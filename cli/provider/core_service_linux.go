@@ -51,7 +51,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	switch cmd {
-	case "rerecord":
+	case "rerecord", "packet-replay":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
 	case "record":
 		return recordSvc, nil
@@ -72,7 +72,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	h := hooks.NewHooks(logger, c)
-	p := proxy.New(logger, h, c)
+	p := proxy.New(logger, h, c, core.NewSessions())
 	//for keploy test bench
 	t := tester.New(logger, h)
 	app.HookImpl = app.NewHooks(logger)

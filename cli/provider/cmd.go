@@ -257,6 +257,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+		cmd.Flags().Bool("capture-packets", c.cfg.CapturePackets, "Should capture the network packets and store in file")
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
@@ -271,6 +272,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+
+	case "packet-replay":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringP("pcap-path", "c", ".", "Path to the pcap file used to replay the network packets")
+		cmd.Flags().StringP("mocks-path", "m", ".", "Path to the directory where mock should be stored")
+		cmd.Flags().Uint32("dest-port", 16790, "Port used by the mock server to replay the db network packets")
+		cmd.Flags().Bool("no-preserve-timing", false, "Disable preserve the timing between the packets while replaying")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -1100,6 +1108,47 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New("TestDir is not set")
 			}
 		}
+
+	case "packet-replay":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		pcapPath, err := cmd.Flags().GetString("pcap-path")
+		if err != nil {
+			errMsg := "failed to get the pcap path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.PcapPath = pcapPath
+
+		mocksPath, err := cmd.Flags().GetString("mocks-path")
+		if err != nil {
+			errMsg := "failed to get the mocks path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.MocksPath = mocksPath
+
+		destPort, err := cmd.Flags().GetUint32("dest-port")
+		if err != nil {
+			errMsg := "failed to get the dest port"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.DestPort = destPort
+
+		disablePreserveTime, err := cmd.Flags().GetBool("no-preserve-timing")
+		if err != nil {
+			errMsg := "failed to get the disable preserve time flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.PreserveTiming = !disablePreserveTime
 	}
 
 	return nil

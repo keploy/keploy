@@ -23,6 +23,7 @@ type Service interface {
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 	SetGlobalMockChannel(mockCh chan<- *models.Mock)
 	GetNextTestSetID(ctx context.Context) (string, error)
+	InsertMocks(ctx context.Context, testSetID string, mockCh <-chan *models.Mock) error
 }
 
 type TestDB interface {

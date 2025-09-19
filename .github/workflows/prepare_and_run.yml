@@ -78,3 +78,6 @@ jobs:
   run_node_mapping:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_mapping.yml
+  run_node_packet_capture:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/node_packet_capture.yml

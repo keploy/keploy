@@ -13,13 +13,20 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/afpacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcapgo"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -31,6 +38,11 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	ErrSrcConnTimeout = errors.New("timeout reading from source connection")
+	ErrDstConnTimeout = errors.New("timeout reading from destination connection")
+)
+
 type ParserPriority struct {
 	Priority   int
 	ParserType integrations.IntegrationType
@@ -39,10 +51,13 @@ type ParserPriority struct {
 type Proxy struct {
 	logger *zap.Logger
 
-	IP4     string
-	IP6     string
-	Port    uint32
-	DNSPort uint32
+	IP4                   string
+	IP6                   string
+	Port                  uint32
+	DNSPort               uint32
+	Debug                 bool
+	CaptureNetworkPackets bool
+	GlobalPassthrough     bool
 
 	DestInfo     core.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -61,27 +76,28 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
-	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer      *dns.Server
-	TCPDNSServer      *dns.Server
-	GlobalPassthrough bool
+	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
+	UDPDNSServer *dns.Server
+	TCPDNSServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *core.Sessions) *Proxy {
 	return &Proxy{
-		logger:            logger,
-		Port:              opts.ProxyPort, // default: 16789
-		DNSPort:           opts.DNSPort,   // default: 26789
-		IP4:               "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:           &sync.Mutex{},
-		connMutex:         &sync.Mutex{},
-		DestInfo:          info,
-		sessions:          core.NewSessions(),
-		MockManagers:      sync.Map{},
-		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough: opts.Record.GlobalPassthrough,
-		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
+		logger:                logger,
+		Port:                  opts.ProxyPort, // default: 16789
+		DNSPort:               opts.DNSPort,   // default: 26789
+		IP4:                   "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
+		IP6:                   "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		Debug:                 opts.Debug,
+		CaptureNetworkPackets: opts.CapturePackets,
+		GlobalPassthrough:     opts.Record.GlobalPassthrough,
+		ipMutex:               &sync.Mutex{},
+		connMutex:             &sync.Mutex{},
+		DestInfo:              info,
+		sessions:              session,
+		MockManagers:          sync.Map{},
+		Integrations:          make(map[integrations.IntegrationType]integrations.Integrations),
+		errChannel:            make(chan error, 100), // buffered channel to prevent blocking
 	}
 }
 
@@ -143,7 +159,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}
 
 	// start the TCP DNS server
-	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
+	p.logger.Info("Starting Tcp Dns Server for handling Dns queries over TCP")
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
@@ -169,7 +185,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	})
 
 	// start the UDP DNS server
-	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
+	p.logger.Info("Starting Udp Dns Server for handling Dns queries over UDP")
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
@@ -216,9 +232,15 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		return err
 	}
 	p.Listener = listener
-	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
+	p.logger.Info(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Signal that the server is ready
 	readyChan <- nil
+
+	if p.CaptureNetworkPackets {
+		p.logger.Info("Debug mode is ON — starting packet capture on loopback for proxy port 16789 → traffic.pcap")
+		go p.recordNetworkPacketsForProxy(ctx)
+	}
+
 	defer func(listener net.Listener) {
 		err := listener.Close()
 
@@ -234,7 +256,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		clientConnCancel()
 		err := clientConnErrGrp.Wait()
 		if err != nil {
-			p.logger.Debug("failed to handle the client connection", zap.Error(err))
+			p.logger.Info("failed to handle the client connection", zap.Error(err))
 		}
 		//closing all the mock channels (if any in record mode)
 		for _, mc := range p.sessions.GetAllMC() {
@@ -290,62 +312,58 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
-	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
-
-	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
 
 	defer func(start time.Time) {
-		duration := time.Since(start)
-		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
+		p.logger.Debug("time taken by proxy to execute the flow",
+			zap.Any("Client ConnectionID", clientConnID),
+			zap.Int64("Duration(ms)", time.Since(start).Milliseconds()))
 	}(start)
 
-	// dstConn stores conn with actual destination for the outgoing network call
 	var dstConn net.Conn
-
-	//Dialing for tls conn
 	destConnID := util.GetNextID()
 
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
+	p.logger.Debug("Inside handleConnection of proxyServer",
+		zap.Int("source port", sourcePort),
+		zap.Int64("Time", time.Now().Unix()))
 
-	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-
+	// Destination lookup
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
-
-	// releases the occupied source port when done fetching the destination info
-	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
-	if err != nil {
+	if err := p.DestInfo.Delete(ctx, uint16(sourcePort)); err != nil {
 		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
 
-	//get the session rule
+	// Session rule
 	rule, ok := p.sessions.Get(destInfo.AppID)
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Uint64("AppID", destInfo.AppID))
-		return err
+		return errors.New("session rule not found")
 	}
 
+	// Build dstAddr
 	var dstAddr string
-
 	switch destInfo.Version {
 	case 4:
-		p.logger.Debug("the destination is ipv4")
+		p.logger.Info("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
 		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
 	case 6:
-		p.logger.Debug("the destination is ipv6")
+		p.logger.Info("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+	default:
+		return fmt.Errorf("unsupported ip version: %d", destInfo.Version)
 	}
 
-	// This is used to handle the parser errors
+	// Parser ctx / cleanup
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
@@ -355,83 +373,251 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		parserCtxCancel()
 
 		if srcConn != nil {
-			err := srcConn.Close()
-			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
-				}
-				return
+			if err := srcConn.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+				utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 			}
 		}
-
 		if dstConn != nil {
-			err = dstConn.Close()
-			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					// Log other errors
-					utils.LogError(p.logger, err, "failed to close the destination connection")
-				}
-				return
+			if err := dstConn.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+				utils.LogError(p.logger, err, "failed to close the destination connection")
 			}
 		}
-
-		err = parserErrGrp.Wait()
-		if err != nil {
+		if err := parserErrGrp.Wait(); err != nil {
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
 		}
 	}()
 
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
-
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
 		}
-
-		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
-		if err != nil {
+		if err := p.globalPassThrough(parserCtx, srcConn, dstConn); err != nil {
 			utils.LogError(p.logger, err, "failed to handle the global pass through")
 			return err
 		}
 		return nil
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	// Establish destination upfront (except in MODE_TEST)
+	if rule.Mode != models.MODE_TEST {
+		dst, err := net.Dial("tcp", dstAddr)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+			return err
+		}
+		dstConn = dst
+	}
+
+	// SINGLE readers per side (no one reads raw net.Conn elsewhere)
+	srcBR := bufio.NewReader(srcConn)
+	var dstBR *bufio.Reader
+	if dstConn != nil {
+		dstBR = bufio.NewReader(dstConn)
+	}
+
+	// Peek both sides concurrently; larger than 10ms because server greetings can be slow
+	const sniffN = 5
+	const sniffDeadline = 10 * time.Millisecond
+
+	srcPeek, srcPeekErr, _, dstPeekErr, isServerFirst := peekNConcurrent(srcConn, srcBR, dstConn, dstBR, sniffN, sniffDeadline)
+
+	if srcPeekErr != nil && srcPeekErr != io.EOF {
+		p.logger.Debug("source peek error (non-fatal)", zap.Error(srcPeekErr))
+	}
+	if dstPeekErr != nil && dstPeekErr != io.EOF {
+		p.logger.Debug("destination peek error (non-fatal)", zap.Error(dstPeekErr))
+	}
+
+	// In test mode, we replay the dest packet that's why we can judge only based on srcPeek
+	if rule.Mode == models.MODE_TEST {
+		isServerFirst = len(srcPeek) == 0
+	}
+
+	// Build util.Conn ONCE per side; prepend peeked bytes back into the stream
+	srcUC := mkUtilConn(srcConn, srcBR, p.logger)
+	var dstUC *util.Conn
+	if dstConn != nil {
+		dstUC = mkUtilConn(dstConn, dstBR, p.logger)
+	}
+
+	// TLS detection on client-first only (we have client hello)
+	var isTLS bool
+	if !isServerFirst && len(srcPeek) != 0 && pTls.IsTLSHandshake(srcPeek) {
+		isTLS = true
+		dec, err := pTls.HandleTLSConnection(parserCtx, p.logger, srcUC, rule.Backdate)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to handle TLS conn")
+			return err
+		}
+		// Recreate single reader/conn for decrypted client side
+		srcConn = dec
+		srcBR = bufio.NewReader(dec)
+		srcUC = &util.Conn{Conn: dec, Reader: srcBR, Logger: p.logger}
+	}
+
+	// Logger with IDs
+	clientID, _ := parserCtx.Value(models.ClientConnectionIDKey).(string)
+	destID, _ := parserCtx.Value(models.DestConnectionIDKey).(string)
+	logger := p.logger.With(
+		zap.String("Client ConnectionID", clientID),
+		zap.String("Destination ConnectionID", destID),
+		zap.String("Destination IP Address", dstAddr),
+		zap.String("Client IP Address", srcConn.RemoteAddr().String()),
+	)
+
+	// If TLS, or for HTTP completeness, read initial bytes from SAME reader path
+	var initial []byte
+	if !isServerFirst {
+		var err error
+		initial, err = util.ReadInitialBuf(parserCtx, p.logger, srcUC)
+		if err != nil && err != io.EOF {
+			utils.LogError(logger, err, "failed to read the initial buffer")
+			return err
+		}
+	}
+
+	// HTTP header completion (still on the SAME srcUC)
+	if util.IsHTTPReq(initial) && !util.HasCompleteHTTPHeaders(initial) {
+		logger.Info("Partial HTTP headers detected, reading more data to get complete headers")
+		more, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcUC)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the complete HTTP headers from client")
+			return err
+		}
+		initial = append(initial, more...)
+	}
+	// If we accumulated 'initial', prepend it back for parsers
+	if len(initial) > 0 {
+		srcUC = &util.Conn{
+			Conn:   srcUC.Conn,
+			Reader: io.MultiReader(bytes.NewReader(initial), srcBR),
+			Logger: p.logger,
+		}
+	}
+
+	// Prepare dst config (plain or TLS)
+	dstCfg := &models.ConditionalDstCfg{Port: uint(destInfo.Port)}
+	if isTLS {
+		// map client sourcePort -> SNI/host
+		urlVal, ok := pTls.SrcPortToDstURL.Load(sourcePort)
+		if !ok {
+			utils.LogError(logger, nil, "failed to fetch the destination url")
+			return errors.New("tls dst url not found")
+		}
+		dstURL, ok := urlVal.(string)
+		if !ok {
+			utils.LogError(logger, nil, "failed to type cast the destination url")
+			return errors.New("tls dst url wrong type")
+		}
+		cfg := &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         dstURL,
+		}
+		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
+			tlsDst, err := tls.Dial("tcp", addr, cfg)
 			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
 			}
+			dstConn = tlsDst
+			dstBR = bufio.NewReader(tlsDst)
+			// rebuild dstUC preserving any earlier peek (usually empty under TLS)
+			dstUC = &util.Conn{Conn: tlsDst, Reader: dstBR, Logger: p.logger}
+		}
+		dstCfg.TLSCfg = cfg
+		dstCfg.Addr = addr
+	} else {
+		dstCfg.Addr = dstAddr
+	}
 
+	// Mock manager (if needed)
+	m, ok := p.MockManagers.Load(destInfo.AppID)
+	if !ok && rule.Mode == models.MODE_TEST {
+		utils.LogError(logger, nil, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
+		return errors.New("mock manager not found")
+	}
+
+	// Parser selection:
+	// - server-first: decide using dstPeek (e.g., MySQL greeting)
+	// - client-first: decide using 'initial' (or srcPeek when initial empty)
+	var (
+		generic       = true
+		matchedParser integrations.Integrations
+		parserType    integrations.IntegrationType
+	)
+
+	for _, pr := range p.integrationsPriority {
+		parser := p.Integrations[pr.ParserType]
+		if parser == nil {
+			continue
+		}
+
+		if pr.ParserType == integrations.MYSQL && isServerFirst {
 			dstCfg := &models.ConditionalDstCfg{
 				Port: uint(destInfo.Port),
 			}
 			rule.DstCfg = dstCfg
+			matchedParser = parser
+			parserType = pr.ParserType
+			generic = false
+			logger.Debug("Matched MySQL protocol based on server greeting")
+			break
+		}
+		// client-first or other protocols
+		cand := initial
+		if len(cand) == 0 {
+			cand = srcPeek
+		}
+		if parser.MatchType(parserCtx, cand) {
+			matchedParser = parser
+			parserType = pr.ParserType
+			generic = false
+			break
+		}
+	}
 
-			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to record the outgoing message")
+	// Dispatch
+	if !generic {
+		p.logger.Info("The external dependency is supported. Hence using the parser",
+			zap.String("ParserType", string(parserType)),
+			zap.Bool("isServerFirst", isServerFirst))
+
+		switch rule.Mode {
+		case models.MODE_RECORD:
+			if err := matchedParser.RecordOutgoing(parserCtx, srcUC, dstUC, rule.MC, rule.OutgoingOptions); err != nil {
+				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
-			return nil
+		case models.MODE_TEST:
+			if err := matchedParser.MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
+				utils.LogError(logger, err, "failed to mock the outgoing message")
+				// Send specific error type to error channel for external monitoring
+				proxyErr := models.ParserError{
+					ParserErrorType: models.ErrMockNotFound,
+					Err:             err,
+				}
+				p.SendError(proxyErr)
+				return err
+			}
 		}
+		return nil
+	}
 
-		m, ok := p.MockManagers.Load(destInfo.AppID)
-		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
+	// Fallback generic
+	logger.Info("The external dependency is not supported. Hence using generic parser")
+	if rule.Mode == models.MODE_RECORD {
+		if err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcUC, dstUC, rule.MC, rule.OutgoingOptions); err != nil {
+			utils.LogError(logger, err, "failed to record the outgoing message")
 			return err
 		}
-
-		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
-		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
-			utils.LogError(p.logger, err, "failed to mock the outgoing message")
+	} else {
+		if err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF && err != io.EOF && !errors.Is(err, context.Canceled) {
+			utils.LogError(logger, err, "failed to mock the outgoing message")
 			// Send specific error type to error channel for external monitoring
 			proxyErr := models.ParserError{
 				ParserErrorType: models.ErrMockNotFound,
@@ -439,211 +625,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			p.SendError(proxyErr)
 			return err
-		}
-		return nil
-	}
-
-	reader := bufio.NewReader(srcConn)
-	initialData := make([]byte, 5)
-	// reading the initial data from the client connection to determine if the connection is a TLS handshake
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
-			return nil
-		}
-		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
-		return err
-	}
-
-	multiReader := io.MultiReader(reader, srcConn)
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: multiReader,
-		Logger: p.logger,
-	}
-
-	isTLS := pTls.IsTLSHandshake(testBuffer)
-	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to handle TLS conn")
-			return err
-		}
-	}
-
-	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
-	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the client connection id")
-		return err
-	}
-	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
-	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
-		return err
-	}
-
-	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
-
-	var initialBuf []byte
-	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the initial buffer")
-		return err
-	}
-
-	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
-		// HTTP headers are never chunked according to the HTTP protocol,
-		// but at the TCP layer, we cannot be sure if we have received the entire
-		// header in the first buffer chunk. This is why we check if the headers are complete
-		// and read more data if needed.
-
-		// Some HTTP requests, like AWS SQS, may require special handling in Keploy Enterprise.
-		// These cases may send partial headers in multiple chunks, so we need to read until
-		// we get the complete headers.
-
-		logger.Debug("Partial HTTP headers detected, reading more data to get complete headers")
-
-		// Read more data from the TCP connection to get the complete HTTP headers.
-		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
-		if err != nil {
-			// Log the error if we fail to read the complete HTTP headers.
-			utils.LogError(logger, err, "failed to read the complete HTTP headers from client")
-			return err
-		}
-		// Append the additional data to the initial buffer.
-		initialBuf = append(initialBuf, headerBuf...)
-	}
-
-	//update the src connection to have the initial buffer
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
-		Logger: p.logger,
-	}
-
-	dstCfg := &models.ConditionalDstCfg{
-		Port: uint(destInfo.Port),
-	}
-
-	//make new connection to the destination server
-	if isTLS {
-
-		// get the destinationUrl from the map for the tls connection
-		url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
-		if !ok {
-			utils.LogError(logger, err, "failed to fetch the destination url")
-			return err
-		}
-		//type case the dstUrl to string
-		dstURL, ok := url.(string)
-		if !ok {
-			utils.LogError(logger, err, "failed to type cast the destination url")
-			return err
-		}
-
-		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
-		cfg := &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         dstURL,
-		}
-
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
-		if rule.Mode != models.MODE_TEST {
-			dstConn, err = tls.Dial("tcp", addr, cfg)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-		}
-
-		dstCfg.TLSCfg = cfg
-		dstCfg.Addr = addr
-
-	} else {
-		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-		}
-		dstCfg.Addr = dstAddr
-	}
-
-	// get the mock manager for the current app
-	m, ok := p.MockManagers.Load(destInfo.AppID)
-	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
-		return err
-	}
-
-	generic := true
-
-	var matchedParser integrations.Integrations
-	var parserType integrations.IntegrationType
-
-	//Checking for all the parsers according to their priority.
-	for _, parserPair := range p.integrationsPriority { // Iterate over ordered priority list
-		parser, exists := p.Integrations[parserPair.ParserType]
-		if !exists {
-			continue // Skip if parser not found
-		}
-
-		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
-		if parser.MatchType(parserCtx, initialBuf) {
-			matchedParser = parser
-			parserType = parserPair.ParserType
-			generic = false
-			break
-		}
-	}
-
-	if !generic {
-		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
-		switch rule.Mode {
-		case models.MODE_RECORD:
-			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
-				utils.LogError(logger, err, "failed to record the outgoing message")
-				return err
-			}
-		case models.MODE_TEST:
-			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
-				// Send specific error type to error channel for external monitoring
-				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrMockNotFound,
-					Err:             err,
-				}
-				p.SendError(proxyErr)
-				return err
-			}
-		}
-	}
-
-	if generic {
-		logger.Debug("The external dependency is not supported. Hence using generic parser")
-		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
-				utils.LogError(logger, err, "failed to record the outgoing message")
-				return err
-			}
-		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
-				// Send specific error type to error channel for external monitoring
-				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrMockNotFound,
-					Err:             err,
-				}
-				p.SendError(proxyErr)
-				return err
-			}
 		}
 	}
 	return nil
@@ -753,6 +734,173 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
+}
+
+func (p *Proxy) recordNetworkPacketsForProxy(ctx context.Context) {
+	const (
+		outPath      = "traffic.pcap"
+		snaplen      = 65535
+		matchPort    = uint16(16789)
+		pollTO       = 300 * time.Millisecond
+		blockTO      = 200 * time.Millisecond
+		frameSizePow = 11 // 2^11 = 2048
+		numBlocks    = 64
+	)
+
+	p.logger.Info("capturing packets", zap.String("outPath", outPath), zap.Uint16("port", matchPort))
+
+	// Prepare output PCAP (pure Go writer)
+	f, err := os.Create(outPath)
+	if err != nil {
+		p.logger.Error("creating output pcap", zap.Error(err))
+		return
+	}
+	defer f.Close()
+
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(uint32(snaplen), layers.LinkTypeEthernet); err != nil {
+		p.logger.Error("writing pcap header", zap.Error(err))
+		return
+	}
+	p.logger.Info("writing packets", zap.String("outPath", outPath))
+
+	// AF_PACKET config
+	frameSize := 1 << frameSizePow
+	blockSize := 1 << 20 // 1 MiB per block
+	if blockSize%frameSize != 0 {
+		p.logger.Error("block size must be multiple of frame size", zap.Int("blockSize", blockSize), zap.Int("frameSize", frameSize))
+		return
+	}
+
+	// Get list of interfaces
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		p.logger.Error("failed to get interfaces", zap.Error(err))
+		return
+	}
+
+	// Initialize a wait group for concurrent packet capture on all interfaces
+	var wg sync.WaitGroup
+
+	// Capture packets from each interface
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 {
+			// Skip down or loopback interfaces
+			continue
+		}
+
+		wg.Add(1)
+		go func(ifaceName string) {
+			defer wg.Done()
+			p.logger.Info("capturing packets", zap.String("iface", ifaceName))
+
+			// Open a TPacket on the interface
+			tp, err := afpacket.NewTPacket(
+				afpacket.OptInterface(ifaceName),
+				afpacket.OptFrameSize(frameSize),
+				afpacket.OptBlockSize(blockSize),
+				afpacket.OptNumBlocks(numBlocks),
+				afpacket.OptBlockTimeout(blockTO),
+				afpacket.OptPollTimeout(pollTO),
+				afpacket.OptAddVLANHeader(false),
+				afpacket.SocketRaw, // L2 frames
+				afpacket.OptTPacketVersion(afpacket.TPacketVersion3),
+			)
+			if err != nil {
+				p.logger.Error("open interface error", zap.String("iface", ifaceName), zap.Error(err))
+				return
+			}
+			defer tp.Close()
+
+			var writeMu sync.Mutex
+			var seen uint64
+			var total uint64
+			start := time.Now()
+
+			for ctx.Err() == nil {
+				data, ci, err := tp.ZeroCopyReadPacketData()
+				atomic.AddUint64(&seen, 1)
+
+				if err != nil {
+					if errors.Is(err, afpacket.ErrTimeout) || errors.Is(err, syscall.EAGAIN) {
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						p.logger.Error("read error", zap.String("iface", ifaceName), zap.Error(err))
+						continue
+					}
+				}
+
+				pkt := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.NoCopy)
+				tl := pkt.TransportLayer()
+				if tl == nil {
+					continue
+				}
+
+				keep := false
+				var srcPort, dstPort uint16
+				switch t := tl.(type) {
+				case *layers.TCP:
+					if t.RST {
+						continue
+					}
+					srcPort = uint16(t.SrcPort)
+					dstPort = uint16(t.DstPort)
+					keep = (srcPort == matchPort || dstPort == matchPort)
+				case *layers.UDP:
+					srcPort = uint16(t.SrcPort)
+					dstPort = uint16(t.DstPort)
+					keep = (srcPort == matchPort || dstPort == matchPort)
+				default:
+					keep = false
+				}
+				if !keep {
+					continue
+				}
+
+				if nl := pkt.NetworkLayer(); nl != nil {
+					p.logger.Info("packet captured",
+						zap.String("iface", ifaceName),
+						zap.String("src", fmt.Sprintf("%v:%d", nl.NetworkFlow().Src(), srcPort)),
+						zap.String("dst", fmt.Sprintf("%v:%d", nl.NetworkFlow().Dst(), dstPort)),
+						zap.Int("len", len(data)),
+					)
+				} else {
+					p.logger.Info("packet captured (no net layer)",
+						zap.String("iface", ifaceName),
+						zap.Int("len", len(data)),
+					)
+				}
+
+				if len(data) > snaplen {
+					data = data[:snaplen]
+				}
+
+				writeMu.Lock()
+				if err := w.WritePacket(ci, data); err != nil {
+					p.logger.Error("pcap write error", zap.Error(err))
+				}
+				writeMu.Unlock()
+
+				if n := atomic.AddUint64(&total, 1); n%10000 == 0 {
+					elapsed := time.Since(start).Truncate(time.Second)
+					p.logger.Info("captured matching packets",
+						zap.Uint64("matchingPackets", n),
+						zap.Uint64("totalSeen", atomic.LoadUint64(&seen)),
+						zap.Duration("elapsed", elapsed),
+					)
+				}
+			}
+		}(iface.Name)
+	}
+
+	// Wait for all captures to complete
+	wg.Wait()
+
+	p.logger.Info("capture completed")
 }
 
 // GetErrorChannel returns the error channel for external monitoring

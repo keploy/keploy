@@ -3,12 +3,17 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"sync"
+	"time"
 
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -75,5 +80,127 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			}
 			return err
 		}
+	}
+}
+
+// peekN peeks up to n bytes from br with a read deadline on c, returns a COPY of bytes (non-consuming).
+func peekN(c net.Conn, br *bufio.Reader, n int, d time.Duration) ([]byte, error) {
+	if c == nil || br == nil || n <= 0 {
+		return nil, nil
+	}
+	_ = c.SetReadDeadline(time.Now().Add(d))
+	b, err := br.Peek(n)
+	_ = c.SetReadDeadline(time.Time{})
+	// Common non-fatal cases: EOF (empty), ErrBufferFull (we still got some), nil
+	if err != nil && err != io.EOF && !errors.Is(err, bufio.ErrBufferFull) {
+		return nil, err
+	}
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	return cp, nil
+}
+
+// peekResult holds the result of a peek operation
+type peekResult struct {
+	data []byte
+	err  error
+	side string // "src" or "dst"
+}
+
+// peekNConcurrent peeks from both connections concurrently and returns as soon as either side has data
+func peekNConcurrent(srcConn net.Conn, srcBR *bufio.Reader, dstConn net.Conn, dstBR *bufio.Reader, n int, d time.Duration) (srcData []byte, srcErr error, dstData []byte, dstErr error, isServerFirst bool) {
+	resultChan := make(chan peekResult, 2)
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+
+	// Goroutine for source connection
+	if srcConn != nil && srcBR != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer recover() // Protect against panics
+
+			data, err := peekN(srcConn, srcBR, n, d)
+			select {
+			case resultChan <- peekResult{data: data, err: err, side: "src"}:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	// Goroutine for destination connection
+	if dstConn != nil && dstBR != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer recover() // Protect against panics
+
+			data, err := peekN(dstConn, dstBR, n, d)
+			select {
+			case resultChan <- peekResult{data: data, err: err, side: "dst"}:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	// Close the channel when all goroutines are done
+	defer func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	var firstResult *peekResult
+	srcReceived := false
+	dstReceived := false
+
+	// Wait for results with timeout
+	for {
+		select {
+		case result, ok := <-resultChan:
+			if !ok {
+				// Channel closed, all goroutines finished
+				return srcData, srcErr, dstData, dstErr, isServerFirst
+			}
+
+			if result.side == "src" {
+				srcData = result.data
+				srcErr = result.err
+				srcReceived = true
+			} else {
+				dstData = result.data
+				dstErr = result.err
+				dstReceived = true
+			}
+
+			// Record the first result to determine server-first
+			if firstResult == nil && len(result.data) > 0 {
+				firstResult = &result
+				isServerFirst = (result.side == "dst")
+				// Cancel context to stop other goroutines if we got meaningful data
+				cancel()
+			}
+
+			// If we have results from both sides or meaningful data from one side, we can return
+			if (srcReceived && dstReceived) || firstResult != nil {
+				return srcData, srcErr, dstData, dstErr, isServerFirst
+			}
+
+		case <-ctx.Done():
+			// Timeout reached, return what we have
+			return srcData, srcErr, dstData, dstErr, isServerFirst
+		}
+	}
+}
+
+// mkUtilConn builds a util.Conn from conn, br, logger.
+func mkUtilConn(conn net.Conn, br *bufio.Reader, logger *zap.Logger) *util.Conn {
+	var r io.Reader = br
+
+	return &util.Conn{
+		Conn:   conn,
+		Reader: r,
+		Logger: logger,
 	}
 }

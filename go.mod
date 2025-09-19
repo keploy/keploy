@@ -148,6 +148,7 @@ require (
 	github.com/fatih/semgroup v1.2.0 // indirect
 	github.com/gitleaks/go-gitdiff v0.9.1 // indirect
 	github.com/golang/glog v1.2.4 // indirect
+	github.com/gopacket/gopacket v1.4.0 // indirect
 	github.com/h2non/filetype v1.1.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
