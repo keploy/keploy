@@ -181,7 +181,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				} else {
 					r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 				}
-				return nil
 			}
 			return nil
 		})
