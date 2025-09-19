@@ -107,6 +107,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
+			h.Logger.Debug("decodeHTTP debug logs for input",
+				zap.Any("method", input.method),
+				zap.Any("url", input.url),
+				zap.Any("header", input.header),
+				zap.Any("body", string(input.body)),
+				zap.Any("raw", string(input.raw)))
+
 			ok, stub, err := h.match(ctx, input, mockDb) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
