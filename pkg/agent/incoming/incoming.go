@@ -1,4 +1,5 @@
-package IncomingTestCase
+package incoming
+
 
 import (
 	"bufio"
@@ -9,7 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
-	utils "go.keploy.io/server/v2/pkg/core/hooks/conn"
+	utils "go.keploy.io/server/v2/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )

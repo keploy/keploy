@@ -23,7 +23,7 @@ import (
 	"go.keploy.io/server/v2/utils"
 
 	grpc "go.keploy.io/server/v2/pkg/agent/proxy/gRPCincoming"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/agent/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )

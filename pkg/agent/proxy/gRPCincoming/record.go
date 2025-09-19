@@ -14,7 +14,7 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v2/pkg"
-	temputils "go.keploy.io/server/v2/pkg/core/hooks/conn"
+	temputils "go.keploy.io/server/v2/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"

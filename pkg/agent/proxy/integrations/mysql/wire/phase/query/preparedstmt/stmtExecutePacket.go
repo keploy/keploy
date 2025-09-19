@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"io"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
-	intUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/utils"
+	intUtil "go.keploy.io/server/v2/pkg/agent/proxy/integrations/util"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"

@@ -191,10 +191,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.e2eAppRegistrationMap = objs.E2eInfoMap
-	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
+	// h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
-	h.objects.BindFilterResults = objs.BindFilterResults
+	// h.objects.BindFilterResults = objs.BindFilterResults
 	// ---------------
 
 	// ----- used in case of wsl -----
@@ -279,7 +279,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		}
 
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
-			h.InboundMeta = objs.InboundMeta
+			// h.InboundMeta = objs.InboundMeta
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
 				Path:    cGroupPath,
@@ -313,7 +313,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 			sk, err := link.AttachRawLink(link.RawLinkOptions{
 				Target:  int(netns.Fd()),
-				Program: objs.SteerIngress,
+				// Program: objs.SteerIngress,
 				Attach:  ebpf.AttachSkLookup,
 			})
 			if err != nil {

@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query/rowscols"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
 )

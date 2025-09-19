@@ -23,7 +23,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent"
 	Hooks "go.keploy.io/server/v2/pkg/agent/hooks"
-	incomingTestCase "go.keploy.io/server/v2/pkg/core/incoming"
+	incomingTestCase "go.keploy.io/server/v2/pkg/agent/incoming"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"

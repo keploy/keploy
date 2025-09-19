@@ -12,8 +12,8 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"

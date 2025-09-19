@@ -13,8 +13,8 @@ import (
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"

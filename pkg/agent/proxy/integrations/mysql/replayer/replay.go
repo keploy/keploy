@@ -8,9 +8,9 @@ import (
 	"io"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
-	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire"
+	pUtil "go.keploy.io/server/v2/pkg/agent/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"

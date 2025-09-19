@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
+	pUtil "go.keploy.io/server/v2/pkg/agent/proxy/util"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )

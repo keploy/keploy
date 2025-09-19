@@ -8,9 +8,9 @@ import (
 	"io"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/recorder"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/replayer"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/recorder"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/replayer"
 
 	"go.keploy.io/server/v2/utils"
 

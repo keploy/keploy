@@ -9,12 +9,12 @@ import (
 	"io"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
-	intgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
-	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
-	pUtils "go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
+	mysqlUtils "go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire"
+	intgUtils "go.keploy.io/server/v2/pkg/agent/proxy/integrations/util"
+	pTls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
+	pUtils "go.keploy.io/server/v2/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"

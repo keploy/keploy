@@ -21,7 +21,7 @@ import (
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/agent/proxy/util"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
