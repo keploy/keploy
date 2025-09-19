@@ -69,7 +69,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	mappingDB := mapdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
-	testSetDb := testset.New[*models.TestSet](logger, c.Path)
+	testSetDb := testset.NewWithConfig[*models.TestSet](logger, c.Path, c)
 	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
 		commonPlatformServices{
