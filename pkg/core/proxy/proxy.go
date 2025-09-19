@@ -64,6 +64,7 @@ type Proxy struct {
 
 	MockManagers         sync.Map
 	integrationsPriority []ParserPriority
+	errChannel           chan error
 
 	sessions *core.Sessions
 
@@ -96,6 +97,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *c
 		sessions:              session,
 		MockManagers:          sync.Map{},
 		Integrations:          make(map[integrations.IntegrationType]integrations.Integrations),
+		errChannel:            make(chan error, 100), // buffered channel to prevent blocking
 	}
 }
 
@@ -385,14 +387,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	isGlobalPassthrough := (!rule.Mocking && rule.Mode == models.MODE_TEST) || (rule.Mode == models.MODE_RECORD && p.GlobalPassthrough)
-	if isGlobalPassthrough {
-		dst, err := net.Dial("tcp", dstAddr)
+	//check for global passthrough in test mode
+	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
+		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
 		}
-		dstConn = dst
 		if err := p.globalPassThrough(parserCtx, srcConn, dstConn); err != nil {
 			utils.LogError(p.logger, err, "failed to handle the global pass through")
 			return err
@@ -429,9 +430,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if dstPeekErr != nil && dstPeekErr != io.EOF {
 		p.logger.Debug("destination peek error (non-fatal)", zap.Error(dstPeekErr))
 	}
-
-	// Decide who spoke first (server-first if dst has data and src doesn’t)
-	// isServerFirst := len(dstPeek) > 0 && len(srcPeek) == 0
 
 	// In test mode, we replay the dest packet that's why we can judge only based on srcPeek
 	if rule.Mode == models.MODE_TEST {
@@ -596,8 +594,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 		case models.MODE_TEST:
-			if err := matchedParser.MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF {
+			if err := matchedParser.MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
+				// Send specific error type to error channel for external monitoring
+				proxyErr := models.ParserError{
+					ParserErrorType: models.ErrMockNotFound,
+					Err:             err,
+				}
+				p.SendError(proxyErr)
 				return err
 			}
 		}
@@ -612,8 +616,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 	} else {
-		if err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF {
+		if err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF && err != io.EOF && !errors.Is(err, context.Canceled) {
 			utils.LogError(logger, err, "failed to mock the outgoing message")
+			// Send specific error type to error channel for external monitoring
+			proxyErr := models.ParserError{
+				ParserErrorType: models.ErrMockNotFound,
+				Err:             err,
+			}
+			p.SendError(proxyErr)
 			return err
 		}
 	}
@@ -647,6 +657,9 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		utils.LogError(p.logger, err, "failed to stop the dns servers")
 		return
 	}
+
+	// Close the error channel
+	p.CloseErrorChannel()
 
 	p.logger.Info("proxy stopped...")
 }
@@ -888,4 +901,25 @@ func (p *Proxy) recordNetworkPacketsForProxy(ctx context.Context) {
 	wg.Wait()
 
 	p.logger.Info("capture completed")
+}
+
+// GetErrorChannel returns the error channel for external monitoring
+func (p *Proxy) GetErrorChannel() <-chan error {
+	return p.errChannel
+}
+
+// SendError sends an error to the error channel for external monitoring
+func (p *Proxy) SendError(err error) {
+	select {
+	case p.errChannel <- err:
+		// Error sent successfully
+	default:
+		// Channel is full, log the error instead
+		p.logger.Warn("Error channel is full, dropping error", zap.Error(err))
+	}
+}
+
+// CloseErrorChannel closes the error channel
+func (p *Proxy) CloseErrorChannel() {
+	close(p.errChannel)
 }

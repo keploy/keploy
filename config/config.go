@@ -31,6 +31,7 @@ type Config struct {
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
+	DisableMapping        bool         `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	EnableTesting         bool         `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
@@ -84,6 +85,7 @@ type ReRecord struct {
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
 	ShowDiff      bool     `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	AmendTestSet  bool     `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
