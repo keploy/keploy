@@ -289,7 +289,7 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 
 		if ok {
 			bodyMatched = append(bodyMatched, mock)
-			h.Logger.Debug("found a mock with body schema match")
+			h.Logger.Debug("found a mock with body schema match", zap.String("mock name", mock.Name))
 		}
 	}
 	return bodyMatched, nil
