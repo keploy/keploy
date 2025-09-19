@@ -3,8 +3,10 @@ package replay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,8 @@ var timeSleep224 = time.Sleep
 var extractClaimsWithoutVerification224 = extractClaimsWithoutVerification
 var getLatestPlan224 = getLatestPlan
 
+const configPushPath = "/mock/pr" // The API endpoint for pushing config changes
+
 type mock struct {
 	cfg        *config.Config
 	storage    Storage
@@ -34,6 +38,7 @@ func (m *mock) setToken(token string) {
 	m.token = token
 }
 
+// download function remains the same...
 func (m *mock) download(ctx context.Context, testSetID string) error {
 	// Add nil check protection to prevent segmentation fault
 	if m.storage == nil {
@@ -264,11 +269,17 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 			return err
 		}
 
-		err := m.tsConfigDB.Write(ctx, testSetID, tsConfig)
+		err = m.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
 			m.logger.Error("Failed to write test set config", zap.Error(err))
 			return err
 		}
+
+		// After successfully writing the config, push it to the repo
+		if m.cfg.ReRecord.Branch != "" {
+			go m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
+		}
+
 		return nil
 	}
 
@@ -288,10 +299,101 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 		return err
 	}
 
+	tsConfig.MockRegistry.Mock = mockHash
+	if plan == "Free" {
+		if username == "" {
+			m.logger.Error("Username not found in the token for Free plan")
+			return fmt.Errorf("failed to upload mock file: username not found in the token")
+		}
+		tsConfig.MockRegistry.User = username
+	}
+	err = m.tsConfigDB.Write(ctx, testSetID, tsConfig)
+	if err != nil {
+		m.logger.Error("Failed to write updated test set config", zap.Error(err))
+		return err
+	}
+
+	// After successfully writing the config, push it to the repo
+	if m.cfg.ReRecord.Branch != "" {
+		// Run in a goroutine to not block the main flow
+		go m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
+	}
+	// --- MODIFICATION END ---
+
 	err = utils.AddToGitIgnore(m.logger, m.cfg.Path, "/*/mocks.yaml")
 	if err != nil {
 		utils.LogError(m.logger, err, "failed to add /*/mocks.yaml to .gitignore file")
 	}
 
 	return nil
+}
+
+// pushConfigChange sends a request to the api-server to push the updated config to a git branch.
+func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig *models.TestSet, branch string) {
+	m.logger.Info("Attempting to push config change to git", zap.String("testSetID", testSetID), zap.String("branch", branch))
+
+	// Define request and response structs locally to mirror the server's expectations
+	// This avoids a direct dependency on the server's models package.
+	type MockChangeReq struct {
+		Config    *models.TestSet `json:"config"`
+		TestSetID string          `json:"testSetId"`
+		Branch    string          `json:"branch"`
+	}
+	type MockChangeResp struct {
+		CommitURL string `json:"commit_url"`
+		Message   string `json:"message"`
+	}
+
+	// 1. Construct the request payload
+	payload := MockChangeReq{
+		Config:    tsConfig,
+		TestSetID: testSetID,
+		Branch:    branch,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		m.logger.Error("Failed to marshal config push request payload", zap.Error(err))
+		return
+	}
+
+	// 2. Create the HTTP request
+	url := m.cfg.APIServerURL + configPushPath
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		m.logger.Error("Failed to create HTTP request for config push", zap.Error(err))
+		return
+	}
+
+	// 3. Set necessary headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+m.token)
+
+	// 4. Send the request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		m.logger.Error("Failed to send config push request to API server", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	// 5. Handle the response
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		m.logger.Error("API server returned an error for config push",
+			zap.Int("statusCode", resp.StatusCode),
+			zap.String("response", string(respBody)))
+		return
+	}
+
+	var respData MockChangeResp
+	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
+		m.logger.Error("Failed to decode successful config push response", zap.Error(err))
+		return
+	}
+
+	m.logger.Info("Successfully pushed config change to git",
+		zap.String("testSetID", testSetID),
+		zap.String("commitURL", respData.CommitURL))
 }
