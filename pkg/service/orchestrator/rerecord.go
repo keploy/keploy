@@ -180,6 +180,8 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return nil
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
+
+	o.replay.UploadMocks(ctx)
 	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)

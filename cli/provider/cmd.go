@@ -316,6 +316,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		if cmd.Name() == "rerecord" {
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
 			cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
+			cmd.Flags().String("branch", c.cfg.ReRecord.Branch, "In which git branch to send the updated config file with new mock hash")
 		}
 		if cmd.Name() == "test" {
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")

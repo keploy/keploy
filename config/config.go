@@ -85,6 +85,7 @@ type ReRecord struct {
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
 	APITimeout    uint64   `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	AmendTestSet  bool     `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
+	Branch        string   `json:"branch" yaml:"branch" mapstructure:"branch"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
