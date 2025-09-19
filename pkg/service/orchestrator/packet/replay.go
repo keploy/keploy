@@ -116,7 +116,7 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 		close(shutdown)
 	}()
 
-	drainUntilEOF := func(c net.Conn, shutdown <-chan struct{}, connID string) {
+	drainUntilEOF := func(c net.Conn, ctx context.Context, connID string) {
 		drainFields := LogFields{
 			Component: "app_server",
 			Operation: "drain_connection",
@@ -132,10 +132,11 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 		for {
 			_ = c.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			select {
-			case <-shutdown:
-				logger.Debug("drain stopped due to shutdown",
+			case <-ctx.Done():
+				logger.Debug("drain stopped due to context cancellation",
 					append(drainFields.ToZapFields(),
 						zap.Int64("bytes_drained", bytesRead),
+						zap.Error(ctx.Err()),
 					)...)
 				return
 			default:
@@ -210,6 +211,14 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 
 		for {
 			select {
+			case <-ctx.Done():
+				logger.Debug("stopping writes due to context cancellation",
+					append(connFields.ToZapFields(),
+						zap.Int64("bytes_written", bytesWritten),
+						zap.Int64("responses_written", responsesWritten),
+						zap.Error(ctx.Err()),
+					)...)
+				goto afterWrites
 			case <-shutdown:
 				logger.Debug("stopping writes due to shutdown",
 					append(connFields.ToZapFields(),
@@ -276,7 +285,7 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 			}
 		}
 
-		drainUntilEOF(c, shutdown, connID)
+		drainUntilEOF(c, ctx, connID)
 	}
 
 	acceptLoop := func() {
@@ -290,14 +299,37 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 
 		for {
 			select {
+			case <-ctx.Done():
+				logger.Info("accept loop exiting due to context cancellation",
+					append(acceptFields.ToZapFields(),
+						zap.Error(ctx.Err()),
+					)...)
+				return
 			case <-shutdown:
 				logger.Info("accept loop exiting due to shutdown",
 					acceptFields.ToZapFields()...)
 				return
 			default:
+				// Set a deadline on the listener to make accept non-blocking
+				if tcpListener, ok := ln.(*net.TCPListener); ok {
+					_ = tcpListener.SetDeadline(time.Now().Add(100 * time.Millisecond))
+				}
+
 				conn, err := ln.Accept()
 				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						// Timeout is expected when using SetDeadline, continue loop
+						continue
+					}
+
 					select {
+					case <-ctx.Done():
+						logger.Info("accept loop exiting due to context cancellation after accept error",
+							append(acceptFields.ToZapFields(),
+								zap.Error(ctx.Err()),
+								zap.Error(err),
+							)...)
+						return
 					case <-shutdown:
 						logger.Info("accept loop exiting due to shutdown after accept error",
 							append(acceptFields.ToZapFields(),
@@ -358,6 +390,11 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 		select {
 		case <-done:
 			logger.Info("server shutdown completed successfully")
+		case <-ctx.Done():
+			logger.Warn("server shutdown interrupted by context cancellation",
+				append(stopFields.ToZapFields(),
+					zap.Error(ctx.Err()),
+				)...)
 		case <-time.After(1 * time.Minute):
 			logger.Warn("server shutdown timeout reached")
 		}
@@ -431,6 +468,22 @@ func replaySequence(
 	// Process events sequentially
 	var prev time.Time
 	for i, ev := range events {
+		// Early context cancellation check for each event
+		select {
+		case <-ctx.Done():
+			logger.Warn("replay cancelled during event processing",
+				append(LogFields{
+					Component: "replay_sequence",
+					Operation: "process_event",
+					EventID:   i + 1,
+				}.ToZapFields(),
+					zap.Int64("events_processed", metrics.EventsProcessed),
+					zap.Error(ctx.Err()),
+				)...)
+			return ctx.Err()
+		default:
+		}
+
 		eventFields := LogFields{
 			Component: "replay_sequence",
 			Operation: "process_event",
@@ -474,18 +527,6 @@ func replaySequence(
 			}
 		}
 
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			logger.Warn("replay cancelled by context",
-				append(eventFields.ToZapFields(),
-					zap.Int64("events_processed", metrics.EventsProcessed),
-					zap.Error(ctx.Err()),
-				)...)
-			return ctx.Err()
-		default:
-		}
-
 		// Process the event
 		switch ev.dir {
 		case DirToProxy:
@@ -523,7 +564,16 @@ func replaySequence(
 
 				if feeder != nil {
 					for !feeder.isEmpty() {
-						time.Sleep(10 * time.Millisecond)
+						select {
+						case <-ctx.Done():
+							logger.Warn("context cancelled while waiting for feeder to empty",
+								append(eventFields.ToZapFields(),
+									zap.Error(ctx.Err()),
+								)...)
+							return ctx.Err()
+						case <-time.After(10 * time.Millisecond):
+							// Continue waiting
+						}
 					}
 				}
 
@@ -578,8 +628,21 @@ func replaySequence(
 
 		metrics.EventsProcessed++
 
-		// Log progress every 100 events
+		// Log progress every 100 events and check for context cancellation
 		if (i+1)%100 == 0 {
+			// Check for context cancellation during progress logging
+			select {
+			case <-ctx.Done():
+				logger.Warn("replay cancelled during progress update",
+					append(replayFields.ToZapFields(),
+						zap.Int("events_processed", i+1),
+						zap.Int("total_events", len(events)),
+						zap.Error(ctx.Err()),
+					)...)
+				return ctx.Err()
+			default:
+			}
+
 			logger.Info("replay progress update",
 				append(replayFields.ToZapFields(),
 					zap.Int("events_processed", i+1),
@@ -613,11 +676,19 @@ func replaySequence(
 
 // ReadSrcPortEvents iterates packets, filters on proxy port, dedups by TCP seq,
 // and groups events by the peer (non-proxy) port.
-func ReadSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) ([]flowKeyDup, error) {
+func ReadSrcPortEvents(ctx context.Context, r *pcapgo.Reader, proxyPort int, log *zap.Logger) ([]flowKeyDup, error) {
 	var srcPorts []flowKeyDup
 	seenSeq := make(map[uint32]bool)
 
 	for {
+		// Check for context cancellation periodically
+		select {
+		case <-ctx.Done():
+			log.Warn("packet reading cancelled by context", zap.Error(ctx.Err()))
+			return nil, ctx.Err()
+		default:
+		}
+
 		data, ci, err := r.ZeroCopyReadPacketData()
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF || strings.Contains(strings.ToLower(err.Error()), "eof") {
@@ -693,6 +764,14 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 		return ErrMissingPCAP
 	}
 
+	// Check for context cancellation early
+	select {
+	case <-ctx.Done():
+		logger.Warn("replay cancelled before starting", zap.Error(ctx.Err()))
+		return ctx.Err()
+	default:
+	}
+
 	proxyAddr, proxyPort, writeDelay, destPort, preserveTiming, err := prepareReplayInputs(opts)
 	if err != nil {
 		return err
@@ -706,19 +785,35 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 	}
 	defer f.Close()
 
+	// Check for context cancellation after file operations
+	select {
+	case <-ctx.Done():
+		logger.Warn("replay cancelled after opening pcap file", zap.Error(ctx.Err()))
+		return ctx.Err()
+	default:
+	}
+
 	pcapReader, err := pcapgo.NewReader(f)
 	if err != nil {
 		logger.Error("pcap reader", zap.Error(err))
 		return fmt.Errorf("failed to create pcap reader: %w", err)
 	}
 
-	packetEvents, err := ReadSrcPortEvents(pcapReader, proxyPort, logger)
+	packetEvents, err := ReadSrcPortEvents(ctx, pcapReader, proxyPort, logger)
 	if err != nil {
 		return err
 	}
 
 	if len(packetEvents) == 0 {
 		return ErrNoProxyRelatedFlows
+	}
+
+	// Check for context cancellation before starting replay sequence
+	select {
+	case <-ctx.Done():
+		logger.Warn("replay cancelled before starting sequence", zap.Error(ctx.Err()))
+		return ctx.Err()
+	default:
 	}
 
 	// for index, ev := range packetEvents {
