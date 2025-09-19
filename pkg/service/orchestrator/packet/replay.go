@@ -16,6 +16,7 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcapgo"
+	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.uber.org/zap"
 )
 
@@ -679,6 +680,7 @@ func replaySequence(
 func ReadSrcPortEvents(ctx context.Context, r *pcapgo.Reader, proxyPort int, log *zap.Logger) ([]flowKeyDup, error) {
 	var srcPorts []flowKeyDup
 	seenSeq := make(map[uint32]bool)
+	tlsConnections := make(map[string]bool) // Track TLS connections by "srcIP:srcPort-dstIP:dstPort"
 
 	for {
 		// Check for context cancellation periodically
@@ -724,12 +726,42 @@ func ReadSrcPortEvents(ctx context.Context, r *pcapgo.Reader, proxyPort int, log
 
 		srcIP := ip.NetworkFlow().Src().String()
 		dstIP := ip.NetworkFlow().Dst().String()
+		srcPort := uint16(tcp.SrcPort)
+		dstPort := uint16(tcp.DstPort)
+
+		// Create connection identifier
+		connID := fmt.Sprintf("%s:%d-%s:%d", srcIP, srcPort, dstIP, dstPort)
+		reverseConnID := fmt.Sprintf("%s:%d-%s:%d", dstIP, dstPort, srcIP, srcPort)
+
+		// Check if this is a TLS handshake packet
+		if pTls.IsTLSHandshake(tcp.Payload) {
+			log.Debug("detected TLS handshake, marking connection as TLS",
+				zap.String("src", fmt.Sprintf("%s:%d", srcIP, srcPort)),
+				zap.String("dst", fmt.Sprintf("%s:%d", dstIP, dstPort)),
+				zap.String("conn_id", connID))
+
+			// Mark this connection as TLS in both directions
+			tlsConnections[connID] = true
+			tlsConnections[reverseConnID] = true
+
+			// Skip TLS handshake packets
+			continue
+		}
+
+		// Check if this connection was previously identified as TLS
+		if tlsConnections[connID] || tlsConnections[reverseConnID] {
+			log.Debug("skipping packet from TLS connection",
+				zap.String("src", fmt.Sprintf("%s:%d", srcIP, srcPort)),
+				zap.String("dst", fmt.Sprintf("%s:%d", dstIP, dstPort)),
+				zap.String("conn_id", connID))
+			continue
+		}
 
 		ev := flowKeyDup{
 			srcIP:   srcIP,
 			dstIP:   dstIP,
-			srcPort: uint16(tcp.SrcPort),
-			dstPt:   uint16(tcp.DstPort),
+			srcPort: srcPort,
+			dstPt:   dstPort,
 			payload: append([]byte(nil), tcp.Payload...), // copy
 			ts:      ci.Timestamp,
 		}
@@ -751,6 +783,11 @@ func ReadSrcPortEvents(ctx context.Context, r *pcapgo.Reader, proxyPort int, log
 		log.Error("no proxy-related payloads found in pcap")
 		return nil, ErrNoProxyRelatedFlows
 	}
+
+	log.Info("packet filtering completed",
+		zap.Int("total_packets", len(srcPorts)),
+		zap.Int("tls_connections_filtered", len(tlsConnections)/2)) // Divide by 2 since we track both directions
+
 	return srcPorts, nil
 }
 
