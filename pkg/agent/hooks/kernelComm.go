@@ -22,18 +22,18 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 		return nil, err
 	}
 
-	// Use the current app ID with proper synchronization
-	h.m.Lock()
-	currentAppID := h.appID
-	h.m.Unlock()
+	// Use the current client ID with proper synchronization
+	// h.m.Lock()
+	// currentClientID := h.clientID
+	// h.m.Unlock()
 
-	s, ok := h.sess.Get(currentAppID)
-	if !ok {
-		return nil, fmt.Errorf("session not found")
-	}
+	// s, ok := h.sess.Get(currentAppID)
+	// if !ok {
+	// 	return nil, fmt.Errorf("session not found")
+	// }
 
 	return &agent.NetworkAddress{
-		AppID:    s.ID,
+		ClientID: d.ClientID,
 		Version:  d.IPVersion,
 		IPv4Addr: d.DestIP4,
 		IPv6Addr: d.DestIP6,
@@ -92,8 +92,9 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	return nil
 }
 
-func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
-	err := h.clientRegistrationMap.Update(id, appInfo, ebpf.UpdateAny)
+func (h *Hooks) SendClientInfo(id uint64, clientInfo structs.ClientInfo) error {
+	fmt.Println("Sending client info to ebpf program", clientInfo)
+	err := h.clientRegistrationMap.Update(id, clientInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
 		return err
@@ -103,6 +104,7 @@ func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
 
 func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	key := 0
+	fmt.Println("Sending agent info to ebpf program", agentInfo)
 	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")

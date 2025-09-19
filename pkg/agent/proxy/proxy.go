@@ -369,9 +369,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//get the session rule
-	rule, ok := p.sessions.Get(destInfo.AppID)
+	rule, ok := p.sessions.Get(destInfo.ClientID)
 	if !ok {
-		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Uint64("AppID", destInfo.AppID))
+		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Uint64("ClientID", destInfo.ClientID))
 		return err
 	}
 
@@ -465,9 +465,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return nil
 		}
 
-		m, ok := p.MockManagers.Load(destInfo.AppID)
+		m, ok := p.MockManagers.Load(destInfo.ClientID)
 		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
+			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Uint64("ClientID", destInfo.ClientID))
 			return err
 		}
 
@@ -616,9 +616,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	// get the mock manager for the current app
-	m, ok := p.MockManagers.Load(destInfo.AppID)
+	m, ok := p.MockManagers.Load(destInfo.ClientID)
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
+		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Uint64("ClientID", destInfo.ClientID))
 		return err
 	}
 

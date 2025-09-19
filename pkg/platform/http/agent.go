@@ -333,7 +333,7 @@ func (a *AgentClient) GetContainerIP(_ context.Context, clientID uint64) (string
 }
 
 func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOptions) models.AppError {
-
+	fmt.Println("Inside Run of agent binary !!.. ")
 	app, err := a.getApp(clientID)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
@@ -781,4 +781,9 @@ func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {
 	ch := make(chan struct{})
 	close(ch) // Immediately close since no actual hooks are loaded
 	return ch
+}
+
+
+func (c *AgentClient) GetErrorChannel() <-chan error {
+	return nil
 }

@@ -608,18 +608,23 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
-	proxyIP, err := IPv4ToUint32(h.proxyIP4)
-	if err != nil {
-		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
-	}
+	// proxyIP, err := IPv4ToUint32(h.proxyIP4)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
+	// }
 
 	var agentInfo = structs.AgentInfo{}
-
-	agentInfo.ProxyInfo = structs.ProxyInfo{
-		IP4:  proxyIP,
-		IP6:  h.proxyIP6,
-		Port: h.proxyPort,
+	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
+	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
+		return err
 	}
+	// agentInfo.ProxyInfo = structs.ProxyInfo{
+	// 	IP4:  proxyIP,
+	// 	IP6:  h.proxyIP6,
+	// 	Port: h.proxyPort,
+	// }
 
 	agentInfo.DNSPort = int32(h.dnsPort)
 

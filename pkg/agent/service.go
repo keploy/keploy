@@ -93,7 +93,7 @@ type OutgoingInfo interface {
 }
 
 type NetworkAddress struct {
-	AppID    uint64
+	ClientID uint64
 	Version  uint32
 	IPv4Addr uint32
 	IPv6Addr [4]uint32
