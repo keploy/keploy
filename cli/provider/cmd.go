@@ -243,6 +243,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("bigPayload", false, "Enable the instrumentation hook to capture test cases and mocks.")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -1060,6 +1061,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+
+		bigPayload, _ := cmd.Flags().GetBool("bigPayload")
+		c.cfg.Record.BigPayload = bigPayload
 
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
