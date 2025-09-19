@@ -558,12 +558,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if parser == nil {
 			continue
 		}
-		p.logger.Info("Checking for the parser",
-			zap.String("ParserType", string(pr.ParserType)),
-			zap.Bool("isServerFirst", isServerFirst))
 
 		if pr.ParserType == integrations.MYSQL && isServerFirst {
-			// MySQL greeting is server-first (0x0a for 5.x+ etc.)
+			dstCfg := &models.ConditionalDstCfg{
+				Port: uint(destInfo.Port),
+			}
+			rule.DstCfg = dstCfg
 			matchedParser = parser
 			parserType = pr.ParserType
 			generic = false
