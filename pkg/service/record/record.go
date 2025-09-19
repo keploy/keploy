@@ -31,8 +31,8 @@ type Recorder struct {
 	testSetConf     TestSetConfig
 	config          *config.Config
 
-	tools           ToolsSvc
-	globalMockCh    chan<- *models.Mock
+	tools        ToolsSvc
+	globalMockCh chan<- *models.Mock
 }
 
 const (
@@ -87,7 +87,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case <-ctx.Done():
 		default:
 			if !reRecordCfg.Rerecord {
-
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -254,7 +253,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	defer func() {
-		if !reRecord && !r.config.InCi {
+		if !reRecordCfg.Rerecord && !r.config.InCi {
 			areTestsPresent, err := r.testDB.CheckForTests(ctx, newTestSetID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to check for tests")
@@ -517,11 +516,11 @@ func (r *Recorder) PromptToTemplatize(ctx context.Context, testSetID string) err
 				zap.String("input", input))
 			return nil
 		}
+	}
 }
-  
+
 // SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
 func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
 	r.globalMockCh = mockCh
 	r.logger.Info("Global mock channel set for record service")
-
 }
