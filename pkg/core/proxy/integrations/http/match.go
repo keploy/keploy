@@ -43,9 +43,12 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 		unfilteredMocks := FilterHTTPMocks(mocks)
 
-		for _, mock := range unfilteredMocks {
-			h.Logger.Debug("mock name under consideration for match function", zap.String("mock name", mock.Name))
+		// Log all mock names in a single line for better readability
+		mockNames := make([]string, len(unfilteredMocks))
+		for i, mock := range unfilteredMocks {
+			mockNames[i] = mock.Name
 		}
+		h.Logger.Debug("mocks under consideration for match function", zap.Strings("mock names", mockNames))
 
 		h.Logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
 
@@ -186,7 +189,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		}
 		// Body type check
 		if !h.MatchBodyType(mock.Spec.HTTPReq.Body, input.body) {
-			h.Logger.Debug("The body of mock and request aren't of same type", zap.String("mock name", mock.Name), zap.Any("input body", input.body), zap.Any("mock body", mock.Spec.HTTPReq.Body))
+			h.Logger.Debug("The body of mock and request aren't of same type", zap.String("mock name", mock.Name))
 			continue
 		}
 
@@ -198,19 +201,19 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// HTTP method match
 		if mock.Spec.HTTPReq.Method != models.Method(input.method) {
-			h.Logger.Debug("The method of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input method", models.Method(input.method)), zap.Any("mock method", mock.Spec.HTTPReq.Method))
+			h.Logger.Debug("The method of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
 		// Header key match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.Header, input.header) {
-			h.Logger.Debug("The header keys of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input header", input.header), zap.Any("mock header", mock.Spec.HTTPReq.Header))
+			h.Logger.Debug("The header keys of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
 		// Query parameter match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
-			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url params", input.url.Query()), zap.Any("mock url params", mock.Spec.HTTPReq.URLParams))
+			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
@@ -222,8 +225,14 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 // ExactBodyMatch Exact body match
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
+	// Log all mock names in a single line for better readability
+	mockNames := make([]string, len(schemaMatched))
+	for i, mock := range schemaMatched {
+		mockNames[i] = mock.Name
+	}
+	h.Logger.Debug("mocks under consideration for exact body match", zap.Strings("mock names", mockNames), zap.String("req body", string(body)))
+
 	for _, mock := range schemaMatched {
-		h.Logger.Debug("mock name under consideration for exact body match", zap.String("mock name", mock.Name), zap.String("mock body", mock.Spec.HTTPReq.Body), zap.String("req body", string(body)))
 		if mock.Spec.HTTPReq.Body == string(body) {
 			return true, mock
 		}
@@ -259,9 +268,15 @@ func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
 	h.Logger.Debug("Performing schema match for body")
 
+	// Log all mock names in a single line for better readability
+	mockNames := make([]string, len(schemaMatched))
+	for i, mock := range schemaMatched {
+		mockNames[i] = mock.Name
+	}
+	h.Logger.Debug("mocks under consideration for PerformBodyMatch function", zap.Strings("mock names", mockNames))
+
 	var bodyMatched []*models.Mock
 	for _, mock := range schemaMatched {
-		h.Logger.Debug("mock name under consideration for PerformBodyMatch function", zap.String("mock name", mock.Name))
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -325,9 +340,15 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 
 // PerformFuzzyMatch Perform fuzzy match on the request
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
+	// Log all mock names in a single line for better readability
+	mockNames := make([]string, len(tcsMocks))
+	for i, mock := range tcsMocks {
+		mockNames[i] = mock.Name
+	}
+	h.Logger.Debug("mocks under consideration for performfuzzyMatch function", zap.Strings("mock names", mockNames))
+
 	encodedReq := encode(reqBuff)
 	for _, mock := range tcsMocks {
-		h.Logger.Debug("mock name under consideration for performfuzzyMatch function", zap.String("mock name", mock.Name))
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
 		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
 			return true, mock
