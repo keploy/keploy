@@ -280,3 +280,36 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 	}
 	return nil
 }
+
+func (ts *TestYaml) CheckForTests(ctx context.Context, testSetID string) (bool, error) {
+	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+
+	TestPath, err := yaml.ValidatePath(path)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(TestPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to check directory status", zap.String("path", TestPath))
+		return false, err
+	}
+	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
+		return false, err
+	}
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
+		return false, err
+	}
+	for _, j := range files {
+		if filepath.Ext(j.Name()) == ".yaml" && !strings.Contains(j.Name(), "mocks") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
