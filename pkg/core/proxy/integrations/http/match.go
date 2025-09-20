@@ -132,13 +132,36 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
 }
 
 func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
-	if len(map1) != len(map2) {
+	// Helper function to check if a header should be ignored
+	shouldIgnoreHeader := func(key string) bool {
+		lkey := strings.ToLower(key)
+		return strings.HasPrefix(lkey, "keploy")
+	}
+
+	// Count non-ignored keys in map1
+	map1Count := 0
+	for key := range map1 {
+		if !shouldIgnoreHeader(key) {
+			map1Count++
+		}
+	}
+
+	// Count non-ignored keys in map2
+	map2Count := 0
+	for key := range map2 {
+		if !shouldIgnoreHeader(key) {
+			map2Count++
+		}
+	}
+
+	// Check if counts match
+	if map1Count != map2Count {
 		return false
 	}
 
+	// Check if all non-ignored keys in map1 exist in map2
 	for key := range map1 {
-		lkey := strings.ToLower(key)
-		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
+		if shouldIgnoreHeader(key) {
 			continue
 		}
 		if _, exists := map2[key]; !exists {
@@ -146,9 +169,9 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 		}
 	}
 
+	// Check if all non-ignored keys in map2 exist in map1
 	for key := range map2 {
-		lkey := strings.ToLower(key)
-		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
+		if shouldIgnoreHeader(key) {
 			continue
 		}
 		if _, exists := map1[key]; !exists {
@@ -170,8 +193,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// Content type check
 		if input.header.Get("Content-Type") != "" {
-			if input.header.Get("Content-Type") != mock.Spec.HTTPReq.Header["Content-Type"] {
-				h.Logger.Debug("The content type of mock and request aren't the same")
+			if !pkg.CompareMultiValueHeaders(mock.Spec.HTTPReq.Header["Content-Type"], input.header.Values("Content-Type")) {
+				h.Logger.Debug("The content type of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input header", input.header.Values("Content-Type")), zap.Any("mock header content-type", mock.Spec.HTTPReq.Header["Content-Type"]))
 				continue
 			}
 		}
@@ -195,7 +218,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// Header key match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.Header, input.header) {
-			h.Logger.Debug("The header keys of mock and request aren't the same")
+			h.Logger.Debug("headers are", zap.Any("mock header", mock.Spec.HTTPReq.Header), zap.Any("input header", input.header))
+			h.Logger.Debug("The header keys of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
