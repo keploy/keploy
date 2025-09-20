@@ -64,7 +64,10 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
-// checks if the mock header value is the same as the input header value
+// CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
+// with an input header value (as a slice of strings). It normalizes whitespace,
+// splits the mock header value by commas, trims spaces, sorts both sets of values,
+// and returns true if they contain the same elements in any order.
 func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string) bool {
 	// early returns
 	if mockHeaderValue == "" && len(inputHeaderValue) == 0 {
