@@ -71,6 +71,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
+
+			h.Logger.Debug("Decoded HTTP request headers", zap.Any("headers", request.Header))
 			// Set the host header explicitely because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
