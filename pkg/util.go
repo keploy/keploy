@@ -64,6 +64,48 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
+// checks if the mock header value is the same as the input header value
+func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string) bool {
+	// early returns
+	if mockHeaderValue == "" && len(inputHeaderValue) == 0 {
+		return true
+	}
+
+	if mockHeaderValue == "" || len(inputHeaderValue) == 0 {
+		return false
+	}
+
+	mockValues := strings.Split(mockHeaderValue, ",")
+	normalizedMockValues := make([]string, len(mockValues))
+	for i, v := range mockValues {
+		normalizedMockValues[i] = strings.TrimSpace(v)
+	}
+
+	// Normalize input header values
+	normalizedInputValues := make([]string, len(inputHeaderValue))
+	for i, v := range inputHeaderValue {
+		normalizedInputValues[i] = strings.TrimSpace(v)
+	}
+
+	// Sort both slices for comparison
+	sort.Strings(normalizedMockValues)
+	sort.Strings(normalizedInputValues)
+
+	// Compare lengths first
+	if len(normalizedMockValues) != len(normalizedInputValues) {
+		return false
+	}
+
+	// Compare each value
+	for i, mockVal := range normalizedMockValues {
+		if mockVal != normalizedInputValues[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
