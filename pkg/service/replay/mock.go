@@ -277,7 +277,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 		// After successfully writing the config, push it to the repo
 		if m.cfg.ReRecord.Branch != "" {
-			go m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
+			m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
 		}
 
 		return nil
@@ -315,10 +315,8 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 	// After successfully writing the config, push it to the repo
 	if m.cfg.ReRecord.Branch != "" {
-		// Run in a goroutine to not block the main flow
-		go m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
+		m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
 	}
-	// --- MODIFICATION END ---
 
 	err = utils.AddToGitIgnore(m.logger, m.cfg.Path, "/*/mocks.yaml")
 	if err != nil {
