@@ -263,11 +263,11 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 		m.logger.Info("uploading mock file...", zap.String("testSet", testSetID))
 
-		err = m.storage.Upload(ctx, mockFileReader, mockHash, m.cfg.AppName, m.token)
-		if err != nil {
-			m.logger.Error("Failed to upload mock file", zap.Error(err))
-			return err
-		}
+		// err = m.storage.Upload(ctx, mockFileReader, mockHash, m.cfg.AppName, m.token)
+		// if err != nil {
+		// 	m.logger.Error("Failed to upload mock file", zap.Error(err))
+		// 	return err
+		// }
 
 		err = m.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
