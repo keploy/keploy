@@ -57,6 +57,7 @@ func (h *Hooks) DeleteClientInfo(id uint64) error {
 func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
 	h.m.Lock()
 	defer h.m.Unlock()
+	fmt.Println("Sending proxy info to ebpf program", proxInfo)
 	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the proxy info to the ebpf program")
@@ -123,35 +124,35 @@ func (h *Hooks) SendE2EInfo(pid uint32) error {
 	return nil
 }
 
-func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppInfo) error {
-	h.m.Lock()
-	defer h.m.Unlock()
+// func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppInfo) error {
+// 	h.m.Lock()
+// 	defer h.m.Unlock()
 
-	// Use the provided app ID or the current app ID, don't generate a random one
-	dockerAppID := appID
-	if dockerAppID == 0 {
-		dockerAppID = h.appID
-	}
+// 	// Use the provided app ID or the current app ID, don't generate a random one
+// 	dockerAppID := appID
+// 	if dockerAppID == 0 {
+// 		dockerAppID = h.appID
+// 	}
 
-	if h.appID != 0 && h.appID != dockerAppID {
-		err := h.dockerAppRegistrationMap.Delete(h.appID)
-		if err != nil {
-			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Uint64("(Key)/AppID", h.appID))
-			return err
-		}
-	}
+// 	if h.appID != 0 && h.appID != dockerAppID {
+// 		err := h.dockerAppRegistrationMap.Delete(h.appID)
+// 		if err != nil {
+// 			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Uint64("(Key)/AppID", h.appID))
+// 			return err
+// 		}
+// 	}
 
-	// Don't override the app ID with a random number - use the real app ID
-	err := h.dockerAppRegistrationMap.Update(dockerAppID, dockerAppInfo, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program", zap.Uint64("appID", dockerAppID))
-		return err
-	}
+// 	// Don't override the app ID with a random number - use the real app ID
+// 	err := h.dockerAppRegistrationMap.Update(dockerAppID, dockerAppInfo, ebpf.UpdateAny)
+// 	if err != nil {
+// 		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program", zap.Uint64("appID", dockerAppID))
+// 		return err
+// 	}
 
-	// Update the app ID only if we received a valid one
-	if appID != 0 {
-		h.appID = appID
-	}
+// 	// Update the app ID only if we received a valid one
+// 	if appID != 0 {
+// 		h.appID = appID
+// 	}
 
-	return nil
-}
+// 	return nil
+// }

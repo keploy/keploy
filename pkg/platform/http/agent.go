@@ -634,6 +634,7 @@ func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.Unre
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) error {
 	// Start the Keploy agent in a Docker container, directly using the passed context for cancellation
+	fmt.Println("Starting the keploy agent in docker container....")
 	agentCtx := context.WithoutCancel(ctx)
 	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
