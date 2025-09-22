@@ -11,68 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
-
-	yamlDoc := yaml.NetworkTrafficDoc{
-		Version:      mock.Version,
-		Kind:         mock.Kind,
-		Name:         mock.Name,
-		ConnectionID: mock.ConnectionID,
-	}
-	switch mock.Kind {
-	case models.HTTP:
-		httpSpec := models.HTTPSchema{
-			Metadata:         mock.Spec.Metadata,
-			Request:          *mock.Spec.HTTPReq,
-			Response:         *mock.Spec.HTTPResp,
-			Created:          mock.Spec.Created,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(httpSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
-			return nil, err
-		}
-	case models.GENERIC:
-		genericSpec := models.GenericSchema{
-			Metadata:         mock.Spec.Metadata,
-			GenericRequests:  mock.Spec.GenericRequests,
-			GenericResponses: mock.Spec.GenericResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(genericSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
-			return nil, err
-		}
-	case models.REDIS:
-		redisSpec := models.RedisSchema{
-			Metadata:         mock.Spec.Metadata,
-			RedisRequests:    mock.Spec.RedisRequests,
-			RedisResponses:   mock.Spec.RedisResponses,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(redisSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
-			return nil, err
-		}
-	case models.Mongo, models.GRPC_EXPORT, models.Postgres, models.MySQL:
-		// These kinds are now handled directly in their respective integration packages
-		// and should not reach this central encoding function
-		utils.LogError(logger, nil, "mock kind should be encoded in integration package", zap.String("kind", string(mock.Kind)))
-		return nil, errors.New("mock kind should be encoded in integration package")
-	default:
-		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
-		return nil, errors.New("type of mock is invalid")
-	}
-
-	return &yamlDoc, nil
-}
-
 func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
 	mocks := []*models.Mock{}
 
@@ -113,7 +51,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		decoder, ok := integrations.GetDecoder(integrationType)
 		if !ok {
 			utils.LogError(logger, nil, "no decoder found for mock kind", zap.String("kind", string(m.Kind)))
-			return nil, errors.New("no decoder found for mock kind: " + string(m.Kind))
+			continue
 		}
 
 		mockPtr, err := decoder(m, logger)

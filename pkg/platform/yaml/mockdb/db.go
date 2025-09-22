@@ -63,9 +63,9 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		return err
 	}
 
-	// decode the mocks read from the yaml file
+	// decode the mocks read from the yaml file and filter by name
 	dec := yamlLib.NewDecoder(bytes.NewReader(data))
-	var mockYamls []*yaml.NetworkTrafficDoc
+	var filteredMockYamls []*yaml.NetworkTrafficDoc
 	for {
 		var doc *yaml.NetworkTrafficDoc
 		err := dec.Decode(&doc)
@@ -76,42 +76,27 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			utils.LogError(ys.Logger, err, "failed to decode the yaml file documents", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
 			return fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
 		}
-		mockYamls = append(mockYamls, doc)
-	}
-	mocks, err := decodeMocks(mockYamls, ys.Logger)
-	if err != nil {
-		return err
-	}
-	var newMocks []*models.Mock
-	for _, mock := range mocks {
-		if _, ok := mockNames[mock.Name]; ok {
-			newMocks = append(newMocks, mock)
-			continue
+		// Filter by name directly without converting to models.Mock
+		if _, ok := mockNames[doc.Name]; ok {
+			filteredMockYamls = append(filteredMockYamls, doc)
 		}
 	}
-	ys.Logger.Debug("logging the names of the used mocks", zap.Any("mockNames", newMocks), zap.String("for testset", testSetID))
-
 	// remove the old mock yaml file
 	err = os.Remove(filepath.Join(path, mockFileName+".yaml"))
 	if err != nil {
 		return err
 	}
 
-	// write the new mocks to the new yaml file
-	for _, newMock := range newMocks {
-		mockYaml, err := EncodeMock(newMock, ys.Logger)
+	// write the filtered mocks directly to the new yaml file
+	for _, mockYaml := range filteredMockYamls {
+		data, err = yamlLib.Marshal(mockYaml)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to encode the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
-			return err
-		}
-		data, err = yamlLib.Marshal(&mockYaml)
-		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
+			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.String("mock", mockYaml.Name), zap.String("for testset", testSetID))
 			return err
 		}
 		err = yaml.WriteFile(ctx, ys.Logger, path, mockFileName, data, true)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to write the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
+			utils.LogError(ys.Logger, err, "failed to write the mock to yaml", zap.String("mock", mockYaml.Name), zap.String("for testset", testSetID))
 			return err
 		}
 	}
