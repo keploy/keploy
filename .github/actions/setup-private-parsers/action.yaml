@@ -25,7 +25,7 @@ runs:
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@feat/update-parsers
         
         echo "Creating extraparsers.go..."
         mkdir -p pkg/core/proxy
