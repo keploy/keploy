@@ -512,7 +512,7 @@ func TestGenerateTableDiff_ComplexRealWorldExample_026(t *testing.T) {
 	assert.Contains(t, diff, `Expected: "Bugs"`)
 	assert.Contains(t, diff, `Actual: "Tests"`)
 	assert.Contains(t, diff, "Path: data.page_info.id")
-		assert.Contains(t, diff, `Expected: "99999"`)
+	assert.Contains(t, diff, `Expected: "99999"`)
 	assert.Contains(t, diff, `Actual: "13777"`)
 	assert.Contains(t, diff, "Path: data.page_info.name")
 	assert.Contains(t, diff, `Expected: "keploy improve"`)
