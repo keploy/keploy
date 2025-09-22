@@ -27,6 +27,8 @@ func init() {
 	integrations.Register(integrations.HTTP, &integrations.Parsers{
 		Initializer: New, Priority: 100,
 	})
+
+	integrations.RegisterDecoder(integrations.HTTP, DecodeHTTPMock)
 }
 
 type HTTP struct {

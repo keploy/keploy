@@ -19,6 +19,8 @@ func init() {
 		Initializer: New,
 		Priority:    100,
 	})
+
+	integrations.RegisterDecoder(integrations.GENERIC, DecodeGenericMock)
 }
 
 type Generic struct {

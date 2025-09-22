@@ -24,6 +24,7 @@ func init() {
 		Initializer: New,
 		Priority:    100,
 	})
+	integrations.RegisterDecoder(integrations.MYSQL, DecodeMySQLMock)
 }
 
 type MySQL struct {
