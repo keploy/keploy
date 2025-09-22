@@ -157,14 +157,14 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	}
 
 	a.proxyStarted = true
-	if opts.EnableTesting {
-		// Setting up the test bench
-		err := a.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
-		if err != nil {
-			utils.LogError(a.logger, err, "error while setting up the test bench environment")
-			return errors.New("failed to setup the test bench")
-		}
-	}
+	// if opts.EnableTesting {
+	// 	// Setting up the test bench
+	// 	err := a.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, err, "error while setting up the test bench environment")
+	// 		return errors.New("failed to setup the test bench")
+	// 	}
+	// }
 
 	return nil
 }
@@ -208,7 +208,7 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 	// ctx, cancel := context.WithCancel(ctx)
 	// a.activeClients.Store(opts.ClientID, cancel)
 	// Register the client and start processing
-	
+
 	// send the network info to the kernel
 	err := a.SendNetworkInfo(ctx, opts)
 	if err != nil {
