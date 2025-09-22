@@ -198,7 +198,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		return err
 	}
 	h.socket = socket
-
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		switch runtime.GOARCH {
 		case "amd64":
@@ -271,7 +270,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 			utils.LogError(h.logger, err, "failed to detect the cgroup path")
 			return err
 		}
-
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{

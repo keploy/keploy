@@ -851,7 +851,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		
+
 		absPath, err := utils.GetAbsPath(c.cfg.Path)
 		if err != nil {
 			utils.LogError(c.logger, err, "error while getting absolute path")

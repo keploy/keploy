@@ -44,6 +44,7 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 func (h *Hooks) DeleteClientInfo(id uint64) error {
 	h.m.Lock()
 	defer h.m.Unlock()
+	fmt.Println("Deleting client info from ebpf program with clientId", id)
 	err := h.clientRegistrationMap.Delete(id)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")

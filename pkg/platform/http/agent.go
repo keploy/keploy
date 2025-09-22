@@ -607,6 +607,7 @@ func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.Unre
 		return io.EOF
 	}
 
+	fmt.Println("Unregistering the client with clientID:", unregister.ClientID)
 	requestJSON, err := json.Marshal(unregister)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for unregister client")
@@ -783,7 +784,6 @@ func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {
 	close(ch) // Immediately close since no actual hooks are loaded
 	return ch
 }
-
 
 func (c *AgentClient) GetErrorChannel() <-chan error {
 	return nil

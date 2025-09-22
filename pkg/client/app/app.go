@@ -233,7 +233,6 @@ func (a *App) SetupCompose() error {
 	}
 
 	a.KeployNetwork = info.Name
-
 	ok, err = a.docker.NetworkExists(a.KeployNetwork)
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.KeployNetwork))
@@ -248,6 +247,15 @@ func (a *App) SetupCompose() error {
 			return err
 		}
 	}
+
+	//check if compose file has keploy-init container
+	// adding keploy init pid to the compose file
+	err = a.docker.SetInitPid(compose, a.container)
+	if err != nil {
+		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
+		return err
+	}
+	// composeChanged = true
 
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)

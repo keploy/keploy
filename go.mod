@@ -6,7 +6,7 @@ toolchain go1.24.6
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
-// replace github.com/keploy/integrations => /home/sarthak/projects/integrations
+replace github.com/keploy/integrations => /home/sarthak/projects/integrations
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -122,7 +122,6 @@ require (
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/zricethezav/gitleaks/v8 v8.28.0
 	golang.org/x/sync v0.15.0
-	golang.org/x/term v0.32.0
 	google.golang.org/grpc v1.71.0
 	gopkg.in/yaml.v2 v2.4.0
 	helm.sh/helm/v3 v3.18.3
