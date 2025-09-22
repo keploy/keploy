@@ -2,7 +2,7 @@ name: GRPC on Linux
 on:
   workflow_call:
 jobs:
-  node_linux:
+  grpc_linux:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
