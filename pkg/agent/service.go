@@ -16,7 +16,7 @@ import (
 )
 
 type Hooks interface {
-	AppInfo
+	// AppInfo
 	DestInfo
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
@@ -73,9 +73,9 @@ type DestInfo interface {
 	Delete(ctx context.Context, srcPort uint16) error
 }
 
-type AppInfo interface {
-	SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error
-}
+// type AppInfo interface {
+// 	// SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error
+// }
 
 // For keploy test bench
 

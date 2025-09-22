@@ -182,7 +182,7 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 
 func (a *AgentRequest) DeRegisterClients(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
+	fmt.Println("De-register client req")
 	var UnregisterReq models.UnregisterReq
 	err := json.NewDecoder(r.Body).Decode(&UnregisterReq)
 

@@ -180,7 +180,7 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockS
 
 func (a *Agent) DeRegisterClient(ctx context.Context, unregister models.UnregisterReq) error {
 	// send the info of the mode if its test mode we dont need to send the last mock
-
+	fmt.Println("Making the client deregistered in the proxy....", unregister.Mode)
 	if unregister.Mode != models.MODE_TEST {
 		err := a.Proxy.MakeClientDeRegisterd(ctx)
 		if err != nil {

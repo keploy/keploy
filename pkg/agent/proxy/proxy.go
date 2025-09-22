@@ -85,6 +85,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		DestInfo:          info,
 		sessions:          agent.NewSessions(),
 		MockManagers:      sync.Map{},
+		clientClose:       make(chan bool, 1),
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough: opts.Record.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
@@ -327,7 +328,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 }
 
 func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
-	p.logger.Debug("Inside MakeClientDeregisterd of proxyServer")
+	p.logger.Info("Inside MakeClientDeregisterd of proxyServer")
 	p.clientClose <- true
 	return nil
 }
@@ -457,7 +458,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			rule.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -644,10 +645,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if !generic {
-		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			fmt.Println("Using parser:", parserType)
+			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
@@ -670,7 +672,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err

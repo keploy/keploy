@@ -9,6 +9,17 @@ ARG SENTRY_DSN_DOCKER
 ARG VERSION
 ARG SERVER_URL
 
+
+ENV GOPRIVATE=github.com/keploy/*
+ENV GONOSUMDB=github.com/keploy/*
+ENV GOPROXY=direct
+
+ARG GITHUB_TOKEN
+RUN test -n "$GITHUB_TOKEN" || (echo "GITHUB_TOKEN build-arg is required" && exit 1)
+
+# Configure Git to rewrite https to https-with-token
+RUN git config --global url."https://${GITHUB_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+
 # Copy the Go module files and download dependencies
 COPY go.mod go.sum /app/
 RUN go mod download
@@ -25,6 +36,9 @@ RUN GOMAXPROCS=2 go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_
 FROM debian:bookworm-slim
 
 ENV KEPLOY_INDOCKER=true
+
+
+
 
 # Update the package lists and install required packages
 RUN apt-get update
@@ -54,4 +68,4 @@ RUN sed -i 's/\r$//' /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy"]
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent","--is-docker", "--port", "8096","--proxy-port", "36789"]

@@ -157,6 +157,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
 	case <-ctx.Done():
+		fmt.Println("Context cancelled, stopping the recording process...")
 		return nil
 	default:
 	}
@@ -193,7 +194,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 		errGrp.Go(func() error {
 			for testCase := range frames.Incoming {
-				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
 				if reRecordCfg.TestSet == "" {
 					err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 					if err != nil {

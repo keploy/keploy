@@ -35,7 +35,7 @@ func (g *Generic) MatchType(_ context.Context, _ []byte) bool {
 	return false
 }
 
-func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn,mocks chan<- *models.Mock,  clientClose chan bool,opts models.OutgoingOptions) error {
 	logger := g.logger.With(zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.String("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.String("Client IP Address", src.RemoteAddr().String()))
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)

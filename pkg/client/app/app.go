@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -130,6 +131,32 @@ func (a *App) SetupDocker() error {
 		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
 		return err
 	}
+
+	// attaching the init container's PID namespace to the app container
+	err = a.attachInitPid(context.Background())
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to attach init pid")
+		return err
+	}
+	return nil
+}
+
+// AttachInitPid modifies the existing Docker command to attach the init container's PID namespace
+func (a *App) attachInitPid(_ context.Context) error {
+	if a.cmd == "" {
+		return fmt.Errorf("no command provided to modify")
+	}
+
+	pidMode := fmt.Sprintf("--pid=container:%s", "keploy-init")
+	// Inject the pidMode flag after 'docker run' in the command
+	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
+	if len(parts) < 3 {
+		return fmt.Errorf("invalid command structure: %s", a.cmd)
+	}
+
+	// Modify the command to insert the pidMode
+	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], pidMode, parts[2])
+	fmt.Println("Modified Command..:", a.cmd)
 	return nil
 }
 
@@ -206,7 +233,6 @@ func (a *App) SetupCompose() error {
 	}
 
 	a.KeployNetwork = info.Name
-
 	ok, err = a.docker.NetworkExists(a.KeployNetwork)
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.KeployNetwork))
@@ -221,6 +247,15 @@ func (a *App) SetupCompose() error {
 			return err
 		}
 	}
+
+	//check if compose file has keploy-init container
+	// adding keploy init pid to the compose file
+	err = a.docker.SetInitPid(compose, a.container)
+	if err != nil {
+		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
+		return err
+	}
+	// composeChanged = true
 
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
