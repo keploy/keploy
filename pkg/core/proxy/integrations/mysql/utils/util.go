@@ -318,21 +318,60 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 	if len(b) == 0 {
 		return nil, 0, nil
 	}
-	length := b[0]
-	if length == 0 {
-		return nil, 1, nil
+	l := int(b[0])
+	if l == 0 {
+		return nil, 1, nil // zero value
 	}
-	year := binary.LittleEndian.Uint16(b[1:3])
-	month := b[3]
-	day := b[4]
-	hour := b[5]
-	minute := b[6]
-	second := b[7]
-	if length > 7 {
-		microsecond := binary.LittleEndian.Uint32(b[8:12])
-		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d", year, month, day, hour, minute, second, microsecond), int(length) + 1, nil
+	// DATETIME valid lengths in MySQL binary row: 4, 7, 11
+	if l != 4 && l != 7 && l != 11 {
+		return nil, 0, fmt.Errorf("invalid DATETIME length %d (expected 0|4|7|11) – likely misaligned buffer", l)
 	}
-	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second), int(length) + 1, nil
+	if len(b) < 1+l {
+		return nil, 0, io.ErrUnexpectedEOF
+	}
+
+	p := b[1:] // start of payload after length
+	year := int(binary.LittleEndian.Uint16(p[0:2]))
+	month := int(p[2])
+	day := int(p[3])
+
+	switch l {
+	case 4:
+		// YYYY-MM-DD
+		return fmt.Sprintf("%04d-%02d-%02d", year, month, day), 1 + l, nil
+	case 7:
+		hour := int(p[4])
+		minute := int(p[5])
+		second := int(p[6])
+		// Basic sanity guard helps catch misalignment early
+		if !validYMDHMS(year, month, day, hour, minute, second) {
+			return nil, 0, fmt.Errorf("invalid DATETIME %04d-%02d-%02d %02d:%02d:%02d (misaligned?)",
+				year, month, day, hour, minute, second)
+		}
+		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d",
+			year, month, day, hour, minute, second), 1 + l, nil
+	case 11:
+		hour := int(p[4])
+		minute := int(p[5])
+		second := int(p[6])
+		us := binary.LittleEndian.Uint32(p[7:11])
+		if !validYMDHMS(year, month, day, hour, minute, second) {
+			return nil, 0, fmt.Errorf("invalid DATETIME %04d-%02d-%02d %02d:%02d:%02d.%06d (misaligned?)",
+				year, month, day, hour, minute, second, us)
+		}
+		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d",
+			year, month, day, hour, minute, second, us), 1 + l, nil
+	}
+	return nil, 0, fmt.Errorf("unreachable")
+}
+
+func validYMDHMS(y, m, d, hh, mm, ss int) bool {
+	return y >= 1 && y <= 9999 &&
+		m >= 1 && m <= 12 &&
+		d >= 1 && d <= 31 && // fine for a quick guard; deeper month/day checks optional
+		hh >= 0 && hh <= 23 &&
+		mm >= 0 && mm <= 59 &&
+		ss >= 0 && ss <= 59
 }
 
 func ParseBinaryTime(b []byte) (interface{}, int, error) {
