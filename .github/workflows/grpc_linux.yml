@@ -10,8 +10,8 @@ jobs:
         app:
           - name: go-grpc
             path: go-grpc
-            script_dir: go_grpc
-          - mode: [incoming, outgoing]
+            script_dir: go-grpc
+        mode: [incoming, outgoing]
         config:
           - job: record_latest_replay_build
             record_src: latest
