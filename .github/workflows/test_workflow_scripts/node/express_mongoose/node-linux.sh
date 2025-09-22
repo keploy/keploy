@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Safe, chatty CI script for Node + Mongo + Keploy
+# Safe, chatty CI script for Node + Mongo + Keploy (fail-fast, reference-aligned)
 
 set -Eeuo pipefail
+set -o errtrace
 
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
@@ -33,7 +34,8 @@ wait_for_mongo() {
     sleep 1
   done
   echo "::error::Mongo did not become ready in time"
-  endsec; return 1
+  endsec
+  return 1
 }
 
 wait_for_http() {
@@ -50,10 +52,13 @@ send_request() {
 
   if ! wait_for_http "http://localhost:8000/students" 120; then
     echo "::error::App did not become healthy at /students"
+    # Let the pipeline fail by returning non-zero
+    return 1
   else
-    echo "good!App started"
+    echo "good! App started"
   fi
 
+  # Drive a bit of traffic (best-effort)
   curl -sS --request POST --url http://localhost:8000/students \
     --header 'content-type: application/json' \
     --data '{"name":"John Doe","email":"john@xyiz.com","phone":"0123456799"}' || true
@@ -104,7 +109,7 @@ for i in 1 2; do
     > "${app_name}.txt" 2>&1 &
   KEPLOY_PID=$!
 
-  # Drive traffic and stop keploy
+  # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
   send_request "$KEPLOY_PID"
 
   # Wait + capture rc
@@ -113,19 +118,32 @@ for i in 1 2; do
   rc=$?
   set -e
   echo "Record exit code: $rc"
-  [[ $rc -ne 0 ]] && echo "::warning::Keploy record exited non-zero (iteration $i)"
 
-  echo "== keploy artifacts (depth 3) =="
-  find ./keploy -maxdepth 3 -type f | sort || true
-
+  # Fail hard like the reference script
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
     cat "${app_name}.txt"
     exit 1
   fi
   if grep -q "ERROR" "${app_name}.txt"; then
-    echo "::warning::Errors found in ${app_name}.txt"
+    echo "::error::Error found during recording (iteration $i)"
     cat "${app_name}.txt"
+    exit 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    echo "::error::Keploy record exited non-zero (iteration $i)"
+    cat "${app_name}.txt" || true
+    exit "$rc"
+  fi
+
+  echo "== keploy artifacts (depth 3) =="
+  find ./keploy -maxdepth 3 -type f | sort || true
+
+  # Ensure at least one test/mocks were produced for this iteration
+  if ! find ./keploy -type f -name 'test-*.yaml' -o -name 'mocks-*.yaml' | grep -q .; then
+    echo "::error::No tests/mocks produced in iteration $i"
+    cat "${app_name}.txt" || true
+    exit 1
   fi
 
   endsec
@@ -162,22 +180,44 @@ run_replay() {
   echo "Replay #$idx exit code: $rc"
   cat "$logfile" || true
 
-  # Find newest run dir and print set statuses
+  # Fail on log errors like the reference
+  if grep -q "WARNING: DATA RACE" "$logfile"; then
+    echo "::error::Data race detected in replay #$idx"
+    return 1
+  fi
+  if grep -q "ERROR" "$logfile"; then
+    echo "::error::Error found in replay #$idx"
+    return 1
+  fi
+
+  # Find newest run dir and validate reports
   local RUN_DIR
   RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
   if [[ -z "${RUN_DIR:-}" ]]; then
     echo "::error::No test-run directory found after replay #$idx"
-    return "$rc"
+    return 1
   fi
   echo "Using reports from: $RUN_DIR"
+
   local any_fail=false
+  local any_seen=false
+  shopt -s nullglob
   for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
-    [[ -f "$rpt" ]] || continue
+    any_seen=true
     local status
     status=$(awk '/^status:/{print $2; exit}' "$rpt")
     echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
-    if [[ "$status" != "PASSED" ]]; then any_fail=true; fi
+    if [[ -z "${status:-}" || "$status" != "PASSED" ]]; then
+      any_fail=true
+    fi
   done
+  shopt -u nullglob
+
+  if ! $any_seen; then
+    echo "::error::No test-set reports found in $RUN_DIR"
+    return 1
+  fi
+
   endsec
 
   if $any_fail; then
@@ -187,6 +227,7 @@ run_replay() {
   fi
 }
 
+# Replays (will fail pipeline if any returns non-zero due to set -e)
 run_replay 1
 run_replay 2 "--testsets test-set-0"
 
@@ -199,5 +240,5 @@ fi
 
 run_replay 3 "--apiTimeout 30"
 
-echo "All replays completed. If no errors above, CI can PASS."
+echo "All replays completed and PASSED."
 exit 0
