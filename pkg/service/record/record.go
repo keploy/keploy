@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -183,29 +184,35 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	})
 
 	errGrp.Go(func() error {
-		for mock := range frames.Outgoing {
+		for networkDoc := range frames.Outgoing {
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
-				currMockID := r.mockDB.GetCurrMockID()
-				// Create a deep copy of the mock to avoid race conditions
-				mockCopy := *mock
-				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
-				select {
-				case r.globalMockCh <- &mockCopy:
-					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
-				default:
-					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
+				// Convert NetworkTrafficDoc to Mock for correlation manager
+				mocks, err := convertNetworkDocToMock(networkDoc, r.logger)
+				if err != nil {
+					r.logger.Error("Failed to convert NetworkTrafficDoc to Mock for correlation", zap.Error(err))
+				} else if len(mocks) > 0 {
+					mock := mocks[0] // Take the first converted mock
+					currMockID := r.mockDB.GetCurrMockID()
+					mock.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
+
+					select {
+					case r.globalMockCh <- mock:
+						r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", string(networkDoc.Kind)))
+					default:
+						r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", string(networkDoc.Kind)))
+					}
 				}
 			}
-			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			err := r.mockDB.InsertMock(ctx, networkDoc, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					continue
 				}
 				insertMockErrChan <- err
 			} else {
-				mockCountMap[mock.GetKind()]++
-				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				mockCountMap[string(networkDoc.Kind)]++
+				r.telemetry.RecordedTestCaseMock(string(networkDoc.Kind))
 			}
 		}
 		return nil
@@ -429,4 +436,21 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
 	r.globalMockCh = mockCh
 	r.logger.Info("Global mock channel set for record service")
+}
+
+// convertNetworkDocToMock converts a NetworkTrafficDoc to a Mock for compatibility with correlation manager
+func convertNetworkDocToMock(networkDoc *yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
+	// Create a mock using the same fields from NetworkTrafficDoc
+	mock := &models.Mock{
+		Version:      networkDoc.Version,
+		Name:         networkDoc.Name,
+		Kind:         networkDoc.Kind,
+		ConnectionID: networkDoc.ConnectionID,
+	}
+
+	// For correlation purposes, we only need basic mock info
+	// The Spec field can be empty since correlation doesn't need the detailed spec
+	mock.Spec = models.MockSpec{}
+
+	return []*models.Mock{mock}, nil
 }

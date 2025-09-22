@@ -118,18 +118,14 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	return nil
 }
 
-func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
-	mock.Name = fmt.Sprint("mock-", ys.getNextID())
-	mockYaml, err := EncodeMock(mock, ys.Logger)
-	if err != nil {
-		return err
-	}
+func (ys *MockYaml) InsertMock(ctx context.Context, networkDoc *yaml.NetworkTrafficDoc, testSetID string) error {
+	networkDoc.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-	data, err := yamlLib.Marshal(&mockYaml)
+	data, err := yamlLib.Marshal(&networkDoc)
 	if err != nil {
 		return err
 	}
