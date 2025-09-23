@@ -1,9 +1,10 @@
 name: Golang On Docker (macOS)
-'on':
+on:
   workflow_call:
+
 jobs:
   golang_docker_macos:
-    runs-on: [self-hosted, macOS]
+    runs-on: [self-hosted, macos]
     strategy:
       fail-fast: false
       matrix:

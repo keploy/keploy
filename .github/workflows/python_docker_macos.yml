@@ -1,10 +1,10 @@
 name: Python On Docker (macOS)
 on:
   workflow_call:
+
 jobs:
   python_docker_macos:
-    # Requires a self-hosted macOS runner with Docker Desktop installed and running
-    runs-on: [self-hosted, macOS]
+    runs-on: [self-hosted, macos]
     strategy:
       fail-fast: false
       matrix:

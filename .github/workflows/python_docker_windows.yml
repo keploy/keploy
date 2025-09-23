@@ -3,8 +3,7 @@ on:
   workflow_call:
 jobs:
   python_docker_windows:
-    # Requires a self-hosted Windows runner with Docker Desktop installed (Linux containers) and running
-    runs-on: [self-hosted, Windows]
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:

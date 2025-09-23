@@ -1,9 +1,10 @@
 name: Golang On Docker (Windows)
 on:
   workflow_call:
+
 jobs:
   golang_docker_windows:
-    runs-on: [self-hosted, Windows]
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +29,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Check Docker availability (Windows)
+        shell: bash
+        run: |
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "Docker is not available on GitHub-hosted Windows runners. Use a self-hosted Windows runner with Docker Desktop installed, or run this job on Linux." >&2
+            exit 1
+          fi
+          docker version || { echo "Docker is not running. Start Docker Desktop on the runner." >&2; exit 1; }
 
       - id: image
         uses: ./.github/actions/download-image
