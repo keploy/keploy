@@ -88,9 +88,6 @@ send_request() {
   echo "== List all seeded date rows =="
   curl -sS http://localhost:9090/query/dates || true
 
-  echo "== Active rows (non-expired) =="
-  curl -sS http://localhost:9090/query/active || true
-
   # Give Keploy a moment to persist artifacts, then stop it cleanly
   sleep 10
   echo "$kp_pid Keploy PID"
