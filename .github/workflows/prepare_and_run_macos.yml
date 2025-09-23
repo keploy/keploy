@@ -4,7 +4,7 @@ on:
     branches: [main]
 jobs:
   build-and-upload:
-    runs-on: [self-hosted, macOS]
+    runs-on: [self-hosted, macOS, native]
     steps:
       - uses: actions/checkout@v4
     
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
