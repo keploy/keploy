@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"
 
-# --- helpers ---------------------------------------------------------------
+# ---------------- helpers ----------------
 
 rewrite_in_place() {
   local tmp
@@ -13,7 +13,7 @@ rewrite_in_place() {
 }
 
 ensure_dockerfile_syntax() {
-  # Needed for BuildKit front-end features like --mount
+  # needed for --mount
   if ! head -n1 "$DOCKERFILE_PATH" | grep -q '^# syntax=docker/dockerfile:'; then
     {
       echo '# syntax=docker/dockerfile:1.6'
@@ -23,7 +23,6 @@ ensure_dockerfile_syntax() {
 }
 
 add_race_flag() {
-  # add -race to any RUN go build line if missing
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+build(\>|[[:space:]])/ {
@@ -36,7 +35,7 @@ add_race_flag() {
 }
 
 enable_ssh_mount_for_go_mod() {
-  # Turn "RUN go mod download" into BuildKit mount form
+  # Turn: RUN go mod download  -->  RUN --mount=type=ssh go mod download
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
@@ -48,11 +47,10 @@ enable_ssh_mount_for_go_mod() {
 }
 
 inject_git_settings_minimal() {
-  # Minimal + portable:
+  # Minimal + portable (no chmod/ssh-keyscan):
   # - Only keploy org uses SSH (others stay HTTPS)
-  # - Disable proxy/sumdb for keploy/* (private)
-  # - Skip known_hosts entirely via StrictHostKeyChecking=no
-  # - NO mkdir/chmod/ssh-keyscan/&& anywhere
+  # - Avoid proxy/sumdb for private deps
+  # - Disable host key checking (no known_hosts)
   awk '
     BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
@@ -81,23 +79,61 @@ inject_git_settings_minimal() {
   ' "$DOCKERFILE_PATH" | rewrite_in_place
 }
 
-build_docker_image() {
-  echo "Building with BuildKit enabled (no buildx dependency)…"
-  # Force BuildKit for classic docker build
-  export DOCKER_BUILDKIT=1
-  export COMPOSE_DOCKER_CLI_BUILD=1
-  export BUILDKIT_PROGRESS=plain
+install_buildx_if_missing() {
+  if docker buildx version >/dev/null 2>&1; then
+    return 0
+  fi
 
-  # Forward the runner’s SSH agent into the build so --mount=type=ssh works
-  docker build --ssh default -t ghcr.io/keploy/keploy:1h .
+  echo "docker buildx not found. Installing locally for this job…"
+  # Known good version; update if you need newer.
+  local BX_VER="v0.13.1"
+  local OS_BIN=""
+  case "$(uname -s 2>/dev/null || echo)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+      OS_BIN="buildx-${BX_VER}.windows-amd64.exe"
+      ;;
+    Linux)
+      OS_BIN="buildx-${BX_VER}.linux-amd64"
+      ;;
+    Darwin)
+      OS_BIN="buildx-${BX_VER}.darwin-amd64"
+      ;;
+    *)
+      echo "Unsupported runner OS for auto-install of buildx." >&2
+      exit 1
+      ;;
+  esac
+
+  local URL="https://github.com/docker/buildx/releases/download/${BX_VER}/${OS_BIN}"
+  local PLUGDIR="${HOME}/.docker/cli-plugins"
+  mkdir -p "${PLUGDIR}"
+
+  echo "Downloading ${URL}"
+  curl -fsSL "${URL}" -o "${PLUGDIR}/docker-buildx"
+  chmod +x "${PLUGDIR}/docker-buildx"
+
+  # On Windows Git-Bash, also drop a .exe for docker to find
+  if [[ "$OS_BIN" == *.exe ]]; then
+    mv "${PLUGDIR}/docker-buildx" "${PLUGDIR}/docker-buildx.exe"
+  fi
+
+  docker buildx version
 }
 
-main() {
-  ensure_dockerfile_syntax
-  add_race_flag
-  enable_ssh_mount_for_go_mod
-  inject_git_settings_minimal
-  build_docker_image
+build_with_buildx() {
+  # Ensure an instance exists & is selected
+  docker buildx create --name keploybx --driver docker-container --use >/dev/null 2>&1 || docker buildx use keploybx
+  docker buildx inspect --bootstrap >/dev/null 2>&1 || true
+
+  # Forward agent into build
+  docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h .
 }
 
-main
+# ---------------- main ----------------
+
+ensure_dockerfile_syntax
+add_race_flag
+enable_ssh_mount_for_go_mod
+inject_git_settings_minimal
+install_buildx_if_missing
+build_with_buildx
