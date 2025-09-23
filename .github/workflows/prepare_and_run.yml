@@ -64,12 +64,24 @@ jobs:
   run_python_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/python_docker.yml
+  run_python_docker_macos:
+    needs: [build-and-upload, upload-latest, build-docker-image]
+    uses: ./.github/workflows/python_docker_macos.yml
+  run_python_docker_windows:
+    needs: [build-and-upload, upload-latest, build-docker-image]
+    uses: ./.github/workflows/python_docker_windows.yml
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest,build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
+  run_golang_docker_macos:
+    needs: [build-and-upload, upload-latest, build-docker-image]
+    uses: ./.github/workflows/golang_docker_macos.yml
+  run_golang_docker_windows:
+    needs: [build-and-upload, upload-latest, build-docker-image]
+    uses: ./.github/workflows/golang_docker_windows.yml
   run_fuzzer_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
