@@ -5,7 +5,6 @@ package generic
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -123,35 +121,4 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		}
 		return err
 	}
-}
-
-// DecodeGenericMock converts a NetworkTrafficDoc with Generic kind to a Mock
-func DecodeGenericMock(networkDoc *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.Mock, error) {
-	if networkDoc.Kind != models.GENERIC {
-		return nil, fmt.Errorf("expected GENERIC mock kind, got %s", networkDoc.Kind)
-	}
-
-	mock := models.Mock{
-		Version:      networkDoc.Version,
-		Name:         networkDoc.Name,
-		Kind:         networkDoc.Kind,
-		ConnectionID: networkDoc.ConnectionID,
-	}
-
-	genericSpec := models.GenericSchema{}
-	err := networkDoc.Spec.Decode(&genericSpec)
-	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.String("mock name", networkDoc.Name))
-		return nil, err
-	}
-
-	mock.Spec = models.MockSpec{
-		Metadata:         genericSpec.Metadata,
-		GenericRequests:  genericSpec.GenericRequests,
-		GenericResponses: genericSpec.GenericResponses,
-		ReqTimestampMock: genericSpec.ReqTimestampMock,
-		ResTimestampMock: genericSpec.ResTimestampMock,
-	}
-
-	return &mock, nil
 }

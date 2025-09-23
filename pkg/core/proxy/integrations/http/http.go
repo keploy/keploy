@@ -19,7 +19,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
 )
 
@@ -27,8 +26,6 @@ func init() {
 	integrations.Register(integrations.HTTP, &integrations.Parsers{
 		Initializer: New, Priority: 100,
 	})
-
-	integrations.RegisterDecoder(integrations.HTTP, DecodeHTTPMock)
 }
 
 type HTTP struct {
@@ -64,7 +61,7 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	return isHTTP
 }
 
-func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *yaml.NetworkTrafficDoc, opts models.OutgoingOptions) error {
+func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
@@ -101,7 +98,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 }
 
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
-func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *yaml.NetworkTrafficDoc, opts models.OutgoingOptions) error {
+func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
@@ -185,42 +182,31 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
-	// Create HTTP spec
-	httpSpec := models.HTTPSchema{
-		Metadata: meta,
-		Request: models.HTTPReq{
-			Method:     models.Method(req.Method),
-			ProtoMajor: req.ProtoMajor,
-			ProtoMinor: req.ProtoMinor,
-			URL:        req.URL.String(),
-			Header:     pkg.ToYamlHTTPHeader(req.Header),
-			Body:       string(reqBody),
-			URLParams:  pkg.URLParams(req),
-			Timestamp:  mock.ReqTimestampMock,
-		},
-		Response: models.HTTPResp{
-			StatusCode: respParsed.StatusCode,
-			Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
-			Body:       string(respBody),
-		},
-		Created:          time.Now().Unix(),
-		ReqTimestampMock: mock.ReqTimestampMock,
-		ResTimestampMock: mock.ResTimestampMock,
-	}
-
-	// Create NetworkTrafficDoc with serialized YAML spec
-	yamlDoc := yaml.NetworkTrafficDoc{
+	mocks <- &models.Mock{
 		Version: models.GetVersion(),
-		Kind:    models.HTTP,
 		Name:    "mocks",
-	}
+		Kind:    models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: meta,
+			HTTPReq: &models.HTTPReq{
+				Method:     models.Method(req.Method),
+				ProtoMajor: req.ProtoMajor,
+				ProtoMinor: req.ProtoMinor,
+				URL:        req.URL.String(),
+				Header:     pkg.ToYamlHTTPHeader(req.Header),
+				Body:       string(reqBody),
+				URLParams:  pkg.URLParams(req),
+			},
+			HTTPResp: &models.HTTPResp{
+				StatusCode: respParsed.StatusCode,
+				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
+				Body:       string(respBody),
+			},
+			Created: time.Now().Unix(),
 
-	err = yamlDoc.Spec.Encode(httpSpec)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to marshal the HTTP input-output as yaml")
-		return err
+			ReqTimestampMock: mock.ReqTimestampMock,
+			ResTimestampMock: mock.ResTimestampMock,
+		},
 	}
-
-	mocks <- &yamlDoc
 	return nil
 }
