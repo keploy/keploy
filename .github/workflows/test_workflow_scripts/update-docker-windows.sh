@@ -25,8 +25,6 @@ ensure_dockerfile_syntax() {
 add_race_flag() {
   echo "Ensuring -race in go build lines (idempotent)..."
   awk '
-    # If a line starts with RUN go build and does not already contain -race,
-    # insert -race right after `go build`
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+build(\>|[[:space:]])/ {
       if ($0 ~ /(^|\s)-race(\s|$)/) { print; next }
@@ -40,7 +38,7 @@ add_race_flag() {
 enable_ssh_mount_for_go_mod() {
   echo "Switching go mod download to use BuildKit SSH mount (idempotent)..."
 
-  # Detect Windows base image (handles indentation, multi-stage, and explicit SHELL)
+  # Detect Windows base image (handles indentation, multi-stage, or explicit PowerShell shell)
   if grep -qiE '^[[:space:]]*FROM[[:space:]]+[^#]*\b(nanoserver|servercore|windows)\b' "$DOCKERFILE_PATH" \
      || grep -qiE '^[[:space:]]*SHELL[[:space:]]*\[.*powershell' "$DOCKERFILE_PATH"; then
     echo "Windows base detected; skipping --mount=type=ssh rewrite."
@@ -58,9 +56,9 @@ enable_ssh_mount_for_go_mod() {
 }
 
 use_ssh_for_github_and_known_hosts() {
-  echo "Injecting SSH config, known_hosts, and GOPRIVATE around go mod download (idempotent)..."
+  echo "Injecting Git SSH config and envs around go mod download (idempotent)..."
 
-  # Detect Windows base image (handles indentation, multi-stage, and explicit SHELL)
+  # Detect Windows base image (handles indentation, multi-stage, or explicit PowerShell shell)
   if grep -qiE '^[[:space:]]*FROM[[:space:]]+[^#]*\b(nanoserver|servercore|windows)\b' "$DOCKERFILE_PATH" \
      || grep -qiE '^[[:space:]]*SHELL[[:space:]]*\[.*powershell' "$DOCKERFILE_PATH"; then
     WINDOWS_BASE=1
@@ -69,17 +67,13 @@ use_ssh_for_github_and_known_hosts() {
   fi
 
   if [ "$WINDOWS_BASE" -eq 1 ]; then
-    # Windows / PowerShell-friendly injection
+    # WINDOWS: emit only safe lines (no mkdir/chmod/ssh-keyscan/&&)
     awk '
       BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
       function emit_win_git_prep() {
         print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-        # Create %USERPROFILE%\\.ssh (no chmod on Windows)
-        print "RUN powershell -Command \"",
-              "$ErrorActionPreference=\\\"Stop\\\"; ",
-              "New-Item -ItemType Directory -Force -Path $env:USERPROFILE\\.ssh | Out-Null\""
-        # We skip ssh-keyscan on Windows containers (OpenSSH client may not exist)
+        # rely on StrictHostKeyChecking=no so we don t need known_hosts or chmod/mkdir
       }
 
       /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
@@ -94,7 +88,6 @@ use_ssh_for_github_and_known_hosts() {
       /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
         if (!injected_before_go_mod) {
           print "ENV GOPRIVATE=github.com/keploy/*"
-          # Disable strict host key checking to avoid known_hosts needs
           print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
           emit_win_git_prep();
           injected_before_go_mod=1;
@@ -104,8 +97,9 @@ use_ssh_for_github_and_known_hosts() {
 
       { print }
     ' "$DOCKERFILE_PATH" | rewrite_in_place
+
   else
-    # Linux-friendly injection
+    # LINUX: standard POSIX prep; split mkdir/chmod to avoid && issues if ever misdetected
     awk '
       BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
