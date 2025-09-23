@@ -45,10 +45,51 @@ send_request() {
     sleep 1
   done
 
+  echo "== Seed special datetime rows =="
+  curl -sS -X POST http://localhost:9090/seed/dates || true
+
+  echo "== Basic flows from original script =="
   curl -sS -X POST http://localhost:9090/shorten -H "Content-Type: application/json" \
     -d '{"url": "https://github.com"}' || true
-
+  # keep one resolve from the old tests
   curl -sS http://localhost:9090/resolve/4KepjkTT || true
+
+  echo "== Query by exact end_time timestamps =="
+  # 1) RFC3339 min-sentinel like "9999-01-01T00:00:00Z"
+  curl -sS "http://localhost:9090/query/by-endtime?ts=9999-01-01T00:00:00Z" || true
+
+  # 2) RFC3339 max-sentinel with microseconds
+  curl -sS "http://localhost:9090/query/by-endtime?ts=9999-12-31T23:59:59.999999Z" || true
+
+  # 3) MySQL-style with space "1970-01-01 00:00:00"
+  curl -sS "http://localhost:9090/query/by-endtime?ts=1970-01-01%2000:00:00" || true
+
+  # 4) Lower bound valid (1000-01-01)
+  curl -sS "http://localhost:9090/query/by-endtime?ts=1000-01-01T00:00:00Z" || true
+
+  # 5) Leap second-ish / leap day example
+  curl -sS "http://localhost:9090/query/by-endtime?ts=2020-02-29T12:34:56Z" || true
+
+  # 6) Offset input (should normalize to UTC in response)
+  #    First with explicit offset in the query param (needs URL-encoding for '+')
+  curl -sS "http://localhost:9090/query/by-endtime?ts=2023-07-01T18:30:00%2B05:30" || true
+  #    And the UTC-equivalent time (13:00:00Z)
+  curl -sS "http://localhost:9090/query/by-endtime?ts=2023-07-01T13:00:00Z" || true
+
+  echo "== Sentinel pair =="
+  curl -sS http://localhost:9090/query/sentinels || true
+
+  echo "== Lookup by label (short_code) =="
+  # leap case present in the seed
+  curl -sS http://localhost:9090/query/label/dt-leap-2020-02-29T12:34:56Z || true
+  # also try resolving by the same short_code via /resolve
+  curl -sS http://localhost:9090/resolve/dt-leap-2020-02-29T12:34:56Z || true
+
+  echo "== List all seeded date rows =="
+  curl -sS http://localhost:9090/query/dates || true
+
+  echo "== Active rows (non-expired) =="
+  curl -sS http://localhost:9090/query/active || true
 
   # Give Keploy a moment to persist artifacts, then stop it cleanly
   sleep 10
