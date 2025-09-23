@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
 )
 
 type Instrumentation interface {
@@ -13,7 +12,7 @@ type Instrumentation interface {
 	//Hook will load hooks and start the proxy server.
 	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
-	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *yaml.NetworkTrafficDoc, error)
+	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
@@ -33,7 +32,7 @@ type TestDB interface {
 }
 
 type MockDB interface {
-	InsertMock(ctx context.Context, mock *yaml.NetworkTrafficDoc, testSetID string) error
+	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
 	DeleteMocksForSet(ctx context.Context, testSetID string) error
 	GetCurrMockID() int64
 	ResetCounterID()
@@ -53,5 +52,5 @@ type Telemetry interface {
 
 type FrameChan struct {
 	Incoming <-chan *models.TestCase
-	Outgoing <-chan *yaml.NetworkTrafficDoc
+	Outgoing <-chan *models.Mock
 }
