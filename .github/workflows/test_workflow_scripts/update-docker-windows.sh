@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"
 
-# ---------------- helpers ----------------
+# ---------- helpers ----------
 
 rewrite_in_place() {
   local tmp
@@ -35,7 +35,7 @@ add_race_flag() {
 }
 
 enable_ssh_mount_for_go_mod() {
-  # Turn: RUN go mod download  -->  RUN --mount=type=ssh go mod download
+  # Turn: RUN go mod download  ->  RUN --mount=type=ssh go mod download
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
@@ -47,10 +47,7 @@ enable_ssh_mount_for_go_mod() {
 }
 
 inject_git_settings_minimal() {
-  # Minimal + portable (no chmod/ssh-keyscan):
-  # - Only keploy org uses SSH (others stay HTTPS)
-  # - Avoid proxy/sumdb for private deps
-  # - Disable host key checking (no known_hosts)
+  # Only keploy/* over SSH; avoid proxy/sumdb; skip known_hosts & chmod entirely
   awk '
     BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
@@ -83,57 +80,48 @@ install_buildx_if_missing() {
   if docker buildx version >/dev/null 2>&1; then
     return 0
   fi
-
-  echo "docker buildx not found. Installing locally for this job…"
-  # Known good version; update if you need newer.
+  echo "docker buildx not found. Installing locally…"
   local BX_VER="v0.13.1"
-  local OS_BIN=""
+  local OS_BIN
   case "$(uname -s 2>/dev/null || echo)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-      OS_BIN="buildx-${BX_VER}.windows-amd64.exe"
-      ;;
-    Linux)
-      OS_BIN="buildx-${BX_VER}.linux-amd64"
-      ;;
-    Darwin)
-      OS_BIN="buildx-${BX_VER}.darwin-amd64"
-      ;;
-    *)
-      echo "Unsupported runner OS for auto-install of buildx." >&2
-      exit 1
-      ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) OS_BIN="buildx-${BX_VER}.windows-amd64.exe" ;;
+    Linux) OS_BIN="buildx-${BX_VER}.linux-amd64" ;;
+    Darwin) OS_BIN="buildx-${BX_VER}.darwin-amd64" ;;
+    *) echo "Unsupported OS"; exit 1 ;;
   esac
-
   local URL="https://github.com/docker/buildx/releases/download/${BX_VER}/${OS_BIN}"
   local PLUGDIR="${HOME}/.docker/cli-plugins"
   mkdir -p "${PLUGDIR}"
-
-  echo "Downloading ${URL}"
   curl -fsSL "${URL}" -o "${PLUGDIR}/docker-buildx"
   chmod +x "${PLUGDIR}/docker-buildx"
-
-  # On Windows Git-Bash, also drop a .exe for docker to find
-  if [[ "$OS_BIN" == *.exe ]]; then
-    mv "${PLUGDIR}/docker-buildx" "${PLUGDIR}/docker-buildx.exe"
-  fi
-
+  if [[ "$OS_BIN" == *.exe ]]; then mv "${PLUGDIR}/docker-buildx" "${PLUGDIR}/docker-buildx.exe"; fi
   docker buildx version
 }
 
-build_with_buildx() {
-  # Ensure an instance exists & is selected
-  docker buildx create --name keploybx --driver docker-container --use >/dev/null 2>&1 || docker buildx use keploybx
-  docker buildx inspect --bootstrap >/dev/null 2>&1 || true
+build_image() {
+  echo "Building with buildx (docker driver) and SSH agent forwarding…"
 
-  # Forward agent into build
-  docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h .
+  # Ensure the lightweight "docker" driver (no privileged container)
+  if ! docker buildx inspect keploybx >/dev/null 2>&1; then
+    docker buildx create --name keploybx --driver docker --use >/dev/null
+  else
+    docker buildx use keploybx >/dev/null
+  fi
+
+  # On Docker Desktop/Windows daemon, driver=docker uses built-in BuildKit.
+  # Use --load so the image is available to classic 'docker' after build.
+  if docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h --load .; then
+    return 0
+  fi
+
+  echo "buildx (docker driver) failed; trying classic docker build with BuildKit…" >&2
+  DOCKER_BUILDKIT=1 docker build --ssh default -t ghcr.io/keploy/keploy:1h .
 }
 
-# ---------------- main ----------------
-
+# ---------- main ----------
 ensure_dockerfile_syntax
 add_race_flag
 enable_ssh_mount_for_go_mod
 inject_git_settings_minimal
 install_buildx_if_missing
-build_with_buildx
+build_image
