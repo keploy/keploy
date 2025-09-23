@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"
 
-# ---- helpers ---------------------------------------------------------------
+# --- helpers ---------------------------------------------------------------
 
 rewrite_in_place() {
   local tmp
@@ -13,6 +13,7 @@ rewrite_in_place() {
 }
 
 ensure_dockerfile_syntax() {
+  # Needed for BuildKit front-end features like --mount
   if ! head -n1 "$DOCKERFILE_PATH" | grep -q '^# syntax=docker/dockerfile:'; then
     {
       echo '# syntax=docker/dockerfile:1.6'
@@ -22,6 +23,7 @@ ensure_dockerfile_syntax() {
 }
 
 add_race_flag() {
+  # add -race to any RUN go build line if missing
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+build(\>|[[:space:]])/ {
@@ -34,7 +36,7 @@ add_race_flag() {
 }
 
 enable_ssh_mount_for_go_mod() {
-  # Turn: RUN go mod download  ->  RUN --mount=type=ssh go mod download
+  # Turn "RUN go mod download" into BuildKit mount form
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
@@ -46,10 +48,11 @@ enable_ssh_mount_for_go_mod() {
 }
 
 inject_git_settings_minimal() {
-  # No mkdir/chmod/ssh-keyscan. Just:
-  # - use SSH only for keploy org
-  # - disable host key checking
-  # - disable proxy/sumdb for keploy
+  # Minimal + portable:
+  # - Only keploy org uses SSH (others stay HTTPS)
+  # - Disable proxy/sumdb for keploy/* (private)
+  # - Skip known_hosts entirely via StrictHostKeyChecking=no
+  # - NO mkdir/chmod/ssh-keyscan/&& anywhere
   awk '
     BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
@@ -79,28 +82,14 @@ inject_git_settings_minimal() {
 }
 
 build_docker_image() {
-  echo "Building Docker image (trying buildx → BuildKit → legacy)..."
+  echo "Building with BuildKit enabled (no buildx dependency)…"
+  # Force BuildKit for classic docker build
+  export DOCKER_BUILDKIT=1
+  export COMPOSE_DOCKER_CLI_BUILD=1
+  export BUILDKIT_PROGRESS=plain
 
-  # 1) Try buildx + SSH agent forwarding
-  if docker buildx version >/dev/null 2>&1; then
-    if docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h .; then
-      return 0
-    else
-      echo "buildx build failed; falling back to BuildKit docker build…" >&2
-    fi
-  else
-    echo "buildx not present; using BuildKit docker build…" >&2
-  fi
-
-  # 2) Try BuildKit-enabled docker build with --ssh
-  if DOCKER_BUILDKIT=1 docker build --ssh default -t ghcr.io/keploy/keploy:1h .; then
-    return 0
-  else
-    echo "BuildKit docker build failed; falling back to legacy docker build (no SSH)…" >&2
-  fi
-
-  # 3) Last resort (no SSH mount) – this will only work if all deps are public
-  docker build -t ghcr.io/keploy/keploy:1h .
+  # Forward the runner’s SSH agent into the build so --mount=type=ssh works
+  docker build --ssh default -t ghcr.io/keploy/keploy:1h .
 }
 
 main() {
