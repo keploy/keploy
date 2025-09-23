@@ -49,7 +49,7 @@ jobs:
           curl -L "$URL" -o keploy.tar.gz
           tar -xzf keploy.tar.gz
           chmod +x keploy
-          
+
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy }
 
@@ -71,7 +71,7 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
       - name: Build image
         run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker.sh
+          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
       - name: Push image
         run: |
           docker push ttl.sh/keploy/keploy:1h
