@@ -1,0 +1,52 @@
+name: Python On Docker (Windows)
+on:
+  workflow_call:
+jobs:
+  python_docker_windows:
+    # Requires a self-hosted Windows runner with Docker Desktop installed (Linux containers) and running
+    runs-on: [self-hosted, Windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }} (Windows)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
+
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-python
+          path: samples-python
+
+      - name: Run the flask-mongo application (Windows)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        shell: bash
+        run: |
+          cd samples-python/flask-mongo
+          bash ./../../.github/workflows/test_workflow_scripts/python-docker-windows.sh

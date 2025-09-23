@@ -1,0 +1,58 @@
+name: Golang On Docker (Windows)
+on:
+  workflow_call:
+jobs:
+  golang_docker_windows:
+    runs-on: [self-hosted, Windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: gin-mongo
+            path: gin-mongo
+            script_dir: gin_mongo
+          - name: echo-sql
+            path: echo-sql
+            script_dir: echo_sql
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Run ${{ matrix.app.name }} application (Windows)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        shell: bash
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-windows.sh
