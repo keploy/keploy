@@ -44,16 +44,80 @@ Keploy not only records API calls, but also records database calls and replays t
 
 > 🐰 **Fun fact:** Keploy uses itself for testing! Check out our swanky coverage badge: [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;
 
-## 🚨 Here for  [Unit Test Generator](README-UnitGen.md) (ut-gen)? 
-Keploy has newly launched the world's first unit test generator(ut-gen) implementation of [Meta LLM research paper](https://arxiv.org/pdf/2402.09171), it understands code semantics and generates meaningful unit tests, aiming to:
+<br/>
 
-- **Automate unit test generation (UTG)**: Quickly generate comprehensive unit tests and reduce redundant manual effort.
+<div align="center">
 
-- **Improve edge cases**: Extend and improve the scope of automated tests to cover more complex scenarios, often missed manually.
+<!-- Unique Gradient Banner with Animation Effect -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://user-images.githubusercontent.com/1/banner-dark.svg">
+  <img alt="Keploy Unit Test Generator" src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=200&section=header&text=🚨%20NEW%20FEATURE%20ALERT%20🚨&fontSize=40&fontColor=fff&animation=fadeIn&fontAlignY=35&desc=World's%20First%20AI%20Unit%20Test%20Generator&descAlignY=55&descSize=18">
+</picture>
 
-- **Boost test coverage**: As codebases grow, ensuring exhaustive coverage should become feasible, aligning with our mission.
+</div>
 
-### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅
+<div align="center">
+
+<!-- Unique Feature Badges with Custom Colors -->
+[![🤖 AI-Powered Testing](https://img.shields.io/badge/🤖%20AI--Powered-Testing-8A2BE2?style=for-the-badge&labelColor=4B0082&logo=openai&logoColor=white)](README-UnitGen.md)
+[![⚡ Zero Configuration](https://img.shields.io/badge/⚡%20Zero-Configuration-FF4500?style=for-the-badge&labelColor=FF6347&logo=lightning&logoColor=white)](README-UnitGen.md)
+[![🎯 Smart Coverage](https://img.shields.io/badge/🎯%20Smart-Coverage-32CD32?style=for-the-badge&labelColor=228B22&logo=target&logoColor=white)](README-UnitGen.md)
+[![🧠 Meta Research](https://img.shields.io/badge/🧠%20Meta-Research-1E90FF?style=for-the-badge&labelColor=4169E1&logo=meta&logoColor=white)](https://arxiv.org/pdf/2402.09171)
+
+</div>
+
+<div align="center">
+
+<!-- Attention-Grabbing Header with Unique Styling -->
+<h2>
+  <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Megaphone.png" alt="📢" width="30" height="30" />
+  <strong>Looking for our Revolutionary <a href="README-UnitGen.md" style="color: #FF6B35; text-decoration: none;">Unit Test Generator</a>?</strong>
+  <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Megaphone.png" alt="📢" width="30" height="30" />
+</h2>
+
+<p style="font-size: 16px; color: #666; max-width: 600px; margin: 0 auto;">
+  🚀 <strong>World's first implementation</strong> of <a href="https://arxiv.org/pdf/2402.09171" style="color: #4285F4;">Meta's LLM research paper</a> that understands code semantics and generates meaningful unit tests
+</p>
+
+</div>
+
+<!-- Unique Visual Feature Grid -->
+<div align="center">
+<table>
+<tr>
+<td align="center" width="33%">
+  <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Robot.png" alt="🤖" width="50" height="50" />
+  <br><strong>Automate UTG</strong>
+  <br><sub>Generate comprehensive unit tests and reduce manual effort</sub>
+</td>
+<td align="center" width="33%">
+  <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Direct%20Hit.png" alt="🎯" width="50" height="50" />
+  <br><strong>Smart Edge Cases</strong>
+  <br><sub>Cover complex scenarios often missed manually</sub>
+</td>
+<td align="center" width="33%">
+  <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Chart%20Increasing.png" alt="📈" width="50" height="50" />
+  <br><strong>Boost Coverage</strong>
+  <br><sub>Ensure exhaustive coverage as codebases grow</sub>
+</td>
+</tr>
+</table>
+</div>
+
+<div align="center">
+
+<!-- Prominent CTA with Unique Styling -->
+<p>
+  <a href="README-UnitGen.md">
+    <img src="https://img.shields.io/badge/📜%20EXPLORE%20UNIT%20TEST%20GENERATOR-Click%20Here%20→-FF6B35?style=for-the-badge&labelColor=FF4500&logoColor=white" alt="Explore Unit Test Generator" />
+  </a>
+</p>
+
+<sub>✨ <em>Join thousands of developers already using Keploy's AI-powered testing</em> ✨</sub>
+
+</div>
+
+---
 
 ## 📘 Documentation!
 Become a Keploy pro with **[Keploy Documentation](https://keploy.io/docs/)**.
