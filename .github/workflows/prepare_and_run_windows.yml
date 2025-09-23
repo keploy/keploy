@@ -21,8 +21,10 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
+        shell: bash
         run: |
           GOOS=windows GOARCH=amd64 go build -tags=viper_bind_struct -o keploy.exe
+
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy.exe }
 
