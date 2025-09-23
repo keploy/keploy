@@ -324,7 +324,7 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 	}
 	// DATETIME valid lengths in MySQL binary row: 4, 7, 11
 	if l != 4 && l != 7 && l != 11 {
-		return nil, 0, fmt.Errorf("invalid DATETIME length %d (expected 0|4|7|11) – likely misaligned buffer", l)
+		return nil, 0, fmt.Errorf("invalid DATETIME length %d (expected 0|4|7|11) - likely misaligned buffer", l)
 	}
 	if len(b) < 1+l {
 		return nil, 0, io.ErrUnexpectedEOF
