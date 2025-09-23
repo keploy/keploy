@@ -3,8 +3,6 @@
 # safer bash, but we’ll locally disable -e around commands we want to inspect
 set -Eeuo pipefail
 
-cat main.go
-
 # ----- helpers -----
 section()  { echo "::group::$*"; }
 endsec()   { echo "::endgroup::"; }
