@@ -7,7 +7,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        app: 
+          - name: flask-mongo
+            path: flask-mongo
+            script_dir: flask-mongo
+        config:
           - job: record_latest_replay_build
             record_src: latest
             replay_src: build
@@ -17,7 +21,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.job }} (Windows)
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,12 +42,12 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.record_src }}
+          src: ${{ matrix.config.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.replay_src }}
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
@@ -51,11 +55,11 @@ jobs:
           repository: keploy/samples-python
           path: samples-python
 
-      - name: Run the flask-mongo application (Windows)
+      - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         shell: bash
         run: |
-          cd samples-python/flask-mongo
-          bash ./../../.github/workflows/test_workflow_scripts/python-docker-windows.sh
+          cd samples-python/${{ matrix.app.path }}
+          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/windows/python-docker-windows.sh
