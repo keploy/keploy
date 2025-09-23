@@ -44,7 +44,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy.exe }
 
-  # Build docker image once on Linux and let Windows jobs pull via download-image
   build-docker-image:
     runs-on: windows-latest
     steps:
@@ -62,9 +61,6 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
-      - name: Setup Docker buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Normalize Docker environment (Windows)
         shell: bash
         run: |
@@ -76,7 +72,7 @@ jobs:
       - name: Build image
         shell: bash
         run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker.sh
+          source ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
 
       - name: Push image
         run: |
