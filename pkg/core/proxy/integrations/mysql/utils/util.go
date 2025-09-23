@@ -362,7 +362,7 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d",
 			year, month, day, hour, minute, second, us), 1 + l, nil
 	}
-	return nil, 0, fmt.Errorf("unreachable")
+	panic(fmt.Sprintf("unreachable code reached in ParseBinaryDateTime: unexpected length l=%d", l))
 }
 
 func validYMDHMS(y, m, d, hh, mm, ss int) bool {
