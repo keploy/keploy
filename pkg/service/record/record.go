@@ -188,11 +188,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
 				// Convert NetworkTrafficDoc to Mock for correlation manager
-				mocks, err := convertNetworkDocToMock(networkDoc, r.logger)
+				mock, err := convertNetworkDocToMock(networkDoc, r.logger)
 				if err != nil {
 					r.logger.Error("Failed to convert NetworkTrafficDoc to Mock for correlation", zap.Error(err))
-				} else if len(mocks) > 0 {
-					mock := mocks[0] // Take the first converted mock
+				} else {
 					currMockID := r.mockDB.GetCurrMockID()
 					mock.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
 
@@ -439,7 +438,7 @@ func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
 }
 
 // convertNetworkDocToMock converts a NetworkTrafficDoc to a Mock for compatibility with correlation manager
-func convertNetworkDocToMock(networkDoc *yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
+func convertNetworkDocToMock(networkDoc *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.Mock, error) {
 	// Create a mock using the same fields from NetworkTrafficDoc
 	mock := &models.Mock{
 		Version:      networkDoc.Version,
@@ -452,5 +451,5 @@ func convertNetworkDocToMock(networkDoc *yaml.NetworkTrafficDoc, logger *zap.Log
 	// The Spec field can be empty since correlation doesn't need the detailed spec
 	mock.Spec = models.MockSpec{}
 
-	return []*models.Mock{mock}, nil
+	return mock, nil
 }
