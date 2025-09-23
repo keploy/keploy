@@ -52,46 +52,88 @@ enable_ssh_mount_for_go_mod() {
 use_ssh_for_github_and_known_hosts() {
   echo "Injecting SSH config, known_hosts, and GOPRIVATE around go mod download (idempotent)..."
 
-  awk '
-    BEGIN {
-      OFS="";
-      injected_before_go_mod = 0;
-      injected_after_copy = 0;
-    }
+  # Detect Windows base image from FROM line (nanoserver/servercore/windows)
+  if grep -qiE '^FROM .*((nanoserver|servercore|windows))' "$DOCKERFILE_PATH"; then
+    WINDOWS_BASE=1
+  else
+    WINDOWS_BASE=0
+  fi
 
-    # Emit our SSH/Git prep block (PowerShell-compatible for Windows)
-    function emit_git_known_hosts_block() {
-      print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-      # Create ~/.ssh directory using PowerShell
-      print "RUN powershell -Command \"New-Item -ItemType Directory -Force -Path ~/.ssh | Out-Null\""
-      # Best-effort keyscan: try if present, ignore failures using PowerShell
-      print "RUN powershell -Command \"try { ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>$null } catch { Write-Host 'ssh-keyscan failed or not found; continuing' }\""
-    }
+  if [ "$WINDOWS_BASE" -eq 1 ]; then
+    # Windows / PowerShell-friendly injection
+    awk '
+      BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
-    # After COPY go.mod go.sum /app
-    /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
-      print;
-      if (!injected_after_copy) {
-        emit_git_known_hosts_block();
-        injected_after_copy = 1;
+      function emit_win_git_prep() {
+        print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
+        # Create %USERPROFILE%\.ssh (no chmod on Windows)
+        print "RUN powershell -Command \"",
+              "$ErrorActionPreference = \\\"Stop\\\"; ",
+              "New-Item -ItemType Directory -Force -Path $env:USERPROFILE\\.ssh | Out-Null\""
+        # We skip ssh-keyscan on Windows containers (OpenSSH client may not exist)
       }
-      next
-    }
 
-    # Before the first RUN --mount=type=ssh go mod download
-    /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
-      if (!injected_before_go_mod) {
-        print "ENV GOPRIVATE=github.com/keploy/*"
-        print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
-        emit_git_known_hosts_block();
-        injected_before_go_mod = 1;
+      /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
+        print;
+        if (!injected_after_copy) {
+          emit_win_git_prep();
+          injected_after_copy=1;
+        }
+        next
       }
-      print; next
-    }
 
-    { print }
-  ' "$DOCKERFILE_PATH" | rewrite_in_place
+      /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
+        if (!injected_before_go_mod) {
+          print "ENV GOPRIVATE=github.com/keploy/*"
+          # Disable strict host key checking to avoid known_hosts needs
+          print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
+          emit_win_git_prep();
+          injected_before_go_mod=1;
+        }
+        print; next
+      }
+
+      { print }
+    ' "$DOCKERFILE_PATH" | rewrite_in_place
+  else
+    # Linux-friendly injection (your original intent), remove chmod if you want it extra-safe
+    awk '
+      BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
+
+      function emit_nix_git_prep() {
+        print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
+        print "RUN mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+        print "RUN if command -v ssh-keyscan >/dev/null 2>&1; then \\"
+        print "      (ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || echo \"ssh-keyscan failed; continuing\"); \\"
+        print "    else \\"
+        print "      echo \"ssh-keyscan not found; continuing\"; \\"
+        print "    fi"
+      }
+
+      /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
+        print;
+        if (!injected_after_copy) {
+          emit_nix_git_prep();
+          injected_after_copy=1;
+        }
+        next
+      }
+
+      /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
+        if (!injected_before_go_mod) {
+          print "ENV GOPRIVATE=github.com/keploy/*"
+          print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
+          emit_nix_git_prep();
+          injected_before_go_mod=1;
+        }
+        print; next
+      }
+
+      { print }
+    ' "$DOCKERFILE_PATH" | rewrite_in_place
+  fi
 }
+
 
 build_docker_image() {
   echo "Building Docker image with SSH forwarding on Windows..."
