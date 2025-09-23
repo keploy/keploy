@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
 )
 
 type Hooks interface {
@@ -44,7 +45,7 @@ type App interface {
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
 	StartProxy(ctx context.Context, opts ProxyOptions) error
-	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
+	Record(ctx context.Context, id uint64, mocks chan<- *yaml.NetworkTrafficDoc, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
@@ -125,9 +126,9 @@ func (s *Sessions) getAll() map[uint64]*Session {
 	return sessions
 }
 
-func (s *Sessions) GetAllMC() []chan<- *models.Mock {
+func (s *Sessions) GetAllMC() []chan<- *yaml.NetworkTrafficDoc {
 	sessions := s.getAll()
-	var mc []chan<- *models.Mock
+	var mc []chan<- *yaml.NetworkTrafficDoc
 	for _, session := range sessions {
 		mc = append(mc, session.MC)
 	}
@@ -138,6 +139,6 @@ type Session struct {
 	ID   uint64
 	Mode models.Mode
 	TC   chan<- *models.TestCase
-	MC   chan<- *models.Mock
+	MC   chan<- *yaml.NetworkTrafficDoc
 	models.OutgoingOptions
 }

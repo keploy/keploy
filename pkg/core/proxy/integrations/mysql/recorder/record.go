@@ -16,13 +16,14 @@ import (
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 // Binary to Mock Yaml
 
-func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *yaml.NetworkTrafficDoc, opts models.OutgoingOptions) error {
 
 	var (
 		requests  []mysql.Request
@@ -65,7 +66,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		reqTimestamp := result.reqTimestamp
 
-		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp)
+		recordMock(ctx, logger, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp)
 
 		// reset the requests and responses
 		requests = []mysql.Request{}
@@ -107,25 +108,64 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 }
 
-func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+func recordMock(ctx context.Context, logger *zap.Logger, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *yaml.NetworkTrafficDoc, reqTimestampMock time.Time) {
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
 		"responseOperation": responseOperation,
 		"connID":            ctx.Value(models.ClientConnectionIDKey).(string),
 	}
-	mysqlMock := &models.Mock{
+
+	// Create MySQL spec with requests and responses
+	requestsYaml := []mysql.RequestYaml{}
+	for _, v := range requests {
+		req := mysql.RequestYaml{
+			Header: v.Header,
+			Meta:   v.Meta,
+		}
+		err := req.Message.Encode(v.Message)
+		if err != nil {
+			utils.LogError(logger, err, "failed to encode mysql request wiremessage into yaml")
+			return
+		}
+		requestsYaml = append(requestsYaml, req)
+	}
+
+	responsesYaml := []mysql.ResponseYaml{}
+	for _, v := range responses {
+		resp := mysql.ResponseYaml{
+			Header: v.Header,
+			Meta:   v.Meta,
+		}
+		err := resp.Message.Encode(v.Message)
+		if err != nil {
+			utils.LogError(logger, err, "failed to encode mysql response wiremessage into yaml")
+			return
+		}
+		responsesYaml = append(responsesYaml, resp)
+	}
+
+	sqlSpec := mysql.Spec{
+		Metadata:         meta,
+		Requests:         requestsYaml,
+		Response:         responsesYaml,
+		CreatedAt:        time.Now().Unix(),
+		ReqTimestampMock: reqTimestampMock,
+		ResTimestampMock: time.Now(),
+	}
+
+	// Create NetworkTrafficDoc with serialized YAML spec
+	yamlDoc := yaml.NetworkTrafficDoc{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,
 		Name:    mockType,
-		Spec: models.MockSpec{
-			Metadata:         meta,
-			MySQLRequests:    requests,
-			MySQLResponses:   responses,
-			Created:          time.Now().Unix(),
-			ReqTimestampMock: reqTimestampMock,
-			ResTimestampMock: time.Now(),
-		},
 	}
-	mocks <- mysqlMock
+
+	err := yamlDoc.Spec.Encode(sqlSpec)
+	if err != nil {
+		utils.LogError(logger, err, "failed to marshal the MySQL input-output as yaml")
+		return
+	}
+
+	mocks <- &yamlDoc
 }

@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -212,4 +213,36 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 		return err
 	}
+}
+
+// DecodeHTTPMock converts a NetworkTrafficDoc with HTTP kind to a Mock
+func DecodeHTTPMock(networkDoc *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.Mock, error) {
+	if networkDoc.Kind != models.HTTP {
+		return nil, fmt.Errorf("expected HTTP mock kind, got %s", networkDoc.Kind)
+	}
+
+	mock := models.Mock{
+		Version:      networkDoc.Version,
+		Name:         networkDoc.Name,
+		Kind:         networkDoc.Kind,
+		ConnectionID: networkDoc.ConnectionID,
+	}
+
+	httpSpec := models.HTTPSchema{}
+	err := networkDoc.Spec.Decode(&httpSpec)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.String("mock name", networkDoc.Name))
+		return nil, err
+	}
+
+	mock.Spec = models.MockSpec{
+		Metadata:         httpSpec.Metadata,
+		HTTPReq:          &httpSpec.Request,
+		HTTPResp:         &httpSpec.Response,
+		Created:          httpSpec.Created,
+		ReqTimestampMock: httpSpec.ReqTimestampMock,
+		ResTimestampMock: httpSpec.ResTimestampMock,
+	}
+
+	return &mock, nil
 }

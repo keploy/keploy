@@ -12,13 +12,13 @@ import (
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query/rowscols"
-	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext) error {
+func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *yaml.NetworkTrafficDoc, decodeCtx *wire.DecodeContext) error {
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
@@ -62,7 +62,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			// handle no response commands like COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA, etc
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
-				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp)
+				recordMock(ctx, logger, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp)
 				// reset the requests and responses
 				requests = []mysql.Request{}
 				responses = []mysql.Response{}
@@ -85,7 +85,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			})
 
 			// record the mock
-			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp)
+			recordMock(ctx, logger, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp)
 
 			// reset the requests and responses
 			requests = []mysql.Request{}

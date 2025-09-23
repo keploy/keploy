@@ -14,11 +14,12 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *yaml.NetworkTrafficDoc, _ models.OutgoingOptions) error {
 
 	var genericRequests []models.Payload
 
@@ -83,19 +84,31 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
 				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-				// Save the mock
-				mocks <- &models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.GENERIC,
-					Spec: models.MockSpec{
-						GenericRequests:  genericRequestsCopy,
-						GenericResponses: genericResponsesCopy,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-						Metadata:         metadata,
-					},
+
+				// Create Generic spec
+				genericSpec := models.GenericSchema{
+					Metadata:         metadata,
+					GenericRequests:  genericRequestsCopy,
+					GenericResponses: genericResponsesCopy,
+					ReqTimestampMock: reqTimestampMock,
+					ResTimestampMock: resTimestampMock,
 				}
+
+				// Create NetworkTrafficDoc with serialized YAML spec
+				yamlDoc := yaml.NetworkTrafficDoc{
+					Version: models.GetVersion(),
+					Kind:    models.GENERIC,
+					Name:    "mocks",
+				}
+
+				err := yamlDoc.Spec.Encode(genericSpec)
+				if err != nil {
+					utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
+					return err
+				}
+
+				// Save the mock
+				mocks <- &yamlDoc
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
@@ -116,19 +129,31 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
 					metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-					// Save the mock
-					mocks <- &models.Mock{
-						Version: models.GetVersion(),
-						Name:    "mocks",
-						Kind:    models.GENERIC,
-						Spec: models.MockSpec{
-							GenericRequests:  reqs,
-							GenericResponses: resps,
-							ReqTimestampMock: reqTimestampMock,
-							ResTimestampMock: resTimestampMock,
-							Metadata:         metadata,
-						},
+
+					// Create Generic spec
+					genericSpec := models.GenericSchema{
+						Metadata:         metadata,
+						GenericRequests:  reqs,
+						GenericResponses: resps,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
 					}
+
+					// Create NetworkTrafficDoc with serialized YAML spec
+					yamlDoc := yaml.NetworkTrafficDoc{
+						Version: models.GetVersion(),
+						Kind:    models.GENERIC,
+						Name:    "mocks",
+					}
+
+					err := yamlDoc.Spec.Encode(genericSpec)
+					if err != nil {
+						utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
+						return
+					}
+
+					// Save the mock
+					mocks <- &yamlDoc
 
 				}(genericRequestsCopy, genericResponseCopy)
 				genericRequests = []models.Payload{}
