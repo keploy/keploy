@@ -27,6 +27,7 @@ import (
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -683,7 +684,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("proxy stopped...")
 }
 
-func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *yaml.NetworkTrafficDoc, opts models.OutgoingOptions) error {
 	p.sessions.Set(id, &core.Session{
 		ID:              id,
 		Mode:            models.MODE_RECORD,
