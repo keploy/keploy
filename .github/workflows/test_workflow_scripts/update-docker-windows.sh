@@ -69,7 +69,9 @@ use_ssh_for_github_and_known_hosts() {
 
     # Helper patterns
     function emit_git_known_hosts_block() {
-      print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\" && mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts"
+      print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
+      print "RUN mkdir -p -m 0700 ~/.ssh"
+      print "RUN ssh-keyscan github.com >> ~/.ssh/known_hosts"
     }
 
     # After COPY go.mod go.sum /app
