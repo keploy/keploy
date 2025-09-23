@@ -78,3 +78,6 @@ jobs:
   run_node_mapping:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_mapping.yml
+  run_grpc_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/grpc_linux.yml
