@@ -6,7 +6,21 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
-      - uses: actions/checkout@v4
+      - name: Clear docker images and cache
+        run: |
+          docker builder prune --all -f
+          docker volume prune -f
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
+      
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
     
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
@@ -18,6 +32,12 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
+      
+      - name: Clean up git config
+        if: always() # This ensures the step runs even if previous steps fail
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
 
   upload-latest:
     runs-on: [self-hosted, macOS, native]
@@ -29,8 +49,15 @@ jobs:
           curl -L "$URL" -o keploy.tar.gz
           tar -xzf keploy.tar.gz
           chmod +x keploy
+          
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy }
+
+      - name: Clean up git config
+        if: always() # This ensures the step runs even if previous steps fail
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
 
   # Build docker image once on Linux and let macOS jobs pull via download-image
   build-docker-image:
@@ -48,6 +75,12 @@ jobs:
       - name: Push image
         run: |
           docker push ttl.sh/keploy/keploy:1h
+          
+      - name: Clean up git config
+        if: always() # This ensures the step runs even if previous steps fail
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
 
   run_python_docker_macos:
     needs: [build-and-upload, upload-latest, build-docker-image]
