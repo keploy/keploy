@@ -93,7 +93,7 @@ if [ "$MODE" = "incoming" ]; then
 
   sleep 120
 
- echo "Stopping keploy record and server"
+  echo "Stopping keploy record and server"
 
   # Stop keploy record
   pid=$(pgrep keploy || true)
@@ -114,9 +114,36 @@ if [ "$MODE" = "incoming" ]; then
   sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt
   echo "checking for errors"
   check_for_errors test_incoming.txt
-  echo "Checking for success phrase"
-  ensure_success_phrase test_incoming.txt
-  echo "✅ Incoming mode passed."
+
+  # ✅ For INCOMING mode: no success-phrase check. Instead, verify Keploy reports PASSED.
+  RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
+  if [[ -z "${RUN_DIR:-}" ]]; then
+    echo "::error::No test-run directory found under ./keploy/reports"
+    exit 1
+  fi
+  echo "Using reports from: $RUN_DIR"
+
+  all_passed=true
+  found_any=false
+  for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
+    [[ -f "$rpt" ]] || continue
+    found_any=true
+    status=$(awk '/^status:/{print $2; exit}' "$rpt")
+    echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
+    [[ "$status" == "PASSED" ]] || all_passed=false
+  done
+
+  if ! $found_any; then
+    echo "::error::No test-set report files found in $RUN_DIR"
+    exit 1
+  fi
+
+  if $all_passed; then
+    echo "✅ Incoming mode passed."
+  else
+    echo "::error::One or more test sets failed in $RUN_DIR"
+    exit 1
+  fi
 
 elif [ "$MODE" = "outgoing" ]; then
   echo "🧪 Testing with outgoing requests"
