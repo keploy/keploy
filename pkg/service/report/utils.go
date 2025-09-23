@@ -65,8 +65,8 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 
 // applyCliColorsToDiff adds ANSI colors to values in the JSON diff block.
 // - Value after "Path:" is yellow
-// - Value after "Old:" is red
-// - Value after "New:" is green
+// - Value after "Expected:" is red
+// - Value after "Actual:" is green
 func applyCliColorsToDiff(diff string) string {
 	if diff == "" {
 		return diff
@@ -124,8 +124,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 	if !test.Result.StatusCode.Normal {
 		hasDiff = true
 		sb.WriteString("Path: status_code\n")
-		sb.WriteString(fmt.Sprintf("  Old: %d\n", test.Result.StatusCode.Expected))
-		sb.WriteString(fmt.Sprintf("  New: %d\n\n", test.Result.StatusCode.Actual))
+		sb.WriteString(fmt.Sprintf("  Expected: %d\n", test.Result.StatusCode.Expected))
+		sb.WriteString(fmt.Sprintf("  Actual: %d\n\n", test.Result.StatusCode.Actual))
 	}
 
 	// Headers
@@ -137,8 +137,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 		expected := strings.Join(hr.Expected.Value, ", ")
 		actual := strings.Join(hr.Actual.Value, ", ")
 		sb.WriteString(fmt.Sprintf("Path: header.%s\n", hr.Actual.Key))
-		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
-		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
+		sb.WriteString(fmt.Sprintf("  Expected: %s\n", expected))
+		sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", actual))
 	}
 
 	// Trailer headers
@@ -150,8 +150,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 		expected := strings.Join(tr.Expected.Value, ", ")
 		actual := strings.Join(tr.Actual.Value, ", ")
 		sb.WriteString(fmt.Sprintf("Path: trailer.%s\n", tr.Actual.Key))
-		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
-		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
+		sb.WriteString(fmt.Sprintf("  Expected: %s\n", expected))
+		sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", actual))
 	}
 
 	// Synthetic content length if body differs and content-length header wasn't already reported
@@ -172,8 +172,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 			if expLen != actLen {
 				hasDiff = true
 				sb.WriteString("Path: content_length\n")
-				sb.WriteString(fmt.Sprintf("  Old: %d\n", expLen))
-				sb.WriteString(fmt.Sprintf("  New: %d\n\n", actLen))
+				sb.WriteString(fmt.Sprintf("  Expected: %d\n", expLen))
+				sb.WriteString(fmt.Sprintf("  Actual: %d\n\n", actLen))
 				break
 			}
 		}

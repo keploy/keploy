@@ -54,14 +54,14 @@ func GenerateTableDiff(expected, actual string) (string, error) {
 
 		sb.WriteString(fmt.Sprintf("Path: %s\n", path))
 		if aok && bok { // Modified
-			sb.WriteString(fmt.Sprintf("  Old: %s\n", av))
-			sb.WriteString(fmt.Sprintf("  New: %s\n\n", bv))
+			sb.WriteString(fmt.Sprintf("  Expected: %s\n", av))
+			sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", bv))
 		} else if aok { // Removed
-			sb.WriteString(fmt.Sprintf("  Old: %s\n", av))
-			sb.WriteString("  New: <removed>\n\n")
+			sb.WriteString(fmt.Sprintf("  Expected: %s\n", av))
+			sb.WriteString("  Actual: <removed>\n\n")
 		} else { // Added
-			sb.WriteString("  Old: <added>\n")
-			sb.WriteString(fmt.Sprintf("  New: %s\n\n", bv))
+			sb.WriteString("  Expected: <added>\n")
+			sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", bv))
 		}
 	}
 
