@@ -61,7 +61,9 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
       - name: Build image
+        shell: bash
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker.sh
       - name: Push image
