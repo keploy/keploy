@@ -29,7 +29,7 @@ jobs:
         with: { name: build, path: keploy.exe }
 
   upload-latest:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Download latest release (Windows)
         run: |
@@ -48,6 +48,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Add GitHub to known_hosts (Windows)
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
       
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
