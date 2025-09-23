@@ -98,10 +98,16 @@ use_ssh_for_github_and_known_hosts() {
 }
 
 build_docker_image() {
-  echo "Building Docker image with BuildKit and SSH forwarding on Windows..."
-  # On Windows, we need to use regular Docker build with BuildKit enabled
-  # without the buildx action that causes manifest issues
-  DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
+  echo "Building Docker image with SSH forwarding on Windows..."
+  # On Windows, check if buildx is available, otherwise use legacy build
+  if docker buildx version >/dev/null 2>&1; then
+    echo "Using buildx for SSH mount support..."
+    docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h .
+  else
+    echo "Buildx not available, using legacy Docker build..."
+    # Fallback to regular build without SSH mount (SSH setup handled in Dockerfile)
+    docker build -t ghcr.io/keploy/keploy:1h .
+  fi
 }
 
 main() {

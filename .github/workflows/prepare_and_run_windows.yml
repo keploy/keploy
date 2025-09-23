@@ -74,9 +74,16 @@ jobs:
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
 
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push image
         run: |
-          docker push ttl.sh/keploy/keploy:1h
+          docker push ghcr.io/keploy/keploy:1h
 
   run_python_docker_windows:
     needs: [build-and-upload, upload-latest, build-docker-image]
