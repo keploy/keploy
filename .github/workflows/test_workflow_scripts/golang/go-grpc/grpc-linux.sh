@@ -49,10 +49,10 @@ check_for_errors() {
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
     # This command finds lines with "ERROR" but excludes the non-critical "Unsupported DNS query type" error.
-    if grep "ERROR" "$logfile" | grep -qv "Unsupported DNS query type"; then
-      echo "Error found in $logfile"
-      cat "$logfile"
-      exit 1
+    if awk '/ERROR/ && !/Unsupported DNS query type/ { exit 0 } END { exit 1 }' "$logfile"; then
+        echo "Error found in $logfile"
+        cat "$logfile"
+        exit 1
     fi
     if grep -q "WARNING: DATA RACE" "$logfile"; then
       echo "Race condition detected in $logfile"
