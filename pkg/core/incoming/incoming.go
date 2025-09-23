@@ -1,13 +1,11 @@
 package IncomingTestCase
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
-	"net/http"
 	"time"
 
+	"go.keploy.io/server/v2/pkg"
 	utils "go.keploy.io/server/v2/pkg/core/hooks/conn"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -25,20 +23,21 @@ func NewCaptureIncoming(logger *zap.Logger) *CaptureIncoming {
 
 func (d *CaptureIncoming) CreateHTTP(ctx context.Context, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error {
 
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqData)))
+	parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
+
 	if err != nil {
 		return fmt.Errorf("failed to parse raw http request: %w", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(respData)), req)
+	parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
 	if err != nil {
 		return fmt.Errorf("failed to parse raw http response: %w", err)
 	}
 
-	defer req.Body.Close()
-	defer resp.Body.Close()
+	defer parsedHTTPReq.Body.Close()
+	defer parsedHTTPRes.Body.Close()
 
-	utils.Capture(ctx, d.logger, t, req, resp, reqTime, respTime, opts)
+	utils.Capture(ctx, d.logger, t, parsedHTTPReq, parsedHTTPRes, reqTime, respTime, opts)
 
 	return nil
 }

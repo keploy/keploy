@@ -261,7 +261,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		err := cmd.Flags().MarkHidden("bigPayload")
 		if err != nil {
 			errMsg := "failed to mark bigPayload as hidden flag"
-			utils.LogError(c.logger, err, errMsg) 
+			utils.LogError(c.logger, err, errMsg)
 			return err
 		}
 

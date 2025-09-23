@@ -39,7 +39,6 @@ type TestCaseCreator interface {
 	CreateHTTP(ctx context.Context, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error
 }
 
-
 type proxyStop func() error
 
 type IngressProxyManager struct {
@@ -47,7 +46,7 @@ type IngressProxyManager struct {
 	active       map[uint16]proxyStop
 	logger       *zap.Logger
 	deps         models.ProxyDependencies // Use the new dependency struct
-	tcCreator    TestCaseCreator   // The decoder remains the same
+	tcCreator    TestCaseCreator          // The decoder remains the same
 	hooks        *hooks.Hooks
 	tcChan       chan *models.TestCase
 	ctx          context.Context
@@ -100,8 +99,8 @@ func (pm *IngressProxyManager) StopAll() {
 	}
 }
 func (pm *IngressProxyManager) UpdateDependencies(persister models.TestCasePersister, opts models.IncomingOptions) {
-    pm.deps.Persister = persister
-    pm.incomingOpts = opts
+	pm.deps.Persister = persister
+	pm.incomingOpts = opts
 }
 func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 	go pm.persistTestCases()

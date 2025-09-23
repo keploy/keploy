@@ -12,9 +12,9 @@ import (
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks"
-	"go.keploy.io/server/v2/pkg/core/proxy"
-	incomingProxy "go.keploy.io/server/v2/pkg/core/incomingProxy"
 	incomingTestCase "go.keploy.io/server/v2/pkg/core/incoming"
+	incomingProxy "go.keploy.io/server/v2/pkg/core/incomingProxy"
+	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
@@ -75,7 +75,6 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
-
 
 	tcCapture := incomingTestCase.NewCaptureIncoming(logger)
 	ingressProxyDeps := models.ProxyDependencies{}
