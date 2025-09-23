@@ -4,7 +4,7 @@ on:
     branches: [main]
 jobs:
   build-and-upload:
-    runs-on: [self-hosted, macos]
+    runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@v4
 

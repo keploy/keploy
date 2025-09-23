@@ -4,7 +4,7 @@ on:
     branches: [main]
 jobs:
   build-and-upload:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -46,10 +46,7 @@ jobs:
   run_python_docker_windows:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/python_docker_windows.yml
-    with:
-      runner: '[self-hosted, Windows]'
+
   run_golang_docker_windows:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/golang_docker_windows.yml
-    with:
-      runner: '[self-hosted, Windows]'

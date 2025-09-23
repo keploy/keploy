@@ -4,7 +4,7 @@ on:
 
 jobs:
   python_docker_macos:
-    runs-on: [self-hosted, macos]
+    runs-on: [self-hosted, macOS]
     strategy:
       fail-fast: false
       matrix:
