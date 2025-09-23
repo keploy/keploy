@@ -34,6 +34,16 @@ type mock struct {
 	token      string
 }
 
+type MockChangeReq struct {
+	Config    *models.TestSet `json:"config"`
+	TestSetID string          `json:"testSetId"`
+	Branch    string          `json:"branch"`
+}
+type MockChangeResp struct {
+	CommitURL string `json:"commit_url"`
+	Message   string `json:"message"`
+}
+
 func (m *mock) setToken(token string) {
 	m.token = token
 }
@@ -277,7 +287,11 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 		// After successfully writing the config, push it to the repo
 		if m.cfg.ReRecord.Branch != "" {
-			m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
+			err := m.pushConfigChange(ctx, testSetID, tsConfig, m.cfg.ReRecord.Branch)
+			if err != nil {
+				m.logger.Error("Failed to push config change", zap.Error(err))
+				return err
+			}
 		}
 
 		return nil
@@ -315,7 +329,11 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 	// After successfully writing the config, push it to the repo
 	if m.cfg.ReRecord.Branch != "" {
-		m.pushConfigChange(context.Background(), testSetID, tsConfig, m.cfg.ReRecord.Branch)
+		err := m.pushConfigChange(ctx, testSetID, tsConfig, m.cfg.ReRecord.Branch)
+		if err != nil {
+			m.logger.Error("Failed to push config change", zap.Error(err))
+			return err
+		}
 	}
 
 	err = utils.AddToGitIgnore(m.logger, m.cfg.Path, "/*/mocks.yaml")
@@ -327,20 +345,8 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 }
 
 // pushConfigChange sends a request to the api-server to push the updated config to a git branch.
-func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig *models.TestSet, branch string) {
+func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig *models.TestSet, branch string) error {
 	m.logger.Info("Attempting to push config change to git", zap.String("testSetID", testSetID), zap.String("branch", branch))
-
-	// Define request and response structs locally to mirror the server's expectations
-	// This avoids a direct dependency on the server's models package.
-	type MockChangeReq struct {
-		Config    *models.TestSet `json:"config"`
-		TestSetID string          `json:"testSetId"`
-		Branch    string          `json:"branch"`
-	}
-	type MockChangeResp struct {
-		CommitURL string `json:"commit_url"`
-		Message   string `json:"message"`
-	}
 
 	// 1. Construct the request payload
 	payload := MockChangeReq{
@@ -352,7 +358,7 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 	body, err := json.Marshal(payload)
 	if err != nil {
 		m.logger.Error("Failed to marshal config push request payload", zap.Error(err))
-		return
+		return err
 	}
 
 	// 2. Create the HTTP request
@@ -360,7 +366,7 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		m.logger.Error("Failed to create HTTP request for config push", zap.Error(err))
-		return
+		return err
 	}
 
 	// 3. Set necessary headers
@@ -372,7 +378,7 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 	resp, err := client.Do(req)
 	if err != nil {
 		m.logger.Error("Failed to send config push request to API server", zap.Error(err))
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -382,16 +388,18 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 		m.logger.Error("API server returned an error for config push",
 			zap.Int("statusCode", resp.StatusCode),
 			zap.String("response", string(respBody)))
-		return
+		return err
 	}
 
 	var respData MockChangeResp
 	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
 		m.logger.Error("Failed to decode successful config push response", zap.Error(err))
-		return
+		return err
 	}
 
 	m.logger.Info("Successfully pushed config change to git",
 		zap.String("testSetID", testSetID),
 		zap.String("commitURL", respData.CommitURL))
+
+	return nil
 }
