@@ -156,6 +156,8 @@ if [ "$MODE" = "incoming" ]; then
     ./grpc-client &> client_incoming.log &
     sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false &> record_incoming.log &
     wait_for_port 50051
+
+    sleep 5
     
     send_requests
     sleep 15 # Allow time for traces to be recorded
