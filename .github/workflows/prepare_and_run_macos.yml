@@ -7,6 +7,11 @@ jobs:
     runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@v4
+    
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Build Keploy (PR) - macOS (darwin/arm64)
         run: |
@@ -32,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
