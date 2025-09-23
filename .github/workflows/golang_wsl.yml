@@ -1,0 +1,78 @@
+name: Golang On WSL (Windows host)
+on:
+  workflow_call:
+jobs:
+  golang_wsl:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http_pokeapi
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (WSL)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Setup WSL (Ubuntu)
+        uses: Vampire/setup-wsl@v3
+        with:
+          distribution: Ubuntu-22.04
+
+      - name: Prepare binaries for WSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.wsl-bin"
+          # Normalize filenames for predictable WSL paths
+          cp "${{ steps.record.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_record"
+          cp "${{ steps.replay.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_replay"
+
+      - name: Install dependencies in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y golang-go curl git ca-certificates
+
+      - name: Run ${{ matrix.app.name }} application in WSL
+        shell: wsl-bash {0}
+        env:
+          WSL_WS: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          WS=$(wslpath -u "$WSL_WS")
+          export RECORD_BIN="$WS/.wsl-bin/keploy_record"
+          export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
+          chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true
+          cd "$WS/samples-go/${{ matrix.app.path }}"
+          # Source the existing Linux bash script under WSL
+          source "$WS/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh"
