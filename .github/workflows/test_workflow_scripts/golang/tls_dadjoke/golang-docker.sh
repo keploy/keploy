@@ -39,11 +39,8 @@ cleanup() {
 die() {
   local rc=$?
   echo "::error::Pipeline failed on line ${BASH_LINENO[0]} (exit code=$rc)."
-  section "Record Log (Iteration 1)"
-  cat record_1.log 2>/dev/null || echo "Record log 1 not found."
-  endsec
-  section "Record Log (Iteration 2)"
-  cat record_2.log 2>/dev/null || echo "Record log 2 not found."
+  section "Record Log"
+  cat record.log 2>/dev/null || echo "Record log not found."
   endsec
   section "Test Log"
   cat test.log 2>/dev/null || echo "Test log not found."
@@ -120,6 +117,13 @@ check_test_report() {
     endsec
 }
 
+container_kill() {
+    pid=$(pgrep -n keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
+}
+
 # --- Main Execution Logic ---
 
 section "Build Docker Image"
@@ -132,10 +136,9 @@ sudo rm -rf keploy/
 endsec
 
 # --- 1. Record Application Interactions ---
-log_file="record.log"
-section "Start Recording - Iteration ${i}"
+section "Start Recording"
 # Start Keploy record in the background, wrapping the Docker command.
-sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p8080:8080 --rm --name jokeApp --network keploy-network go-joke-app" --container-name jokeApp > "$log_file" 2>&1 &
+sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p8080:8080 --rm --name jokeApp --network keploy-network go-joke-app" --container-name jokeApp > record.log 2>&1 &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID for container jokeApp"
 endsec
@@ -145,13 +148,14 @@ generate_traffic
 
 echo "Waiting for recordings to be flushed..."
 sleep 5
+endsec
 
-section "Stop Recording - Iteration ${i}"
+section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-container_kill "$KEPLOY_PID"
+container_kill
 wait "$KEPLOY_PID" || true # Wait for it to exit, ignore error if already gone.
 echo "Recording stopped."
-check_for_errors "$log_file"
+check_for_errors record.log
 endsec
 
 # --- 2. Test Application with Captured Mocks ---
