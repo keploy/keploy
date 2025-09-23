@@ -52,14 +52,6 @@ enable_ssh_mount_for_go_mod() {
 use_ssh_for_github_and_known_hosts() {
   echo "Injecting SSH config, known_hosts, and GOPRIVATE around go mod download (idempotent)..."
 
-  # We'll inject two things before the first `RUN --mount=type=ssh go mod download`:
-  #   ENV GOPRIVATE=github.com/keploy/*
-  #   ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
-  #   RUN git config ... && mkdir ~/.ssh && ssh-keyscan ...
-  #
-  # And we'll also try adding the git/ssh known_hosts RUN right after a COPY go.mod go.sum /app line (best-effort).
-  #
-  # Guard with flags to avoid duplicate insertions.
   awk '
     BEGIN {
       OFS="";
@@ -67,11 +59,17 @@ use_ssh_for_github_and_known_hosts() {
       injected_after_copy = 0;
     }
 
-    # Helper patterns
+    # Emit our SSH/Git prep block (no hard-fail keyscan)
     function emit_git_known_hosts_block() {
       print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-      print "RUN powershell -Command \"New-Item -ItemType Directory -Force -Path ~/.ssh\""
-      print "RUN ssh-keyscan github.com >> ~/.ssh/known_hosts"
+      # Create ~/.ssh but DO NOT hard-require ssh-keyscan
+      print "RUN mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+      # Best-effort keyscan: try if present, ignore failures
+      print "RUN if command -v ssh-keyscan >/dev/null 2>&1; then \\"
+      print "      (ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || echo \"ssh-keyscan failed; continuing\"); \\"
+      print "    else \\"
+      print "      echo \"ssh-keyscan not found; continuing\"; \\"
+      print "    fi"
     }
 
     # After COPY go.mod go.sum /app
