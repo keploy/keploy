@@ -63,6 +63,7 @@ configPath: ""
 bypassRules: []
 contract:
   driven: "consumer"
+  proxy: false
   mappings:
     servicesMapping: {}
     self: "s1"
