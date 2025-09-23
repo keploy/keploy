@@ -8,6 +8,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Add GitHub to known_hosts (Windows)
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
