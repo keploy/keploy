@@ -16,9 +16,18 @@ ensure_dockerfile_syntax() {
   # needed for --mount
   if ! head -n1 "$DOCKERFILE_PATH" | grep -q '^# syntax=docker/dockerfile:'; then
     {
-      echo '# syntax=docker/dockerfile:1.6'
+      echo '# syntax=docker/dockerfile:1'
       cat "$DOCKERFILE_PATH"
     } | rewrite_in_place
+  fi
+}
+
+assert_linux_engine() {
+  local os
+  os="$(docker info --format '{{.OSType}}' 2>/dev/null || echo 'unknown')"
+  if [ "$os" = "windows" ]; then
+    echo "::error::Docker daemon is in Windows-Containers mode. This repo builds a Linux image (FROM golang:1.24) and requires a Linux daemon. Run this job on ubuntu-latest or switch Docker Desktop to Linux containers." >&2
+    exit 90
   fi
 }
 
@@ -121,4 +130,5 @@ add_race_flag
 enable_ssh_mount_for_go_mod
 inject_git_settings_minimal
 install_buildx_if_missing
+assert_linux_engine
 build_image

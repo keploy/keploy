@@ -45,7 +45,7 @@ jobs:
         with: { name: latest, path: keploy.exe }
 
   build-docker-image:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
