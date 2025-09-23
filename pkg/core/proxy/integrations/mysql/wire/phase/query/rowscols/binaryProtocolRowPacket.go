@@ -359,7 +359,7 @@ func stripISOStuff(s string) string {
 		s = strings.TrimSuffix(s, "Z")
 		s = strings.TrimSpace(s)
 	}
-	if m := tzSuffixRe.FindStringSubmatch(s); m != nil {
+	if m := tzSuffixRe.FindStringSubmatch(s); len(m) > 1 {
 		s = strings.TrimSuffix(s, m[1])
 		s = strings.TrimSpace(s)
 	}
