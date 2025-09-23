@@ -3,6 +3,18 @@ set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"
 
+# ---------- OS / Runner detection ----------
+is_windows_runner() {
+  if [ "${RUNNER_OS:-}" = "Windows" ]; then
+    return 0
+  fi
+  # Fallbacks for local runs on Windows bash
+  case "$(uname -s 2>/dev/null || echo)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) return 0 ;;
+  esac
+  return 1
+}
+
 # Create a temp file safely and atomically replace the original
 rewrite_in_place() {
   local tmp
@@ -37,14 +49,10 @@ add_race_flag() {
 
 enable_ssh_mount_for_go_mod() {
   echo "Switching go mod download to use BuildKit SSH mount (idempotent)..."
-
-  # Detect Windows base image (handles indentation, multi-stage, or explicit PowerShell shell)
-  if grep -qiE '^[[:space:]]*FROM[[:space:]]+[^#]*\b(nanoserver|servercore|windows)\b' "$DOCKERFILE_PATH" \
-     || grep -qiE '^[[:space:]]*SHELL[[:space:]]*\[.*powershell' "$DOCKERFILE_PATH"; then
-    echo "Windows base detected; skipping --mount=type=ssh rewrite."
+  if is_windows_runner; then
+    echo "Windows runner detected; skipping --mount=type=ssh rewrite."
     return 0
   fi
-
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
@@ -56,95 +64,78 @@ enable_ssh_mount_for_go_mod() {
 }
 
 use_ssh_for_github_and_known_hosts() {
-  echo "Injecting Git SSH config and envs around go mod download (idempotent)..."
+  echo "Injecting Git SSH config/env (idempotent, Windows-safe)..."
 
-  # Detect Windows base image (handles indentation, multi-stage, or explicit PowerShell shell)
-  if grep -qiE '^[[:space:]]*FROM[[:space:]]+[^#]*\b(nanoserver|servercore|windows)\b' "$DOCKERFILE_PATH" \
-     || grep -qiE '^[[:space:]]*SHELL[[:space:]]*\[.*powershell' "$DOCKERFILE_PATH"; then
-    WINDOWS_BASE=1
-  else
-    WINDOWS_BASE=0
-  fi
-
-  if [ "$WINDOWS_BASE" -eq 1 ]; then
-    # WINDOWS: emit only safe lines (no mkdir/chmod/ssh-keyscan/&&)
+  if is_windows_runner; then
+    # WINDOWS: emit only safe lines. NO mkdir/chmod/ssh-keyscan/&&
     awk '
       BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
       function emit_win_git_prep() {
         print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-        # rely on StrictHostKeyChecking=no so we don t need known_hosts or chmod/mkdir
+        # rely on StrictHostKeyChecking=no so no known_hosts/chmod/mkdir needed
       }
 
       /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
         print;
-        if (!injected_after_copy) {
-          emit_win_git_prep();
-          injected_after_copy=1;
-        }
+        if (!injected_after_copy) { emit_win_git_prep(); injected_after_copy=1 }
         next
       }
 
-      /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
+      /^[[:space:]]*RUN[[:space:]]+(--mount=type=ssh[[:space:]]+)?go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
         if (!injected_before_go_mod) {
           print "ENV GOPRIVATE=github.com/keploy/*"
           print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
-          emit_win_git_prep();
-          injected_before_go_mod=1;
+          emit_win_git_prep()
+          injected_before_go_mod=1
         }
         print; next
       }
 
       { print }
     ' "$DOCKERFILE_PATH" | rewrite_in_place
-
-  else
-    # LINUX: standard POSIX prep; split mkdir/chmod to avoid && issues if ever misdetected
-    awk '
-      BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
-
-      function emit_nix_git_prep() {
-        print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-        print "RUN mkdir -p ~/.ssh"
-        print "RUN chmod 700 ~/.ssh"
-        print "RUN if command -v ssh-keyscan >/dev/null 2>&1; then \\"
-        print "      (ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || echo \"ssh-keyscan failed; continuing\"); \\"
-        print "    else \\"
-        print "      echo \"ssh-keyscan not found; continuing\"; \\"
-        print "    fi"
-      }
-
-      /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
-        print;
-        if (!injected_after_copy) {
-          emit_nix_git_prep();
-          injected_after_copy=1;
-        }
-        next
-      }
-
-      /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
-        if (!injected_before_go_mod) {
-          print "ENV GOPRIVATE=github.com/keploy/*"
-          print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
-          emit_nix_git_prep();
-          injected_before_go_mod=1;
-        }
-        print; next
-      }
-
-      { print }
-    ' "$DOCKERFILE_PATH" | rewrite_in_place
+    return 0
   fi
+
+  # LINUX: POSIX prep, but **NO chmod** (portable & avoids PowerShell accidents if misdetected)
+  awk '
+    BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
+
+    function emit_nix_git_prep() {
+      print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
+      print "RUN mkdir -p ~/.ssh"
+      print "RUN if command -v ssh-keyscan >/dev/null 2>&1; then \\"
+      print "      (ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || echo \"ssh-keyscan failed; continuing\"); \\"
+      print "    else \\"
+      print "      echo \"ssh-keyscan not found; continuing\"; \\"
+      print "    fi"
+    }
+
+    /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
+      print;
+      if (!injected_after_copy) { emit_nix_git_prep(); injected_after_copy=1 }
+      next
+    }
+
+    /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
+      if (!injected_before_go_mod) {
+        print "ENV GOPRIVATE=github.com/keploy/*"
+        print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
+        emit_nix_git_prep()
+        injected_before_go_mod=1
+      }
+      print; next
+    }
+
+    { print }
+  ' "$DOCKERFILE_PATH" | rewrite_in_place
 }
 
 build_docker_image() {
-  echo "Building Docker image (will use buildx if available)..."
+  echo "Building Docker image (prefers buildx if available)..."
   if docker buildx version >/dev/null 2>&1; then
-    echo "Using buildx for SSH mount support..."
     docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h .
   else
-    echo "Buildx not available, using legacy Docker build..."
     docker build -t ghcr.io/keploy/keploy:1h .
   fi
 }
