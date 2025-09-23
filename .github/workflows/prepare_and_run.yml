@@ -1,7 +1,7 @@
 name: Prepare Binary and Run Workflows
-on:
-  pull_request:
-    branches: [main]
+# on:
+#   pull_request:
+#     branches: [main]
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
