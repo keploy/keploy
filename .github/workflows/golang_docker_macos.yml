@@ -4,6 +4,9 @@ on:
 
 jobs:
   golang_docker_macos:
+    concurrency:
+      group: macos-keploy-${{ github.ref }}
+      cancel-in-progress: false
     runs-on: [self-hosted, macOS, native]
     strategy:
       fail-fast: false
@@ -71,6 +74,23 @@ jobs:
         run: |
           cd samples-go/${{ matrix.app.path }}
           bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-macos.sh
+
+      - name: Final cleanup (macOS)
+        if: always()
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        shell: bash
+        run: |
+          set +e
+          docker compose down || true
+          docker ps -aq --filter "name=ginApp" | xargs -r docker rm -f || true
+          docker ps -aq --filter "name=ginApp_test" | xargs -r docker rm -f || true
+          docker ps -aq --filter "name=mongoDb" | xargs -r docker rm -f || true
+          docker network rm keploy-network || true
+          find "$GITHUB_WORKSPACE" -type d -name keploy -prune -exec rm -rf {} + || true
+          rm -rf "$TMPDIR"/keploy-run-* || true
+          rm -f "$RECORD_BIN" "$REPLAY_BIN" || true
 
       - name: Clean up git config
         if: always()

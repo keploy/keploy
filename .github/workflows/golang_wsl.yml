@@ -67,9 +67,23 @@ jobs:
         shell: wsl-bash {0}
         env:
           WSL_WS: ${{ github.workspace }}
+          # Ensure the WSL_WS env var is propagated into the WSL environment and treated as a path
+          # so it is automatically converted to a Linux path. This makes it available inside WSL.
+          WSLENV: WSL_WS/p
         run: |
           set -euo pipefail
-          WS=$(wslpath -u "$WSL_WS")
+          # Prefer the forwarded WSL_WS if present; otherwise fall back to current working directory
+          # Using ${VAR:-} avoids errors with set -u when the variable is unset
+          if [ -n "${WSL_WS:-}" ]; then
+            # If WSLENV propagated the path, it will already be a Linux path; otherwise try wslpath
+            WS="${WSL_WS}"
+            # In case it's still a Windows path (e.g., if WSLENV didn't apply), convert it defensively
+            if echo "$WS" | grep -qiE '^[A-Z]:\\\\|^/[a-z]/'; then
+              WS=$(wslpath -u "$WS") || WS=$(pwd)
+            fi
+          else
+            WS=$(pwd)
+          fi
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
           chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true

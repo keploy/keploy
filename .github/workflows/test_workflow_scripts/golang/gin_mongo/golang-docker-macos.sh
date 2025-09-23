@@ -3,14 +3,35 @@
 # macOS variant for gin-mongo (docker run)
 set -euo pipefail
 
+# Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
+export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-gin-mongo}-$(date +%s)"
+export HOME="$KEPLOY_HOME_ROOT/home"
+mkdir -p "$HOME"
+
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+
+cleanup() {
+    set +e
+    # Stop and remove docker resources
+    docker rm -f ginApp || true
+    docker rm -f ginApp_test || true
+    docker stop mongoDb || true
+    docker rm mongoDb || true
+    docker network rm keploy-network || true
+    # Remove generated artifacts
+    rm -rf keploy/ || true
+    rm -f echoApp.txt ginApp_*.txt ginApp_test.txt || true
+    # Remove keploy home override
+    rm -rf "$KEPLOY_HOME_ROOT" || true
+}
+trap cleanup EXIT INT TERM
 
 # Start mongo before starting keploy.
 docker network create keploy-network || true
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
-sudo -E env PATH=$PATH "$RECORD_BIN" config --generate
+sudo -E env HOME="$HOME" PATH=$PATH "$RECORD_BIN" config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -69,7 +90,7 @@ send_request(){
 for i in {1..2}; do
     container_name="ginApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH "$RECORD_BIN" record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt" || true
+    sudo -E env HOME="$HOME" PATH=$PATH "$RECORD_BIN" record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt" || true
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -94,7 +115,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-sudo -E env PATH=$PATH "$REPLAY_BIN" test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
+sudo -E env HOME="$HOME" PATH=$PATH "$REPLAY_BIN" test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
