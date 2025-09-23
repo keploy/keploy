@@ -135,14 +135,19 @@ all_passed=true
 for i in {0..1}
 do
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-    echo "Test status for test-set-$i: $test_status"
-    if [ "$test_status" != "PASSED" ]; then
+    if [ -f "$report_file" ]; then
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        echo "Test status for test-set-$i: $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Test-set-$i did not pass."
+            break
+        fi
+    else
         all_passed=false
-        echo "Test-set-$i did not pass."
+        echo "Report not found: $report_file"
         break
     fi
-
 done
 
 if [ "$all_passed" = true ]; then
