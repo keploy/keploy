@@ -144,6 +144,12 @@ wait_for_port() {
     exit 1
 }
 
+# Kills the keploy process and waits for it to terminate
+kill_keploy_process() {
+    pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+    wait "$pid" 2>/dev/null || true
+}
+
 # --- Main Logic ---
 
 # Reset state before each run
@@ -162,13 +168,10 @@ if [ "$MODE" = "incoming" ]; then
     send_requests
     sleep 15 # Allow time for traces to be recorded
     
-    pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-    wait "$pid" 2>/dev/null || true
+    kill_keploy_process
 
     check_for_errors record_incoming.log
 
-    cat record_incoming.log
-    
     # Test: Keploy replays the captured gRPC calls against the server.
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload &> test_incoming.log
 
@@ -190,8 +193,7 @@ elif [ "$MODE" = "outgoing" ]; then
     send_requests
     sleep 15 # Allow time for traces to be recorded
 
-    pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-    wait "$pid" 2>/dev/null || true
+    kill_keploy_process
     
     check_for_errors record_outgoing.log
 
