@@ -53,10 +53,11 @@ jobs:
           path: samples-go
 
       - name: Setup WSL (Ubuntu)
-        uses: Vampire/setup-wsl@v3
+        uses: Vampire/setup-wsl@v6
         with:
           distribution: Ubuntu-22.04
-
+          wsl-version: 2
+          
       - name: Prepare binaries for WSL
         shell: bash
         run: |
