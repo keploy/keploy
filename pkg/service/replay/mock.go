@@ -38,6 +38,7 @@ type MockChangeReq struct {
 	Config    *models.TestSet `json:"config"`
 	TestSetID string          `json:"testSetId"`
 	Branch    string          `json:"branch"`
+	Owner     string          `json:"owner"`
 }
 type MockChangeResp struct {
 	CommitURL string `json:"commit_url"`
@@ -286,8 +287,8 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 		}
 
 		// After successfully writing the config, push it to the repo
-		if m.cfg.ReRecord.Branch != "" {
-			err := m.pushConfigChange(ctx, testSetID, tsConfig, m.cfg.ReRecord.Branch)
+		if m.cfg.ReRecord.Branch != "" && m.cfg.ReRecord.Owner != "" {
+			err := m.pushConfigChange(ctx, testSetID, tsConfig, m.cfg.ReRecord.Owner, m.cfg.ReRecord.Branch)
 			if err != nil {
 				m.logger.Error("Failed to push config change", zap.Error(err))
 				return err
@@ -328,8 +329,8 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 	}
 
 	// After successfully writing the config, push it to the repo
-	if m.cfg.ReRecord.Branch != "" {
-		err := m.pushConfigChange(ctx, testSetID, tsConfig, m.cfg.ReRecord.Branch)
+	if m.cfg.ReRecord.Branch != "" && m.cfg.ReRecord.Owner != "" {
+		err := m.pushConfigChange(ctx, testSetID, tsConfig, m.cfg.ReRecord.Owner, m.cfg.ReRecord.Branch)
 		if err != nil {
 			m.logger.Error("Failed to push config change", zap.Error(err))
 			return err
@@ -345,7 +346,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 }
 
 // pushConfigChange sends a request to the api-server to push the updated config to a git branch.
-func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig *models.TestSet, branch string) error {
+func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig *models.TestSet, owner, branch string) error {
 	m.logger.Info("Attempting to push config change to git", zap.String("testSetID", testSetID), zap.String("branch", branch))
 
 	// 1. Construct the request payload
@@ -353,6 +354,7 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 		Config:    tsConfig,
 		TestSetID: testSetID,
 		Branch:    branch,
+		Owner:     owner,
 	}
 
 	body, err := json.Marshal(payload)
