@@ -59,18 +59,13 @@ use_ssh_for_github_and_known_hosts() {
       injected_after_copy = 0;
     }
 
-    # Emit our SSH/Git prep block (no hard-fail keyscan)
+    # Emit our SSH/Git prep block (PowerShell-compatible for Windows)
     function emit_git_known_hosts_block() {
       print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-      # Create ~/.ssh but DO NOT hard-require ssh-keyscan
-      print "RUN mkdir -p ~/.ssh"
-      print "RUN chmod 700 ~/.ssh"
-      # Best-effort keyscan: try if present, ignore failures
-      print "RUN if command -v ssh-keyscan >/dev/null 2>&1; then \\"
-      print "      (ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || echo \"ssh-keyscan failed; continuing\"); \\"
-      print "    else \\"
-      print "      echo \"ssh-keyscan not found; continuing\"; \\"
-      print "    fi"
+      # Create ~/.ssh directory using PowerShell
+      print "RUN powershell -Command \"New-Item -ItemType Directory -Force -Path ~/.ssh | Out-Null\""
+      # Best-effort keyscan: try if present, ignore failures using PowerShell
+      print "RUN powershell -Command \"try { ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>$null } catch { Write-Host 'ssh-keyscan failed or not found; continuing' }\""
     }
 
     # After COPY go.mod go.sum /app
