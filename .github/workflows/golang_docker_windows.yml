@@ -39,8 +39,18 @@ jobs:
           fi
           docker version || { echo "Docker is not running. Start Docker Desktop on the runner." >&2; exit 1; }
 
+      - name: Normalize Docker environment (Windows)
+        shell: bash
+        run: |
+          echo "DOCKER_HOST before: ${DOCKER_HOST:-<unset>}"
+          echo "DOCKER_HOST=" >> "$GITHUB_ENV"
+          docker context use default || true
+          docker version || { echo "Docker daemon not reachable. Ensure Docker Desktop is running on the self-hosted runner." >&2; exit 1; }
+
       - id: image
         uses: ./.github/actions/download-image
+        env:
+          DOCKER_HOST: ""
 
       - id: record
         uses: ./.github/actions/download-binary

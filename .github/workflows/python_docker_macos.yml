@@ -23,8 +23,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Normalize Docker environment (macOS)
+        shell: bash
+        run: |
+          echo "DOCKER_HOST before: ${DOCKER_HOST:-<unset>}"
+          echo "DOCKER_HOST=" >> "$GITHUB_ENV"
+          docker context use default || docker context use desktop-linux || true
+          docker version || { echo "Docker daemon not reachable. Ensure Docker Desktop is running on the self-hosted runner." >&2; exit 1; }
+
       - id: image
         uses: ./.github/actions/download-image
+        env:
+          DOCKER_HOST: ""
 
       - id: record
         uses: ./.github/actions/download-binary
