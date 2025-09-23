@@ -20,23 +20,25 @@ import (
 )
 
 type Core struct {
-	Proxy                      // embedding the Proxy interface to transfer the proxy methods to the core object
-	Hooks                      // embedding the Hooks interface to transfer the hooks methods to the core object
-	Tester                     // embedding the Tester interface to transfer the tester methods to the core object
-	dockerClient docker.Client //embedding the docker client to transfer the docker client methods to the core object
-	logger       *zap.Logger
-	id           utils.AutoInc
-	apps         sync.Map
-	proxyStarted bool
+	Proxy                       // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks                       // embedding the Hooks interface to transfer the hooks methods to the core object
+	IncomingProxy               // embedding the IncomingProxy interface to transfer the incoming proxy methods to the core object
+	Tester                      // embedding the Tester interface to transfer the tester methods to the core object
+	dockerClient  docker.Client //embedding the docker client to transfer the docker client methods to the core object
+	logger        *zap.Logger
+	id            utils.AutoInc
+	apps          sync.Map
+	proxyStarted  bool
 }
 
-func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
+func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client, ingressProxy IncomingProxy) *Core {
 	return &Core{
-		logger:       logger,
-		Hooks:        hook,
-		Proxy:        proxy,
-		Tester:       tester,
-		dockerClient: client,
+		logger:        logger,
+		Hooks:         hook,
+		IncomingProxy: ingressProxy,
+		Proxy:         proxy,
+		Tester:        tester,
+		dockerClient:  client,
 	}
 }
 

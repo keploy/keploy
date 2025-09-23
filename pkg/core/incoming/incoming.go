@@ -8,19 +8,22 @@ import (
 	"net/http"
 	"time"
 
-	"go.keploy.io/server/v2/pkg"
 	utils "go.keploy.io/server/v2/pkg/core/hooks/conn"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 
-type TestcaseCapture struct{}
-
-func NewTestcaseCapture() *TestcaseCapture {
-	return &TestcaseCapture{}
+type CaptureIncoming struct {
+	logger *zap.Logger
 }
 
-func (d *TestcaseCapture) CreateHTTP(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error {
+func NewCaptureIncoming(logger *zap.Logger) *CaptureIncoming {
+	return &CaptureIncoming{
+		logger: logger,
+	}
+}
+
+func (d *CaptureIncoming) CreateHTTP(ctx context.Context, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error {
 
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqData)))
 	if err != nil {
@@ -35,13 +38,7 @@ func (d *TestcaseCapture) CreateHTTP(ctx context.Context, logger *zap.Logger, t 
 	defer req.Body.Close()
 	defer resp.Body.Close()
 
-	utils.Capture(ctx, logger, t, req, resp, reqTime, respTime, opts)
+	utils.Capture(ctx, d.logger, t, req, resp, reqTime, respTime, opts)
 
-	return nil
-}
-
-func (d *TestcaseCapture) CreateGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream *pkg.HTTP2Stream) error {
-
-	utils.CaptureGRPC(ctx, logger, t, stream)
 	return nil
 }

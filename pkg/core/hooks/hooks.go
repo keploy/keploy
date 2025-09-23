@@ -198,31 +198,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 	h.socket = socket
 
-	if opts.Mode != models.MODE_TEST && opts.BigPayload {
-		switch runtime.GOARCH {
-		case "amd64":
-			h.logger.Info("Attaching x86_64 (amd64) kprobes for bind syscall.")
-			// Attach the kprobe for bind syscall entry on x86
-			h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
-			if err != nil {
-				utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
-				return err
-			}
-		case "arm64":
-			h.logger.Info("Attaching arm64 kprobes for bind syscall.")
-			// Attach the kprobe for bind syscall entry on arm64
-			h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
-			if err != nil {
-				utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
-				return err
-			}
-
-		default:
-			err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-			utils.LogError(h.logger, err, "failed to attach bind hooks")
-			return err
-		}
-	}
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
 		h.objects = objs
@@ -268,6 +243,31 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
+
+			switch runtime.GOARCH {
+			case "amd64":
+				h.logger.Info("Attaching x86_64 (amd64) kprobes for bind syscall.")
+				// Attach the kprobe for bind syscall entry on x86
+				h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
+				if err != nil {
+					utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
+					return err
+				}
+			case "arm64":
+				h.logger.Info("Attaching arm64 kprobes for bind syscall.")
+				// Attach the kprobe for bind syscall entry on arm64
+				h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
+				if err != nil {
+					utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
+					return err
+				}
+
+			default:
+				err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+				utils.LogError(h.logger, err, "failed to attach bind hooks")
+				return err
+			}
+
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
 				Path:    cGroupPath,
@@ -291,13 +291,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 			}
 			h.cgBind6 = cg6
 
-			netnsPath := "/proc/self/ns/net" // Or make this configurable
-			netns, err := os.Open(netnsPath)
-			if err != nil {
-				utils.LogError(h.logger, err, "failed to open netns", zap.String("path", netnsPath))
-				return err
-			}
-			defer netns.Close()
 			h.logger.Info("Attached ingress redirection hooks.")
 		}
 
@@ -781,10 +774,14 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		if h.cgBind4 != nil {
-			h.cgBind4.Close()
+			if err := h.cgBind4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgBind4")
+			}
 		}
 		if h.cgBind6 != nil {
-			h.cgBind6.Close()
+			if err := h.cgBind6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgBind6")
+			}
 		}
 		if h.bindEnter != nil {
 			if err := h.bindEnter.Close(); err != nil {

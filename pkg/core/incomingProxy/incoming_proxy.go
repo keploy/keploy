@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
-	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/utils"
 
@@ -35,34 +34,31 @@ type IngressEvent struct {
 	NewAppPort  uint16
 	_           uint16 // Padding
 }
+
 type TestCaseCreator interface {
-	CreateHTTP(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error
-	CreateGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream *pkg.HTTP2Stream) error
+	CreateHTTP(ctx context.Context, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error
 }
 
-type ProxyDependencies struct {
-	Logger    *zap.Logger
-	Persister models.TestCasePersister
-}
 
 type proxyStop func() error
 
 type IngressProxyManager struct {
-	mu        sync.Mutex
-	active    map[uint16]proxyStop
-	logger    *zap.Logger
-	deps      ProxyDependencies // Use the new dependency struct
-	tcCreator TestCaseCreator   // The decoder remains the same
-
+	mu           sync.Mutex
+	active       map[uint16]proxyStop
+	logger       *zap.Logger
+	deps         models.ProxyDependencies // Use the new dependency struct
+	tcCreator    TestCaseCreator   // The decoder remains the same
+	hooks        *hooks.Hooks
 	tcChan       chan *models.TestCase
 	ctx          context.Context
 	incomingOpts models.IncomingOptions
 }
 
-func NewIngressProxyManager(ctx context.Context, logger *zap.Logger, deps ProxyDependencies, tcCreator TestCaseCreator, incomingOpts models.IncomingOptions) *IngressProxyManager {
+func NewIngressProxyManager(ctx context.Context, logger *zap.Logger, h *hooks.Hooks, deps models.ProxyDependencies, tcCreator TestCaseCreator, incomingOpts models.IncomingOptions) *IngressProxyManager {
 
 	pm := &IngressProxyManager{
 		logger:       logger,
+		hooks:        h,
 		tcChan:       make(chan *models.TestCase, 100),
 		active:       make(map[uint16]proxyStop),
 		deps:         deps,
@@ -70,13 +66,12 @@ func NewIngressProxyManager(ctx context.Context, logger *zap.Logger, deps ProxyD
 		ctx:          ctx,
 		incomingOpts: incomingOpts,
 	}
-	go pm.persistTestCases()
 	return pm
 }
 
 // Ensure starts a new ingress proxy on the given original app pory if it's not already running.
 
-func (pm *IngressProxyManager) Ensure(origAppPort, newAppPort uint16) {
+func (pm *IngressProxyManager) StartIngressProxy(origAppPort, newAppPort uint16) {
 	pm.mu.Lock()
 	_, ok := pm.active[origAppPort]
 	pm.mu.Unlock()
@@ -104,9 +99,13 @@ func (pm *IngressProxyManager) StopAll() {
 		delete(pm.active, p)
 	}
 }
-
-func ListenForIngressEvents(ctx context.Context, h *hooks.Hooks, pm *IngressProxyManager) {
-	rb, err := ringbuf.NewReader(h.BindEvents)
+func (pm *IngressProxyManager) UpdateDependencies(persister models.TestCasePersister, opts models.IncomingOptions) {
+    pm.deps.Persister = persister
+    pm.incomingOpts = opts
+}
+func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
+	go pm.persistTestCases()
+	rb, err := ringbuf.NewReader(pm.hooks.BindEvents)
 	if err != nil {
 		pm.logger.Error("Failed to create ringbuf reader for ingress events", zap.Error(err))
 		return
@@ -138,7 +137,7 @@ func ListenForIngressEvents(ctx context.Context, h *hooks.Hooks, pm *IngressProx
 				zap.Uint16("Orig_App_Port", e.OrigAppPort),
 				zap.Uint16("New_App_Port", e.NewAppPort))
 
-			pm.Ensure(e.OrigAppPort, e.NewAppPort)
+			pm.StartIngressProxy(e.OrigAppPort, e.NewAppPort)
 		}
 	}
 }
@@ -170,7 +169,11 @@ func runTCPForwarder(logger *zap.Logger, origAppAddr, newAppAddr string, pm *Ing
 				return
 			default:
 			}
-			_ = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			err = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			if err != nil {
+				logger.Error("Failed to set deadline on ingress listener", zap.Error(err))
+				return
+			}
 			clientConn, err := listener.Accept()
 			if err != nil {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -297,7 +300,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		)
 
 		go func() {
-			err := tcCreator.CreateHTTP(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
+			err := tcCreator.CreateHTTP(ctx, t, reqData, respData, reqTimestamp, respTimestamp, opts)
 			if err != nil {
 				logger.Error("Failed to create test case from captured data", zap.Error(err))
 			}
@@ -326,9 +329,9 @@ func (pm *IngressProxyManager) persistTestCases() {
 			return
 		case tc := <-pm.tcChan:
 			if err := pm.deps.Persister(pm.ctx, tc); err != nil {
-				pm.deps.Logger.Error("Failed to persist captured test case", zap.Error(err))
+				pm.logger.Error("Failed to persist captured test case", zap.Error(err))
 			} else {
-				pm.deps.Logger.Debug("Successfully captured and persisted a test case.", zap.String("kind", string(tc.Kind)))
+				pm.logger.Debug("Successfully captured and persisted a test case.", zap.String("kind", string(tc.Kind)))
 			}
 		}
 	}

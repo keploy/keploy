@@ -1,11 +1,21 @@
 package models
 
 import (
+	"context"
 	"crypto/tls"
 	"time"
 
 	"go.keploy.io/server/v2/config"
 )
+
+// TestCasePersister defines the function signature for saving a TestCase.
+// By placing it in the models package, both the core and proxy packages can
+// reference it without creating a circular dependency.
+type TestCasePersister func(ctx context.Context, testCase *TestCase) error
+
+type ProxyDependencies struct {
+	Persister TestCasePersister
+}
 
 type HookOptions struct {
 	Rules         []config.BypassRule

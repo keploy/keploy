@@ -13,6 +13,8 @@ import (
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
+	incomingProxy "go.keploy.io/server/v2/pkg/core/incomingProxy"
+	incomingTestCase "go.keploy.io/server/v2/pkg/core/incoming"
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
@@ -69,10 +71,17 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 
 }
 
-func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
+func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
+
+
+	tcCapture := incomingTestCase.NewCaptureIncoming(logger)
+	ingressProxyDeps := models.ProxyDependencies{}
+	ingressOpts := models.IncomingOptions{}
+
+	ingressProxyManager := incomingProxy.NewIngressProxyManager(ctx, logger, h, ingressProxyDeps, tcCapture, ingressOpts)
 	//for keploy test bench
 	t := tester.New(logger, h)
 	app.HookImpl = app.NewHooks(logger)
@@ -107,7 +116,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 		}
 	}
 
-	instrumentation := core.New(logger, h, p, t, client)
+	instrumentation := core.New(logger, h, p, t, client, ingressProxyManager)
 
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")

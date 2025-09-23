@@ -310,6 +310,7 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 			},
 			BigPayload: r.config.Record.BigPayload,
 		}
+
 		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
@@ -318,6 +319,21 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 				return appID, err
 			}
 			return appID, fmt.Errorf("%s", stopReason)
+		}
+
+		if r.config.Record.BigPayload && hooks.Mode == models.MODE_RECORD {
+			r.logger.Info("BigPayload mode enabled, starting ingress proxy.")
+			incomingOpts := models.IncomingOptions{
+				Filters:  r.config.Record.Filters,
+				BasePath: r.config.Record.BasePath,
+			}
+			// Call the new core method to start the ingress proxy listener.
+			// This call is non-blocking.
+			if err := r.instrumentation.StartIncomingProxy(ctx, persister, incomingOpts); err != nil {
+				stopReason = "failed to start the ingress proxy"
+				utils.LogError(r.logger, err, stopReason)
+				return appID, fmt.Errorf("%s", stopReason)
+			}
 		}
 	}
 	return appID, nil

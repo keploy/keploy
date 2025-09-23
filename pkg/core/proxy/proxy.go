@@ -22,7 +22,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	Hooks "go.keploy.io/server/v2/pkg/core/hooks"
-	incomingTestCase "go.keploy.io/server/v2/pkg/core/incoming"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -203,36 +202,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 
 	if err := <-readyChan; err != nil {
 		return err
-	}
-
-	if opts.Mode != models.MODE_TEST && opts.BigPayload {
-		persister := opts.Persister
-		if persister == nil {
-			persister = func(ctx context.Context, testCase *models.TestCase) error {
-				p.logger.Debug("Proxy is not in record mode.")
-				return nil
-			}
-		}
-		deps := ProxyDependencies{
-			Logger:    p.logger,
-			Persister: persister,
-		}
-		tcCapture := incomingTestCase.NewTestcaseCapture()
-		// Start the eBPF listener for bind events
-		ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, tcCapture, incomingOpts)
-		go func() {
-			defer utils.Recover(p.logger)
-			ListenForIngressEvents(ctx, p.hooks, ingressProxyManager)
-		}()
-
-		// Setup a graceful shutdown for the ingress proxies.
-		g.Go(func() error {
-			<-ctx.Done()
-			p.logger.Info("Shutting down all dynamic ingress proxies...")
-			ingressProxyManager.StopAll()
-			return nil
-		})
-		p.logger.Debug("Successfully pinned proxy listener socket to eBPF sockmap.")
 	}
 
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")

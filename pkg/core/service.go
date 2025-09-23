@@ -52,6 +52,13 @@ type Proxy interface {
 	GetErrorChannel() <-chan error
 }
 
+type IncomingProxy interface {
+	UpdateDependencies(persister models.TestCasePersister, opts models.IncomingOptions)
+	StartIngressProxy(origAppPort, newAppPort uint16)
+	ListenForIngressEvents(ctx context.Context)
+	StopAll()
+}
+
 type ProxyOptions struct {
 	// DNSIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv4Addr string
