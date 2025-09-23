@@ -97,5 +97,70 @@ func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) 
 
 	render.JSON(w, r, consumedMocks)
 	render.Status(r, http.StatusOK)
+}
 
+func (a *AgentRequest) StoreMocks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var storeMocksReq models.StoreMocksReq
+	err := json.NewDecoder(r.Body).Decode(&storeMocksReq)
+
+	storeMocksRes := models.AgentResp{
+		ClientID:  storeMocksReq.ClientID,
+		Error:     nil,
+		IsSuccess: true,
+	}
+
+	if err != nil {
+		storeMocksRes.Error = err
+		storeMocksRes.IsSuccess = false
+		render.JSON(w, r, storeMocksRes)
+		render.Status(r, http.StatusBadRequest)
+		return
+	}
+
+	err = a.agent.StoreMocks(r.Context(), storeMocksReq.ClientID, storeMocksReq.Filtered, storeMocksReq.UnFiltered)
+	if err != nil {
+		storeMocksRes.Error = err
+		storeMocksRes.IsSuccess = false
+		render.JSON(w, r, storeMocksRes)
+		render.Status(r, http.StatusInternalServerError)
+		return
+	}
+
+	render.JSON(w, r, storeMocksRes)
+	render.Status(r, http.StatusOK)
+}
+
+func (a *AgentRequest) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var updateParamsReq models.UpdateMockParamsReq
+	err := json.NewDecoder(r.Body).Decode(&updateParamsReq)
+
+	updateParamsRes := models.AgentResp{
+		ClientID:  updateParamsReq.ClientID,
+		Error:     nil,
+		IsSuccess: true,
+	}
+
+	if err != nil {
+		updateParamsRes.Error = err
+		updateParamsRes.IsSuccess = false
+		render.JSON(w, r, updateParamsRes)
+		render.Status(r, http.StatusBadRequest)
+		return
+	}
+
+	err = a.agent.UpdateMockParams(r.Context(), updateParamsReq.ClientID, updateParamsReq.FilterParams)
+	if err != nil {
+		updateParamsRes.Error = err
+		updateParamsRes.IsSuccess = false
+		render.JSON(w, r, updateParamsRes)
+		render.Status(r, http.StatusInternalServerError)
+		return
+	}
+
+	render.JSON(w, r, updateParamsRes)
+	render.Status(r, http.StatusOK)
 }

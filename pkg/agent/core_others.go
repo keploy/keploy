@@ -46,6 +46,14 @@ func (c *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock
 	return errUnsupported
 }
 
+func (c *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	return errUnsupported
+}
+
+func (c *Agent) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
+	return errUnsupported
+}
+
 func (c *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
 	return nil, errUnsupported
 }

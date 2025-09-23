@@ -282,6 +282,81 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 	return nil
 }
 
+func (a *AgentClient) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	requestBody := models.StoreMocksReq{
+		Filtered:   filtered,
+		UnFiltered: unFiltered,
+		ClientID:   id,
+	}
+
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to marshal request body for storemocks")
+		return fmt.Errorf("error marshaling request body for storemocks: %s", err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/storemocks", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to create request for storemocks")
+		return fmt.Errorf("error creating request for store mocks: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request for storemocks: %s", err.Error())
+	}
+
+	var mockResp models.AgentResp
+	err = json.NewDecoder(res.Body).Decode(&mockResp)
+	if err != nil {
+		return fmt.Errorf("failed to decode response body for storemocks: %s", err.Error())
+	}
+
+	if mockResp.Error != nil {
+		return mockResp.Error
+	}
+
+	return nil
+}
+
+func (a *AgentClient) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
+	requestBody := models.UpdateMockParamsReq{
+		ClientID:     id,
+		FilterParams: params,
+	}
+
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to marshal request body for updatemockparams")
+		return fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/updatemockparams", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
+		return fmt.Errorf("error creating request for update mock params: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
+	}
+
+	var mockResp models.AgentResp
+	err = json.NewDecoder(res.Body).Decode(&mockResp)
+	if err != nil {
+		return fmt.Errorf("failed to decode response body for updatemockparams: %s", err.Error())
+	}
+
+	if mockResp.Error != nil {
+		return mockResp.Error
+	}
+
+	return nil
+}
+
 func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
 	// Create the URL with query parameters
 	url := fmt.Sprintf("http://localhost:%d/agent/consumedmocks?id=%d", a.conf.Agent.Port, id)

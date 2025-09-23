@@ -32,6 +32,8 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/setmocks", a.SetMocks)
+		r.Post("/storemocks", a.StoreMocks)
+		r.Post("/updatemockparams", a.UpdateMockParams)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Post("/register", a.RegisterClients)
 		r.Get("/consumedmocks", a.GetConsumedMocks)

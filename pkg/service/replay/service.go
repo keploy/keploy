@@ -27,6 +27,10 @@ type Instrumentation interface {
 
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 	UnregisterClient(ctx context.Context, opts models.UnregisterReq) error
+
+	// New methods for improved mock management
+	StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
+	UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error
 }
 
 type Service interface {
@@ -112,7 +116,7 @@ type Storage interface {
 }
 
 type InstrumentState struct {
-	ClientID      uint64
+	ClientID   uint64
 	HookCancel context.CancelFunc
 	UnloadDone <-chan struct{} // Channel that will be closed when hooks are completely unloaded
 }

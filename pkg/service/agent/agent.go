@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
 	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
@@ -18,6 +20,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type ClientMockStorage struct {
+	filtered   []*models.Mock
+	unfiltered []*models.Mock
+	mu         sync.RWMutex
+}
+
 type Agent struct {
 	logger       *zap.Logger
 	agent.Proxy                 // embedding the Proxy interface to transfer the proxy methods to the core object
@@ -26,6 +34,8 @@ type Agent struct {
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	proxyStarted bool
 	// activeClients sync.Map
+	// New field for storing client-specific mocks
+	clientMocks sync.Map // map[uint64]*ClientMockStorage
 }
 
 func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client) *Agent {
@@ -298,6 +308,89 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		return err
 	}
 	return nil
+}
+
+// StoreMocks stores the filtered and unfiltered mocks for a client ID
+func (a *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unfiltered []*models.Mock) error {
+	storage := &ClientMockStorage{
+		filtered:   make([]*models.Mock, len(filtered)),
+		unfiltered: make([]*models.Mock, len(unfiltered)),
+	}
+
+	// Deep copy the mocks to avoid data races
+	copy(storage.filtered, filtered)
+	copy(storage.unfiltered, unfiltered)
+
+	a.clientMocks.Store(id, storage)
+
+	a.logger.Info("Successfully stored mocks for client", zap.Uint64("clientID", id))
+	return nil
+}
+
+// UpdateMockParams applies filtering parameters and updates the agent's mock manager
+func (a *Agent) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
+
+	// Get stored mocks for the client
+	storageInterface, exists := a.clientMocks.Load(id)
+	if !exists {
+		return fmt.Errorf("no mocks stored for client ID %d", id)
+	}
+
+	storage := storageInterface.(*ClientMockStorage)
+	storage.mu.RLock()
+	originalFiltered := make([]*models.Mock, len(storage.filtered))
+	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
+	copy(originalFiltered, storage.filtered)
+	copy(originalUnfiltered, storage.unfiltered)
+	storage.mu.RUnlock()
+
+	var filteredMocks, unfilteredMocks []*models.Mock
+
+	// Apply filtering based on parameters
+	if params.UseMappingBased && len(params.MockMapping) > 0 {
+		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
+	} else {
+		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime)
+		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
+	}
+
+	// Filter out deleted mocks if totalConsumedMocks is provided
+	if params.TotalConsumedMocks != nil {
+		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
+		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
+	}
+
+	// Set the filtered mocks to the proxy
+	err := a.Proxy.SetMocks(ctx, id, filteredMocks, unfilteredMocks)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to set mocks on proxy")
+		return err
+	}
+
+	return nil
+}
+
+// filterOutDeleted filters out deleted mocks based on totalConsumedMocks
+func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[string]models.MockState) []*models.Mock {
+	filtered := make([]*models.Mock, 0, len(mocks))
+	for _, m := range mocks {
+		// treat empty/missing names as never consumed
+		if m == nil || m.Name == "" {
+			filtered = append(filtered, m)
+			continue
+		}
+		// we are picking mocks that are not consumed till now (not present in map),
+		// and, mocks that are updated.
+		if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
+			if ok {
+				m.TestModeInfo.IsFiltered = k.IsFiltered
+				m.TestModeInfo.SortOrder = k.SortOrder
+			}
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered
 }
 
 // func (a *Agent) SendKtInfo(ctx context.Context, tb models.TestBenchReq) error {

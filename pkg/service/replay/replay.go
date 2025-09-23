@@ -779,6 +779,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
+	err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to store mocks on agent")
+		return models.TestSetStatusFailed, err
+	}
+
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
@@ -833,9 +839,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	// Initial mock setup - use empty mapping for initial setup
-	// For the initial setup, we always use mapping-based with empty mapping to get all unfiltered mocks
-	err = r.FilterAndSetMocksWithFallback(ctx, appID, filteredMocks, unfilteredMocks, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+	// Send initial filtering parameters to set up mocks for test set
+	err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
@@ -1004,9 +1009,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testPass bool
 		var loopErr error
 
-		err = r.FilterAndSetMocksWithFallback(runTestSetCtx, appID, filteredMocks, unfilteredMocks, expectedTestMockMappings[testCase.Name], testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks, useMappingBased)
+		err = r.NewUpdateMockParams(runTestSetCtx, appID, expectedTestMockMappings[testCase.Name], testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks, useMappingBased)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to filter and set mocks")
+			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
 		}
 
@@ -1507,6 +1512,37 @@ func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, appID uint
 		return r.FilterAndSetMocks(ctx, appID, filtered, unfiltered, afterTime, beforeTime, totalConsumedMocks)
 	}
 
+}
+
+// NewUpdateMockParams sends filtering parameters to agent instead of sending filtered mocks
+func (r *Replayer) NewUpdateMockParams(ctx context.Context, appID uint64, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+	if !r.instrument {
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		return nil
+	}
+
+	// Build filter parameters
+	params := models.MockFilterParams{
+		AfterTime:          afterTime,
+		BeforeTime:         beforeTime,
+		MockMapping:        expectedMockMapping,
+		UseMappingBased:    useMappingBased,
+		TotalConsumedMocks: totalConsumedMocks,
+	}
+
+	// Send parameters to agent for filtering and mock updates
+	err := r.instrumentation.UpdateMockParams(ctx, appID, params)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+		return err
+	}
+
+	r.logger.Debug("Successfully sent mock filter parameters to agent",
+		zap.Uint64("appID", appID),
+		zap.Bool("useMappingBased", useMappingBased),
+		zap.Int("mockMappingCount", len(expectedMockMapping)))
+
+	return nil
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {

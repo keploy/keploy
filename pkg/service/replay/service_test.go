@@ -46,6 +46,14 @@ func (m *MockInstrumentation) SetMocks(ctx context.Context, id uint64, filtered 
 	return nil // Mock return value
 }
 
+func (m *MockInstrumentation) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	return nil // Mock return value
+}
+
+func (m *MockInstrumentation) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
+	return nil // Mock return value
+}
+
 func (m *MockInstrumentation) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
 	return []models.MockState{}, nil // Mock return value
 }
@@ -70,7 +78,7 @@ func TestInstrumentState_UnloadDoneChannel(t *testing.T) {
 	unloadCh := make(chan struct{})
 
 	state := &InstrumentState{
-		ClientID:      12345,
+		ClientID:   12345,
 		HookCancel: func() {}, // dummy cancel function
 		UnloadDone: unloadCh,
 	}
@@ -170,7 +178,7 @@ func TestInstrument_ChannelIntegration(t *testing.T) {
 	// Simulate getting the instrument state
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	state := &InstrumentState{
-		ClientID:      appID,
+		ClientID:   appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}
