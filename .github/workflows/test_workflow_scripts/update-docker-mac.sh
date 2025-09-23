@@ -49,6 +49,16 @@ use_ssh_mount_for_go_mod_download() {
     "$DOCKERFILE_PATH"
 }
 
+inject_go_private_and_git_env() {
+  echo "Injecting GOPRIVATE and GIT_SSH_COMMAND before go mod download..."
+  # Add environment hints to prefer SSH and skip strict host key checks
+  # Insert just before the go mod download line
+  sed -E "${SED_INPLACE[@]}" \
+    '/^RUN --mount=type=ssh go mod download$/i \\
+ENV GOPRIVATE=github.com\/keploy\/*\\nENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"' \
+    "$DOCKERFILE_PATH"
+}
+
 build_docker_image() {
   echo "Building Docker image with BuildKit and SSH agent forwarding..."
   DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
@@ -59,6 +69,7 @@ main() {
   add_race_flag
   inject_ssh_known_hosts
   use_ssh_mount_for_go_mod_download
+  inject_go_private_and_git_env
   build_docker_image
 }
 
