@@ -22,7 +22,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    name: ${{ matrix.mode }}-grpc (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,4 +49,4 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd samples-go/${{ matrix.app.path }}
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/grpc-linux.sh
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/grpc-linux.sh ${{ matrix.mode }}
