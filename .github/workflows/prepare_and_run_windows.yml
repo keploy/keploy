@@ -67,8 +67,10 @@ jobs:
           echo "DOCKER_HOST before: ${DOCKER_HOST:-<unset>}"
           echo "DOCKER_HOST=" >> "$GITHUB_ENV"
           docker context use default || true
-          docker version || { echo "Docker daemon not reachable. Ensure Docker Desktop is running on the self-hosted runner." >&2; exit 1; }
-
+          docker version || { echo "Docker daemon not reachable. Ensure Docker Desktop is running on the runner." >&2; exit 1; }
+          # Optional visibility
+          docker buildx ls || true
+        
       - name: Build image
         shell: bash
         run: |

@@ -101,15 +101,11 @@ install_buildx_if_missing() {
 build_image() {
   echo "Building with buildx (docker driver) and SSH agent forwarding…"
 
-  # Ensure the lightweight "docker" driver (no privileged container)
-  if ! docker buildx inspect keploybx >/dev/null 2>&1; then
-    docker buildx create --name keploybx --driver docker --use >/dev/null
-  else
-    docker buildx use keploybx >/dev/null
-  fi
+  # Use the existing default builder (already driver=docker on Docker Desktop/Windows)
+  # Do NOT create a new docker-driver builder (Windows allows only one).
+  docker buildx use default >/dev/null 2>&1 || true
 
-  # On Docker Desktop/Windows daemon, driver=docker uses built-in BuildKit.
-  # Use --load so the image is available to classic 'docker' after build.
+  # Build with buildx and load into the classic 'docker images' store.
   if docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h --load .; then
     return 0
   fi
@@ -117,6 +113,7 @@ build_image() {
   echo "buildx (docker driver) failed; trying classic docker build with BuildKit…" >&2
   DOCKER_BUILDKIT=1 docker build --ssh default -t ghcr.io/keploy/keploy:1h .
 }
+
 
 # ---------- main ----------
 ensure_dockerfile_syntax
