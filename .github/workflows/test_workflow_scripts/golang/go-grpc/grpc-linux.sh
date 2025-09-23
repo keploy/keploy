@@ -164,6 +164,8 @@ if [ "$MODE" = "incoming" ]; then
     wait "$pid" 2>/dev/null || true
 
     check_for_errors record_incoming.log
+
+    cat record_incoming.log
     
     # Test: Keploy replays the captured gRPC calls against the server.
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload &> test_incoming.log
