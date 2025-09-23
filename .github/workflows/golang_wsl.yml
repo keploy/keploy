@@ -57,7 +57,22 @@ jobs:
         with:
           distribution: Ubuntu-22.04
           wsl-version: 2
-          
+      
+      - name: Verify kernel version in WSL
+        shell: wsl-bash {0}
+        run: |
+          echo "=== Kernel Version ==="
+          uname -r
+          echo "=== Checking kernel requirement ==="
+          KERNEL_VERSION=$(uname -r | cut -d'.' -f1-2)
+          REQUIRED_VERSION="5.10"
+          if printf '%s\n' "$REQUIRED_VERSION" "$KERNEL_VERSION" | sort -V | head -n1 | grep -q "$REQUIRED_VERSION"; then
+            echo "✓ Kernel version $KERNEL_VERSION meets requirement $REQUIRED_VERSION"
+          else
+            echo "✗ Kernel version $KERNEL_VERSION is below required $REQUIRED_VERSION"
+            exit 1
+          fi
+    
       - name: Prepare binaries for WSL
         shell: bash
         run: |

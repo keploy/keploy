@@ -12,16 +12,16 @@ mkdir -p "$HOME"
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-cleanup() {
-    set +e
-    docker stop mongo || true
-    docker rm mongo || true
-    docker network rm keploy-network || true
-    rm -rf keploy/ || true
-    rm -f flaskApp_*.txt flashApp_test.txt || true
-    rm -rf "$KEPLOY_HOME_ROOT" || true
-}
-trap cleanup EXIT INT TERM
+# cleanup() {
+#     set +e
+#     docker stop mongo || true
+#     docker rm mongo || true
+#     docker network rm keploy-network || true
+#     rm -rf keploy/ || true
+#     rm -f flaskApp_*.txt flashApp_test.txt || true
+#     rm -rf "$KEPLOY_HOME_ROOT" || true
+# }
+# trap cleanup EXIT INT TERM
 
 # Start mongo before starting keploy.
 docker network create keploy-network || true
@@ -98,6 +98,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
 test_container="flashApp_test"
+echo "Starting test mode..."
 sudo -E env HOME="$HOME" PATH=$PATH "$REPLAY_BIN" test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

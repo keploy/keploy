@@ -10,21 +10,21 @@ mkdir -p "$HOME"
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-cleanup() {
-    set +e
-    # Stop and remove docker resources
-    docker rm -f ginApp || true
-    docker rm -f ginApp_test || true
-    docker stop mongoDb || true
-    docker rm mongoDb || true
-    docker network rm keploy-network || true
-    # Remove generated artifacts
-    rm -rf keploy/ || true
-    rm -f echoApp.txt ginApp_*.txt ginApp_test.txt || true
-    # Remove keploy home override
-    rm -rf "$KEPLOY_HOME_ROOT" || true
-}
-trap cleanup EXIT INT TERM
+# cleanup() {
+#     set +e
+#     # Stop and remove docker resources
+#     docker rm -f ginApp || true
+#     docker rm -f ginApp_test || true
+#     docker stop mongoDb || true
+#     docker rm mongoDb || true
+#     docker network rm keploy-network || true
+#     # Remove generated artifacts
+#     rm -rf keploy/ || true
+#     rm -f echoApp.txt ginApp_*.txt ginApp_test.txt || true
+#     # Remove keploy home override
+#     rm -rf "$KEPLOY_HOME_ROOT" || true
+# }
+# trap cleanup EXIT INT TERM
 
 # Start mongo before starting keploy.
 docker network create keploy-network || true
@@ -115,6 +115,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
+echo "Starting test mode..."
 sudo -E env HOME="$HOME" PATH=$PATH "$REPLAY_BIN" test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
 
 if grep "ERROR" "${test_container}.txt"; then
