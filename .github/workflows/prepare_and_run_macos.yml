@@ -20,7 +20,7 @@ jobs:
         with: { name: build, path: keploy }
 
   upload-latest:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, native]
     steps:
       - name: Download latest release (macOS)
         run: |
@@ -34,7 +34,7 @@ jobs:
 
   # Build docker image once on Linux and let macOS jobs pull via download-image
   build-docker-image:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, native]
     steps:
       - uses: actions/checkout@v4
 
