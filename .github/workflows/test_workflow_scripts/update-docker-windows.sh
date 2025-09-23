@@ -63,7 +63,8 @@ use_ssh_for_github_and_known_hosts() {
     function emit_git_known_hosts_block() {
       print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
       # Create ~/.ssh but DO NOT hard-require ssh-keyscan
-      print "RUN mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+      print "RUN mkdir -p ~/.ssh"
+      print "RUN chmod 700 ~/.ssh"
       # Best-effort keyscan: try if present, ignore failures
       print "RUN if command -v ssh-keyscan >/dev/null 2>&1; then \\"
       print "      (ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || echo \"ssh-keyscan failed; continuing\"); \\"
