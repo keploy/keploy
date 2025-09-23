@@ -39,6 +39,14 @@ add_race_flag() {
 
 enable_ssh_mount_for_go_mod() {
   echo "Switching go mod download to use BuildKit SSH mount (idempotent)..."
+
+  # Detect Windows base image (handles indentation, multi-stage, and explicit SHELL)
+  if grep -qiE '^[[:space:]]*FROM[[:space:]]+[^#]*\b(nanoserver|servercore|windows)\b' "$DOCKERFILE_PATH" \
+     || grep -qiE '^[[:space:]]*SHELL[[:space:]]*\[.*powershell' "$DOCKERFILE_PATH"; then
+    echo "Windows base detected; skipping --mount=type=ssh rewrite."
+    return 0
+  fi
+
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
@@ -52,8 +60,9 @@ enable_ssh_mount_for_go_mod() {
 use_ssh_for_github_and_known_hosts() {
   echo "Injecting SSH config, known_hosts, and GOPRIVATE around go mod download (idempotent)..."
 
-  # Detect Windows base image from FROM line (nanoserver/servercore/windows)
-  if grep -qiE '^FROM .*((nanoserver|servercore|windows))' "$DOCKERFILE_PATH"; then
+  # Detect Windows base image (handles indentation, multi-stage, and explicit SHELL)
+  if grep -qiE '^[[:space:]]*FROM[[:space:]]+[^#]*\b(nanoserver|servercore|windows)\b' "$DOCKERFILE_PATH" \
+     || grep -qiE '^[[:space:]]*SHELL[[:space:]]*\[.*powershell' "$DOCKERFILE_PATH"; then
     WINDOWS_BASE=1
   else
     WINDOWS_BASE=0
@@ -66,9 +75,9 @@ use_ssh_for_github_and_known_hosts() {
 
       function emit_win_git_prep() {
         print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-        # Create %USERPROFILE%\.ssh (no chmod on Windows)
+        # Create %USERPROFILE%\\.ssh (no chmod on Windows)
         print "RUN powershell -Command \"",
-              "$ErrorActionPreference = \\\"Stop\\\"; ",
+              "$ErrorActionPreference=\\\"Stop\\\"; ",
               "New-Item -ItemType Directory -Force -Path $env:USERPROFILE\\.ssh | Out-Null\""
         # We skip ssh-keyscan on Windows containers (OpenSSH client may not exist)
       }
@@ -96,13 +105,14 @@ use_ssh_for_github_and_known_hosts() {
       { print }
     ' "$DOCKERFILE_PATH" | rewrite_in_place
   else
-    # Linux-friendly injection (your original intent), remove chmod if you want it extra-safe
+    # Linux-friendly injection
     awk '
       BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
 
       function emit_nix_git_prep() {
         print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\""
-        print "RUN mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+        print "RUN mkdir -p ~/.ssh"
+        print "RUN chmod 700 ~/.ssh"
         print "RUN if command -v ssh-keyscan >/dev/null 2>&1; then \\"
         print "      (ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || echo \"ssh-keyscan failed; continuing\"); \\"
         print "    else \\"
@@ -134,16 +144,13 @@ use_ssh_for_github_and_known_hosts() {
   fi
 }
 
-
 build_docker_image() {
-  echo "Building Docker image with SSH forwarding on Windows..."
-  # On Windows, check if buildx is available, otherwise use legacy build
+  echo "Building Docker image (will use buildx if available)..."
   if docker buildx version >/dev/null 2>&1; then
     echo "Using buildx for SSH mount support..."
     docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h .
   else
     echo "Buildx not available, using legacy Docker build..."
-    # Fallback to regular build without SSH mount (SSH setup handled in Dockerfile)
     docker build -t ghcr.io/keploy/keploy:1h .
   fi
 }
