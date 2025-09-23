@@ -1,6 +1,8 @@
 name: Golang On WSL (Windows host)
+
 on:
   workflow_call:
+
 jobs:
   golang_wsl:
     runs-on: windows-latest
@@ -22,9 +24,17 @@ jobs:
             record_src: build
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (WSL)
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Optional hardening on the Windows host to prefer LF
+      - name: Configure Git EOL on Windows (optional but recommended)
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -52,9 +62,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/.wsl-bin"
-          # Normalize filenames for predictable WSL paths
           cp "${{ steps.record.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_record"
           cp "${{ steps.replay.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_replay"
+
+      # Normalize endings to LF and ensure execute bits inside WSL
+      - name: Normalize line endings & make scripts executable (WSL)
+        shell: wsl-bash {0}
+        env:
+          WSL_WS: ${{ github.workspace }}
+          WSLENV: WSL_WS/p
+        run: |
+          set -euo pipefail
+          WS="${WSL_WS}"
+          # Convert CRLF -> LF for all workflow bash scripts (no-op if already LF)
+          find "$WS/.github/workflows/test_workflow_scripts" -type f -name "*.sh" -print0 \
+            | xargs -0 -I{} sed -i 's/\r$//' "{}"
+          chmod -R a+x "$WS/.github/workflows/test_workflow_scripts"
 
       - name: Install dependencies in WSL
         shell: wsl-bash {0}
@@ -67,23 +90,11 @@ jobs:
         shell: wsl-bash {0}
         env:
           WSL_WS: ${{ github.workspace }}
-          # Ensure the WSL_WS env var is propagated into the WSL environment and treated as a path
-          # so it is automatically converted to a Linux path. This makes it available inside WSL.
+          # Propagate WSL_WS as a path so Windows -> Linux path translation happens
           WSLENV: WSL_WS/p
         run: |
           set -euo pipefail
-          # Prefer the forwarded WSL_WS if present; otherwise fall back to current working directory
-          # Using ${VAR:-} avoids errors with set -u when the variable is unset
-          if [ -n "${WSL_WS:-}" ]; then
-            # If WSLENV propagated the path, it will already be a Linux path; otherwise try wslpath
-            WS="${WSL_WS}"
-            # In case it's still a Windows path (e.g., if WSLENV didn't apply), convert it defensively
-            if echo "$WS" | grep -qiE '^[A-Z]:\\\\|^/[a-z]/'; then
-              WS=$(wslpath -u "$WS") || WS=$(pwd)
-            fi
-          else
-            WS=$(pwd)
-          fi
+          WS="${WSL_WS}"
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
           chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true
