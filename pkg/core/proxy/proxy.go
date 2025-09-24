@@ -18,11 +18,11 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
-	"golang.org/x/sync/errgroup"
-
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
@@ -99,9 +99,8 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 	return nil
 }
 
-// In proxy.go
-
 func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
+
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
 	if err != nil {
@@ -194,11 +193,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 			return err
 		}
 	})
-
-	if err := <-readyChan; err != nil {
+	// Wait for the proxy server to be ready or fail
+	err = <-readyChan
+	if err != nil {
 		return err
 	}
-
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
@@ -312,6 +311,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	sourcePort := remoteAddr.Port
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
+
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
