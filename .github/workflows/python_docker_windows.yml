@@ -28,6 +28,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Detect Docker engine / WSL2
+        shell: bash
+        run: |
+          echo "=== docker info (key fields) ==="
+          ENGINE_OS="$(docker info --format '{{.OSType}}' || true)"
+          OS_STR="$(docker info --format '{{.OperatingSystem}}' || true)"
+          KERNEL="$(docker info --format '{{.KernelVersion}}' || true)"
+          echo "OSType: $ENGINE_OS"
+          echo "OperatingSystem: $OS_STR"
+          echo "KernelVersion: $KERNEL"
+
+          echo "=== wsl.exe status (if present) ==="
+          if command -v wsl.exe >/dev/null 2>&1; then
+            wsl.exe --status || true
+            wsl.exe -l -v || true
+          else
+            echo "wsl.exe not available on this runner"
+          fi
+
+          if [[ "$ENGINE_OS" == "linux" ]]; then
+            echo "✅ Docker is running the Linux engine (on Windows this is typically WSL2)."
+          else
+            echo "::error ::Docker is running the Windows engine (OSType=windows). Linux images (python:3.9, mongo) will not run."
+            exit 1
+          fi
+
       - name: Normalize Docker environment (Windows)
         shell: bash
         run: |
