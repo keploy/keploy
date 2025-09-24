@@ -2,6 +2,10 @@
 
 package tls
 
-func ExtractCertToTemp() (string, error) {
-	return "", nil
+import (
+	"go.uber.org/zap"
+)
+
+func SetupCaCertEnv(logger *zap.Logger) error {
+	return nil
 }

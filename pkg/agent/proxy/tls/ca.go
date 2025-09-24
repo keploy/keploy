@@ -228,25 +228,13 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 		return err
 	}
 
-	tempCertPath, err := ExtractCertToTemp()
+	// Set environment variables for Node.js and Python to use the custom CA
+	err = SetupCaCertEnv(logger)
 	if err != nil {
-		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
+		utils.LogError(logger, err, "Failed to set up CA cert environment variables")
 		return err
 	}
 
-	// for node
-	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
-	if err != nil {
-		utils.LogError(logger, err, "Failed to set environment variable NODE_EXTRA_CA_CERTS")
-		return err
-	}
-
-	// for python
-	err = os.Setenv("REQUESTS_CA_BUNDLE", tempCertPath)
-	if err != nil {
-		utils.LogError(logger, err, "Failed to set environment variable REQUESTS_CA_BUNDLE")
-		return err
-	}
 	return nil
 }
 
@@ -342,4 +330,28 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	}
 
 	return &serverTLSCert, nil
+}
+
+func SetupCaCertEnv(logger *zap.Logger) error {
+	tempCertPath, err := ExtractCertToTemp()
+	if err != nil {
+		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
+		return err
+	}
+
+	// for node
+	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to set environment variable NODE_EXTRA_CA_CERTS")
+		return err
+	}
+
+	// for python
+	err = os.Setenv("REQUESTS_CA_BUNDLE", tempCertPath)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to set environment variable REQUESTS_CA_BUNDLE")
+		return err
+	}
+
+	return nil
 }
