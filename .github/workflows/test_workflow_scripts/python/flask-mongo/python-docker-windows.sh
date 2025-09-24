@@ -68,11 +68,11 @@ fi
 
 # --- Record twice ---
 for i in 1 2; do
-  container_name="flaskApp_${i}"
+  container_name="flask-app"
   send_request "${container_name}" &
   # NOTE: no -E at start; goes through run_env
   run_env "$RECORD_BIN" record \
-    -c "docker run -p 6000:6000 --rm --name ${container_name} flask-app:1.0" \
+    -c "docker compose up" \
     --container-name "${container_name}" &> "${container_name}.txt" || true
 
   cat "${container_name}.txt"
@@ -92,10 +92,10 @@ for i in 1 2; do
 done
 
 # --- Test (replay) ---
-test_container="flaskApp_test"
+test_container="flask-app"
 # map the correct port (6000), not 8080
 run_env "$REPLAY_BIN" test \
-  -c "docker run -p 6000:6000 --rm --name ${test_container} flask-app:1.0" \
+  -c "docker compose up" \
   --containerName "${test_container}" --apiTimeout 60 --delay 20 \
   --generate-github-actions=false &> "${test_container}.txt" || true
 
