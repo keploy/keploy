@@ -139,9 +139,9 @@ jobs:
         id: fuzzer
         run: |
           set -euo pipefail
-          KEY="releases/grpc-fuzzer/latest/grpc-fuzzer-linux-amd64.tar.gz"
+          KEY="releases/grpc-unary-fuzzer/latest/grpc-unary-fuzzer-linux-amd64.tar.gz"
           aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
-          tar -xzf grpc-fuzzer-linux-amd64.tar.gz
+          tar -xzf grpc-unary-fuzzer-linux-amd64.tar.gz
           chmod +x ./client ./server
           echo "client=$(realpath ./client)" >> $GITHUB_OUTPUT
           echo "server=$(realpath ./server)" >> $GITHUB_OUTPUT
