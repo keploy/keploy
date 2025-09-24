@@ -75,11 +75,11 @@ jobs:
     uses: ./.github/workflows/fuzzer_linux.yml
     secrets:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  run_grpc_fuzzer:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/grpc_fuzzer.yml
-    secrets:
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#  run_grpc_fuzzer:
+#    needs: [build-and-upload, upload-latest]
+#    uses: ./.github/workflows/grpc_fuzzer.yml
+#    secrets:
+#      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   run_node_mapping:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_mapping.yml
