@@ -59,6 +59,7 @@ func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions) error {
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
+		return err
 	}
 
 	<-ctx.Done()

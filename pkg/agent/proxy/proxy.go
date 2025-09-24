@@ -166,10 +166,12 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions, incomin
 
 		select {
 		case <-ctx.Done():
-			err := p.TCPDNSServer.Shutdown()
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-				return err
+			if p.TCPDNSServer != nil {
+				err := p.TCPDNSServer.Shutdown()
+				if err != nil {
+					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
+					return err
+				}
 			}
 			return nil
 		case err := <-errCh:
@@ -192,10 +194,12 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions, incomin
 
 		select {
 		case <-ctx.Done():
-			err := p.UDPDNSServer.Shutdown()
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-				return err
+			if p.UDPDNSServer != nil {
+				err := p.UDPDNSServer.Shutdown()
+				if err != nil {
+					utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
+					return err
+				}
 			}
 			return nil
 		case err := <-errCh:
