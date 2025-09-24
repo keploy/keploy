@@ -46,6 +46,7 @@ jobs:
 
   build-docker-image:
     runs-on: windows-latest
+    needs: [build-and-upload, upload-latest]
     steps:
       - uses: actions/checkout@v4
 
