@@ -31,13 +31,13 @@ sleep 5
 
 # --- Helpers ---
 # THIS IS THE KEY CHANGE: Gracefully stop the app container, allowing Keploy to shut down cleanly.
-graceful_shutdown() {
-  local container_name="$1"
-  echo "Gracefully stopping container: ${container_name} to allow clean Keploy exit."
-  # Give a few seconds for the final requests to complete before stopping.
-  sleep 3
-  docker stop "${container_name}" >/dev/null 2>&1 || true
-}
+# graceful_shutdown() {
+#   local container_name="$1"
+#   echo "Gracefully stopping container: ${container_name} to allow clean Keploy exit."
+#   # Give a few seconds for the final requests to complete before stopping.
+#   sleep 3
+#   docker stop "${container_name}" >/dev/null 2>&1 || true
+# }
 
 send_request_and_shutdown() {
   local container_name="${1:-}"
@@ -63,7 +63,7 @@ send_request_and_shutdown() {
   curl -sS -X DELETE http://localhost:6000/students/12345 >/dev/null
 
   # Call the new shutdown function instead of killing the Keploy process directly.
-  graceful_shutdown "$container_name"
+#   graceful_shutdown "$container_name"
 }
 
 # --- Record sessions ---
@@ -78,6 +78,7 @@ for i in 1 2; do
     -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
     --container-name "$container_name" \
     --generate-github-actions=false \
+    --record-timer=9s \
     &> "${container_name}.txt"
   
   # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
