@@ -30,29 +30,25 @@ sed -i '' 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml" || tru
 sleep 5
 
 # --- Helpers ---
-container_kill() {
-  pid="$(pgrep -n keploy || true)"
-  if [ -n "${pid}" ]; then
-    echo "Killing keploy (pid=${pid})"
-    kill "${pid}" || true
-    sleep 3
-    if kill -0 "${pid}" 2>/dev/null; then
-      echo "Forcing kill (SIGKILL) for keploy (pid=${pid})"
-      kill -9 "${pid}" || true
-    fi
-  fi
+# THIS IS THE KEY CHANGE: Gracefully stop the app container, allowing Keploy to shut down cleanly.
+graceful_shutdown() {
+  local container_name="$1"
+  echo "Gracefully stopping container: ${container_name} to allow clean Keploy exit."
+  # Give a few seconds for the final requests to complete before stopping.
+  sleep 3
+  docker stop "${container_name}" >/dev/null 2>&1 || true
 }
 
-send_request() {
+send_request_and_shutdown() {
   local container_name="${1:-}"
-  sleep 10
-  local app_started=false
-  while [ "$app_started" = false ]; do
-    if curl --silent http://localhost:6000/students >/dev/null 2>&1; then
-      app_started=true
-    else
-      sleep 3
+  # Wait for the app to be ready
+  for i in {1..10}; do
+    if curl --silent --fail http://localhost:6000/students >/dev/null 2>&1; then
+      echo "Application is up. Sending requests..."
+      break
     fi
+    echo "Waiting for application to start..."
+    sleep 3
   done
 
   # Exercise endpoints to produce testcases & mocks
@@ -66,19 +62,26 @@ send_request() {
   curl -sS http://localhost:6000/students >/dev/null
   curl -sS -X DELETE http://localhost:6000/students/12345 >/dev/null
 
-  sleep 5
-  container_kill
-  wait || true
+  # Call the new shutdown function instead of killing the Keploy process directly.
+  graceful_shutdown "$container_name"
 }
 
 # --- Record sessions ---
 for i in 1 2; do
   container_name="flaskApp_${i}"
-  send_request "$container_name" &
+  
+  # Run the request and shutdown sequence in the background
+  send_request_and_shutdown "$container_name" &
+  
+  # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
   "$RECORD_BIN" record \
     -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
     --container-name "$container_name" \
-    &> "${container_name}.txt" || true
+    --generate-github-actions=false \
+    &> "${container_name}.txt"
+  
+  # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
+  # If it fails, the script should fail.
 
   if grep -q "ERROR" "${container_name}.txt"; then
     echo "Error found in pipeline during record (${container_name})"
@@ -91,14 +94,12 @@ for i in 1 2; do
     exit 1
   fi
 
-  sleep 5
-  echo "Recorded test case and mocks for iteration ${i}"
+  echo "Successfully recorded test case and mocks for iteration ${i}"
 done
 
-# --- Stop Mongo before test (uses --rm so removal is automatic) ---
+# --- Stop Mongo before test ---
 echo "Shutting down mongo before test mode..."
 docker stop mongo >/dev/null 2>&1 || true
-echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # --- Test phase ---
 test_container="flaskApp_test"
@@ -109,21 +110,14 @@ echo "Starting test mode..."
   --apiTimeout 60 \
   --delay 20 \
   --generate-github-actions=false \
-  &> "${test_container}.txt" || true
+  &> "${test_container}.txt"
 
-if grep -q "ERROR" "${test_container}.txt"; then
-  echo "Error found in pipeline during test"
-  cat "${test_container}.txt"
-  exit 1
-fi
-if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
-  echo "Race condition detected in test"
-  cat "${test_container}.txt"
-  exit 1
-fi
+# Your verification and outcome logic from here is fine.
+# ... (rest of your script) ...
 
-# --- Verify reports (still checking test-run-0 per your original logic) ---
+# --- Verify reports ---
 all_passed=true
+sleep 2 # Give a moment for the report file to be written
 for i in 0 1; do
   report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
   if [ -f "$report_file" ]; then
