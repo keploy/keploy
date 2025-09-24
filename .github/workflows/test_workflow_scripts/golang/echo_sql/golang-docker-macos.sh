@@ -78,6 +78,8 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+ cat "${container_name}.txt"  # For visibility in logs
+
 # Shutdown services before test mode - Keploy should use mocks for dependencies
 echo "Shutting down docker compose services before test mode..."
 docker compose down
@@ -98,6 +100,8 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     cat "${test_container}.txt"
     exit 1
 fi
+
+cat "${test_container}.txt"  # For visibility in logs
 
 all_passed=true
 
