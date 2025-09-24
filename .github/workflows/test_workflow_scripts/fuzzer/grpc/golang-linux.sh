@@ -68,6 +68,36 @@ ensure_success_phrase() {
   exit 1
 }
 
+# --- ✨ NEW: Graceful shutdown function ---
+stop_keploy_gracefully() {
+  echo "Stopping keploy gracefully..."
+  pid=$(pgrep keploy || true)
+  if [ -z "${pid:-}" ]; then
+    echo "Keploy process not found."
+    return
+  fi
+
+  echo "${pid} is the Keploy PID"
+  # Send SIGINT (Ctrl+C) for a graceful shutdown, allowing keploy to save files.
+  sudo kill -INT "$pid" || true
+
+  # Wait up to 30 seconds for it to exit
+  timeout=30
+  while [ $timeout -gt 0 ] && ps -p "$pid" > /dev/null; do
+    sleep 1
+    timeout=$((timeout - 1))
+  done
+
+  # If it's still running, force kill it
+  if ps -p "$pid" > /dev/null; then
+    echo "Keploy did not shut down gracefully after 30s, forcing kill."
+    sudo kill -KILL "$pid" || true
+  else
+    echo "Keploy shut down gracefully."
+  fi
+}
+
+
 if [ "$MODE" = "incoming" ]; then
   echo "🧪 Testing with incoming requests"
 
@@ -80,6 +110,7 @@ if [ "$MODE" = "incoming" ]; then
   sleep 10
 
   # Kick off 1000 unary RPC fuzz calls
+  echo "Starting fuzzing run..."
   curl -sS -X POST http://localhost:18080/run \
     -H 'Content-Type: application/json' \
     -d '{
@@ -91,17 +122,11 @@ if [ "$MODE" = "incoming" ]; then
       "max_diffs": 5
     }'
 
-  sleep 120
+  # --- ✨ CHANGED: Added cool-down period for Keploy to process recordings ---
+  echo "Fuzzing complete. Giving Keploy time to process recordings..."
+  sleep 30
 
-  echo "Stopping keploy record and server"
-
-  # Stop keploy record
-  pid=$(pgrep keploy || true)
-  echo "$pid Keploy PID"
-  if [ -n "${pid:-}" ]; then
-    echo "Killing keploy"
-    sudo kill "$pid" || true
-  fi
+  stop_keploy_gracefully
 
   echo "Waiting for processes to settle"
 
@@ -156,6 +181,7 @@ elif [ "$MODE" = "outgoing" ]; then
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" &> record_outgoing.txt &
   sleep 10
 
+  echo "Starting fuzzing run..."
   curl -sS -X POST http://localhost:18080/run \
     -H 'Content-Type: application/json' \
     -d '{
@@ -167,20 +193,19 @@ elif [ "$MODE" = "outgoing" ]; then
       "max_diffs": 5
     }'
 
-  sleep 10
+  # --- ✨ CHANGED: Increased cool-down period significantly ---
+  echo "Fuzzing complete. Giving Keploy time to process recordings..."
+  sleep 30
 
-  pid=$(pgrep keploy || true)
-  echo "$pid Keploy PID"
-  if [ -n "${pid:-}" ]; then
-    echo "Killing keploy"
-    sudo kill "$pid" || true
-  fi
+  stop_keploy_gracefully
+
   sleep 5
 
   check_for_errors server_outgoing.txt
   check_for_errors record_outgoing.txt
 
   # Replay the client (relying on mocks)
+  echo "Replaying outgoing requests..."
   sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" &> test_outgoing.txt
   check_for_errors test_outgoing.txt
   ensure_success_phrase test_outgoing.txt
