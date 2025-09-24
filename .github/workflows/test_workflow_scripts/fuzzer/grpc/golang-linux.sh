@@ -31,16 +31,33 @@ sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "./keploy.yml"
 
 SUCCESS_PHRASE="all 1000 unary RPCs validated successfully"
 
+# --- ✨ NEW: Robust function to wait for a port to be open ---
+wait_for_port() {
+  local port=$1
+  local service_name=$2
+  local timeout=30
+  echo "Waiting for $service_name on port $port..."
+  while ! nc -z localhost "$port" > /dev/null 2>&1 && [ $timeout -gt 0 ]; do
+    sleep 1
+    timeout=$((timeout - 1))
+  done
+
+  if [ $timeout -eq 0 ]; then
+    echo "::error::$service_name failed to start on port $port in time."
+    exit 1
+  fi
+  echo "$service_name is ready."
+}
+
+
 check_for_errors() {
   local logfile=$1
   if [ -f "$logfile" ]; then
     if grep -q "ERROR" "$logfile"; then
-      # Ignore benign coverage-symbol errors from stripped binaries
       if grep -Eq 'failed to read symbols, skipping coverage calculation|no symbol section' "$logfile"; then
         echo "Ignoring benign coverage-symbol error in $logfile"
       else
         echo "Error found in $logfile"
-        # show only ERROR lines for quick triage
         grep -n "ERROR" "$logfile" || true
         cat "$logfile"
         exit 1
@@ -68,7 +85,6 @@ ensure_success_phrase() {
   exit 1
 }
 
-# --- ✨ NEW: Graceful shutdown function ---
 stop_keploy_gracefully() {
   echo "Stopping keploy gracefully..."
   pid=$(pgrep keploy || true)
@@ -78,17 +94,14 @@ stop_keploy_gracefully() {
   fi
 
   echo "${pid} is the Keploy PID"
-  # Send SIGINT (Ctrl+C) for a graceful shutdown, allowing keploy to save files.
   sudo kill -INT "$pid" || true
-
-  # Wait up to 30 seconds for it to exit
+  
   timeout=30
   while [ $timeout -gt 0 ] && ps -p "$pid" > /dev/null; do
     sleep 1
     timeout=$((timeout - 1))
   done
 
-  # If it's still running, force kill it
   if ps -p "$pid" > /dev/null; then
     echo "Keploy did not shut down gracefully after 30s, forcing kill."
     sudo kill -KILL "$pid" || true
@@ -103,11 +116,13 @@ if [ "$MODE" = "incoming" ]; then
 
   # Start server with keploy in record mode
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" &> record_incoming.txt &
-  sleep 10
+  # --- ✨ CHANGED: Use wait_for_port instead of sleep ---
+  wait_for_port 50051 "Fuzzer Server"
 
   # Start client HTTP driver
   "$FUZZER_CLIENT_BIN" --http :18080 &> client_incoming.txt &
-  sleep 10
+  # --- ✨ CHANGED: Use wait_for_port instead of sleep ---
+  wait_for_port 18080 "Fuzzer Client"
 
   # Kick off 1000 unary RPC fuzz calls
   echo "Starting fuzzing run..."
@@ -122,17 +137,13 @@ if [ "$MODE" = "incoming" ]; then
       "max_diffs": 5
     }'
 
-  # --- ✨ CHANGED: Added cool-down period for Keploy to process recordings ---
   echo "Fuzzing complete. Giving Keploy time to process recordings..."
   sleep 30
 
   stop_keploy_gracefully
-
   echo "Waiting for processes to settle"
-
   check_for_errors record_incoming.txt
   check_for_errors client_incoming.txt
-
   echo "Replaying incoming requests"
 
   # Replay
@@ -140,7 +151,6 @@ if [ "$MODE" = "incoming" ]; then
   echo "checking for errors"
   check_for_errors test_incoming.txt
 
-  # ✅ For INCOMING mode: no success-phrase check. Instead, verify Keploy reports PASSED.
   RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
   if [[ -z "${RUN_DIR:-}" ]]; then
     echo "::error::No test-run directory found under ./keploy/reports"
@@ -175,11 +185,13 @@ elif [ "$MODE" = "outgoing" ]; then
 
   # Start server (no keploy here)
   "$FUZZER_SERVER_BIN" &> server_outgoing.txt &
-  sleep 5
+  # --- ✨ CHANGED: Use wait_for_port instead of sleep ---
+  wait_for_port 50051 "Fuzzer Server"
 
   # Record the client (it makes outgoing RPCs)
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" &> record_outgoing.txt &
-  sleep 10
+  # --- ✨ CHANGED: Use wait_for_port instead of sleep ---
+  wait_for_port 18080 "Fuzzer Client"
 
   echo "Starting fuzzing run..."
   curl -sS -X POST http://localhost:18080/run \
@@ -193,14 +205,11 @@ elif [ "$MODE" = "outgoing" ]; then
       "max_diffs": 5
     }'
 
-  # --- ✨ CHANGED: Increased cool-down period significantly ---
   echo "Fuzzing complete. Giving Keploy time to process recordings..."
   sleep 30
 
   stop_keploy_gracefully
-
   sleep 5
-
   check_for_errors server_outgoing.txt
   check_for_errors record_outgoing.txt
 
