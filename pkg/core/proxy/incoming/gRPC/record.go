@@ -301,8 +301,13 @@ func (p *grpcTestCaseProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod str
 			hdr.OrdinaryHeaders["te"] = "trailers"
 		}
 	} else {
-		// Response headers are handled as they are received.
-		// No special default values are typically needed.
+		if _, ok := hdr.PseudoHeaders[":status"]; !ok {
+			hdr.PseudoHeaders[":status"] = "200"
+		}
+		if ct, ok := hdr.OrdinaryHeaders["content-type"]; ok &&
+			strings.HasPrefix(ct, "application/grpc") {
+			hdr.OrdinaryHeaders["content-type"] = "application/grpc"
+		}
 	}
 	return hdr
 }
