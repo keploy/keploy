@@ -4,6 +4,15 @@ set -euo pipefail
 SUDO=""
 if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
 
+# wrapper to preserve env with/without sudo
+run_env() {
+  if [ -n "${SUDO}" ]; then
+    sudo -E env PATH="$PATH" "$@"
+  else
+    env PATH="$PATH" "$@"
+  fi
+}
+
 source "${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh"
 
 # --- Detect Docker engine ---
@@ -14,20 +23,18 @@ if [[ "${ENGINE_OS}" != "windows" ]]; then
   exit 1
 fi
 
-# --- Build Windows image ---
 echo "Building Windows image with Dockerfile.windows..."
 docker build -t flask-app:1.0 -f Dockerfile.windows .
 
-# --- Helper to kill keploy process if still running ---
 container_kill() {
   pid=$(pgrep -n keploy || true)
   if [ -n "${pid:-}" ]; then
     echo "Killing keploy PID ${pid}"
-    $SUDO kill "${pid}" || true
+    # no bare -E here anymore
+    ${SUDO:+sudo} kill "${pid}" || true
   fi
 }
 
-# --- Wait for app and send traffic ---
 send_request() {
   local container_name="$1"
   echo "Waiting for ${container_name} on :6000"
@@ -38,7 +45,6 @@ send_request() {
     sleep 2
   done
 
-  # Your existing calls (no DB now)
   curl -s -X POST -H "Content-Type: application/json" \
     -d '{"student_id":"12345","name":"John Doe","age":20}' http://localhost:6000/students >/dev/null
   curl -s -X POST -H "Content-Type: application/json" \
@@ -54,10 +60,8 @@ send_request() {
   wait || true
 }
 
-# --- Clean previous run ---
 rm -rf keploy/ || true
 
-# --- Optional: tweak keploy.yml if your app needs it (safe if absent) ---
 if [ -f "./keploy.yml" ]; then
   sed -i 's/global: {}/global: {"header":{"Allow":[]}}/' "./keploy.yml" || true
 fi
@@ -66,12 +70,11 @@ fi
 for i in 1 2; do
   container_name="flaskApp_${i}"
   send_request "${container_name}" &
-  # Windows engine default network is NAT; -p works fine
-  $SUDO -E env PATH="$PATH" "$RECORD_BIN" record \
+  # NOTE: no -E at start; goes through run_env
+  run_env "$RECORD_BIN" record \
     -c "docker run -p 6000:6000 --rm --name ${container_name} flask-app:1.0" \
     --container-name "${container_name}" &> "${container_name}.txt" || true
 
-  # output the container_name.txt
   cat "${container_name}.txt"
 
   if grep -q "ERROR" "${container_name}.txt"; then
@@ -90,12 +93,12 @@ done
 
 # --- Test (replay) ---
 test_container="flaskApp_test"
-$SUDO -E env PATH="$PATH" "$REPLAY_BIN" test \
-  -c "docker run -p 8080:8080 --rm --name ${test_container} flask-app:1.0" \
+# map the correct port (6000), not 8080
+run_env "$REPLAY_BIN" test \
+  -c "docker run -p 6000:6000 --rm --name ${test_container} flask-app:1.0" \
   --containerName "${test_container}" --apiTimeout 60 --delay 20 \
   --generate-github-actions=false &> "${test_container}.txt" || true
 
-# output the test_container.txt
 cat "${test_container}.txt"
 
 if grep -q "ERROR" "${test_container}.txt"; then
@@ -109,7 +112,6 @@ if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
   exit 1
 fi
 
-# --- Gate on reports if present ---
 all_passed=true
 for i in 0 1; do
   report="./keploy/reports/test-run-0/test-set-${i}-report.yaml"
