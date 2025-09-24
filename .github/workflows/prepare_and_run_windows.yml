@@ -55,26 +55,29 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-      
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-        
-      - name: Build image
+
+      - name: Build image (Linux if possible, else Windows variant)
+        id: build_image_win
         shell: bash
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
 
       - name: Push image
+        if: steps.build_image_win.outputs.built == 'true'
         run: |
-          docker push ttl.sh/keploy/keploy:1h
+          docker push ${{ steps.build_image_win.outputs.image }}
 
       - name: Clean up git config
         if: always()
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
+
 
   run_python_docker_windows:
     needs: [build-and-upload, upload-latest, build-docker-image]
