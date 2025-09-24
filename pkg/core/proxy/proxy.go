@@ -21,7 +21,6 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
-	Hooks "go.keploy.io/server/v2/pkg/core/hooks"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -66,18 +65,15 @@ type Proxy struct {
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
-	hooks             *Hooks.Hooks
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
-	h := info.(*Hooks.Hooks)
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort, // default: 16789
-		hooks:             h,
-		DNSPort:           opts.DNSPort, // default: 26789
-		IP4:               "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		DNSPort:           opts.DNSPort,   // default: 26789
+		IP4:               "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
+		IP6:               "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:           &sync.Mutex{},
 		connMutex:         &sync.Mutex{},
 		DestInfo:          info,
@@ -105,8 +101,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 
 // In proxy.go
 
-func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incomingOpts models.IncomingOptions) error {
-
+func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
 	if err != nil {

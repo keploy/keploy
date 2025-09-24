@@ -137,11 +137,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return nil
 	default:
 	}
-	var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
-		return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-	}
+
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err := r.Instrument(hookCtx, persister)
+	appID, err := r.Instrument(hookCtx, newTestSetID)
 
 	if err != nil {
 		stopReason = "failed to instrument the application"
@@ -280,7 +278,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePersister) (uint64, error) {
+func (r *Recorder) Instrument(ctx context.Context, newTestSetID string) (uint64, error) {
 	var stopReason string
 	// setting up the environment for recording
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
@@ -303,12 +301,7 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 			Rules:         r.config.BypassRules,
 			E2E:           r.config.E2E,
 			Port:          r.config.Port,
-			Persister:     persister,
-			Incoming: models.IncomingOptions{
-				Filters:  r.config.Record.Filters,
-				BasePath: r.config.Record.BasePath,
-			},
-			BigPayload: r.config.Record.BigPayload,
+			BigPayload:    r.config.Record.BigPayload,
 		}
 
 		err = r.instrumentation.Hook(ctx, appID, hooks)
@@ -329,6 +322,9 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 			}
 			// Call the new core method to start the ingress proxy listener.
 			// This call is non-blocking.
+			var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+				return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			}
 			if err := r.instrumentation.StartIncomingProxy(ctx, persister, incomingOpts); err != nil {
 				stopReason = "failed to start the ingress proxy"
 				utils.LogError(r.logger, err, stopReason)

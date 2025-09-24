@@ -20,6 +20,7 @@ type Hooks interface {
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 	GetUnloadDone() <-chan struct{}
 }
 
@@ -44,7 +45,7 @@ type App interface {
 
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
-	StartProxy(ctx context.Context, opts ProxyOptions, incomingOpts models.IncomingOptions) error
+	StartProxy(ctx context.Context, opts ProxyOptions) error
 	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
@@ -53,10 +54,7 @@ type Proxy interface {
 }
 
 type IncomingProxy interface {
-	UpdateDependencies(persister models.TestCasePersister, opts models.IncomingOptions)
-	StartIngressProxy(origAppPort, newAppPort uint16)
-	ListenForIngressEvents(ctx context.Context)
-	StopAll()
+	Start(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions)
 }
 
 type ProxyOptions struct {
@@ -64,9 +62,6 @@ type ProxyOptions struct {
 	DNSIPv4Addr string
 	// DNSIPv6Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv6Addr string
-	Persister   models.TestCasePersister
-	BigPayload  bool
-	Mode        models.Mode
 }
 
 type DestInfo interface {

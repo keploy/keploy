@@ -23,9 +23,15 @@ type HookOptions struct {
 	EnableTesting bool
 	E2E           bool
 	Port          uint32 // used for e2e filtering
-	Persister     TestCasePersister
-	Incoming      IncomingOptions
 	BigPayload    bool
+}
+
+type IngressEvent struct {
+	PID         uint32
+	Family      uint16
+	OrigAppPort uint16
+	NewAppPort  uint16
+	_           uint16 // Padding
 }
 
 type OutgoingOptions struct {
