@@ -50,7 +50,7 @@ jobs:
         with: { name: latest, path: keploy.exe }
 
   build-docker-image:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     needs: [build-and-upload, upload-latest]
     permissions:
       contents: read
@@ -129,11 +129,18 @@ jobs:
           ssh: default
           platforms: linux/amd64, linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ttl.sh/keploy/keploy:1h
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             SENTRY_DSN_DOCKER=${{secrets.SENTRY_DSN_DOCKER}}
             GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+
+      # Push the ttl.sh image for test workflows (always push this one)
+      - name: Push test image to ttl.sh
+        run: |
+          docker push ttl.sh/keploy/keploy:1h
 
       - name: Clean up git config
         if: always()
