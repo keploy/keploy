@@ -14,7 +14,7 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v2/pkg"
-	temputils "go.keploy.io/server/v2/pkg/core/hooks/conn"
+	Utils "go.keploy.io/server/v2/pkg/core/hooks/conn"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -263,7 +263,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 		GRPCReq:  grpcReq,
 		GRPCResp: grpcResp,
 	}
-	temputils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream)
+	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream)
 
 	if s, ok := status.FromError(respErr); ok && respErr != nil {
 		return s.Err()

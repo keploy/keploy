@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"debug/elf"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1301,12 +1300,6 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 // 	}
 // 	return string(xmlBytes), nil
 // }
-
-func NetworkToHostShort(net uint16) uint16 {
-	b := make([]byte, 2)
-	binary.BigEndian.PutUint16(b, net)
-	return binary.LittleEndian.Uint16(b)
-}
 
 func ParseGRPCPath(p string) (serviceFull, method string, err error) {
 	// Trim whitespace and validate input
