@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
 # macOS variant for echo-sql (docker compose). Uses BSD sed.
-set -euo pipefail
+# set -euo pipefail
 
-# Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
-export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-echo-sql}-$(date +%s)"
-export HOME="$KEPLOY_HOME_ROOT/home"
-mkdir -p "$HOME"
+# # Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
+# export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-echo-sql}-$(date +%s)"
+# export HOME="$KEPLOY_HOME_ROOT/home"
+# mkdir -p "$HOME"
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+# source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 
 # Build Docker Image(s)
@@ -18,20 +18,12 @@ docker compose build
 sudo rm -rf keploy/
 
 # Generate the keploy-config file.
-sudo -E env HOME="$HOME" PATH=$PATH "$RECORD_BIN" config --generate
+"$RECORD_BIN" config --generate
 
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
 sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
-# container_kill() {
-#     pid=$(pgrep -n keploy || true)
-#     if [ -n "$pid" ]; then
-#       echo "$pid Keploy PID"
-#       echo "Killing keploy"
-#       sudo kill $pid || true
-#     fi
-# }
 
 send_request(){
     sleep 10

@@ -4,9 +4,9 @@ on:
 
 jobs:
   golang_docker_macos:
-    concurrency:
-      group: macos-keploy-${{ github.ref }}
-      cancel-in-progress: false
+    # concurrency:
+    #   group: macos-keploy-${{ github.ref }}
+    #   cancel-in-progress: false
     runs-on: [self-hosted, macOS, native]
     strategy:
       fail-fast: false
@@ -65,6 +65,23 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+        
+      - name: Ensure Docker Compose is available (macOS)
+        shell: bash
+        run: |
+          set -e
+          if docker compose version >/dev/null 2>&1; then
+            echo "Compose V2 plugin found."
+            exit 0
+          fi
+          if command -v docker-compose >/dev/null 2>&1; then
+            echo "docker-compose (v1) found."
+            exit 0
+          fi
+          # Install docker-compose (v1) via Homebrew as a fallback
+          brew update
+          brew install docker-compose
+          echo "Installed docker-compose."
 
       - name: Run ${{ matrix.app.name }} application (macOS)
         env:
