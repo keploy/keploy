@@ -122,18 +122,13 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	}
 
 	addKeployNetwork(ctx, logger, client)
-	// Only attempt debugfs volume on linux where available
-	if runtime.GOOS == "linux" {
-		err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
-			"type":   "debugfs",
-			"device": "debugfs",
-		})
-		if err != nil {
-			utils.LogError(logger, err, "failed to debugfs volume")
-			return err
-		}
-	} else {
-		logger.Debug("skipping debugfs volume creation on non-linux platform", zap.String("goos", runtime.GOOS))
+	err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
+		"type":   "debugfs",
+		"device": "debugfs",
+	})
+	if err != nil {
+		utils.LogError(logger, err, "failed to debugfs volume")
+		return err
 	}
 
 	var cmd *exec.Cmd
@@ -268,20 +263,23 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		}
 
 		// Construct the alias command based on context-specific `debugfs` mount
-		// macOS path simplified: no privileged/debugfs mounts required
+		var alias string
 		if currentContext == "colima" {
-			// Allow docker client to connect to colima daemon
-			if err := os.Setenv("DOCKER_HOST", dockerEndpoint); err != nil {
-				utils.LogError(logger, err, "failed to set DOCKER_HOST for colima context")
+
+			// To allow docker client to connect to the colima daemon because by default it uses the default docker daemon
+			err := os.Setenv("DOCKER_HOST", dockerEndpoint)
+			if err != nil {
+				utils.LogError(logger, err, "failed to set DOCKER_HOST environment variable for colima context")
 				return "", errors.New("failed to get alias")
 			}
-			logger.Info("Starting keploy in docker (colima context, macOS). Skipping privileged/debugfs mounts")
-		} else {
-			logger.Info("Starting keploy in docker (default context, macOS). Skipping privileged/debugfs mounts")
+			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
+			alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + Volumes + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+			return alias, nil
 		}
-		// On macOS these mounts aren't available; drop --privileged, --pid=host, /sys mounts, debugfs
-		base := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789" + ttyFlag + Volumes + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-		return base, nil
+		// if default docker context is used
+		logger.Info("Starting keploy in docker with default context, as that is the current context.")
+		alias = "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + Volumes + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
 }
