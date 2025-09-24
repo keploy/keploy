@@ -146,5 +146,15 @@ if [ "$all_passed" = true ]; then
     exit 0
 else
     cat "${test_container}.txt"
+    echo "--- Diagnostics: keploy directory tree (if any) ---"
+    if [ -d keploy ]; then
+        find keploy -maxdepth 5 -type f -print
+    else
+        echo "keploy directory not found"
+    fi
+    echo "--- Diagnostics: docker ps (recent) ---"
+    docker ps -a | head -n 20 || true
+    echo "--- Diagnostics: container logs ($test_container) ---"
+    docker logs "$test_container" 2>&1 | tail -n 200 || true
     exit 1
 fi
