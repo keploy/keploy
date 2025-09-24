@@ -72,7 +72,21 @@ jobs:
             echo "✗ Kernel version $KERNEL_VERSION is below required $REQUIRED_VERSION"
             exit 1
           fi
-    
+
+      - name: Mount debugfs in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          # Check if debugfs is already mounted
+          if ! mountpoint -q /sys/kernel/debug; then
+            echo "Mounting debugfs..."
+            sudo mount -t debugfs debugfs /sys/kernel/debug
+          else
+            echo "debugfs is already mounted"
+          fi
+          # Verify the mount
+          mount | grep debugfs || echo "debugfs not found in mount output"  
+                    
       - name: Prepare binaries for WSL
         shell: bash
         run: |
