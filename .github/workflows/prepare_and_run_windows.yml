@@ -1,115 +1,81 @@
 name: Prepare Binary and Run Workflows (Windows)
+
 on:
   pull_request:
     branches: [main]
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Ephemeral registry. We make the repo path unique per-commit to avoid collisions.
+  TTL_IMAGE_REPO: ttl.sh/keploy/keploy-win-${{ github.sha }}
+  TTL_TAG: 1h  # image expires after 1 hour (ttl.sh rule)
 
 jobs:
   build-docker-image:
     runs-on: ubuntu-latest
+    # We only need minimal permissions to read code
     permissions:
       contents: read
-      packages: write
-      # This is used to complete the identity challenge
-      # with sigstore/fulcio when running outside of PRs.
-      id-token: write
+
+    outputs:
+      IMAGE_REF: ${{ steps.export.outputs.IMAGE_REF }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Build exactly the code from this PR HEAD
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ">=1.23"
 
-      - name: Add GitHub to known_hosts (Windows)
-        shell: bash
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
-      # Workaround: https://github.com/docker/build-push-action/issues/461
-      - name: Setup Docker buildx
-        uses: docker/setup-buildx-action@79abd3f86f79a9d68a23c75a09a9a85889262adf
+      - name: Enable Buildx
+        uses: docker/setup-buildx-action@v3
 
-      # Login against a Docker registry except on PR
-      # https://github.com/docker/login-action
-      - name: Log into registry ${{ env.REGISTRY }}
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Extract metadata (tags, labels) for Docker
-      # https://github.com/docker/metadata-action
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha
-
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: build
-          path: .
-
-      - name: Prepare Dockerfile for PR Build
+      - name: Prepare Dockerfile for Release Build
         shell: bash
         run: |
-          # Add the SSH host key to trust github.com and configure git to use SSH
+          # Trust github.com host key (for go mod via SSH) & ensure --mount=type=ssh
           sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' ./Dockerfile
-          
-          # Ensure the go mod download command uses the SSH agent mount
           sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile
 
-      # Build and push Docker image with Buildx (don't push on PR)
-      # https://github.com/docker/build-push-action
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+      - name: Build & Push (ttl.sh)
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           ssh: default
-          platforms: linux/amd64, linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ steps.meta.outputs.tags }}
-            ttl.sh/keploy/keploy:1h
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Push only to ttl.sh; repo includes SHA to avoid collisions; tag is TTL
+          tags: ${{ env.TTL_IMAGE_REPO }}:${{ env.TTL_TAG }}
           build-args: |
-            SENTRY_DSN_DOCKER=${{secrets.SENTRY_DSN_DOCKER}}
+            SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
+            VERSION=${{ github.sha }}
+            SERVER_URL=https://api.keploy.io
             GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
 
-      # Push the ttl.sh image for test workflows (always push this one)
-      - name: Push test image to ttl.sh
-        run: |
-          docker push ttl.sh/keploy/keploy:1h
-
-      - name: Clean up git config
-        if: always()
-        continue-on-error: true
-        run: |
-          git config --global --unset url."git@github.com:".insteadOf
+      - name: Export image ref for downstream jobs
+        id: export
+        run: echo "IMAGE_REF=${{ env.TTL_IMAGE_REPO }}:${{ env.TTL_TAG }}" >> "$GITHUB_OUTPUT"
 
   run_python_docker_windows:
-    needs: [build-and-upload, upload-latest, build-docker-image]
+    needs: [build-docker-image]
     uses: ./.github/workflows/python_docker_windows.yml
+    with:
+      # Pass the ephemeral image ref to the reusable workflow
+      image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}
 
   run_golang_docker_windows:
-    needs: [build-and-upload, upload-latest, build-docker-image]
+    needs: [build-docker-image]
     uses: ./.github/workflows/golang_docker_windows.yml
+    with:
+      # Pass the ephemeral image ref to the reusable workflow
+      image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}

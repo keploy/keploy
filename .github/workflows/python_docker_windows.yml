@@ -1,9 +1,20 @@
 name: Python On Docker (Windows)
+
 on:
   workflow_call:
+    inputs:
+      image_ref:
+        description: "Docker image to pull (e.g., ttl.sh/keploy/keploy-win-<sha>:1h)"
+        required: true
+        type: string
+
 jobs:
   python_docker_windows:
-    runs-on: windows-latest
+    # ✅ Prefer a self-hosted Windows runner that has Docker Desktop
+    runs-on: [self-hosted, Windows, docker]
+    # If you can't provide self-hosted Windows, run this on Ubuntu instead:
+    # runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
@@ -22,53 +33,28 @@ jobs:
             record_src: build
             replay_src: build
 
-  
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # - name: Detect Docker engine / WSL2
-      #   shell: bash
-      #   run: |
-      #     echo "=== docker info (key fields) ==="
-      #     ENGINE_OS="$(docker info --format '{{.OSType}}' || true)"
-      #     OS_STR="$(docker info --format '{{.OperatingSystem}}' || true)"
-      #     KERNEL="$(docker info --format '{{.KernelVersion}}' || true)"
-      #     echo "OSType: $ENGINE_OS"
-      #     echo "OperatingSystem: $OS_STR"
-      #     echo "KernelVersion: $KERNEL"
-
-      #     echo "=== wsl.exe status (if present) ==="
-      #     if command -v wsl.exe >/dev/null 2>&1; then
-      #       wsl.exe --status || true
-      #       wsl.exe -l -v || true
-      #     else
-      #       echo "wsl.exe not available on this runner"
-      #     fi
-
-      #     if [[ "$ENGINE_OS" == "linux" ]]; then
-      #       echo "✅ Docker is running the Linux engine (on Windows this is typically WSL2)."
-      #     else
-      #       echo "::error ::Docker is running the Windows engine (OSType=windows). Linux images (python:3.9, mongo) will not run."
-      #       exit 1
-      #     fi
-
-      - name: Normalize Docker environment (Windows)
+      - name: Ensure Docker engine is reachable
         shell: bash
         run: |
           echo "DOCKER_HOST before: ${DOCKER_HOST:-<unset>}"
           echo "DOCKER_HOST=" >> "$GITHUB_ENV"
           docker context use default || true
-          docker version || { echo "Docker daemon not reachable. Ensure Docker Desktop is running on the self-hosted runner." >&2; exit 1; }
+          docker version
 
-      - name: Setup Docker image for Windows
+      - name: Pull test image (from build job)
         shell: bash
         run: |
-          # For Windows, we use the Linux image built by the build-docker-image job (runs on Ubuntu with Linux containers)
-          # Tag it as the expected name for the test scripts
-          docker pull ttl.sh/keploy/keploy:1h
-          docker tag ttl.sh/keploy/keploy:1h ghcr.io/keploy/keploy:v2-dev
+          echo "Pulling ${{ inputs.image_ref }}"
+          docker pull "${{ inputs.image_ref }}"
+          # Optional: retag to the name your scripts expect
+          docker tag "${{ inputs.image_ref }}" ghcr.io/keploy/keploy:v2-dev
+          docker images | head -n 20
 
       - id: record
         uses: ./.github/actions/download-binary
