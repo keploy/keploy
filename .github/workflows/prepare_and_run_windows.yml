@@ -37,13 +37,16 @@ jobs:
 
       - name: Enable Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # Enable cache for faster builds
+          driver-opts: |
+            image=moby/buildkit:buildx-stable-1
 
-      - name: Prepare Dockerfile for Release Build
+      - name: Prepare Dockerfile for Fast Windows Build
         shell: bash
         run: |
-          # Trust github.com host key (for go mod via SSH) & ensure --mount=type=ssh
-          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' ./Dockerfile
-          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile
+          chmod +x ./.github/workflows/test_workflow_scripts/update-docker-windows-fast.sh
+          ./.github/workflows/test_workflow_scripts/update-docker-windows-fast.sh
 
       - name: Build & Push (ttl.sh)
         id: build
@@ -51,10 +54,15 @@ jobs:
         with:
           context: .
           ssh: default
-          platforms: linux/amd64,linux/arm64
+          # Only build for linux/amd64 to speed up the build for testing
+          platforms: linux/amd64
           push: true
           # Push only to ttl.sh; repo includes SHA to avoid collisions; tag is TTL
           tags: ${{ env.TTL_IMAGE_REPO }}:${{ env.TTL_TAG }}
+          # Enable caching for faster builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build args - script will optimize the actual usage in Dockerfile
           build-args: |
             SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
             VERSION=${{ github.sha }}
