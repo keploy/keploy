@@ -14,25 +14,64 @@ fi
 
 source ${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Start mongo before starting keploy.
-docker network create keploy-network || true
+# Function to create Docker network with fallback options
+create_docker_network() {
+    local network_name="keploy-network"
+    
+    # Check if network already exists
+    if docker network ls --format "{{.Name}}" | grep -q "^${network_name}$"; then
+        echo "Network ${network_name} already exists"
+        return 0
+    fi
+    
+    echo "Creating Docker network: ${network_name}"
+    
+    # Try creating network with bridge driver explicitly
+    if docker network create --driver bridge "${network_name}" 2>/dev/null; then
+        echo "Successfully created network ${network_name} with bridge driver"
+        return 0
+    fi
+    
+    # Fallback: try without explicit driver specification
+    if docker network create "${network_name}" 2>/dev/null; then
+        echo "Successfully created network ${network_name} with default driver"
+        return 0
+    fi
+    
+    # Last resort: try using the default bridge network
+    echo "Warning: Failed to create custom network. Will use default bridge network."
+    echo "This may affect container communication. Consider checking Docker daemon configuration."
+    return 1
+}
 
-# check whether keploy-network is created
-if docker network ls | grep -q "keploy-network"; then
-    echo "Keploy-network is already created"
-else
-    echo "Keploy-network is not created"
-    docker network create keploy-network
+# Validate Docker daemon is running
+if ! docker info >/dev/null 2>&1; then
+    echo "Error: Docker daemon is not running or not accessible"
+    exit 1
 fi
 
-docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
+# Create network with error handling
+create_docker_network
+network_created=$?
+
+# Determine network parameter for Docker containers
+if [ $network_created -eq 0 ]; then
+    NETWORK_PARAM="--net keploy-network"
+    echo "Using custom network: keploy-network"
+else
+    NETWORK_PARAM=""
+    echo "Using default network (no custom network available)"
+fi
+
+# Start MongoDB container
+docker run --name mongo --rm $NETWORK_PARAM -p 27017:27017 -d mongo
 
 # check whether mongo is running
 if docker ps | grep -q "mongo"; then
     echo "Mongo is already running"
 else
-    echo "Mongo is not running"
-    docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
+    echo "Mongo is not running, attempting to start..."
+    docker run --name mongo --rm $NETWORK_PARAM -p 27017:27017 -d mongo
 fi
 
 # Set up environment
@@ -89,7 +128,7 @@ send_request(){
 for i in {1..2}; do
     container_name="flaskApp_${i}"
     send_request &
-    $SUDO -E env PATH=$PATH "$RECORD_BIN" record -c "docker run -p 6000:6000 --network keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt" || true
+    $SUDO -E env PATH=$PATH "$RECORD_BIN" record -c "docker run -p 6000:6000 $NETWORK_PARAM --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt" || true
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
@@ -113,7 +152,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
 test_container="flashApp_test"
-$SUDO -E env PATH=$PATH "$REPLAY_BIN" test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
+$SUDO -E env PATH=$PATH "$REPLAY_BIN" test -c "docker run -p8080:8080 $NETWORK_PARAM --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
