@@ -82,9 +82,9 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			return
 		}
 
-		defer parsedHTTPReq.Body.Close()
-		defer parsedHTTPRes.Body.Close()
 		go func() {
+			defer parsedHTTPReq.Body.Close()
+			defer parsedHTTPRes.Body.Close()
 			hooksUtils.Capture(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, opts)
 		}()
 	}
