@@ -73,15 +73,15 @@ else
 fi
 
 # Start MongoDB container
-docker run --name mongo --rm $NETWORK_PARAM -p 27017:27017 -d mongo
+# docker run --name mongo --rm $NETWORK_PARAM -p 27017:27017 -d mongo
 
-# check whether mongo is running
-if docker ps | grep -q "mongo"; then
-    echo "Mongo is already running"
-else
-    echo "Mongo is not running, attempting to start..."
-    docker run --name mongo --rm $NETWORK_PARAM -p 27017:27017 -d mongo
-fi
+# # check whether mongo is running
+# if docker ps | grep -q "mongo"; then
+#     echo "Mongo is already running"
+# else
+#     echo "Mongo is not running, attempting to start..."
+#     docker run --name mongo --rm $NETWORK_PARAM -p 27017:27017 -d mongo
+# fi
 
 # Set up environment
 rm -rf keploy/  # Clean up old test data
