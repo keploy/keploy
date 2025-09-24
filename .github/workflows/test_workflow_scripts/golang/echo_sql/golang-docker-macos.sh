@@ -15,7 +15,7 @@
 docker compose build
 
 # Remove any preexisting keploy tests and mocks.
-sudo rm -rf keploy/
+rm -rf keploy/
 
 # Generate the keploy-config file.
 "$RECORD_BIN" config --generate
@@ -26,7 +26,7 @@ sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 
 send_request(){
-    sleep 10
+    sleep 1
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8082/health; then
@@ -53,7 +53,7 @@ send_request(){
     curl -X GET http://localhost:8082/health
 
     # Wait for 5 seconds for keploy to record the test cases and mocks.
-    sleep 5
+    sleep 3
     # container_kill
     # wait || true
 }
@@ -61,7 +61,7 @@ send_request(){
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    "$RECORD_BIN" record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=9s &> "${container_name}.txt" || true
+    "$RECORD_BIN" record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt" || true
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
