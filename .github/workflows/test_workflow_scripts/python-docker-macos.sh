@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
 
 # macOS variant. Requires Docker Desktop for Mac running.
-# Note: BSD sed needs an empty string after -i for in-place edits.
 
-# set -euo pipefail
+set -euo pipefail
 
-# # Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
-# export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-python-docker}-$(date +%s)"
-# export HOME="$KEPLOY_HOME_ROOT/home"
-# mkdir -p "$HOME"
 
-# source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # --- Networking: create once, quietly ---
 if ! docker network ls --format '{{.Name}}' | grep -q '^keploy-network$'; then
@@ -29,15 +24,6 @@ docker build -t flask-app:1.0 .
 sed -i '' 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml" || true
 sleep 5
 
-# --- Helpers ---
-# THIS IS THE KEY CHANGE: Gracefully stop the app container, allowing Keploy to shut down cleanly.
-# graceful_shutdown() {
-#   local container_name="$1"
-#   echo "Gracefully stopping container: ${container_name} to allow clean Keploy exit."
-#   # Give a few seconds for the final requests to complete before stopping.
-#   sleep 3
-#   docker stop "${container_name}" >/dev/null 2>&1 || true
-# }
 
 send_request_and_shutdown() {
   local container_name="${1:-}"
@@ -62,8 +48,7 @@ send_request_and_shutdown() {
   curl -sS http://localhost:6000/students >/dev/null
   curl -sS -X DELETE http://localhost:6000/students/12345 >/dev/null
 
-  # Call the new shutdown function instead of killing the Keploy process directly.
-#   graceful_shutdown "$container_name"
+
 }
 
 # --- Record sessions ---
@@ -110,12 +95,11 @@ echo "Starting test mode..."
   -c "docker run -p6000:6000 --net keploy-network --name $test_container flask-app:1.0" \
   --container-name "$test_container" \
   --apiTimeout 60 \
-  --delay 20 \
+  --delay 12 \
   --generate-github-actions=false \
   &> "${test_container}.txt"
 
-# Your verification and outcome logic from here is fine.
-# ... (rest of your script) ...
+
 
 # --- Verify reports ---
 all_passed=true

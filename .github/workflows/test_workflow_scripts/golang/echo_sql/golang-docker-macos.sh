@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 
 # macOS variant for echo-sql (docker compose). Uses BSD sed.
-# set -euo pipefail
+set -euo pipefail
 
-# # Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
-# export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-echo-sql}-$(date +%s)"
-# export HOME="$KEPLOY_HOME_ROOT/home"
-# mkdir -p "$HOME"
 
-# source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 
 # Build Docker Image(s)
@@ -27,13 +23,6 @@ sleep 5
 # sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 
-# container_kill() {
-#     echo "Killing keploy container"
-#     pid=$(pgrep -n keploy)
-#     echo "$pid Keploy PID"
-#     echo "Killing keploy"
-#     kill $pid
-# }
 
 send_request(){
     echo "Sending requests to the application..."
@@ -74,18 +63,18 @@ for i in {1..2}; do
     send_request &
     $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s
 
-    # if grep "WARNING: DATA RACE" "${container_name}.txt"; then
-    #     echo "Race condition detected in recording, stopping pipeline..."
-    #     cat "${container_name}.txt"
-    #     exit 1
-    # fi
-    # if grep "ERROR" "${container_name}.txt"; then
-    #     echo "Error found in pipeline..."
-    #     cat "${container_name}.txt"
-    #     exit 1
-    # fi
-    # sleep 5
-    #  cat "${container_name}.txt"  # For visibility in logs
+    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        cat "${container_name}.txt"
+        exit 1
+    fi
+    if grep "ERROR" "${container_name}.txt"; then
+        echo "Error found in pipeline..."
+        cat "${container_name}.txt"
+        exit 1
+    fi
+    sleep 5
+
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
