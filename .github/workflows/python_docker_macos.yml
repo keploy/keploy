@@ -4,9 +4,9 @@ on:
 
 jobs:
   python_docker_macos:
-    concurrency:
-      group: macos-keploy-${{ github.ref }}
-      cancel-in-progress: false
+    # concurrency:
+    #   group: macos-keploy-${{ github.ref }}
+    #   cancel-in-progress: false
     runs-on: [self-hosted, macOS, native]
     strategy:
       fail-fast: false
@@ -15,8 +15,8 @@ jobs:
           # - job: record_latest_replay_build
           #   record_src: latest
           #   replay_src: build
-          - job: record_build_replay_latest
-            record_src: build
+          - job: record_latest_replay_latest
+            record_src: latest
             replay_src: latest
           # - job: record_build_replay_build
           #   record_src: build
@@ -38,10 +38,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - id: image
-        uses: ./.github/actions/download-image
-        env:
-          DOCKER_HOST: ""
+      # - id: image
+      #   uses: ./.github/actions/download-image
+      #   env:
+      #     DOCKER_HOST: ""
 
       - id: record
         uses: ./.github/actions/download-binary

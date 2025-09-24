@@ -12,9 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - name: gin-mongo
-            path: gin-mongo
-            script_dir: gin_mongo
+          # - name: gin-mongo
+          #   path: gin-mongo
+          #   script_dir: gin_mongo
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
@@ -22,8 +22,8 @@ jobs:
           # - job: record_latest_replay_build
           #   record_src: latest
           #   replay_src: build
-          - job: record_build_replay_latest
-            record_src: build
+          - job: record_latest_replay_latest
+            record_src: latest
             replay_src: latest
           # - job: record_build_replay_build
           #   record_src: build
