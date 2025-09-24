@@ -130,6 +130,7 @@ jobs:
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
           chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true
+          sudo apt-get install -y golang-go curl git ca-certificates
           cd "$WS/samples-go/${{ matrix.app.path }}"
           # Source the existing Linux bash script under WSL
           source "$WS/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh"
