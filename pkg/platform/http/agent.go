@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
+	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
@@ -574,7 +575,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	})
 	a.apps.Store(clientID, usrApp)
 
-	err := usrApp.Setup(ctx)
+	err := a.SetTLSEnvironment()
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to set TLS environment")
+		return 0, err
+	}
+
+	err = usrApp.Setup(ctx)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to setup app")
 		return 0, err
@@ -878,6 +885,31 @@ func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {
 	return ch
 }
 
-func (c *AgentClient) GetErrorChannel() <-chan error {
+func (a *AgentClient) GetErrorChannel() <-chan error {
+	return nil
+}
+
+func (a *AgentClient) SetTLSEnvironment() error {
+
+	tempCertPath, err := ptls.ExtractCertToTemp()
+	if err != nil {
+		utils.LogError(a.logger, err, "Failed to extract certificate to tmp folder")
+		return err
+	}
+
+	// for node
+	err = os.Setenv("NODE_EXTRA_CA_CERTS", tempCertPath)
+	if err != nil {
+		utils.LogError(a.logger, err, "Failed to set environment variable NODE_EXTRA_CA_CERTS")
+		return err
+	}
+
+	// for python
+	err = os.Setenv("REQUESTS_CA_BUNDLE", tempCertPath)
+	if err != nil {
+		utils.LogError(a.logger, err, "Failed to set environment variable REQUESTS_CA_BUNDLE")
+		return err
+	}
+
 	return nil
 }
