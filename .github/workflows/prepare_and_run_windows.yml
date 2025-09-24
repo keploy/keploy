@@ -69,7 +69,7 @@ jobs:
           name: build
           path: .
 
-      - name: Build image (Linux if possible, else Windows variant)
+      - name: Build image
         id: build_image_win
         shell: bash
         run: |

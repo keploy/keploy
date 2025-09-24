@@ -47,10 +47,13 @@ jobs:
           docker context use default || true
           docker version || { echo "Docker daemon not reachable. Ensure Docker Desktop is running on the self-hosted runner." >&2; exit 1; }
 
-      - id: image
-        uses: ./.github/actions/download-image
-        env:
-          DOCKER_HOST: ""
+      - name: Setup Docker image for Windows
+        shell: bash
+        run: |
+          # For Windows, we use the Windows-specific image built by the build-docker-image job
+          # Tag it as the expected name for the test scripts
+          docker pull ttl.sh/keploy/keploy-win:1h
+          docker tag ttl.sh/keploy/keploy-win:1h ghcr.io/keploy/keploy:v2-dev
 
       - id: record
         uses: ./.github/actions/download-binary
