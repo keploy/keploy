@@ -8,50 +8,8 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-upload:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Add GitHub to known_hosts (Windows)
-        shell: bash
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Add Private Parsers
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-
-      - name: Build Keploy (PR) - Windows (windows/amd64)
-        shell: bash
-        run: |
-          GOOS=windows GOARCH=amd64 go build -tags=viper_bind_struct -o keploy.exe
-
-      - uses: actions/upload-artifact@v4
-        with: { name: build, path: keploy.exe }
-
-  upload-latest:
-    runs-on: windows-latest
-    steps:
-      - name: Download latest release (Windows)
-        shell: bash
-        run: |
-          LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
-          URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_windows_amd64.tar.gz"
-          curl -L "$URL" -o keploy.tar.gz
-          tar -xzf keploy.tar.gz
-          # Ensure the binary is named keploy.exe for consistency
-          if [ ! -f keploy.exe ] && [ -f keploy ]; then mv keploy keploy.exe; fi
-          chmod +x keploy.exe || true
-      - uses: actions/upload-artifact@v4
-        with: { name: latest, path: keploy.exe }
-
   build-docker-image:
     runs-on: ubuntu-latest
-    needs: [build-and-upload, upload-latest]
     permissions:
       contents: read
       packages: write
@@ -102,7 +60,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=sha,prefix={{branch}}-
+            type=sha
 
       - name: Download build artifact
         uses: actions/download-artifact@v4
