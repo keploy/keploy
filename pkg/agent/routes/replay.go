@@ -2,6 +2,7 @@
 package routes
 
 import (
+	"encoding/gob"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -100,36 +101,34 @@ func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *AgentRequest) StoreMocks(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/x-gob")
 
 	var storeMocksReq models.StoreMocksReq
-	err := json.NewDecoder(r.Body).Decode(&storeMocksReq)
+	if err := gob.NewDecoder(r.Body).Decode(&storeMocksReq); err != nil {
+		storeMocksRes := models.AgentResp{
+			ClientID:  0,
+			Error:     err,
+			IsSuccess: false,
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_ = gob.NewEncoder(w).Encode(storeMocksRes)
+		return
+	}
+
+	err := a.agent.StoreMocks(r.Context(), storeMocksReq.ClientID, storeMocksReq.Filtered, storeMocksReq.UnFiltered)
 
 	storeMocksRes := models.AgentResp{
 		ClientID:  storeMocksReq.ClientID,
-		Error:     nil,
-		IsSuccess: true,
+		Error:     err,
+		IsSuccess: err == nil,
 	}
 
 	if err != nil {
-		storeMocksRes.Error = err
-		storeMocksRes.IsSuccess = false
-		render.JSON(w, r, storeMocksRes)
-		render.Status(r, http.StatusBadRequest)
-		return
+		w.WriteHeader(http.StatusInternalServerError)
+	} else {
+		w.WriteHeader(http.StatusOK)
 	}
-
-	err = a.agent.StoreMocks(r.Context(), storeMocksReq.ClientID, storeMocksReq.Filtered, storeMocksReq.UnFiltered)
-	if err != nil {
-		storeMocksRes.Error = err
-		storeMocksRes.IsSuccess = false
-		render.JSON(w, r, storeMocksRes)
-		render.Status(r, http.StatusInternalServerError)
-		return
-	}
-
-	render.JSON(w, r, storeMocksRes)
-	render.Status(r, http.StatusOK)
+	_ = gob.NewEncoder(w).Encode(storeMocksRes)
 }
 
 func (a *AgentRequest) UpdateMockParams(w http.ResponseWriter, r *http.Request) {

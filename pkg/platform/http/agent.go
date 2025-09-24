@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed" // necessary for embedding
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,7 +175,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 			}
 		}()
 
-		decoder := json.NewDecoder(res.Body)
+		decoder := gob.NewDecoder(res.Body)
 
 		for {
 			var mock models.Mock
@@ -289,34 +290,53 @@ func (a *AgentClient) StoreMocks(ctx context.Context, id uint64, filtered []*mod
 		ClientID:   id,
 	}
 
-	requestJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to marshal request body for storemocks")
-		return fmt.Errorf("error marshaling request body for storemocks: %s", err.Error())
+	// gob-encode the body
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(requestBody); err != nil {
+		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks")
+		return fmt.Errorf("gob encode request for storemocks: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/storemocks", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		fmt.Sprintf("http://localhost:%d/agent/storemocks", a.conf.Agent.Port),
+		&buf,
+	)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for storemocks")
-		return fmt.Errorf("error creating request for store mocks: %s", err.Error())
+		return fmt.Errorf("create request for storemocks: %s", err.Error())
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-gob")
+	req.Header.Set("Accept", "application/x-gob")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request for storemocks: %s", err.Error())
+		return fmt.Errorf("send request for storemocks: %s", err.Error())
+	}
+	defer res.Body.Close()
+
+	// Non-200? Try to decode anyway; if that fails, return status text
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		// Best-effort decode; fall back to status if it fails
+		var fail models.AgentResp
+		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
+			return fmt.Errorf("storemocks http %d", res.StatusCode)
+		}
+		if fail.Error != nil {
+			return fail.Error
+		}
+		return fmt.Errorf("storemocks http %d", res.StatusCode)
 	}
 
 	var mockResp models.AgentResp
-	err = json.NewDecoder(res.Body).Decode(&mockResp)
-	if err != nil {
-		return fmt.Errorf("failed to decode response body for storemocks: %s", err.Error())
+	if err := gob.NewDecoder(res.Body).Decode(&mockResp); err != nil {
+		return fmt.Errorf("decode gob response for storemocks: %s", err.Error())
 	}
 
 	if mockResp.Error != nil {
 		return mockResp.Error
 	}
-
 	return nil
 }
 

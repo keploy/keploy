@@ -3,6 +3,7 @@ package routes
 
 import (
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -94,50 +95,47 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Transfer-Encoding", "chunked")
+	// Headers for a binary gob stream
+	w.Header().Set("Content-Type", "application/x-gob")
 	w.Header().Set("Cache-Control", "no-cache")
 
-	// Flush headers to ensure the client gets the response immediately
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
 
-	// Create a context with the request's context to manage cancellation
+	// If you had an SSE/JSON client, this changes: they'll need a gob client now.
 	errGrp, _ := errgroup.WithContext(r.Context())
 	ctx := context.WithValue(r.Context(), models.ErrGroupKey, errGrp)
 
 	var outgoingReq models.OutgoingReq
-	err := json.NewDecoder(r.Body).Decode(&outgoingReq)
-	if err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&outgoingReq); err != nil {
 		http.Error(w, "Error decoding request", http.StatusBadRequest)
 		return
 	}
 
-	// Call GetOutgoing to get the channel
 	mockChan, err := a.agent.GetOutgoing(ctx, outgoingReq.ClientID, outgoingReq.OutgoingOptions)
 	if err != nil {
-		render.JSON(w, r, err)
-		render.Status(r, http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("failed to get outgoing: %v", err), http.StatusInternalServerError)
 		a.logger.Error("failed to get outgoing", zap.Error(err))
 		return
 	}
 
-	for m := range mockChan {
+	enc := gob.NewEncoder(w)
+
+	for {
 		select {
 		case <-r.Context().Done():
-			if m != nil {
-				render.JSON(w, r, m)
-			} else {
-				render.JSON(w, r, "No more mocks")
-			}
-			flusher.Flush()
 			return
-		default:
-			// Stream each mock as JSON
-			render.JSON(w, r, m)
+		case m, ok := <-mockChan:
+			if !ok {
+				return
+			}
+			if err := enc.Encode(m); err != nil {
+				a.logger.Error("gob encode failed", zap.Error(err))
+				return
+			}
 			flusher.Flush()
 		}
 	}
