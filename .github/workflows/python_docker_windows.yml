@@ -65,4 +65,4 @@ jobs:
         shell: bash
         run: |
           cd samples-python/${{ matrix.app.path }}
-          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/windows/python-docker-windows.sh
+          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-docker-windows.sh
