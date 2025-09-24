@@ -5,7 +5,7 @@
 
 # set -euo pipefail
 
-# Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
+# # Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
 # export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-python-docker}-$(date +%s)"
 # export HOME="$KEPLOY_HOME_ROOT/home"
 # mkdir -p "$HOME"
@@ -74,11 +74,11 @@ for i in 1 2; do
   send_request_and_shutdown "$container_name" &
   
   # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
-  keploy record \
+  "$RECORD_BIN" record \
     -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
     --container-name "$container_name" \
     --generate-github-actions=false \
-    --record-timer=9s \
+    --record-timer=10s \
     &> "${container_name}.txt"
   
     cat "${container_name}.txt"  # For visibility in logs
@@ -106,11 +106,11 @@ docker stop mongo >/dev/null 2>&1 || true
 # --- Test phase ---
 test_container="flaskApp_test"
 echo "Starting test mode..."
-keploy test \
+"$REPLAY_BIN" test \
   -c "docker run -p6000:6000 --net keploy-network --name $test_container flask-app:1.0" \
   --container-name "$test_container" \
   --apiTimeout 60 \
-  --delay 10 \
+  --delay 20 \
   --generate-github-actions=false \
   &> "${test_container}.txt"
 
