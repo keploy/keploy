@@ -65,15 +65,15 @@ jobs:
         id: export
         run: echo "IMAGE_REF=${{ env.TTL_IMAGE_REPO }}:${{ env.TTL_TAG }}" >> "$GITHUB_OUTPUT"
 
-  # run_python_docker_windows:
-  #   needs: [build-docker-image]
-  #   uses: ./.github/workflows/python_docker_windows.yml
-  #   with:
-  #     image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}
+  run_python_docker_windows:
+    needs: [build-docker-image]
+    uses: ./.github/workflows/python_docker_windows.yml
+    with:
+      image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}
 
-  # run_golang_docker_windows:
-  #   needs: [build-docker-image]
-  #   uses: ./.github/workflows/golang_docker_windows.yml
-  #   with:
-  #     image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}
+  run_golang_docker_windows:
+    needs: [build-docker-image]
+    uses: ./.github/workflows/golang_docker_windows.yml
+    with:
+      image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}
 
