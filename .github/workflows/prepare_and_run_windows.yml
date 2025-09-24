@@ -45,8 +45,8 @@ jobs:
       - name: Prepare Dockerfile for Fast Windows Build
         shell: bash
         run: |
-          chmod +x ./.github/workflows/test_workflow_scripts/update-docker-windows-fast.sh
-          ./.github/workflows/test_workflow_scripts/update-docker-windows-fast.sh
+          chmod +x ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
+          ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
 
       - name: Build & Push (ttl.sh)
         id: build

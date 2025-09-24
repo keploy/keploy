@@ -36,17 +36,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Docker diagnostics
-        shell: powershell
-        run: |
-          Write-Host "=== OS ==="; cmd /c ver
-          Write-Host "`n=== Docker version ==="; docker version
-          Write-Host "`n=== Docker info (daemon) ==="
-          docker info --format 'Server: {{.OSType}}/{{.Architecture}}  {{.OperatingSystem}}  Kernel={{.KernelVersion}}'
-          Write-Host "`n=== Contexts ==="; docker context ls
-          Write-Host "`n=== Image manifests ==="
-          $img="${{ inputs.image_ref }}"; docker buildx imagetools inspect $img
-
       - name: Ensure Docker engine is reachable
         shell: bash
         run: |

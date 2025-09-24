@@ -1,56 +1,88 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
 
-emit_step_output() {
-  if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    echo "$1=$2" >> "$GITHUB_OUTPUT"
+DOCKERFILE_PATH="./Dockerfile"
+
+# Create a temp file safely and atomically replace the original
+rewrite_in_place() {
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp"
+  mv "$tmp" "$DOCKERFILE_PATH"
+}
+
+ensure_dockerfile_syntax() {
+  # Ensure BuildKit features (like --mount=type=ssh) are supported
+  if ! head -n1 "$DOCKERFILE_PATH" | grep -q '^# syntax=docker/dockerfile:'; then
+    echo "Prepending Dockerfile syntax directive for BuildKit mounts..."
+    {
+      echo '# syntax=docker/dockerfile:1.6'
+      cat "$DOCKERFILE_PATH"
+    } | rewrite_in_place
   fi
 }
 
-build_linux_image() {
-  echo "Linux engine detected; building Linux image from existing Dockerfile..."
-  DOCKER_BUILDKIT=1 docker build -t ttl.sh/keploy/keploy:1h .
-  emit_step_output built true
-  emit_step_output image ttl.sh/keploy/keploy:1h
+enable_ssh_mount_for_go_mod() {
+  echo "Switching go mod download to use BuildKit SSH mount (idempotent)..."
+  awk '
+    BEGIN { OFS="" }
+    /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
+      print "RUN --mount=type=ssh go mod download"
+      next
+    }
+    { print }
+  ' "$DOCKERFILE_PATH" | rewrite_in_place
 }
 
-build_windows_runtime_from_binary() {
-  echo "Windows containers engine detected; building runtime-only image from keploy.exe..."
-  if [ ! -f "keploy.exe" ]; then
-    echo "ERROR: keploy.exe not found in workspace. Download the artifact before this step."
-    emit_step_output built false
-    return 0
-  fi
+use_ssh_for_github_and_known_hosts() {
+  echo "Injecting SSH config and known_hosts around go mod download (idempotent)..."
+  
+  awk '
+    BEGIN {
+      OFS="";
+      injected_after_copy = 0;
+    }
 
-  cat > Dockerfile.win.runtime <<'EOF'
-# escape=`
-FROM mcr.microsoft.com/windows/nanoserver:ltsc2022
-WORKDIR C:\app
-COPY keploy.exe C:\app\keploy.exe
-ENTRYPOINT ["C:\\app\\keploy.exe"]
-EOF
+    # Helper function to emit git/ssh setup
+    function emit_git_known_hosts_block() {
+      print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\" && mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts"
+    }
 
-  docker build -f Dockerfile.win.runtime -t ttl.sh/keploy/keploy-win:1h .
-  emit_step_output built true
-  emit_step_output image ttl.sh/keploy/keploy-win:1h
+    # After COPY go.mod go.sum /app
+    /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
+      print;
+      if (!injected_after_copy) {
+        emit_git_known_hosts_block();
+        injected_after_copy = 1;
+      }
+      next
+    }
+
+    { print }
+  ' "$DOCKERFILE_PATH" | rewrite_in_place
+}
+
+optimize_build_for_speed() {
+  echo "Optimizing Go build flags for faster compilation (removing non-essential flags)..."
+  awk '
+    BEGIN { OFS="" }
+    # Find the go build line and simplify the ldflags for faster builds
+    /^[[:space:]]*RUN[[:space:]]+GOMAXPROCS=2[[:space:]]+go[[:space:]]+build.*-ldflags=.*/ {
+      # Replace the complex ldflags with simplified ones for testing
+      gsub(/-ldflags="[^"]*"/, "-ldflags=\"-X main.version=$VERSION -X main.apiServerURI=$SERVER_URL\"")
+      print; next
+    }
+    { print }
+  ' "$DOCKERFILE_PATH" | rewrite_in_place
 }
 
 main() {
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "Docker not found; skipping."
-    emit_step_output built false
-    return 0
-  fi
-
-  osType="$(docker info --format '{{.OSType}}' 2>/dev/null || echo unknown)"
-  echo "Docker engine OSType: $osType"
-
-  case "$osType" in
-    linux)   build_linux_image ;;
-    windows) build_windows_runtime_from_binary ;;
-    *)       echo "Unknown Docker engine OSType ($osType); skipping."
-             emit_step_output built false ;;
-  esac
+  echo "Preparing Dockerfile for fast Windows builds..."
+  ensure_dockerfile_syntax
+  enable_ssh_mount_for_go_mod
+  use_ssh_for_github_and_known_hosts
+  optimize_build_for_speed
+  echo "Dockerfile optimization complete!"
 }
 
 main
