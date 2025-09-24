@@ -13,9 +13,9 @@ import (
 // reference it without creating a circular dependency.
 type TestCasePersister func(ctx context.Context, testCase *TestCase) error
 
-type ProxyDependencies struct {
-	Persister TestCasePersister
-}
+// type ProxyDependencies struct {
+// 	Persister TestCasePersister
+// }
 
 type HookOptions struct {
 	Rules         []config.BypassRule

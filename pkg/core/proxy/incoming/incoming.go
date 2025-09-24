@@ -23,10 +23,10 @@ import (
 type proxyStop func() error
 
 type IngressProxyManager struct {
-	mu           sync.Mutex
-	active       map[uint16]proxyStop
-	logger       *zap.Logger
-	deps         models.ProxyDependencies // Use the new dependency struct
+	mu     sync.Mutex
+	active map[uint16]proxyStop
+	logger *zap.Logger
+	// deps         models.ProxyDependencies // Use the new dependency struct
 	hooks        core.Hooks
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
@@ -43,9 +43,9 @@ func New(logger *zap.Logger, h core.Hooks) *IngressProxyManager {
 }
 
 func (pm *IngressProxyManager) Start(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) {
-	pm.deps.Persister = persister
+	// pm.deps.Persister = persister
 	pm.incomingOpts = opts
-	go pm.persistTestCases(ctx)
+	go pm.persistTestCases(ctx, persister)
 	pm.ListenForIngressEvents(ctx)
 }
 
@@ -202,14 +202,14 @@ func (r *replayConn) Read(p []byte) (int, error) {
 	return r.Conn.Read(p)
 }
 
-func (pm *IngressProxyManager) persistTestCases(ctx context.Context) {
+func (pm *IngressProxyManager) persistTestCases(ctx context.Context, persister models.TestCasePersister) {
 	for {
 		select {
 		case <-ctx.Done():
 			pm.logger.Info("Stopping test case persister.")
 			return
 		case tc := <-pm.tcChan:
-			if err := pm.deps.Persister(ctx, tc); err != nil {
+			if err := persister(ctx, tc); err != nil {
 				pm.logger.Error("Failed to persist captured test case", zap.Error(err))
 			} else {
 				pm.logger.Debug("Successfully captured and persisted a test case.", zap.String("kind", string(tc.Kind)))
