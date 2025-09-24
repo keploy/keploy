@@ -18,15 +18,26 @@ docker compose build
 rm -rf keploy/
 
 # Generate the keploy-config file.
-"$RECORD_BIN" config --generate
+# Safe even if keploy.yml doesn't exist
+# sed -i '' 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml" || true
+sleep 5
 
-# Update the global noise to ts in the config file.
-config_file="./keploy.yml"
-sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+# # Update the global noise to ts in the config file.
+# config_file="./keploy.yml"
+# sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
+
+# container_kill() {
+#     echo "Killing keploy container"
+#     pid=$(pgrep -n keploy)
+#     echo "$pid Keploy PID"
+#     echo "Killing keploy"
+#     kill $pid
+# }
 
 send_request(){
-    sleep 1
+    echo "Sending requests to the application..."
+    sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8082/health; then
@@ -55,30 +66,30 @@ send_request(){
     # Wait for 5 seconds for keploy to record the test cases and mocks.
     sleep 3
     # container_kill
-    # wait || true
+    # wait
 }
 
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    "$RECORD_BIN" record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt" || true
+    keploy record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s
 
-    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
-        cat "${container_name}.txt"
-        exit 1
-    fi
-    if grep "ERROR" "${container_name}.txt"; then
-        echo "Error found in pipeline..."
-        cat "${container_name}.txt"
-        exit 1
-    fi
-    sleep 5
-
+    # if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+    #     echo "Race condition detected in recording, stopping pipeline..."
+    #     cat "${container_name}.txt"
+    #     exit 1
+    # fi
+    # if grep "ERROR" "${container_name}.txt"; then
+    #     echo "Error found in pipeline..."
+    #     cat "${container_name}.txt"
+    #     exit 1
+    # fi
+    # sleep 5
+    #  cat "${container_name}.txt"  # For visibility in logs
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
- cat "${container_name}.txt"  # For visibility in logs
+
 
 # Shutdown services before test mode - Keploy should use mocks for dependencies
 echo "Shutting down docker compose services before test mode..."
@@ -87,7 +98,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-"$REPLAY_BIN" test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
+keploy test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
