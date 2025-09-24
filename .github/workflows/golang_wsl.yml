@@ -86,7 +86,9 @@ jobs:
           fi
           # Verify the mount
           mount | grep debugfs || echo "debugfs not found in mount output"  
-                    
+          sudo apt-get update -y
+          sudo apt-get install -y golang-go curl git ca-certificates jq
+ 
       - name: Prepare binaries for WSL
         shell: bash
         run: |
