@@ -4,7 +4,7 @@
 set -euo pipefail
 
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+# source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 
 # Build Docker Image(s)
@@ -12,15 +12,6 @@ docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
-
-# Generate the keploy-config file.
-# Safe even if keploy.yml doesn't exist
-# sed -i '' 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml" || true
-sleep 5
-
-# # Update the global noise to ts in the config file.
-# config_file="./keploy.yml"
-# sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 
 
