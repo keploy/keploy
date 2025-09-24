@@ -81,6 +81,7 @@ for i in 1 2; do
     --record-timer=9s \
     &> "${container_name}.txt"
   
+    cat "${container_name}.txt"  # For visibility in logs
   # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
   # If it fails, the script should fail.
 
