@@ -14,53 +14,62 @@ fi
 
 source ${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Function to create Docker network with fallback options
+# Detect engine OSType and pick a sane default network driver
+get_docker_network_driver() {
+  local engine_os
+  engine_os="$(docker info --format '{{.OSType}}' 2>/dev/null || echo '')"
+  if [[ "$engine_os" == "windows" ]]; then
+    echo "nat"    # Windows engine commonly uses 'nat'
+  else
+    echo "bridge" # Linux engine uses 'bridge'
+  fi
+}
+
+# Create network if possible; NEVER cause script exit under 'set -e'
 create_docker_network() {
-    local network_name="keploy-network"
-    
-    # Check if network already exists
-    if docker network ls --format "{{.Name}}" | grep -q "^${network_name}$"; then
-        echo "Network ${network_name} already exists"
-        return 0
-    fi
-    
-    echo "Creating Docker network: ${network_name}"
-    
-    # Try creating network with bridge driver explicitly
-    if docker network create --driver bridge "${network_name}" 2>/dev/null; then
-        echo "Successfully created network ${network_name} with bridge driver"
-        return 0
-    fi
-    
-    # Fallback: try without explicit driver specification
-    if docker network create "${network_name}" 2>/dev/null; then
-        echo "Successfully created network ${network_name} with default driver"
-        return 0
-    fi
-    
-    # Last resort: try using the default bridge network
-    echo "Warning: Failed to create custom network. Will use default bridge network."
-    echo "This may affect container communication. Consider checking Docker daemon configuration."
-    return 1
+  local network_name="keploy-network"
+  local driver
+  driver="$(get_docker_network_driver)"
+
+  # Already exists?
+  if docker network ls --format "{{.Name}}" | grep -q "^${network_name}$"; then
+    echo "Network ${network_name} already exists"
+    return 0
+  fi
+
+  echo "Creating Docker network: ${network_name} (driver=${driver})"
+
+  # Try with detected driver
+  if docker network create --driver "${driver}" "${network_name}" >/dev/null 2>&1; then
+    echo "Successfully created network ${network_name} with driver ${driver}"
+    return 0
+  fi
+
+  # Try default driver fallback
+  if docker network create "${network_name}" >/dev/null 2>&1; then
+    echo "Successfully created network ${network_name} with default driver"
+    return 0
+  fi
+
+  # Couldn’t create; warn but DO NOT fail the script
+  echo "Warning: Failed to create custom network. Falling back to default bridge/NAT."
+  echo "This may affect container communication. Check Docker engine mode & permissions."
+  return 2
 }
 
 # Validate Docker daemon is running
 if ! docker info >/dev/null 2>&1; then
-    echo "Error: Docker daemon is not running or not accessible"
-    exit 1
+  echo "Error: Docker daemon is not running or not accessible"
+  exit 1
 fi
 
-# Create network with error handling
-create_docker_network
-network_created=$?
-
-# Determine network parameter for Docker containers
-if [ $network_created -eq 0 ]; then
-    NETWORK_PARAM="--net keploy-network"
-    echo "Using custom network: keploy-network"
+# Create network — guard with 'if' so set -e doesn't abort on nonzero
+if create_docker_network; then
+  NETWORK_PARAM="--net keploy-network"
+  echo "Using custom network: keploy-network"
 else
-    NETWORK_PARAM=""
-    echo "Using default network (no custom network available)"
+  NETWORK_PARAM=""  # fall back to engine default network
+  echo "Using default network (no custom network available)"
 fi
 
 # Start MongoDB container
