@@ -16,6 +16,16 @@ build_linux_image() {
 
 build_windows_runtime_from_binary() {
   echo "Windows containers engine detected; building runtime-only image from keploy.exe..."
+
+  # try to find keploy.exe anywhere if not at repo root
+  if [ ! -f "keploy.exe" ]; then
+    shopt -s nullglob globstar
+    cand=(**/keploy.exe)
+    if [ ${#cand[@]} -gt 0 ]; then
+      cp "${cand[0]}" ./keploy.exe
+    fi
+  fi
+
   if [ ! -f "keploy.exe" ]; then
     echo "ERROR: keploy.exe not found in workspace. Download the artifact before this step."
     emit_step_output built false
@@ -34,6 +44,7 @@ EOF
   emit_step_output built true
   emit_step_output image ttl.sh/keploy/keploy-win:1h
 }
+
 
 main() {
   if ! command -v docker >/dev/null 2>&1; then

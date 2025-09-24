@@ -2,6 +2,7 @@ name: Prepare Binary and Run Workflows (Windows)
 on:
   pull_request:
     branches: [main]
+
 jobs:
   build-and-upload:
     runs-on: windows-latest
@@ -78,7 +79,6 @@ jobs:
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
-
 
   run_python_docker_windows:
     needs: [build-and-upload, upload-latest, build-docker-image]
