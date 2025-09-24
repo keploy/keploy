@@ -10,10 +10,7 @@ on:
 
 jobs:
   python_docker_windows:
-    # ✅ Prefer a self-hosted Windows runner that has Docker Desktop
-    runs-on: [self-hosted, Windows, docker]
-    # If you can't provide self-hosted Windows, run this on Ubuntu instead:
-    # runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     strategy:
       fail-fast: false
