@@ -10,17 +10,6 @@ mkdir -p "$HOME"
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-cleanup() {
-    set +e
-    # Stop docker compose services and remove network resources
-    docker compose down || true
-    # Remove generated artifacts
-    rm -rf keploy/ || true
-    rm -f echoApp.txt flashApp_test.txt || true
-    # Remove keploy home override
-    rm -rf "$KEPLOY_HOME_ROOT" || true
-}
-trap cleanup EXIT INT TERM
 
 # Build Docker Image(s)
 docker compose build
@@ -35,14 +24,14 @@ sudo -E env HOME="$HOME" PATH=$PATH "$RECORD_BIN" config --generate
 config_file="./keploy.yml"
 sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
-container_kill() {
-    pid=$(pgrep -n keploy || true)
-    if [ -n "$pid" ]; then
-      echo "$pid Keploy PID"
-      echo "Killing keploy"
-      sudo kill $pid || true
-    fi
-}
+# container_kill() {
+#     pid=$(pgrep -n keploy || true)
+#     if [ -n "$pid" ]; then
+#       echo "$pid Keploy PID"
+#       echo "Killing keploy"
+#       sudo kill $pid || true
+#     fi
+# }
 
 send_request(){
     sleep 10
@@ -73,14 +62,14 @@ send_request(){
 
     # Wait for 5 seconds for keploy to record the test cases and mocks.
     sleep 5
-    container_kill
-    wait || true
+    # container_kill
+    # wait || true
 }
 
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    sudo -E env HOME="$HOME" PATH=$PATH "$RECORD_BIN" record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt" || true
+    "$RECORD_BIN" record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=9s &> "${container_name}.txt" || true
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -104,7 +93,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env HOME="$HOME" PATH=$PATH "$REPLAY_BIN" test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
+"$REPLAY_BIN" test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
