@@ -1,6 +1,11 @@
 name: Golang On Docker (Windows)
 on:
   workflow_call:
+    inputs:
+      image_ref:
+        description: "Docker image to pull (e.g., ttl.sh/keploy/keploy-win-<sha>:1h)"
+        required: true
+        type: string
 
 jobs:
   golang_docker_windows:
@@ -52,8 +57,9 @@ jobs:
         run: |
           # For Windows, we use the Windows-specific image built by the build-docker-image job
           # Tag it as the expected name for the test scripts
-          docker pull ttl.sh/keploy/keploy-win:1h
-          docker tag ttl.sh/keploy/keploy-win:1h ghcr.io/keploy/keploy:v2-dev
+          echo "Pulling ${{ inputs.image_ref }}"
+          docker pull "${{ inputs.image_ref }}"
+          docker tag "${{ inputs.image_ref }}" ghcr.io/keploy/keploy:v2-dev
 
       - id: record
         uses: ./.github/actions/download-binary
