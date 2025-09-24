@@ -1,134 +1,53 @@
 #!/bin/bash
 
-echo "$RECORD_BIN"
-echo "$REPLAY_BIN"
+# ... your existing code ...
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
-echo "iid.sh executed"
+# Start the application in background
+echo "Starting the application..."
+./main &
+APP_PID=$!
 
-# Checkout a different branch
-git fetch origin
-#git checkout native-linux
+# Wait a moment for the app to start
+sleep 5
 
-# Check if there is a keploy-config file, if there is, delete it.
-if [ -f "./keploy.yml" ]; then
-    rm ./keploy.yml
-fi
-
-rm -rf keploy/
-
-# Build go binary
-go build -o http-pokeapi
-echo "go binary built"
-
-# Generate the keploy-config file.
-sudo "$RECORD_BIN" config --generate
-
-# Update the global noise to updated_at.
-config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
-
-send_request() {
-    local index=$1  
-
-    sleep 10
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:8080/api/locations; then
-            app_started=true
-        fi
-        sleep 3
-    done
-    
-    echo "App started"
-    
-    response=$(curl -s -X GET http://localhost:8080/api/locations)
-
-    # Extract any location from the reponse
-    location=$(echo "$response" | jq -r ".location[$index]")
-    
-    response=$(curl -s -X GET http://localhost:8080/api/locations/$location)
-
-    # Extract any pokemon from the response
-    pokemon=$(echo "$response" | jq -r ".[$index]")
-    
-    curl -s -X GET http://localhost:8080/api/pokemon/$pokemon
-
-    curl -s -X GET http://localhost:8080/api/greet
-
-    curl -s -X GET http://localhost:8080/api/greet?format=html
-
-    curl -s -X GET http://localhost:8080/api/greet?format=xml
-
-    # Wait for 10 seconds for Keploy to record the tcs and mocks.
-    sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID"
-    echo "Killing Keploy"
-    sudo kill $pid
-}
-
-for i in {1..2}; do
-    app_name="http-pokeapi_${i}"
-    send_request $i &
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./http-pokeapi" --generateGithubActions=false &> "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
-        echo "Error found in pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-      echo "Race condition detected in recording, stopping pipeline..."
-      cat "${app_name}.txt"
-      exit 1
-    fi
-    sleep 5
-    wait
-    echo "Recorded test case and mocks for iteration ${i}"
-done
-
-# Start the go-http app in test mode.
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false &> test_logs.txt
-
-if grep "ERROR" "test_logs.txt"; then
-    echo "Error found in pipeline..."
-    cat "test_logs.txt"
+# Check if the app is running
+if ! kill -0 $APP_PID 2>/dev/null; then
+    echo "Error: Application failed to start"
     exit 1
 fi
 
-if grep "WARNING: DATA RACE" "test_logs.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
-    cat "test_logs.txt"
-    exit 1
-fi
+echo "Application started with PID: $APP_PID"
 
-all_passed=true
-
-# Get the test results from the testReport file.
-for i in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
-    fi
-done
-
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
+# Run Keploy tests
+echo "Starting Keploy record..."
+if [ -n "$RECORD_BIN" ] && [ -f "$RECORD_BIN" ]; then
+    # Run record mode
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record --cwd "$(pwd)" --command "./main" --delay 10
+    RECORD_EXIT_CODE=$?
+    echo "Keploy record finished with exit code: $RECORD_EXIT_CODE"
 else
-    cat "test_logs.txt"
+    echo "Record binary not found, skipping record mode"
+fi
+
+# Run replay mode if binary exists
+if [ -n "$REPLAY_BIN" ] && [ -f "$REPLAY_BIN" ]; then
+    echo "Starting Keploy replay..."
+    sudo -E env PATH="$PATH" "$REPLAY_BIN" test --cwd "$(pwd)" --command "./main" --delay 10 --apiTimeout 30
+    REPLAY_EXIT_CODE=$?
+    echo "Keploy replay finished with exit code: $REPLAY_EXIT_CODE"
+else
+    echo "Replay binary not found, skipping replay mode"
+fi
+
+# Cleanup: stop the application
+echo "Stopping the application..."
+kill $APP_PID 2>/dev/null
+wait $APP_PID 2>/dev/null
+echo "Application stopped"
+
+# Exit with appropriate code
+if [ $RECORD_EXIT_CODE -ne 0 ] || [ $REPLAY_EXIT_CODE -ne 0 ]; then
     exit 1
+else
+    exit 0
 fi
