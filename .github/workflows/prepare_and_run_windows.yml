@@ -63,6 +63,12 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: .
+
       - name: Build image (Linux if possible, else Windows variant)
         id: build_image_win
         shell: bash
