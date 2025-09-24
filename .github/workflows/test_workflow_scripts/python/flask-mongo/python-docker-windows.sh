@@ -71,6 +71,9 @@ for i in 1 2; do
     -c "docker run -p 6000:6000 --rm --name ${container_name} flask-app:1.0" \
     --container-name "${container_name}" &> "${container_name}.txt" || true
 
+  # output the container_name.txt
+  cat "${container_name}.txt"
+
   if grep -q "ERROR" "${container_name}.txt"; then
     echo "::error ::Error found during recording ${container_name}"
     cat "${container_name}.txt"
@@ -91,6 +94,9 @@ $SUDO -E env PATH="$PATH" "$REPLAY_BIN" test \
   -c "docker run -p 8080:8080 --rm --name ${test_container} flask-app:1.0" \
   --containerName "${test_container}" --apiTimeout 60 --delay 20 \
   --generate-github-actions=false &> "${test_container}.txt" || true
+
+# output the test_container.txt
+cat "${test_container}.txt"
 
 if grep -q "ERROR" "${test_container}.txt"; then
   echo "::error ::Error during test"
