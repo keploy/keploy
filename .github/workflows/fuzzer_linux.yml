@@ -87,10 +87,10 @@ jobs:
       matrix:
         include:
           # incoming mode
-          - job: incoming_record_latest_replay_build
+          - job: incoming_record_latest_replay_latest
             mode: incoming
             record_src: latest
-            replay_src: build
+            replay_src: latest
           - job: incoming_record_build_replay_latest
             mode: incoming
             record_src: build
@@ -104,9 +104,9 @@ jobs:
             mode: outgoing
             record_src: latest
             replay_src: build
-          - job: outgoing_record_build_replay_latest
+          - job: outgoing_record_latest_replay_latest
             mode: outgoing
-            record_src: build
+            record_src: latest
             replay_src: latest
           - job: outgoing_record_build_replay_build
             mode: outgoing
