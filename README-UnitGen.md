@@ -246,9 +246,23 @@ Reach out to us. We're here to answer!
 
 
 # 📝 Sample QuickStarts
-- ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white) : Try a unit-gen on [Mux-SQL](https://github.com/keploy/samples-go/tree/main/mux-sql#create-unit-testcase-with-keploy) app
+<div align="center" style="display: flex; gap: 2rem; flex-wrap: wrap; justify-content: center;">
+  <!-- Go Quickstart -->
+  <div class="quickstart-card" style="text-align:center;">
+    <a href="https://github.com/keploy/samples-go/tree/main/mux-sql#create-unit-testcase-with-keploy">
+      <img src="https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white" alt="Go Quickstart" style="width:80px; height:80px;">
+      <p class="label" style="display:none; @media(min-width: 640px){display:block;}">Mux-SQL App</p>
+    </a>
+  </div>
 
-- ![Node](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node&logoColor=white) : Try a unit-gen on [Express-Mongoose](https://github.com/keploy/samples-typescript/tree/main/express-mongoose#create-unit-testcase-with-keploy) app
+  <!-- Node.js Quickstart -->
+  <div class="quickstart-card" style="text-align:center;">
+    <a href="https://github.com/keploy/samples-typescript/tree/main/express-mongoose#create-unit-testcase-with-keploy">
+      <img src="https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white" alt="Node Quickstart" style="width:80px; height:80px;">
+      <p class="label" style="display:none; @media(min-width: 640px){display:block;}">Express-Mongoose App</p>
+    </a>
+  </div>
+</div>
 
 ## 🌐 Language Support
 
