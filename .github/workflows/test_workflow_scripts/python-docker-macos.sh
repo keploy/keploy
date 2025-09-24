@@ -100,7 +100,7 @@ done
 
 # --- Stop Mongo before test ---
 echo "Shutting down mongo before test mode..."
-docker stop mongo >/dev/null 2>&1 || true
+# docker stop mongo >/dev/null 2>&1 || true
 
 # --- Test phase ---
 test_container="flaskApp_test"
@@ -109,7 +109,7 @@ echo "Starting test mode..."
   -c "docker run -p6000:6000 --net keploy-network --name $test_container flask-app:1.0" \
   --container-name "$test_container" \
   --apiTimeout 60 \
-  --delay 20 \
+  --delay 10 \
   --generate-github-actions=false \
   &> "${test_container}.txt"
 
