@@ -1,6 +1,8 @@
 name: Golang On WSL (Windows host)
+
 on:
   workflow_call:
+
 jobs:
   golang_wsl:
     runs-on: windows-latest
@@ -22,9 +24,17 @@ jobs:
             record_src: build
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (WSL)
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Optional hardening on the Windows host to prefer LF
+      - name: Configure Git EOL on Windows (optional but recommended)
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -43,18 +53,47 @@ jobs:
           path: samples-go
 
       - name: Setup WSL (Ubuntu)
-        uses: Vampire/setup-wsl@v3
+        uses: Vampire/setup-wsl@v6
         with:
           distribution: Ubuntu-22.04
-
+          wsl-version: 2
+      
+      - name: Verify kernel version in WSL
+        shell: wsl-bash {0}
+        run: |
+          echo "=== Kernel Version ==="
+          uname -r
+          echo "=== Checking kernel requirement ==="
+          KERNEL_VERSION=$(uname -r | cut -d'.' -f1-2)
+          REQUIRED_VERSION="5.10"
+          if printf '%s\n' "$REQUIRED_VERSION" "$KERNEL_VERSION" | sort -V | head -n1 | grep -q "$REQUIRED_VERSION"; then
+            echo "✓ Kernel version $KERNEL_VERSION meets requirement $REQUIRED_VERSION"
+          else
+            echo "✗ Kernel version $KERNEL_VERSION is below required $REQUIRED_VERSION"
+            exit 1
+          fi
+    
       - name: Prepare binaries for WSL
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/.wsl-bin"
-          # Normalize filenames for predictable WSL paths
           cp "${{ steps.record.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_record"
           cp "${{ steps.replay.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_replay"
+
+      # Normalize endings to LF and ensure execute bits inside WSL
+      - name: Normalize line endings & make scripts executable (WSL)
+        shell: wsl-bash {0}
+        env:
+          WSL_WS: ${{ github.workspace }}
+          WSLENV: WSL_WS/p
+        run: |
+          set -euo pipefail
+          WS="${WSL_WS}"
+          # Convert CRLF -> LF for all workflow bash scripts (no-op if already LF)
+          find "$WS/.github/workflows/test_workflow_scripts" -type f -name "*.sh" -print0 \
+            | xargs -0 -I{} sed -i 's/\r$//' "{}"
+          chmod -R a+x "$WS/.github/workflows/test_workflow_scripts"
 
       - name: Install dependencies in WSL
         shell: wsl-bash {0}
@@ -67,9 +106,11 @@ jobs:
         shell: wsl-bash {0}
         env:
           WSL_WS: ${{ github.workspace }}
+          # Propagate WSL_WS as a path so Windows -> Linux path translation happens
+          WSLENV: WSL_WS/p
         run: |
           set -euo pipefail
-          WS=$(wslpath -u "$WSL_WS")
+          WS="${WSL_WS}"
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
           chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true

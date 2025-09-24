@@ -11,7 +11,6 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/replayer"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
 
 	"go.keploy.io/server/v2/utils"
 
@@ -24,7 +23,6 @@ func init() {
 		Initializer: New,
 		Priority:    100,
 	})
-	integrations.RegisterDecoder(integrations.MYSQL, DecodeMySQLMock)
 }
 
 type MySQL struct {
@@ -42,7 +40,7 @@ func (m *MySQL) MatchType(_ context.Context, _ []byte) bool {
 	return false
 }
 
-func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *yaml.NetworkTrafficDoc, opts models.OutgoingOptions) error {
+func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 
 	err := recorder.Record(ctx, logger, src, dst, mocks, opts)

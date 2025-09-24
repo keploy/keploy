@@ -5,7 +5,23 @@
 
 set -euo pipefail
 
+# Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
+export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-python-docker}-$(date +%s)"
+export HOME="$KEPLOY_HOME_ROOT/home"
+mkdir -p "$HOME"
+
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+
+# cleanup() {
+#     set +e
+#     docker stop mongo || true
+#     docker rm mongo || true
+#     docker network rm keploy-network || true
+#     rm -rf keploy/ || true
+#     rm -f flaskApp_*.txt flashApp_test.txt || true
+#     rm -rf "$KEPLOY_HOME_ROOT" || true
+# }
+# trap cleanup EXIT INT TERM
 
 # Start mongo before starting keploy.
 docker network create keploy-network || true
@@ -30,7 +46,8 @@ container_kill() {
 }
 
 send_request(){
-    local container_name=$1
+    # Accept optional container name (not strictly used), avoid unbound var under `set -u`
+    local container_name="${1:-}"
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
@@ -57,8 +74,8 @@ send_request(){
 # Record sessions
 for i in {1..2}; do
     container_name="flaskApp_${i}"
-    send_request &
-    sudo -E env PATH=$PATH "$RECORD_BIN" record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt" || true
+    send_request "$container_name" &
+    sudo -E env HOME="$HOME" PATH=$PATH "$RECORD_BIN" record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt" || true
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
@@ -81,8 +98,9 @@ docker rm mongo || true
 echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
-test_container="flashApp_test"
-sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
+test_container="flaskApp_test"
+echo "Starting test mode..."
+sudo -E env HOME="$HOME" PATH=$PATH "$REPLAY_BIN" test -c "docker run -p6000:6000 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt" || true
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
@@ -101,17 +119,23 @@ do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    if [ -f "$report_file" ]; then
+        # Extract the test status
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
+        # Print the status for debugging
+        echo "Test status for test-set-$i: $test_status"
 
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
+        # Check if any test set did not pass
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Test-set-$i did not pass."
+            break # Exit the loop early as all tests need to pass
+        fi
+    else
         all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
+        echo "Report not found: $report_file"
+        break
     fi
 
 done
