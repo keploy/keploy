@@ -16,11 +16,11 @@ build_linux_image() {
 
 build_windows_image() {
   echo "Windows containers engine detected; generating ephemeral Windows Dockerfile (no DinD)..."
-  cat > Dockerfile.win <<'EOF'
+cat > Dockerfile.win <<'EOF'
 # escape=`
 # --- Build stage (Windows) ---
 FROM golang:1.24-windowsservercore-ltsc2022 AS build
-SHELL ["powershell", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'"]
+SHELL ["powershell", "-NoLogo", "-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';"]
 WORKDIR C:\app
 
 # Copy mod files and download deps
@@ -29,14 +29,12 @@ RUN go mod download
 
 # Copy the source and build keploy.exe
 COPY . C:\app
-# Equivalent build to your Linux stage (minus ldflags you inject in Linux runtime)
 RUN go build -tags=viper_bind_struct -o C:\app\keploy.exe .
 
 # --- Runtime stage (Windows) ---
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2022
 WORKDIR C:\app
 COPY --from=build C:\app\keploy.exe C:\app\keploy.exe
-# NOTE: No Docker Engine inside this image and no entrypoint.sh (Windows containers don't support the same DinD flow)
 ENTRYPOINT ["C:\\app\\keploy.exe"]
 EOF
 
