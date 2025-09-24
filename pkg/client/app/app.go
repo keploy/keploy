@@ -255,7 +255,7 @@ func (a *App) SetupCompose() error {
 		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
 		return err
 	}
-	// composeChanged = true
+	composeChanged = true
 
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
