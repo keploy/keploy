@@ -8,7 +8,18 @@ if command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 fi
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh
+
+# Start mongo before starting keploy.
+docker network create keploy-network || true
+
+# check whether keploy-network is created
+if docker network ls | grep -q "keploy-network"; then
+    echo "Keploy-network is already created"
+else
+    echo "Keploy-network is not created"
+    docker network create keploy-network
+fi
 
 # Build Docker Image(s)
 docker compose build

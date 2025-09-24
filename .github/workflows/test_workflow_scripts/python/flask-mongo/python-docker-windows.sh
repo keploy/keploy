@@ -12,15 +12,40 @@ if command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 fi
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
 docker network create keploy-network || true
+
+# check whether keploy-network is created
+if docker network ls | grep -q "keploy-network"; then
+    echo "Keploy-network is already created"
+else
+    echo "Keploy-network is not created"
+    docker network create keploy-network
+fi
+
 docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
+
+# check whether mongo is running
+if docker ps | grep -q "mongo"; then
+    echo "Mongo is already running"
+else
+    echo "Mongo is not running"
+    docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
+fi
 
 # Set up environment
 rm -rf keploy/  # Clean up old test data
 docker build -t flask-app:1.0 .  # Build the Docker image
+
+# check whether flask-app:1.0 is built
+if docker images | grep -q "flask-app:1.0"; then
+    echo "Flask-app:1.0 is already built"
+else
+    echo "Flask-app:1.0 is not built"
+    exit 1
+fi
 
 # Configure keploy
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
@@ -64,7 +89,7 @@ send_request(){
 for i in {1..2}; do
     container_name="flaskApp_${i}"
     send_request &
-    $SUDO -E env PATH=$PATH "$RECORD_BIN" record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt" || true
+    $SUDO -E env PATH=$PATH "$RECORD_BIN" record -c "docker run -p 6000:6000 --network keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt" || true
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
