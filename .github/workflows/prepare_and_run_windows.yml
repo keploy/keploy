@@ -45,7 +45,7 @@ jobs:
         with: { name: latest, path: keploy.exe }
 
   build-docker-image:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -60,32 +60,21 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-
-      - name: Normalize Docker environment (Windows)
-        shell: bash
-        run: |
-          echo "DOCKER_HOST before: ${DOCKER_HOST:-<unset>}"
-          echo "DOCKER_HOST=" >> "$GITHUB_ENV"
-          docker context use default || true
-          docker version || { echo "Docker daemon not reachable. Ensure Docker Desktop is running on the runner." >&2; exit 1; }
-          # Optional visibility
-          docker buildx ls || true
         
       - name: Build image
         shell: bash
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Push image
         run: |
-          docker push ghcr.io/keploy/keploy:1h
+          docker push ttl.sh/keploy/keploy:1h
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
 
   run_python_docker_windows:
     needs: [build-and-upload, upload-latest, build-docker-image]

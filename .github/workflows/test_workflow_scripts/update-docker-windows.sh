@@ -3,8 +3,7 @@ set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"
 
-# ---------- helpers ----------
-
+# Create a temp file safely and atomically replace the original
 rewrite_in_place() {
   local tmp
   tmp="$(mktemp)"
@@ -13,26 +12,21 @@ rewrite_in_place() {
 }
 
 ensure_dockerfile_syntax() {
-  # needed for --mount
+  # Ensure BuildKit features (like --mount=type=ssh) are supported
   if ! head -n1 "$DOCKERFILE_PATH" | grep -q '^# syntax=docker/dockerfile:'; then
+    echo "Prepending Dockerfile syntax directive for BuildKit mounts..."
     {
-      echo '# syntax=docker/dockerfile:1'
+      echo '# syntax=docker/dockerfile:1.6'
       cat "$DOCKERFILE_PATH"
     } | rewrite_in_place
   fi
 }
 
-assert_linux_engine() {
-  local os
-  os="$(docker info --format '{{.OSType}}' 2>/dev/null || echo 'unknown')"
-  if [ "$os" = "windows" ]; then
-    echo "::error::Docker daemon is in Windows-Containers mode. This repo builds a Linux image (FROM golang:1.24) and requires a Linux daemon. Run this job on ubuntu-latest or switch Docker Desktop to Linux containers." >&2
-    exit 90
-  fi
-}
-
 add_race_flag() {
+  echo "Ensuring -race in go build lines (idempotent)..."
   awk '
+    # If a line starts with RUN go build and does not already contain -race,
+    # insert -race right after `go build`
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+build(\>|[[:space:]])/ {
       if ($0 ~ /(^|\s)-race(\s|$)/) { print; next }
@@ -44,7 +38,7 @@ add_race_flag() {
 }
 
 enable_ssh_mount_for_go_mod() {
-  # Turn: RUN go mod download  ->  RUN --mount=type=ssh go mod download
+  echo "Switching go mod download to use BuildKit SSH mount (idempotent)..."
   awk '
     BEGIN { OFS="" }
     /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
@@ -55,28 +49,46 @@ enable_ssh_mount_for_go_mod() {
   ' "$DOCKERFILE_PATH" | rewrite_in_place
 }
 
-inject_git_settings_minimal() {
-  # Only keploy/* over SSH; avoid proxy/sumdb; skip known_hosts & chmod entirely
-  awk '
-    BEGIN { OFS=""; injected_before_go_mod=0; injected_after_copy=0 }
+use_ssh_for_github_and_known_hosts() {
+  echo "Injecting SSH config, known_hosts, and GOPRIVATE around go mod download (idempotent)..."
 
-    function emit_min_git_prep() {
-      print "ENV GOPRIVATE=github.com/keploy/*"
-      print "ENV GONOSUMDB=github.com/keploy/*"
-      print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
-      print "RUN git config --global url.\"ssh://git@github.com/keploy/\".insteadOf \"https://github.com/keploy/\""
+  # We’ll inject two things before the first `RUN --mount=type=ssh go mod download`:
+  #   ENV GOPRIVATE=github.com/keploy/*
+  #   ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
+  #   RUN git config ... && mkdir ~/.ssh && ssh-keyscan ...
+  #
+  # And we’ll also try adding the git/ssh known_hosts RUN right after a COPY go.mod go.sum /app line (best-effort).
+  #
+  # Guard with flags to avoid duplicate insertions.
+  awk '
+    BEGIN {
+      OFS="";
+      injected_before_go_mod = 0;
+      injected_after_copy = 0;
     }
 
+    # Helper patterns
+    function emit_git_known_hosts_block() {
+      print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\" && mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts"
+    }
+
+    # After COPY go.mod go.sum /app
     /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
       print;
-      if (!injected_after_copy) { emit_min_git_prep(); injected_after_copy=1 }
+      if (!injected_after_copy) {
+        emit_git_known_hosts_block();
+        injected_after_copy = 1;
+      }
       next
     }
 
+    # Before the first RUN --mount=type=ssh go mod download
     /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
       if (!injected_before_go_mod) {
-        emit_min_git_prep();
-        injected_before_go_mod=1
+        print "ENV GOPRIVATE=github.com/keploy/*"
+        print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
+        emit_git_known_hosts_block();
+        injected_before_go_mod = 1;
       }
       print; next
     }
@@ -85,50 +97,21 @@ inject_git_settings_minimal() {
   ' "$DOCKERFILE_PATH" | rewrite_in_place
 }
 
-install_buildx_if_missing() {
-  if docker buildx version >/dev/null 2>&1; then
-    return 0
-  fi
-  echo "docker buildx not found. Installing locally…"
-  local BX_VER="v0.13.1"
-  local OS_BIN
-  case "$(uname -s 2>/dev/null || echo)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) OS_BIN="buildx-${BX_VER}.windows-amd64.exe" ;;
-    Linux) OS_BIN="buildx-${BX_VER}.linux-amd64" ;;
-    Darwin) OS_BIN="buildx-${BX_VER}.darwin-amd64" ;;
-    *) echo "Unsupported OS"; exit 1 ;;
-  esac
-  local URL="https://github.com/docker/buildx/releases/download/${BX_VER}/${OS_BIN}"
-  local PLUGDIR="${HOME}/.docker/cli-plugins"
-  mkdir -p "${PLUGDIR}"
-  curl -fsSL "${URL}" -o "${PLUGDIR}/docker-buildx"
-  chmod +x "${PLUGDIR}/docker-buildx"
-  if [[ "$OS_BIN" == *.exe ]]; then mv "${PLUGDIR}/docker-buildx" "${PLUGDIR}/docker-buildx.exe"; fi
-  docker buildx version
+build_docker_image() {
+  echo "Building Docker image with BuildKit and SSH forwarding..."
+  # The GitHub Actions Windows runner with `shell: bash` provides a Unix-like
+  # environment where DOCKER_BUILDKIT=1 is the standard way to enable BuildKit.
+  # The `--ssh default` flag will work if an SSH agent is configured, which
+  # the preceding workflow steps should handle.
+  DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
 }
 
-build_image() {
-  echo "Building with buildx (docker driver) and SSH agent forwarding…"
-
-  # Use the existing default builder (already driver=docker on Docker Desktop/Windows)
-  # Do NOT create a new docker-driver builder (Windows allows only one).
-  docker buildx use default >/dev/null 2>&1 || true
-
-  # Build with buildx and load into the classic 'docker images' store.
-  if docker buildx build --ssh default -t ghcr.io/keploy/keploy:1h --load .; then
-    return 0
-  fi
-
-  echo "buildx (docker driver) failed; trying classic docker build with BuildKit…" >&2
-  DOCKER_BUILDKIT=1 docker build --ssh default -t ghcr.io/keploy/keploy:1h .
+main() {
+  ensure_dockerfile_syntax
+  add_race_flag
+  enable_ssh_mount_for_go_mod
+  use_ssh_for_github_and_known_hosts
+  build_docker_image
 }
 
-
-# ---------- main ----------
-ensure_dockerfile_syntax
-add_race_flag
-enable_ssh_mount_for_go_mod
-inject_git_settings_minimal
-install_buildx_if_missing
-assert_linux_engine
-build_image
+main
