@@ -10,7 +10,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -324,6 +326,60 @@ func writeLenEncBytes(buf *bytes.Buffer, b []byte) error {
 	return err
 }
 
+// accepts string, []byte, time.Time, or fmt.Stringer; returns a normalized string.
+func coerceToString(v interface{}) (string, error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case []byte:
+		return string(t), nil
+	case fmt.Stringer:
+		return t.String(), nil
+	case time.Time:
+		// MySQL DATETIME has microsecond precision max; drop to microseconds if needed.
+		ts := t.Round(time.Microsecond)
+		base := ts.Format("2006-01-02 15:04:05")
+		usec := ts.Nanosecond() / 1e3
+		if usec == 0 {
+			return base, nil
+		}
+		return fmt.Sprintf("%s.%06d", base, usec), nil
+	default:
+		return "", fmt.Errorf("cannot coerce %T to string", v)
+	}
+}
+
+// strip ISO sugar that MySQL DATETIME can't carry (T, trailing Z, trailing ±HH:MM)
+var tzSuffixRe = regexp.MustCompile(`([+-]\d{2}:\d{2})$`)
+
+func stripISOStuff(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "T", " ")
+	if strings.HasSuffix(s, "Z") {
+		s = strings.TrimSuffix(s, "Z")
+		s = strings.TrimSpace(s)
+	}
+	if m := tzSuffixRe.FindStringSubmatch(s); len(m) > 1 {
+		s = strings.TrimSuffix(s, m[1])
+		s = strings.TrimSpace(s)
+	}
+	// common textual tails that sometimes appear
+	s = strings.TrimSuffix(s, " UTC")
+	s = strings.TrimSuffix(s, " GMT")
+	return s
+}
+
+// normalize fractional seconds to exactly 6 digits (trim or pad right with zeros)
+func normFrac6(frac string) string {
+	if len(frac) > 6 {
+		return frac[:6]
+	}
+	if len(frac) < 6 {
+		return frac + strings.Repeat("0", 6-len(frac))
+	}
+	return frac
+}
+
 func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte, error) {
 	switch fieldType {
 	case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
@@ -341,12 +397,18 @@ func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte,
 }
 
 func encodeDate(value interface{}) ([]byte, error) {
-	dateStr, ok := value.(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid value type for date field")
+	dateStr, err := coerceToString(value)
+	if err != nil {
+		return nil, err
 	}
+	dateStr = stripISOStuff(dateStr)
+	// If a time portion leaked in, keep just the date
+	if i := strings.IndexByte(dateStr, ' '); i >= 0 {
+		dateStr = dateStr[:i]
+	}
+
 	var year, month, day int
-	_, err := fmt.Sscanf(dateStr, "%04d-%02d-%02d", &year, &month, &day)
+	_, err = fmt.Sscanf(dateStr, "%04d-%02d-%02d", &year, &month, &day)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse date string: %w", err)
 	}
@@ -371,61 +433,89 @@ func encodeDate(value interface{}) ([]byte, error) {
 }
 
 func encodeDateTime(value interface{}) ([]byte, error) {
-	dateTimeStr, ok := value.(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid value type for datetime field")
+	s, err := coerceToString(value)
+	if err != nil {
+		return nil, err
 	}
-	var (
-		year, month, day, hour, minute, second, microsecond int
-		length                                              byte
-	)
-	if strings.Contains(dateTimeStr, ".") {
-		_, err := fmt.Sscanf(dateTimeStr, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-			&year, &month, &day, &hour, &minute, &second, &microsecond)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse datetime string: %w", err)
+	s = stripISOStuff(s)
+
+	// allow MySQL DATETIME encoded as date-only variant (length=4)
+	if !strings.Contains(s, " ") {
+		var y, m, d int
+		if _, err := fmt.Sscanf(s, "%04d-%02d-%02d", &y, &m, &d); err != nil {
+			return nil, fmt.Errorf("failed to parse datetime (date-only) %q: %w", s, err)
 		}
-		length = 11
+		buf := new(bytes.Buffer)
+		if err := buf.WriteByte(4); err != nil {
+			return nil, fmt.Errorf("failed to write datetime length: %w", err)
+		}
+		if err := binary.Write(buf, binary.LittleEndian, uint16(y)); err != nil {
+			return nil, fmt.Errorf("failed to write year: %w", err)
+		}
+		if err := buf.WriteByte(byte(m)); err != nil {
+			return nil, fmt.Errorf("failed to write month: %w", err)
+		}
+		if err := buf.WriteByte(byte(d)); err != nil {
+			return nil, fmt.Errorf("failed to write day: %w", err)
+		}
+		return buf.Bytes(), nil
+	}
+
+	// has date and time
+	var y, m, d, hh, mm, ss, usec int
+	hasFrac := strings.Contains(s, ".")
+	if hasFrac {
+		// normalize to exactly 6 fractional digits before scanning
+		// split on last '.' to avoid surprises
+		i := strings.LastIndexByte(s, '.')
+		if i > 0 && i < len(s)-1 {
+			head := s[:i]
+			frac := normFrac6(s[i+1:])
+			s = head + "." + frac
+		}
+		if _, err := fmt.Sscanf(s, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+			&y, &m, &d, &hh, &mm, &ss, &usec); err != nil {
+			return nil, fmt.Errorf("failed to parse datetime %q: %w", s, err)
+		}
 	} else {
-		_, err := fmt.Sscanf(dateTimeStr, "%04d-%02d-%02d %02d:%02d:%02d",
-			&year, &month, &day, &hour, &minute, &second)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse datetime string: %w", err)
+		if _, err := fmt.Sscanf(s, "%04d-%02d-%02d %02d:%02d:%02d",
+			&y, &m, &d, &hh, &mm, &ss); err != nil {
+			return nil, fmt.Errorf("failed to parse datetime %q: %w", s, err)
 		}
-		length = 7
 	}
+
 	buf := new(bytes.Buffer)
-	err := buf.WriteByte(length)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write datetime length: %w", err)
+	// length byte: 7 (no microseconds) or 11 (with microseconds)
+	if hasFrac {
+		if err := buf.WriteByte(11); err != nil {
+			return nil, fmt.Errorf("failed to write datetime length: %w", err)
+		}
+	} else {
+		if err := buf.WriteByte(7); err != nil {
+			return nil, fmt.Errorf("failed to write datetime length: %w", err)
+		}
 	}
-	err = binary.Write(buf, binary.LittleEndian, uint16(year))
-	if err != nil {
+
+	if err := binary.Write(buf, binary.LittleEndian, uint16(y)); err != nil {
 		return nil, fmt.Errorf("failed to write year: %w", err)
 	}
-	err = buf.WriteByte(byte(month))
-	if err != nil {
+	if err := buf.WriteByte(byte(m)); err != nil {
 		return nil, fmt.Errorf("failed to write month: %w", err)
 	}
-	err = buf.WriteByte(byte(day))
-	if err != nil {
+	if err := buf.WriteByte(byte(d)); err != nil {
 		return nil, fmt.Errorf("failed to write day: %w", err)
 	}
-	err = buf.WriteByte(byte(hour))
-	if err != nil {
+	if err := buf.WriteByte(byte(hh)); err != nil {
 		return nil, fmt.Errorf("failed to write hour: %w", err)
 	}
-	err = buf.WriteByte(byte(minute))
-	if err != nil {
+	if err := buf.WriteByte(byte(mm)); err != nil {
 		return nil, fmt.Errorf("failed to write minute: %w", err)
 	}
-	err = buf.WriteByte(byte(second))
-	if err != nil {
+	if err := buf.WriteByte(byte(ss)); err != nil {
 		return nil, fmt.Errorf("failed to write second: %w", err)
 	}
-	if length == 11 {
-		err = binary.Write(buf, binary.LittleEndian, uint32(microsecond))
-		if err != nil {
+	if hasFrac {
+		if err := binary.Write(buf, binary.LittleEndian, uint32(usec)); err != nil {
 			return nil, fmt.Errorf("failed to write microseconds: %w", err)
 		}
 	}
@@ -433,63 +523,92 @@ func encodeDateTime(value interface{}) ([]byte, error) {
 }
 
 func encodeTime(value interface{}) ([]byte, error) {
-	timeStr, ok := value.(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid value type for time field")
+	s, err := coerceToString(value)
+	if err != nil {
+		return nil, err
 	}
-	var (
-		isNegative                                  bool
-		days, hours, minutes, seconds, microseconds int
-		length                                      byte
-	)
-	if timeStr[0] == '-' {
-		isNegative = true
-		timeStr = timeStr[1:]
+	s = strings.TrimSpace(s)
+
+	neg := false
+	if strings.HasPrefix(s, "-") {
+		neg = true
+		s = s[1:]
 	}
-	if strings.Contains(timeStr, ".") {
-		_, err := fmt.Sscanf(timeStr, "%d %02d:%02d:%02d.%06d",
-			&days, &hours, &minutes, &seconds, &microseconds)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse time string: %w", err)
+
+	days, hh, mm, ss, usec := 0, 0, 0, 0, 0
+	hasFrac := strings.Contains(s, ".")
+
+	switch strings.Count(s, " ") {
+	case 0:
+		if hasFrac {
+			// normalize fractional part to 6 digits
+			i := strings.LastIndexByte(s, '.')
+			if i > 0 && i < len(s)-1 {
+				head := s[:i]
+				frac := normFrac6(s[i+1:])
+				s = head + "." + frac
+			}
+			if _, err := fmt.Sscanf(s, "%02d:%02d:%02d.%06d", &hh, &mm, &ss, &usec); err != nil {
+				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+			}
+		} else {
+			if _, err := fmt.Sscanf(s, "%02d:%02d:%02d", &hh, &mm, &ss); err != nil {
+				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+			}
 		}
-		length = 12
-	} else {
-		_, err := fmt.Sscanf(timeStr, "%d %02d:%02d:%02d",
-			&days, &hours, &minutes, &seconds)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse time string: %w", err)
+	default: // "D HH:MM:SS[.uuuuuu]"
+		if hasFrac {
+			i := strings.LastIndexByte(s, '.')
+			if i > 0 && i < len(s)-1 {
+				head := s[:i]
+				frac := normFrac6(s[i+1:])
+				s = head + "." + frac
+			}
+			if _, err := fmt.Sscanf(s, "%d %02d:%02d:%02d.%06d", &days, &hh, &mm, &ss, &usec); err != nil {
+				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+			}
+		} else {
+			if _, err := fmt.Sscanf(s, "%d %02d:%02d:%02d", &days, &hh, &mm, &ss); err != nil {
+				return nil, fmt.Errorf("failed to parse time %q: %w", s, err)
+			}
 		}
-		length = 8
 	}
+
 	buf := new(bytes.Buffer)
-	err := buf.WriteByte(length)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write time length: %w", err)
-	}
-	if isNegative {
-		buf.WriteByte(1)
+	if hasFrac {
+		if err := buf.WriteByte(12); err != nil {
+			return nil, fmt.Errorf("failed to write time length: %w", err)
+		}
 	} else {
-		buf.WriteByte(0)
+		if err := buf.WriteByte(8); err != nil {
+			return nil, fmt.Errorf("failed to write time length: %w", err)
+		}
 	}
-	err = binary.Write(buf, binary.LittleEndian, uint32(days))
-	if err != nil {
+
+	if neg {
+		if err := buf.WriteByte(1); err != nil {
+			return nil, fmt.Errorf("failed to write sign: %w", err)
+		}
+	} else {
+		if err := buf.WriteByte(0); err != nil {
+			return nil, fmt.Errorf("failed to write sign: %w", err)
+		}
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, uint32(days)); err != nil {
 		return nil, fmt.Errorf("failed to write days: %w", err)
 	}
-	err = buf.WriteByte(byte(hours))
-	if err != nil {
+	if err := buf.WriteByte(byte(hh)); err != nil {
 		return nil, fmt.Errorf("failed to write hours: %w", err)
 	}
-	err = buf.WriteByte(byte(minutes))
-	if err != nil {
+	if err := buf.WriteByte(byte(mm)); err != nil {
 		return nil, fmt.Errorf("failed to write minutes: %w", err)
 	}
-	err = buf.WriteByte(byte(seconds))
-	if err != nil {
+	if err := buf.WriteByte(byte(ss)); err != nil {
 		return nil, fmt.Errorf("failed to write seconds: %w", err)
 	}
-	if length == 12 {
-		err = binary.Write(buf, binary.LittleEndian, uint32(microseconds))
-		if err != nil {
+	if hasFrac {
+		if err := binary.Write(buf, binary.LittleEndian, uint32(usec)); err != nil {
 			return nil, fmt.Errorf("failed to write microseconds: %w", err)
 		}
 	}
