@@ -21,6 +21,7 @@ update_dockerfile() {
 # Function to build the Docker image
 build_docker_image() {
     echo "Building Docker image..."
+    cat "$DOCKERFILE_PATH"
 
     # Enable Docker BuildKit and build the image, forwarding the SSH agent
     DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
