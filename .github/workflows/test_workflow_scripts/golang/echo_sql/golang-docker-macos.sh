@@ -19,7 +19,12 @@ $RECORD_BIN config --generate
 
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+if [ -f "$config_file" ]; then
+  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
+
 
 
 send_request(){

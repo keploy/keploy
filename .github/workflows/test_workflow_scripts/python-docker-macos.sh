@@ -25,8 +25,14 @@ docker build -t flask-app:1.0 .
 # Generate the keploy-config file.
 $RECORD_BIN config --generate
 
-# Safe even if keploy.yml doesn't exist
-sed -i '' 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml" || true
+# Update the global noise to ts in the config file.
+config_file="./keploy.yml"
+if [ -f "$config_file" ]; then
+  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
+
 sleep 5
 
 
