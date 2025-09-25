@@ -40,6 +40,8 @@ check_for_errors() {
      if grep -Eq 'failed to read symbols, skipping coverage calculation|no symbol section' "$logfile"; then
        echo "Ignoring benign coverage-symbol error in $logfile"
      else
+       # CHANGED: Added a specific failure message for clarity.
+       echo -e "\n❌ FAILED: An explicit 'ERROR' was found in $logfile. This is the expected failure for the data corruption test.\n"
        echo "Error found in $logfile"
        # show only ERROR lines for quick triage
        grep -n "ERROR" "$logfile" || true
@@ -62,6 +64,8 @@ ensure_success_phrase() {
      return 0
    fi
  done
+ # CHANGED: Added a specific failure message for clarity.
+ echo -e "\n❌ FAILED: The success phrase was NOT found in the client output log. This indicates the test did not complete as expected.\n"
  echo "‼️ Did not find success phrase: '$SUCCESS_PHRASE' in logs: $*"
  for f in "$@"; do
    [ -f "$f" ] && { echo "--- $f ---"; tail -n +1 "$f"; echo "--------------"; }
