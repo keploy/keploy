@@ -107,7 +107,7 @@ jobs:
       - name: Install Docker Desktop (verbose)
         shell: pwsh
         continue-on-error: true
-        timeout-minutes: 3
+        timeout-minutes: 7
         run: |
           $ErrorActionPreference = 'Continue'
           $VerbosePreference = 'Continue'
