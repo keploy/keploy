@@ -1,0 +1,41 @@
+name: Test Integrations PR
+
+on:
+  workflow_dispatch:  # Allows manual triggering
+  push:
+    branches: [ test-integrations-pr ]
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/grpc-fuzzer/**'
+      - '.github/workflows/test_integrations_pr.yml'
+
+jobs:
+  test-grpc-fuzzer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          
+      - name: Install dependencies
+        run: go mod download
+        
+      - name: Test GRPC Fuzzer
+        run: |
+          cd cmd/grpc-fuzzer
+          go test -v ./...
+          
+      - name: Build GRPC Fuzzer
+        run: |
+          cd cmd/grpc-fuzzer
+          go build -o grpc-fuzzer
+          ./grpc-fuzzer --help  # Simple test to verify it runs
+          
+      - name: Run Integration Tests
+        run: |
+          # Add any specific integration tests here
+          echo "Running integration tests..."
