@@ -112,6 +112,18 @@ for i in 1 2; do
   # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
   send_request "$KEPLOY_PID"
 
+  cat "${app_name}.txt"
+
+  # Print logs of files starting with keploy_agent initials
+  for f in keploy_agent*; do
+    if [[ -f "$f" ]]; then
+      echo "== $f (complete) =="
+      cat "$f"
+    fi
+  done
+
+  
+
   # Wait + capture rc
   set +e
   wait "$KEPLOY_PID"
