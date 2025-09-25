@@ -3,23 +3,30 @@ set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"
 
-ensure_dockerfile_syntax() {
-    # Ensure BuildKit features (like --mount=type=ssh) are supported
-    if ! head -n1 "$DOCKERFILE_PATH" | grep -q '^# syntax=docker/dockerfile:'; then
-        echo "Prepending Dockerfile syntax directive for BuildKit mounts..."
-        tmp="$(mktemp)" && {
-          echo '# syntax=docker/dockerfile:1.6'
-          cat "$DOCKERFILE_PATH"
-        } >"$tmp" && mv "$tmp" "$DOCKERFILE_PATH"
-    fi
+
+# Function to add the -race flag to the go build command in the Dockerfile
+update_dockerfile() {
+    echo "Updating Dockerfile to include the -race flag in the go build command..."
+
+    # Use sed to update the Dockerfile
+    sed -i 's/RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy ./RUN go build -race -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy ./' "$DOCKERFILE_PATH"
+    
+    # Configure Git to use SSH and add GitHub's SSH key to known_hosts in a single layer.
+    # This prevents the "Host key verification failed" error.
+    sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' "$DOCKERFILE_PATH"
+    
+    # Ensure the go mod download command uses the SSH mount.
+    sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' "$DOCKERFILE_PATH"
+    
+    # Add go mod tidy after COPY . /app
+    sed -i '/COPY \. \/app/a RUN --mount=type=ssh go mod tidy' "$DOCKERFILE_PATH"
 }
 
-add_race_flag() {
-    echo "Adding -race to go build..."
-    sed -i \
-      's/^(RUN[[:space:]]\+go[[:space:]]\+build)\([[:space:]]\)/\1 -race\2/' \
-      "$DOCKERFILE_PATH" 2>/dev/null || true
-}
+# Function to build the Docker image
+build_docker_image() {
+    echo "Building Docker image..."
+    cat "$DOCKERFILE_PATH"
+
 
 use_ssh_for_github_and_known_hosts() {
     echo "Injecting SSH config and known_hosts before go mod download..."

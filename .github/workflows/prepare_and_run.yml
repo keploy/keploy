@@ -14,7 +14,9 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Build Keploy (PR)
-        run: go build -race -tags=viper_bind_struct -o keploy
+        run: |
+          go mod tidy
+          go build -race -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
 
