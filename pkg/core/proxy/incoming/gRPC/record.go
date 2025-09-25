@@ -50,7 +50,7 @@ func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn,
 
 		if proxy.cc != nil {
 			if err := proxy.cc.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-				logger.Error("failed to close gRPC client connection in test case mode", zap.Error(err))
+				logger.Debug("failed to close gRPC client connection in test case mode", zap.Error(err))
 			}
 		}
 	}()
@@ -149,7 +149,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 
 	destClientConn, err := p.getClientConn(clientCtx)
 	if err != nil {
-		p.logger.Error("failed to dial destination server", zap.Error(err))
+		p.logger.Debug("failed to dial destination server", zap.Error(err))
 		return status.Errorf(codes.Internal, "failed to connect to destination: %v", err)
 	}
 

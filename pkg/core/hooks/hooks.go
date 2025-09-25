@@ -246,7 +246,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 			switch runtime.GOARCH {
 			case "amd64":
-				h.logger.Info("Attaching x86_64 (amd64) kprobes for bind syscall.")
 				// Attach the kprobe for bind syscall entry on x86
 				h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
 				if err != nil {
@@ -254,7 +253,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 					return err
 				}
 			case "arm64":
-				h.logger.Info("Attaching arm64 kprobes for bind syscall.")
 				// Attach the kprobe for bind syscall entry on arm64
 				h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
 				if err != nil {
@@ -290,8 +288,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 				return err
 			}
 			h.cgBind6 = cg6
-
-			h.logger.Info("Attached ingress redirection hooks.")
 		}
 
 		//////////////////////////////////////////////////////////////////////////////

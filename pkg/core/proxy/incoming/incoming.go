@@ -89,7 +89,7 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 		return
 	}
 
-	pm.logger.Info("Listening for application bind events to start ingress proxies...")
+	pm.logger.Debug("Listening for application bind events to start ingress proxies...")
 
 	for e := range eventChan {
 		pm.logger.Debug("Intercepted application bind event",

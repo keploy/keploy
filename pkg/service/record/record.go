@@ -315,7 +315,7 @@ func (r *Recorder) Instrument(ctx context.Context, newTestSetID string) (uint64,
 		}
 
 		if r.config.Record.BigPayload && hooks.Mode == models.MODE_RECORD {
-			r.logger.Info("BigPayload mode enabled, starting ingress proxy.")
+			r.logger.Debug("BigPayload mode enabled, starting ingress proxy.")
 			incomingOpts := models.IncomingOptions{
 				Filters:  r.config.Record.Filters,
 				BasePath: r.config.Record.BasePath,
