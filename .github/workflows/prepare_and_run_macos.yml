@@ -1,7 +1,7 @@
 name: Prepare Binary and Run Workflows (macOS)
-# on:
-#   pull_request:
-#     branches: [main]
+on:
+  pull_request:
+    branches: [main]
 jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
@@ -39,25 +39,25 @@ jobs:
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
-  upload-latest:
-    runs-on: [self-hosted, macOS, native]
-    steps:
-      - name: Download latest release (macOS)
-        run: |
-          LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
-          URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_darwin_all.tar.gz"
-          curl -L "$URL" -o keploy.tar.gz
-          tar -xzf keploy.tar.gz
-          chmod +x keploy
+  # upload-latest:
+  #   runs-on: [self-hosted, macOS, native]
+  #   steps:
+  #     - name: Download latest release (macOS)
+  #       run: |
+  #         LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
+  #         URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_darwin_all.tar.gz"
+  #         curl -L "$URL" -o keploy.tar.gz
+  #         tar -xzf keploy.tar.gz
+  #         chmod +x keploy
 
-      - uses: actions/upload-artifact@v4
-        with: { name: latest, path: keploy }
+  #     - uses: actions/upload-artifact@v4
+  #       with: { name: latest, path: keploy }
 
-      - name: Clean up git config
-        if: always() # This ensures the step runs even if previous steps fail
-        continue-on-error: true
-        run: |
-          git config --global --unset url."git@github.com:".insteadOf
+  #     - name: Clean up git config
+  #       if: always() # This ensures the step runs even if previous steps fail
+  #       continue-on-error: true
+  #       run: |
+  #         git config --global --unset url."git@github.com:".insteadOf
 
   # Build docker image once on Linux and let macOS jobs pull via download-image
   build-docker-image:
@@ -83,9 +83,11 @@ jobs:
           git config --global --unset url."git@github.com:".insteadOf
 
   run_python_docker_macos:
-    needs: [build-and-upload, upload-latest, build-docker-image]
+    needs: [build-and-upload, build-docker-image]
+    # needs: [upload-latest]
     uses: ./.github/workflows/python_docker_macos.yml
 
   run_golang_docker_macos:
-    needs: [build-and-upload, upload-latest, build-docker-image]
+    needs: [build-and-upload, build-docker-image]
+    # needs: [upload-latest]
     uses: ./.github/workflows/golang_docker_macos.yml

@@ -118,6 +118,20 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y golang-go curl git ca-certificates
 
+          
+      - name: Prepare CA tools in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y ca-certificates jq
+          # Run Debian CA refresh (ok if no custom certs yet)
+          sudo update-ca-certificates || true
+          # Provide a no-op for RHEL's tool to avoid exit 127 if Keploy probes it
+          echo '#!/bin/sh
+          exit 0' | sudo tee /usr/local/bin/update-ca-trust >/dev/null
+          sudo chmod +x /usr/local/bin/update-ca-trust
+
       - name: Run ${{ matrix.app.name }} application in WSL
         shell: wsl-bash {0}
         env:
@@ -130,6 +144,7 @@ jobs:
           export RECORD_BIN="$WS/.wsl-bin/keploy_record"
           export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
           chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true
+          sudo apt-get install -y golang-go curl git ca-certificates
           cd "$WS/samples-go/${{ matrix.app.path }}"
           # Source the existing Linux bash script under WSL
           source "$WS/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh"

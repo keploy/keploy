@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 
 # macOS variant. Requires Docker Desktop for Mac running.
-# Note: BSD sed needs an empty string after -i for in-place edits.
+set -euo pipefail
 
-# set -euo pipefail
 
-# Isolate keploy home per run to avoid cross-job collisions on a single self-hosted runner
-# export KEPLOY_HOME_ROOT="${TMPDIR:-/tmp}/keploy-run-${GITHUB_RUN_ID:-$$}-${GITHUB_JOB:-python-docker}-$(date +%s)"
-# export HOME="$KEPLOY_HOME_ROOT/home"
-# mkdir -p "$HOME"
+# for the below shource make it such a way that if the file is not present or already present it does not error
+source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # --- Networking: create once, quietly ---
 if ! docker network ls --format '{{.Name}}' | grep -q '^keploy-network$'; then
@@ -23,21 +19,24 @@ docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data
+rm ./keploy.yml >/dev/null 2>&1 || true
+
 docker build -t flask-app:1.0 .
 
-# Safe even if keploy.yml doesn't exist
-sed -i '' 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml" || true
+
+# Generate the keploy-config file.
+$RECORD_BIN config --generate
+
+# Update the global noise to ts in the config file.
+config_file="./keploy.yml"
+if [ -f "$config_file" ]; then
+  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
+
 sleep 5
 
-# --- Helpers ---
-# THIS IS THE KEY CHANGE: Gracefully stop the app container, allowing Keploy to shut down cleanly.
-# graceful_shutdown() {
-#   local container_name="$1"
-#   echo "Gracefully stopping container: ${container_name} to allow clean Keploy exit."
-#   # Give a few seconds for the final requests to complete before stopping.
-#   sleep 3
-#   docker stop "${container_name}" >/dev/null 2>&1 || true
-# }
 
 send_request_and_shutdown() {
   local container_name="${1:-}"
@@ -62,8 +61,6 @@ send_request_and_shutdown() {
   curl -sS http://localhost:6000/students >/dev/null
   curl -sS -X DELETE http://localhost:6000/students/12345 >/dev/null
 
-  # Call the new shutdown function instead of killing the Keploy process directly.
-#   graceful_shutdown "$container_name"
 }
 
 # --- Record sessions ---
@@ -74,12 +71,12 @@ for i in 1 2; do
   send_request_and_shutdown "$container_name" &
   
   # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
-  keploy record \
+  "$RECORD_BIN" record \
     -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
     --container-name "$container_name" \
     --generate-github-actions=false \
-    --record-timer=9s \
-    &> "${container_name}.txt"
+    --record-timer=10s 2>&1 | tee "${container_name}.txt"
+     
   
     cat "${container_name}.txt"  # For visibility in logs
   # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
@@ -106,16 +103,14 @@ docker stop mongo >/dev/null 2>&1 || true
 # --- Test phase ---
 test_container="flaskApp_test"
 echo "Starting test mode..."
-keploy test \
+"$REPLAY_BIN" test \
   -c "docker run -p6000:6000 --net keploy-network --name $test_container flask-app:1.0" \
   --container-name "$test_container" \
   --apiTimeout 60 \
-  --delay 10 \
-  --generate-github-actions=false \
-  &> "${test_container}.txt"
+  --delay 12 \
+  --generate-github-actions=false 2>&1 | tee "${test_container}.txt"
 
-# Your verification and outcome logic from here is fine.
-# ... (rest of your script) ...
+
 
 # --- Verify reports ---
 all_passed=true
@@ -137,21 +132,9 @@ for i in 0 1; do
   fi
 done
 
-# --- Outcome ---
-if [ "$all_passed" = true ]; then
+if $all_passed; then
   echo "All tests passed"
   exit 0
 else
-  cat "${test_container}.txt"
-  echo "--- Diagnostics: keploy directory tree (if any) ---"
-  if [ -d keploy ]; then
-    find keploy -maxdepth 5 -type f -print
-  else
-    echo "keploy directory not found"
-  fi
-  echo "--- Diagnostics: docker ps (recent) ---"
-  docker ps -a | head -n 20 || true
-  echo "--- Diagnostics: container logs ($test_container) ---"
-  docker logs "$test_container" 2>&1 | tail -n 200 || true
   exit 1
 fi

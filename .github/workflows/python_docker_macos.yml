@@ -4,9 +4,9 @@ on:
 
 jobs:
   python_docker_macos:
-    concurrency:
-      group: macos-keploy-${{ github.ref }}
-      cancel-in-progress: false
+    # concurrency:
+    #   group: macos-keploy-${{ github.ref }}
+    #   cancel-in-progress: false
     runs-on: [self-hosted, macOS, native]
     strategy:
       fail-fast: false
@@ -15,12 +15,14 @@ jobs:
           # - job: record_latest_replay_build
           #   record_src: latest
           #   replay_src: build
-          - job: record_build_replay_latest
+          # - job: record_latest_replay_latest
+          #   record_src: latest
+          #   replay_src: latest
+
+
+          - job: record_build_replay_build
             record_src: build
-            replay_src: latest
-          # - job: record_build_replay_build
-          #   record_src: build
-          #   replay_src: build
+            replay_src: build
     name: ${{ matrix.job }} (macOS)
     steps:
 
@@ -68,19 +70,6 @@ jobs:
           cd samples-python/flask-mongo
           bash ./../../.github/workflows/test_workflow_scripts/python-docker-macos.sh
 
-      # - name: Final cleanup (macOS)
-      #   if: always()
-      #   env:
-      #     RECORD_BIN: ${{ steps.record.outputs.path }}
-      #     REPLAY_BIN: ${{ steps.replay.outputs.path }}
-      #   shell: bash
-      #   run: |
-      #     set +e
-      #     docker ps -aq --filter "name=mongo" | xargs -r docker rm -f || true
-      #     docker network rm keploy-network || true
-      #     find "$GITHUB_WORKSPACE" -type d -name keploy -prune -exec rm -rf {} + || true
-      #     rm -rf "$TMPDIR"/keploy-run-* || true
-      #     rm -f "$RECORD_BIN" "$REPLAY_BIN" || true
 
       - name: Clean up git config
         if: always()
