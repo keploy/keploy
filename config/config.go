@@ -86,6 +86,7 @@ type ReRecord struct {
 	APITimeout    uint64   `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	AmendTestSet  bool     `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
 	Branch        string   `json:"branch" yaml:"branch" mapstructure:"branch"`
+	Owner         string   `json:"owner" yaml:"owner" mapstructure:"owner"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
