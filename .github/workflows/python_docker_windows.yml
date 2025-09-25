@@ -42,11 +42,6 @@ jobs:
         env:
           LIMA_START_ARGS: --cpus 4 --memory 8
 
-      - name: Start Desktop
-        uses: ./start
-        with:
-          docker-desktop-build-url: ${{ matrix.build-url }}
-
       - name: Pull test image (from build job)
         shell: bash
         run: |
