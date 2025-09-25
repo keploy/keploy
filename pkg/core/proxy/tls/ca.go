@@ -54,8 +54,6 @@ var caStoreUpdateCmd = []string{
 
 func commandExists(cmd string) bool {
 	_, err := exec.LookPath(cmd)
-	if err != nil {
-	}
 	return err == nil
 }
 
