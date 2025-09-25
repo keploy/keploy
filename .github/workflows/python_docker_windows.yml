@@ -137,20 +137,18 @@ jobs:
           TS "Printing PATH to see if docker is present"
           $env:Path.Split(';') | ForEach-Object { TS "PATH: $_" }
 
-      # after: the step that runs `winget install Docker.DockerDesktop ...`
       - name: Initialize Docker Desktop (WSL2 Linux engine)
         shell: pwsh
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
           $ErrorActionPreference = 'Stop'
-          $VerbosePreference = 'Continue'
           function TS($m){ Write-Host "$(Get-Date -Format 'HH:mm:ss')  $m" }
 
-          # Ensure Docker CLI on PATH
+          # Ensure CLI on PATH
           $cliBin = 'C:\Program Files\Docker\Docker\resources\bin'
           if (Test-Path $cliBin) { $env:Path = "$env:Path;$cliBin" }
 
-          # Seed Docker settings to force WSL/Linux backend before first launch
+          # 1) Force Desktop to prefer WSL/Linux before first launch
           $cfgDir = Join-Path $env:APPDATA 'Docker'
           $cfg = Join-Path $cfgDir 'settings.json'
           New-Item -Type Directory -Force -Path $cfgDir | Out-Null
@@ -164,15 +162,28 @@ jobs:
           Set-Content -Path $cfg -Value $settings -Encoding UTF8
           TS "Wrote Docker settings.json to prefer WSL/Linux."
 
-          # Headless launch of Docker Desktop (accept license)
+          # 2) Make sure the Desktop Windows service is running (creates the backend named pipe)
+          $svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue
+          if ($null -ne $svc) {
+            if ($svc.Status -ne 'Running') {
+              TS "Starting Windows service: com.docker.service..."
+              Start-Service $svc.Name
+            } else {
+              TS "Service com.docker.service already Running."
+            }
+          } else {
+            TS "Service com.docker.service not found (OK on some versions)."
+          }
+
+          # 3) Launch Desktop headlessly (accept EULA)
           $ddExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
           if (!(Test-Path $ddExe)) { throw "Docker Desktop.exe not found at $ddExe" }
           TS "Starting Docker Desktop (headless)..."
           Start-Process -FilePath $ddExe -ArgumentList '--accept-license','--background' -WindowStyle Hidden
-          Start-Sleep -Seconds 3
+          Start-Sleep -Seconds 5
 
-          # Wait up to 5 min for Desktop to report 'running'
-          $deadline = (Get-Date).AddMinutes(5)
+          # 4) Wait up to 7 min for 'docker desktop status' to become 'running'
+          $deadline = (Get-Date).AddMinutes(7)
           $status = ""
           do {
             try { $status = docker desktop status 2>$null } catch { $status = "" }
@@ -180,18 +191,20 @@ jobs:
             if ($status -match 'running') { break }
             Start-Sleep -Seconds 3
           } while ((Get-Date) -lt $deadline)
+
           if ($status -notmatch 'running') {
-            TS "Docker Desktop never reported 'running'"
+            TS "Docker Desktop never reported 'running' (continuing to force Linux engine anyway)"
           }
 
-          # If engine is still Windows, switch to Linux explicitly
+          # 5) If engine is still Windows, switch explicitly (new + legacy)
           $serverOs = (docker version --format '{{.Server.Os}}' 2>$null)
           TS "Initial Server.Os: $serverOs"
           if ($serverOs -ne 'linux') {
             TS "Attempting 'docker desktop engine use linux'..."
-            try { docker desktop engine use linux | Out-Null } catch {}
+            try { docker desktop engine use linux | Out-Null } catch {
+              TS "desktop engine switch via CLI failed: $($_.Exception.Message)"
+            }
 
-            # Legacy fallback switch path
             if ((docker version --format '{{.Server.Os}}' 2>$null) -ne 'linux') {
               $cli = 'C:\Program Files\Docker\Docker\DockerCli.exe'
               if (Test-Path $cli) {
@@ -201,7 +214,7 @@ jobs:
             }
           }
 
-          # Wait for WSL distros + Linux daemon
+          # 6) Confirm WSL distros + Linux daemon
           $ok = $false
           for ($i=0; $i -lt 120; $i++) {
             $wslList = & wsl.exe -l -v 2>$null
@@ -220,12 +233,11 @@ jobs:
             throw "Docker Desktop did not switch to Linux engine in time"
           }
 
-          # Final diagnostics
+          # 7) Final diagnostics
           TS "✅ Docker Desktop is running with Linux engine."
           docker context ls
           docker version
           docker info | Select-String -Pattern 'OSType|Server Version|Kernel|Operating System|Default Runtime'
-
 
       - name: Show Docker Desktop version
         shell: pwsh
