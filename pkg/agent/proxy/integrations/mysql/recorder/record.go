@@ -97,7 +97,6 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 	select {
 	case <-clientClose:
-		mocks <- &models.Mock{}
 		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
