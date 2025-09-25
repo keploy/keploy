@@ -19,6 +19,8 @@ docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data
+rm ./keploy.yml >/dev/null 2>&1 || true
+
 docker build -t flask-app:1.0 .
 
 
@@ -74,8 +76,8 @@ for i in 1 2; do
     -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
     --container-name "$container_name" \
     --generate-github-actions=false \
-    --record-timer=10s \
-    |& tee "${container_name}.txt"
+    --record-timer=10s 2>&1 | tee "${container_name}.txt"
+     
   
     cat "${container_name}.txt"  # For visibility in logs
   # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
@@ -107,8 +109,7 @@ echo "Starting test mode..."
   --container-name "$test_container" \
   --apiTimeout 60 \
   --delay 12 \
-  --generate-github-actions=false \
-  |& tee "${test_container}.txt"
+  --generate-github-actions=false 2>&1 | tee "${test_container}.txt"
 
 
 

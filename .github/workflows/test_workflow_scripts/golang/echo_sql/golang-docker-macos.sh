@@ -13,6 +13,7 @@ docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
+rm ./keploy.yml >/dev/null 2>&1 || true
 
 # Generate the keploy-config file.
 $RECORD_BIN config --generate
@@ -63,7 +64,7 @@ send_request(){
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-   ($RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s) |& tee  "${container_name}.txt"
+   ($RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s)  2>&1 | tee  "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -87,7 +88,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-($REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false || true)  |& tee "${test_container}.txt"
+($REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false || true)   2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
