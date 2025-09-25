@@ -54,18 +54,13 @@ var caStoreUpdateCmd = []string{
 
 func commandExists(cmd string) bool {
 	_, err := exec.LookPath(cmd)
-	if err != nil {
-		fmt.Println("Command not found:", cmd)
-	}
 	return err == nil
 }
 
 func updateCaStore(ctx context.Context) error {
 	commandRun := false
 	for _, cmd := range caStoreUpdateCmd {
-		
 		if commandExists(cmd) {
-			fmt.Println("Running command to update CA store:", cmd)
 			commandRun = true
 			c := exec.CommandContext(ctx, cmd)
 			_, err := c.CombinedOutput()

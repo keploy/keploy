@@ -111,23 +111,14 @@ jobs:
             | xargs -0 -I{} sed -i 's/\r$//' "{}"
           chmod -R a+x "$WS/.github/workflows/test_workflow_scripts"
 
-      - name: Install dependencies in WSL
-        shell: wsl-bash {0}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y golang-go curl git ca-certificates
-
-          
       - name: Prepare CA tools in WSL
         shell: wsl-bash {0}
         run: |
           set -euo pipefail
           sudo apt-get update -y
+          sudo apt-get install -y golang-go curl git 
           sudo apt-get install -y ca-certificates jq
-          # Run Debian CA refresh (ok if no custom certs yet)
           sudo update-ca-certificates || true
-          # Provide a no-op for RHEL's tool to avoid exit 127 if Keploy probes it
           echo '#!/bin/sh
           exit 0' | sudo tee /usr/local/bin/update-ca-trust >/dev/null
           sudo chmod +x /usr/local/bin/update-ca-trust
