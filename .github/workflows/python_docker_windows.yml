@@ -36,41 +36,111 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Docker Desktop
+      - name: Install Docker Desktop (verbose)
         shell: pwsh
+        continue-on-error: true
         run: |
-          winget install --accept-package-agreements --accept-source-agreements --silent --id Docker.DockerDesktop -e
-      
-      - name: Start Docker Desktop (Linux engine) and wait
+          $ErrorActionPreference = 'Continue'
+          $VerbosePreference = 'Continue'
+          $ProgressPreference = 'SilentlyContinue'
+
+          function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+          TS "winget version:"; winget --version
+          TS "winget sources:"; winget source list
+
+          TS "Attempting winget install Docker.DockerDesktop (silent)"
+          winget install --id Docker.DockerDesktop -e `
+            --accept-source-agreements --accept-package-agreements --silent `
+            --disable-interactivity --verbose-logs
+          $code = $LASTEXITCODE
+          TS "winget exit code: $code"
+          if ($code -ne 0) { TS "winget failed or partially installed (this is expected on GH-hosted Windows)"; }
+
+          TS "Checking if Docker Desktop CLI files exist"
+          $paths = @(
+            'C:\Program Files\Docker\Docker\Docker Desktop.exe',
+            'C:\Program Files\Docker\Docker\resources\bin\docker.exe',
+            'C:\Program Files\Docker\Docker\DockerCli.exe'
+          )
+          foreach($p in $paths){ TS "Exists? $p -> $([IO.File]::Exists($p))" }
+
+          TS "Printing PATH to see if docker is present"
+          $env:Path.Split(';') | ForEach-Object { TS "PATH: $_" }
+
+      - name: Start Docker Desktop & switch to Linux (deep logs)
         shell: pwsh
+        continue-on-error: true
         run: |
-          $ErrorActionPreference = 'Stop'
-          $env:Path += ';C:\Program Files\Docker\Docker\resources\bin'
-          docker desktop start
-          docker desktop engine use linux
+          $ErrorActionPreference = 'Continue'
+          $VerbosePreference = 'Continue'
+          function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+          Start-Transcript -Path $env:USERPROFILE\docker-desktop-transcript.txt -Force
+
+          TS "WSL status"
+          try { wsl.exe -l -v } catch { TS "wsl.exe not available or fails: $($_.Exception.Message)" }
+
+          TS "Hyper-V feature status"
+          try { Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Format-List * } catch { TS "Hyper-V query failed" }
+
+          TS "Ensure CLI on PATH"
+          $cliBin = 'C:\Program Files\Docker\Docker\resources\bin'
+          if (Test-Path $cliBin) { $env:Path = "$env:Path;$cliBin" }
+
+          TS "docker --version (client)"
+          try { docker --version } catch { TS "docker client not found: $($_.Exception.Message)" }
+
+          TS "Trying: docker desktop start"
+          try { docker desktop start | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-start.log } catch { TS "desktop start threw: $($_.Exception.Message)" }
+
+          TS "Trying: docker desktop engine use linux"
+          try { docker desktop engine use linux | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-engine.log } catch { TS "engine switch threw: $($_.Exception.Message)" }
+
+          TS "Wait up to 5 min for 'docker desktop status' to become 'running'"
           $deadline = (Get-Date).AddMinutes(5)
+          $status = ""
           do {
-            $status = "" ; try { $status = docker desktop status 2>$null } catch {}
+            try { $status = docker desktop status 2>$null } catch { $status = "error:$($_.Exception.Message)" }
+            TS "desktop status: $status"
             if ($status -match 'running') { break }
             Start-Sleep -Seconds 3
           } while ((Get-Date) -lt $deadline)
-          if ($status -notmatch 'running') { throw "Docker Desktop not running" }
-          for ($i=0; $i -lt 60; $i++) {
-            try {
-              $v = docker version --format '{{.Server.Version}}' 2>$null
-              if ($LASTEXITCODE -eq 0 -and $v) { break }
-            } catch {}
+          if ($status -notmatch 'running') { TS "Docker Desktop never reported 'running'"; }
+
+          TS "Probe dockerd availability (30 tries)"
+          $v=$null
+          1..30 | ForEach-Object {
+            try { $v = docker version --format '{{.Server.Version}}' 2>$null } catch {}
+            TS "Server.Version: $v"
+            if ($v) { return }
             Start-Sleep -Seconds 3
           }
-          if (-not $v) { throw "Docker daemon never became ready" }
-          docker version
+          if (-not $v) { TS "dockerd never became ready" }
 
-      - name: Check Docker Status
+          TS "docker version (full)"
+          try { docker version } catch { TS "docker version failed: $($_.Exception.Message)" }
+
+          TS "docker info (key lines)"
+          try {
+            docker info | Tee-Object -FilePath $env:USERPROFILE\docker-info.txt
+            Select-String -Path $env:USERPROFILE\docker-info.txt -Pattern 'OSType|Server Version|Storage Driver|Default Isolation|Kernel|Operating System'
+          } catch { TS "docker info failed: $($_.Exception.Message)" }
+
+          TS "List Docker Desktop services/processes"
+          Get-Service *docker* | Format-Table -AutoSize | Out-String | Write-Host
+          Get-Process -Name "*docker*" -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
+
+          Stop-Transcript
+
+      - name: Check Docker Status (final)
+        shell: pwsh
         run: |
-          echo "--- Checking Docker Version ---"
-          docker version
-          echo "--- Checking Docker Daemon Status ---"
-          docker info
+          function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+          TS "--- Checking Docker Version ---"
+          try { docker version } catch { TS "docker version failed: $($_.Exception.Message)" }
+          TS "--- Checking Docker Daemon Status ---"
+          try { docker info } catch { TS "docker info failed: $($_.Exception.Message)" }
 
       - name: Pull test image (from build job)
         shell: bash
