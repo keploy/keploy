@@ -36,66 +36,72 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install WSL
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+      - name: Setup WSL (Ubuntu)
+        uses: Vampire/setup-wsl@v6
+        with:
+          distribution: Ubuntu-22.04
+          wsl-version: 2
+
+      # - name: Install WSL
+      #   shell: pwsh
+      #   run: |
+      #     $ErrorActionPreference = 'Continue'
+      #     function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
           
-          TS "Checking current WSL status"
-          try { wsl.exe -l -v } catch { TS "WSL not available or no distributions installed" }
+      #     TS "Checking current WSL status"
+      #     try { wsl.exe -l -v } catch { TS "WSL not available or no distributions installed" }
           
-          TS "Installing WSL with Ubuntu distribution"
-          # Enable WSL feature and install Ubuntu
-          wsl.exe --install -d Ubuntu --no-launch
+      #     TS "Installing WSL with Ubuntu distribution"
+      #     # Enable WSL feature and install Ubuntu
+      #     wsl.exe --install -d Ubuntu --no-launch
           
-          TS "Waiting for WSL installation to complete (up to 2 minutes)"
-          $deadline = (Get-Date).AddMinutes(2)
-          do {
-            try { 
-              $wslList = wsl.exe -l -v 2>&1
-              TS "WSL status: $wslList"
-              if ($wslList -match "Ubuntu") { 
-                TS "Ubuntu distribution detected in WSL"
-                break 
-              }
-            } catch { 
-              TS "WSL check failed: $($_.Exception.Message)" 
-            }
-            Start-Sleep -Seconds 10
-          } while ((Get-Date) -lt $deadline)
+      #     TS "Waiting for WSL installation to complete (up to 2 minutes)"
+      #     $deadline = (Get-Date).AddMinutes(2)
+      #     do {
+      #       try { 
+      #         $wslList = wsl.exe -l -v 2>&1
+      #         TS "WSL status: $wslList"
+      #         if ($wslList -match "Ubuntu") { 
+      #           TS "Ubuntu distribution detected in WSL"
+      #           break 
+      #         }
+      #       } catch { 
+      #         TS "WSL check failed: $($_.Exception.Message)" 
+      #       }
+      #       Start-Sleep -Seconds 10
+      #     } while ((Get-Date) -lt $deadline)
           
-          TS "Final WSL status check"
-          try { wsl.exe -l -v } catch { TS "Final WSL check failed" }
+      #     TS "Final WSL status check"
+      #     try { wsl.exe -l -v } catch { TS "Final WSL check failed" }
 
-      - name: Initialize Ubuntu WSL (non-interactive) & keep alive
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
+      # - name: Initialize Ubuntu WSL (non-interactive) & keep alive
+      #   shell: pwsh
+      #   run: |
+      #     $ErrorActionPreference = 'Stop'
 
-          # Force a first boot without interactive user creation by running as root
-          wsl.exe -d Ubuntu --user root -- bash -lc "echo first-boot && uname -a"
+      #     # Force a first boot without interactive user creation by running as root
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "echo first-boot && uname -a"
 
-          # Make root default (CI-only, avoids any username prompts)
-          wsl.exe -d Ubuntu --user root -- bash -lc "printf '[user]\ndefault=root\n' > /etc/wsl.conf"
+      #     # Make root default (CI-only, avoids any username prompts)
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "printf '[user]\ndefault=root\n' > /etc/wsl.conf"
 
-          # Keep the distro running so status stays 'Running'
-          wsl.exe -d Ubuntu --user root -- bash -lc "nohup sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 &"
+      #     # Keep the distro running so status stays 'Running'
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "nohup sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 &"
 
-          # Show final state
-          wsl.exe -l -v
+      #     # Show final state
+      #     wsl.exe -l -v
 
-      - name: Initialize Ubuntu WSL & keep alive
-        shell: pwsh
-        run: |
-          $ErrorActionPreference='Stop'
-          # First boot (non-interactive)
-          wsl.exe -d Ubuntu --user root -- bash -lc "true"
-          # Default to root to avoid prompts (CI-only)
-          wsl.exe -d Ubuntu --user root -- bash -lc "printf '[user]\ndefault=root\n' > /etc/wsl.conf"
-          # Keep the distro alive so status stays 'Running'
-          wsl.exe -d Ubuntu --user root -- bash -lc "nohup sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 &"
-          wsl.exe -l -v
+      # - name: Initialize Ubuntu WSL & keep alive
+      #   shell: pwsh
+      #   run: |
+      #     $ErrorActionPreference='Stop'
+      #     # First boot (non-interactive)
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "true"
+      #     # Default to root to avoid prompts (CI-only)
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "printf '[user]\ndefault=root\n' > /etc/wsl.conf"
+      #     # Keep the distro alive so status stays 'Running'
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "nohup sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 &"
+          # wsl.exe -l -v
 
 
       - name: Install Docker Desktop (verbose)
