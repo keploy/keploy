@@ -111,7 +111,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(os.Stdout)),
+		zapcore.AddSync(os.Stdout),
 		LogCfg.Level,
 	)
 
@@ -130,7 +130,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 	encoder := NewANSIConsoleEncoder(cfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(os.Stdout)),
+		zapcore.AddSync(os.Stdout),
 		cfg.Level,
 	)
 

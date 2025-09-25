@@ -16,11 +16,15 @@ update_dockerfile() {
     
     # Ensure the go mod download command uses the SSH mount.
     sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' "$DOCKERFILE_PATH"
+    
+    # Add go mod tidy after COPY . /app
+    sed -i '/COPY \. \/app/a RUN --mount=type=ssh go mod tidy' "$DOCKERFILE_PATH"
 }
 
 # Function to build the Docker image
 build_docker_image() {
     echo "Building Docker image..."
+    cat "$DOCKERFILE_PATH"
 
     # Enable Docker BuildKit and build the image, forwarding the SSH agent
     DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .

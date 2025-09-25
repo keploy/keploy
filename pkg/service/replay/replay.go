@@ -1019,7 +1019,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testPass bool
 		var loopErr error
 
-		err = r.FilterAndSetMocksWithFallback(runTestSetCtx, appID, filteredMocks, unfilteredMocks, expectedTestMockMappings[testCase.Name], testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks, useMappingBased)
+		var reqTime, respTime time.Time
+		switch testCase.Kind {
+		case models.HTTP:
+			reqTime = testCase.HTTPReq.Timestamp
+			respTime = testCase.HTTPResp.Timestamp
+		case models.GRPC_EXPORT:
+			reqTime = testCase.GrpcReq.Timestamp
+			respTime = testCase.GrpcResp.Timestamp
+		}
+
+		err = r.FilterAndSetMocksWithFallback(runTestSetCtx, appID, filteredMocks, unfilteredMocks, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to filter and set mocks")
 			break
