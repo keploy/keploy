@@ -137,6 +137,96 @@ jobs:
           TS "Printing PATH to see if docker is present"
           $env:Path.Split(';') | ForEach-Object { TS "PATH: $_" }
 
+      # after: the step that runs `winget install Docker.DockerDesktop ...`
+      - name: Initialize Docker Desktop (WSL2 Linux engine)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VerbosePreference = 'Continue'
+          function TS($m){ Write-Host "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+          # Ensure Docker CLI on PATH
+          $cliBin = 'C:\Program Files\Docker\Docker\resources\bin'
+          if (Test-Path $cliBin) { $env:Path = "$env:Path;$cliBin" }
+
+          # Seed Docker settings to force WSL/Linux backend before first launch
+          $cfgDir = Join-Path $env:APPDATA 'Docker'
+          $cfg = Join-Path $cfgDir 'settings.json'
+          New-Item -Type Directory -Force -Path $cfgDir | Out-Null
+          $settings = @{
+            version = 3
+            autoStart = $true
+            useWindowsContainers = $false
+            wslEngineEnabled = $true
+            kubernetesEnabled = $false
+          } | ConvertTo-Json -Depth 4
+          Set-Content -Path $cfg -Value $settings -Encoding UTF8
+          TS "Wrote Docker settings.json to prefer WSL/Linux."
+
+          # Headless launch of Docker Desktop (accept license)
+          $ddExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          if (!(Test-Path $ddExe)) { throw "Docker Desktop.exe not found at $ddExe" }
+          TS "Starting Docker Desktop (headless)..."
+          Start-Process -FilePath $ddExe -ArgumentList '--accept-license','--background' -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+
+          # Wait up to 5 min for Desktop to report 'running'
+          $deadline = (Get-Date).AddMinutes(5)
+          $status = ""
+          do {
+            try { $status = docker desktop status 2>$null } catch { $status = "" }
+            TS "desktop status: $status"
+            if ($status -match 'running') { break }
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+          if ($status -notmatch 'running') {
+            TS "Docker Desktop never reported 'running'"
+          }
+
+          # If engine is still Windows, switch to Linux explicitly
+          $serverOs = (docker version --format '{{.Server.Os}}' 2>$null)
+          TS "Initial Server.Os: $serverOs"
+          if ($serverOs -ne 'linux') {
+            TS "Attempting 'docker desktop engine use linux'..."
+            try { docker desktop engine use linux | Out-Null } catch {}
+
+            # Legacy fallback switch path
+            if ((docker version --format '{{.Server.Os}}' 2>$null) -ne 'linux') {
+              $cli = 'C:\Program Files\Docker\Docker\DockerCli.exe'
+              if (Test-Path $cli) {
+                TS "Fallback: DockerCli.exe -SwitchLinuxEngine"
+                & $cli -SwitchLinuxEngine | Out-Null
+              }
+            }
+          }
+
+          # Wait for WSL distros + Linux daemon
+          $ok = $false
+          for ($i=0; $i -lt 120; $i++) {
+            $wslList = & wsl.exe -l -v 2>$null
+            $haveDD = ($wslList -match 'docker-desktop') -and ($wslList -match 'docker-desktop-data')
+            $srv = (docker version --format '{{.Server.Os}}/{{.Server.Version}}' 2>$null)
+            TS "WSL distros ready: $haveDD  |  Server: $srv"
+            if ($haveDD -and $srv -like 'linux/*') { $ok = $true; break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $ok) {
+            TS "❌ Linux engine never came up."
+            TS "== Last 200 lines of Docker log =="
+            $log = "$env:LOCALAPPDATA\Docker\log\log.txt"
+            if (Test-Path $log) { Get-Content $log -Tail 200 | Write-Host } else { TS "no log at $log" }
+            TS "== WSL list =="; try { & wsl.exe -l -v } catch {}
+            throw "Docker Desktop did not switch to Linux engine in time"
+          }
+
+          # Final diagnostics
+          TS "✅ Docker Desktop is running with Linux engine."
+          docker context ls
+          docker version
+          docker info | Select-String -Pattern 'OSType|Server Version|Kernel|Operating System|Default Runtime'
+
+
       - name: Show Docker Desktop version
         shell: pwsh
         run: |
