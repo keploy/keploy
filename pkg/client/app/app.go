@@ -1,5 +1,3 @@
-//go:build !windows
-
 // Package app provides functionality for managing applications.
 package app
 

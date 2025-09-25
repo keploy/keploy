@@ -1,5 +1,3 @@
-//go:build !windows
-
 package hooks
 
 import (
@@ -30,7 +28,6 @@ func IPv4ToUint32(ipStr string) (uint32, error) {
 	}
 	return 0, errors.New("failed to parse IP address")
 }
-
 
 func GetSelfInodeNumber() (uint64, error) {
 	p := filepath.Join("/proc", "self", "ns", "pid")
