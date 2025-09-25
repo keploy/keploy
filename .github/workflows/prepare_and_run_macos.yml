@@ -1,93 +1,93 @@
 name: Prepare Binary and Run Workflows (macOS)
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [ main ]
 jobs:
-  # build-and-upload:
-  #   runs-on: [self-hosted, macOS, native]
-  #   steps:
-  #     - name: Clear docker images and cache
-  #       run: |
-  #         docker builder prune --all -f
-  #         docker volume prune -f
-
-  #     - name: Clean up git config
-  #       if: always()
-  #       continue-on-error: true
-  #       run: |
-  #         git config --global --unset url."git@github.com:".insteadOf
-      
-  #     - name: Checkout Repository
-  #       uses: actions/checkout@v4
-  #       with:
-  #         persist-credentials: false
-    
-  #     - name: Add Private Parsers
-  #       uses: ./.github/actions/setup-private-parsers
-  #       with:
-  #         ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-
-  #     - name: Build Keploy (PR) - macOS (darwin/arm64)
-  #       run: |
-  #         GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -o keploy
-  #     - uses: actions/upload-artifact@v4
-  #       with: { name: build, path: keploy }
-      
-  #     - name: Clean up git config
-  #       if: always() # This ensures the step runs even if previous steps fail
-  #       continue-on-error: true
-  #       run: |
-  #         git config --global --unset url."git@github.com:".insteadOf
-
-  upload-latest:
+  build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
-      - name: Download latest release (macOS)
+      - name: Clear docker images and cache
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
-          URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_darwin_all.tar.gz"
-          curl -L "$URL" -o keploy.tar.gz
-          tar -xzf keploy.tar.gz
-          chmod +x keploy
+          docker builder prune --all -f
+          docker volume prune -f
 
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
+      
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+    
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+      - name: Build Keploy (PR) - macOS (darwin/arm64)
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
-        with: { name: latest, path: keploy }
-
+        with: { name: build, path: keploy }
+      
       - name: Clean up git config
         if: always() # This ensures the step runs even if previous steps fail
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
-  # Build docker image once on Linux and let macOS jobs pull via download-image
-  # build-docker-image:
+  # upload-latest:
   #   runs-on: [self-hosted, macOS, native]
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - name: Download latest release (macOS)
+  #       run: |
+  #         LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
+  #         URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_darwin_all.tar.gz"
+  #         curl -L "$URL" -o keploy.tar.gz
+  #         tar -xzf keploy.tar.gz
+  #         chmod +x keploy
 
-  #     - name: Add Private Parsers
-  #       uses: ./.github/actions/setup-private-parsers
-  #       with:
-  #         ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-  #     - name: Build image
-  #       run: |
-  #         source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
-  #     - name: Push image
-  #       run: |
-  #         docker push ttl.sh/keploy/keploy:1h
-          
+  #     - uses: actions/upload-artifact@v4
+  #       with: { name: latest, path: keploy }
+
   #     - name: Clean up git config
   #       if: always() # This ensures the step runs even if previous steps fail
   #       continue-on-error: true
   #       run: |
   #         git config --global --unset url."git@github.com:".insteadOf
 
+  # Build docker image once on Linux and let macOS jobs pull via download-image
+  build-docker-image:
+    runs-on: [self-hosted, macOS, native]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+      - name: Build image
+        run: |
+          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+      - name: Push image
+        run: |
+          docker push ttl.sh/keploy/keploy:1h
+          
+      - name: Clean up git config
+        if: always() # This ensures the step runs even if previous steps fail
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
+
   run_python_docker_macos:
-    # needs: [build-and-upload, build-docker-image]
-    needs: [upload-latest]
+    needs: [build-and-upload, build-docker-image]
+    # needs: [upload-latest]
     uses: ./.github/workflows/python_docker_macos.yml
 
   run_golang_docker_macos:
-    # needs: [build-and-upload, build-docker-image]
-    needs: [upload-latest]
+    needs: [build-and-upload, build-docker-image]
+    # needs: [upload-latest]
     uses: ./.github/workflows/golang_docker_macos.yml
