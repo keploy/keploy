@@ -68,6 +68,30 @@ jobs:
           TS "Printing PATH to see if docker is present"
           $env:Path.Split(';') | ForEach-Object { TS "PATH: $_" }
 
+      - name: Show Docker Desktop version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:Path += ';C:\Program Files\Docker\Docker\resources\bin'
+
+          Write-Host "== Docker CLI =="
+          try { docker --version } catch { Write-Host "docker client not found" }
+
+          Write-Host "== Docker Desktop CLI =="
+          try { docker desktop version } catch { Write-Host "No 'docker desktop' subcommand (pre-4.37)" }
+
+          Write-Host "== EXE FileVersion fallback =="
+          $exe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          if (Test-Path $exe) {
+            $fv = (Get-Item $exe).VersionInfo.FileVersion
+            Write-Host "Docker Desktop.exe FileVersion: $fv"
+          } else {
+            Write-Host "Docker Desktop.exe not found"
+          }
+
+          Write-Host "== Winget package =="
+          winget list --id Docker.DockerDesktop -e
+
       - name: Start Docker Desktop & switch to Linux (deep logs)
         shell: pwsh
         continue-on-error: true
