@@ -522,7 +522,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	clientInfo.IsKeployClientRegistered = uint32(0)
 
 	if opts.IsDocker {
-		h.proxyIP4 = opts.KeployIPV4
+		h.proxyIP4 = "127.0.0.1"
 		ipv6, err := ToIPv4MappedIPv6(opts.KeployIPV4)
 		if err != nil {
 			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", opts.KeployIPV4, err)
