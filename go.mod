@@ -60,7 +60,6 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff // indirect
@@ -75,7 +74,6 @@ require (
 require (
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/snappy v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/chunkreader/v2 v2.0.0 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
@@ -104,12 +102,12 @@ require (
 	github.com/7sDream/geko v0.1.1
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/andybalholm/brotli v1.2.0
+	github.com/bufbuild/protocompile v0.14.1
 	github.com/charmbracelet/glamour v0.6.0
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.28.1
 	github.com/golang-jwt/jwt/v4 v4.5.0
-	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/keploy/integrations v0.0.0-20250925101223-fa66810ffc7b
@@ -118,9 +116,6 @@ require (
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.10.0
 	github.com/wI2L/jsondiff v0.5.0
-	github.com/xdg-go/pbkdf2 v1.0.0
-	github.com/xdg-go/scram v1.1.1
-	github.com/xdg-go/stringprep v1.0.4
 	github.com/zricethezav/gitleaks/v8 v8.28.0
 	golang.org/x/sync v0.15.0
 	golang.org/x/term v0.32.0
@@ -142,7 +137,6 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
-	github.com/bufbuild/protocompile v0.14.1 // indirect
 	github.com/charmbracelet/lipgloss v0.5.0 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/fatih/semgroup v1.2.0 // indirect
