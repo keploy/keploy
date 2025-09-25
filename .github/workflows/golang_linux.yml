@@ -17,6 +17,9 @@ jobs:
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
+          - name: grpc-mongo
+            path: grpc-mongo
+            script_dir: grpc-mongo
         config:
           - job: record_latest_replay_build
             record_src: latest
