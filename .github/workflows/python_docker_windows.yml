@@ -264,70 +264,70 @@ jobs:
           wsl.exe -l -v 2>$null
 
 
-      - name: Start Docker Desktop & switch to Linux (deep logs)
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $VerbosePreference = 'Continue'
-          function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+      # - name: Start Docker Desktop & switch to Linux (deep logs)
+      #   shell: pwsh
+      #   continue-on-error: true
+      #   run: |
+      #     $ErrorActionPreference = 'Continue'
+      #     $VerbosePreference = 'Continue'
+      #     function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
 
-          Start-Transcript -Path $env:USERPROFILE\docker-desktop-transcript.txt -Force
+      #     Start-Transcript -Path $env:USERPROFILE\docker-desktop-transcript.txt -Force
 
-          TS "WSL status"
-          try { wsl.exe -l -v } catch { TS "wsl.exe not available or fails: $($_.Exception.Message)" }
+      #     TS "WSL status"
+      #     try { wsl.exe -l -v } catch { TS "wsl.exe not available or fails: $($_.Exception.Message)" }
 
-          TS "Hyper-V feature status"
-          try { Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Format-List * } catch { TS "Hyper-V query failed" }
+      #     TS "Hyper-V feature status"
+      #     try { Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Format-List * } catch { TS "Hyper-V query failed" }
 
-          TS "Ensure CLI on PATH"
-          $cliBin = 'C:\Program Files\Docker\Docker\resources\bin'
-          if (Test-Path $cliBin) { $env:Path = "$env:Path;$cliBin" }
+      #     TS "Ensure CLI on PATH"
+      #     $cliBin = 'C:\Program Files\Docker\Docker\resources\bin'
+      #     if (Test-Path $cliBin) { $env:Path = "$env:Path;$cliBin" }
 
-          TS "docker --version (client)"
-          try { docker --version } catch { TS "docker client not found: $($_.Exception.Message)" }
+      #     TS "docker --version (client)"
+      #     try { docker --version } catch { TS "docker client not found: $($_.Exception.Message)" }
 
-          TS "Trying: docker desktop start"
-          try { docker desktop start | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-start.log } catch { TS "desktop start threw: $($_.Exception.Message)" }
+      #     TS "Trying: docker desktop start"
+      #     try { docker desktop start | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-start.log } catch { TS "desktop start threw: $($_.Exception.Message)" }
 
-          TS "Trying: docker desktop engine use linux"
-          try { docker desktop engine use linux | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-engine.log } catch { TS "engine switch threw: $($_.Exception.Message)" }
+      #     TS "Trying: docker desktop engine use linux"
+      #     try { docker desktop engine use linux | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-engine.log } catch { TS "engine switch threw: $($_.Exception.Message)" }
 
-          TS "Wait up to 5 min for 'docker desktop status' to become 'running'"
-          $deadline = (Get-Date).AddMinutes(5)
-          $status = ""
-          do {
-            try { $status = docker desktop status 2>$null } catch { $status = "error:$($_.Exception.Message)" }
-            TS "desktop status: $status"
-            if ($status -match 'running') { break }
-            Start-Sleep -Seconds 3
-          } while ((Get-Date) -lt $deadline)
-          if ($status -notmatch 'running') { TS "Docker Desktop never reported 'running'"; }
+      #     TS "Wait up to 5 min for 'docker desktop status' to become 'running'"
+      #     $deadline = (Get-Date).AddMinutes(5)
+      #     $status = ""
+      #     do {
+      #       try { $status = docker desktop status 2>$null } catch { $status = "error:$($_.Exception.Message)" }
+      #       TS "desktop status: $status"
+      #       if ($status -match 'running') { break }
+      #       Start-Sleep -Seconds 3
+      #     } while ((Get-Date) -lt $deadline)
+      #     if ($status -notmatch 'running') { TS "Docker Desktop never reported 'running'"; }
 
-          TS "Probe dockerd availability (30 tries)"
-          $v=$null
-          1..30 | ForEach-Object {
-            try { $v = docker version --format '{{.Server.Version}}' 2>$null } catch {}
-            TS "Server.Version: $v"
-            if ($v) { return }
-            Start-Sleep -Seconds 3
-          }
-          if (-not $v) { TS "dockerd never became ready" }
+      #     TS "Probe dockerd availability (30 tries)"
+      #     $v=$null
+      #     1..30 | ForEach-Object {
+      #       try { $v = docker version --format '{{.Server.Version}}' 2>$null } catch {}
+      #       TS "Server.Version: $v"
+      #       if ($v) { return }
+      #       Start-Sleep -Seconds 3
+      #     }
+      #     if (-not $v) { TS "dockerd never became ready" }
 
-          TS "docker version (full)"
-          try { docker version } catch { TS "docker version failed: $($_.Exception.Message)" }
+      #     TS "docker version (full)"
+      #     try { docker version } catch { TS "docker version failed: $($_.Exception.Message)" }
 
-          TS "docker info (key lines)"
-          try {
-            docker info | Tee-Object -FilePath $env:USERPROFILE\docker-info.txt
-            Select-String -Path $env:USERPROFILE\docker-info.txt -Pattern 'OSType|Server Version|Storage Driver|Default Isolation|Kernel|Operating System'
-          } catch { TS "docker info failed: $($_.Exception.Message)" }
+      #     TS "docker info (key lines)"
+      #     try {
+      #       docker info | Tee-Object -FilePath $env:USERPROFILE\docker-info.txt
+      #       Select-String -Path $env:USERPROFILE\docker-info.txt -Pattern 'OSType|Server Version|Storage Driver|Default Isolation|Kernel|Operating System'
+      #     } catch { TS "docker info failed: $($_.Exception.Message)" }
 
-          TS "List Docker Desktop services/processes"
-          Get-Service *docker* | Format-Table -AutoSize | Out-String | Write-Host
-          Get-Process -Name "*docker*" -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
+      #     TS "List Docker Desktop services/processes"
+      #     Get-Service *docker* | Format-Table -AutoSize | Out-String | Write-Host
+      #     Get-Process -Name "*docker*" -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
 
-          Stop-Transcript
+      #     Stop-Transcript
 
       - name: Check Docker Status (final)
         shell: pwsh
