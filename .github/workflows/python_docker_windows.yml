@@ -29,7 +29,6 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-        build-url: [ "latest", "https://desktop.docker.com/linux/main/amd64/122432/docker-desktop-4.24.0-amd64.deb" ]
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
 
@@ -37,10 +36,34 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Docker
-        uses: docker/setup-docker-action@v4
-        env:
-          LIMA_START_ARGS: --cpus 4 --memory 8
+      - name: Install Docker Desktop
+        shell: pwsh
+        run: |
+          winget install --accept-package-agreements --accept-source-agreements --silent --id Docker.DockerDesktop -e
+      
+      - name: Start Docker Desktop (Linux engine) and wait
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:Path += ';C:\Program Files\Docker\Docker\resources\bin'
+          docker desktop start
+          docker desktop engine use linux
+          $deadline = (Get-Date).AddMinutes(5)
+          do {
+            $status = "" ; try { $status = docker desktop status 2>$null } catch {}
+            if ($status -match 'running') { break }
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+          if ($status -notmatch 'running') { throw "Docker Desktop not running" }
+          for ($i=0; $i -lt 60; $i++) {
+            try {
+              $v = docker version --format '{{.Server.Version}}' 2>$null
+              if ($LASTEXITCODE -eq 0 -and $v) { break }
+            } catch {}
+            Start-Sleep -Seconds 3
+          }
+          if (-not $v) { throw "Docker daemon never became ready" }
+          docker version
 
       - name: Check Docker Status
         run: |
