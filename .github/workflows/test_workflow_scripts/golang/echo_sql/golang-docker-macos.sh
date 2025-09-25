@@ -4,7 +4,14 @@
 set -euo pipefail
 
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+# ---------- Safe "source" (no error if missing) ----------
+IID_SCRIPT="./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh"
+if [ -r "$IID_SCRIPT" ]; then
+  # shellcheck disable=SC1090
+  . "$IID_SCRIPT"
+else
+  echo "🔎 Skipping $IID_SCRIPT (not found or not readable)."
+fi
 
 
 # Build Docker Image(s)
