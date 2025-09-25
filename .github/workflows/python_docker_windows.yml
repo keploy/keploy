@@ -29,6 +29,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
+        build-url: [ "latest", "https://desktop.docker.com/linux/main/amd64/122432/docker-desktop-4.24.0-amd64.deb" ]
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
 
@@ -40,6 +41,11 @@ jobs:
         uses: docker/setup-docker-action@v4
         env:
           LIMA_START_ARGS: --cpus 4 --memory 8
+
+      - name: Start Desktop
+        uses: ./start
+        with:
+          docker-desktop-build-url: ${{ matrix.build-url }}
 
       - name: Pull test image (from build job)
         shell: bash
