@@ -14,12 +14,12 @@ ensure_dockerfile_syntax() {
     fi
 }
 
-add_race_flag() {
-    echo "Adding -race to go build..."
-    sed -i \
-      's/^(RUN[[:space:]]\+go[[:space:]]\+build)\([[:space:]]\)/\1 -race\2/' \
-      "$DOCKERFILE_PATH" 2>/dev/null || true
-}
+
+# Function to build the Docker image
+build_docker_image() {
+    echo "Building Docker image..."
+    cat "$DOCKERFILE_PATH"
+
 
 use_ssh_for_github_and_known_hosts() {
     echo "Injecting SSH config and known_hosts before go mod download..."
