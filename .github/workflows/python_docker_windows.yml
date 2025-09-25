@@ -137,6 +137,71 @@ jobs:
           TS "Printing PATH to see if docker is present"
           $env:Path.Split(';') | ForEach-Object { TS "PATH: $_" }
 
+      - name: Probe Docker Desktop (before switching)
+        id: probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function TS($m){ Write-Host "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+          $ddExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          $dockerExe = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe'
+          $cliDir = Split-Path $dockerExe -Parent
+          if (Test-Path $cliDir) { $env:Path = "$env:Path;$cliDir" }
+
+          TS "== Executable presence =="
+          TS "Exists? $ddExe -> $([IO.File]::Exists($ddExe))"
+          TS "Exists? $dockerExe -> $([IO.File]::Exists($dockerExe))"
+
+          TS "== Docker client version =="
+          try { docker --version } catch { TS "docker.exe missing: $($_.Exception.Message)" }
+
+          TS "== Docker Desktop CLI version =="
+          $desktopCli = $false
+          try { docker desktop version; $desktopCli = $true } catch { TS "No 'docker desktop' subcommand" }
+
+          TS "== Docker Desktop status =="
+          $desktopStatus = ''
+          if ($desktopCli) {
+            try { $desktopStatus = docker desktop status } catch {}
+            TS "desktop status: $desktopStatus"
+          }
+
+          TS "== com.docker.service (Windows service) =="
+          $svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue
+          if ($null -ne $svc) { TS "com.docker.service: $($svc.Status)" } else { TS "service not found" }
+
+          TS "== FileVersion of Docker Desktop.exe (if present) =="
+          if (Test-Path $ddExe) {
+            $fv = (Get-Item $ddExe).VersionInfo.FileVersion
+            TS "Docker Desktop.exe FileVersion: $fv"
+          }
+
+          TS "== WSL distros =="
+          try { wsl.exe -l -v } catch { TS "wsl.exe not available: $($_.Exception.Message)" }
+
+          TS "== Docker server OS/version =="
+          $server = ''
+          try { $server = docker version --format '{{.Server.Os}}/{{.Server.Version}}' } catch {}
+          TS "Server: $server"
+
+          TS "== Docker contexts =="
+          try { docker context ls } catch {}
+
+          $present = [IO.File]::Exists($ddExe)
+          $running = ($desktopStatus -match 'running')
+
+          "present=$present"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "desktop_cli=$desktopCli"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "running=$running"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "server=$server"             | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          if (-not $running) {
+            TS "== Tail of Desktop log (if any) =="
+            $log = "$env:LOCALAPPDATA\Docker\log\log.txt"
+            if (Test-Path $log) { Get-Content $log -Tail 200 | Write-Host } else { TS "no log at $log" }
+          }
+
       - name: Initialize Docker Desktop (WSL2 Linux engine)
         shell: pwsh
         timeout-minutes: 12
