@@ -42,6 +42,13 @@ jobs:
         env:
           LIMA_START_ARGS: --cpus 4 --memory 8
 
+      - name: Check Docker Status
+        run: |
+          echo "--- Checking Docker Version ---"
+          docker version
+          echo "--- Checking Docker Daemon Status ---"
+          docker info
+
       - name: Pull test image (from build job)
         shell: bash
         run: |
