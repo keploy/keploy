@@ -18,7 +18,7 @@ update_dockerfile() {
     sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' "$DOCKERFILE_PATH"
     
     # Add go mod tidy after go mod download
-    sed -i '/RUN --mount=type=ssh go mod download/a RUN go mod tidy' "$DOCKERFILE_PATH"
+    sed -i '/RUN --mount=type=ssh go mod download/a RUN --mount=type=ssh go mod tidy' "$DOCKERFILE_PATH"
 }
 
 # Function to build the Docker image
