@@ -232,6 +232,14 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 		logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
 	}
 
+	// Intentionally perturb parsed parameter metadata for testing: drop the last param def and clear EOF marker.
+	if len(responseOk.ParamDefs) > 0 {
+		responseOk.ParamDefs = responseOk.ParamDefs[:len(responseOk.ParamDefs)-1]
+		logger.Debug("Intentionally dropped last ParamDef for testing")
+	}
+	// Clear EOF marker to simulate parser inconsistency while keeping I/O intact.
+	responseOk.EOFAfterParamDefs = nil
+
 	//See if there are any columns
 	if responseOk.NumColumns > 0 {
 		for i := uint16(0); i < responseOk.NumColumns; i++ {
@@ -288,6 +296,13 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
 	}
+
+	// Intentionally perturb parsed column metadata for testing: swap first two column defs when present and clear EOF marker.
+	if len(responseOk.ColumnDefs) >= 2 {
+		responseOk.ColumnDefs[0], responseOk.ColumnDefs[1] = responseOk.ColumnDefs[1], responseOk.ColumnDefs[0]
+		logger.Debug("Intentionally swapped first two ColumnDefs for testing")
+	}
+	responseOk.EOFAfterColumnDefs = nil
 
 	//set the lastOp to COM_STMT_PREPARE_OK
 	decodeCtx.LastOp.Store(clientConn, mysql.OK)
@@ -364,6 +379,18 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 
 		textResultSet.EOFAfterColumns = eofData
 
+	}
+
+	// Intentionally perturb parsed text result set metadata: swap first two columns (if present),
+	// clear EOF marker, and decrement ColumnCount to simulate an encoding bug without affecting I/O.
+	if len(textResultSet.Columns) >= 2 {
+		textResultSet.Columns[0], textResultSet.Columns[1] = textResultSet.Columns[1], textResultSet.Columns[0]
+		logger.Debug("Intentionally swapped first two TextResultSet columns for testing")
+	}
+	textResultSet.EOFAfterColumns = nil
+	if textResultSet.ColumnCount > 0 {
+		textResultSet.ColumnCount = textResultSet.ColumnCount - 1
+		logger.Debug("Intentionally decremented TextResultSet.ColumnCount for testing", zap.Uint64("ColumnCount", textResultSet.ColumnCount))
 	}
 	// Read the row data packets
 rowLoop:
@@ -494,6 +521,19 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 	binaryResultSet.EOFAfterColumns = eofData
 
 	// Read the row data packets
+
+	// Intentionally perturb parsed binary result set metadata: swap first two columns (if present),
+	// clear EOF marker, and decrement ColumnCount to simulate an encoding bug without affecting I/O.
+	if len(binaryResultSet.Columns) >= 2 {
+		binaryResultSet.Columns[0], binaryResultSet.Columns[1] = binaryResultSet.Columns[1], binaryResultSet.Columns[0]
+		logger.Debug("Intentionally swapped first two BinaryResultSet columns for testing")
+	}
+	binaryResultSet.EOFAfterColumns = nil
+	if binaryResultSet.ColumnCount > 0 {
+		binaryResultSet.ColumnCount = binaryResultSet.ColumnCount - 1
+		logger.Debug("Intentionally decremented BinaryResultSet.ColumnCount for testing", zap.Uint64("ColumnCount", binaryResultSet.ColumnCount))
+	}
+
 rowLoop:
 	for {
 		select {
