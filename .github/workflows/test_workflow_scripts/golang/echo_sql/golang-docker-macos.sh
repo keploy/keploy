@@ -4,14 +4,8 @@
 set -euo pipefail
 
 
-# ---------- Safe "source" (no error if missing) ----------
-IID_SCRIPT="./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh"
-if [ -r "$IID_SCRIPT" ]; then
-  # shellcheck disable=SC1090
-  . "$IID_SCRIPT"
-else
-  echo "🔎 Skipping $IID_SCRIPT (not found or not readable)."
-fi
+# for the below shource make it such a way that if the file is not present or already present it does not error
+source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 
 # Build Docker Image(s)
@@ -64,16 +58,14 @@ send_request(){
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s &> "${container_name}.txt"
+   ($RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s) |& tee  "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
-        cat "${container_name}.txt"
         exit 1
     fi
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
-        cat "${container_name}.txt"
         exit 1
     fi
     sleep 5
@@ -90,21 +82,17 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false &> "${test_container}.txt" || true
+($REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false || true)  |& tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
     exit 1
 fi
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "${test_container}.txt"
     exit 1
 fi
-
-cat "${test_container}.txt"  # For visibility in logs
 
 all_passed=true
 
@@ -133,6 +121,5 @@ if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    cat "${test_container}.txt"
     exit 1
 fi
