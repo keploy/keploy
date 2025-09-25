@@ -36,13 +36,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Docker engine is reachable
-        shell: bash
-        run: |
-          echo "DOCKER_HOST before: ${DOCKER_HOST:-<unset>}"
-          echo "DOCKER_HOST=" >> "$GITHUB_ENV"
-          docker context use default || true
-          docker version
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v4
+        env:
+          LIMA_START_ARGS: --cpus 4 --memory 8
 
       - name: Pull test image (from build job)
         shell: bash
