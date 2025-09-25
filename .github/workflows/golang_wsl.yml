@@ -1,0 +1,150 @@
+name: Golang On WSL (Windows host)
+
+on:
+  workflow_call:
+
+jobs:
+  golang_wsl:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http_pokeapi
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (WSL)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Optional hardening on the Windows host to prefer LF
+      - name: Configure Git EOL on Windows (optional but recommended)
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Setup WSL (Ubuntu)
+        uses: Vampire/setup-wsl@v6
+        with:
+          distribution: Ubuntu-22.04
+          wsl-version: 2
+      
+      - name: Verify kernel version in WSL
+        shell: wsl-bash {0}
+        run: |
+          echo "=== Kernel Version ==="
+          uname -r
+          echo "=== Checking kernel requirement ==="
+          KERNEL_VERSION=$(uname -r | cut -d'.' -f1-2)
+          REQUIRED_VERSION="5.10"
+          if printf '%s\n' "$REQUIRED_VERSION" "$KERNEL_VERSION" | sort -V | head -n1 | grep -q "$REQUIRED_VERSION"; then
+            echo "✓ Kernel version $KERNEL_VERSION meets requirement $REQUIRED_VERSION"
+          else
+            echo "✗ Kernel version $KERNEL_VERSION is below required $REQUIRED_VERSION"
+            exit 1
+          fi
+
+      - name: Mount debugfs in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          # Check if debugfs is already mounted
+          if ! mountpoint -q /sys/kernel/debug; then
+            echo "Mounting debugfs..."
+            sudo mount -t debugfs debugfs /sys/kernel/debug
+          else
+            echo "debugfs is already mounted"
+          fi
+          # Verify the mount
+          mount | grep debugfs || echo "debugfs not found in mount output"  
+          sudo apt-get update -y
+          sudo apt-get install -y golang-go curl git ca-certificates jq
+ 
+      - name: Prepare binaries for WSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.wsl-bin"
+          cp "${{ steps.record.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_record"
+          cp "${{ steps.replay.outputs.path }}" "$GITHUB_WORKSPACE/.wsl-bin/keploy_replay"
+
+      # Normalize endings to LF and ensure execute bits inside WSL
+      - name: Normalize line endings & make scripts executable (WSL)
+        shell: wsl-bash {0}
+        env:
+          WSL_WS: ${{ github.workspace }}
+          WSLENV: WSL_WS/p
+        run: |
+          set -euo pipefail
+          WS="${WSL_WS}"
+          # Convert CRLF -> LF for all workflow bash scripts (no-op if already LF)
+          find "$WS/.github/workflows/test_workflow_scripts" -type f -name "*.sh" -print0 \
+            | xargs -0 -I{} sed -i 's/\r$//' "{}"
+          chmod -R a+x "$WS/.github/workflows/test_workflow_scripts"
+
+      - name: Install dependencies in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y golang-go curl git ca-certificates
+
+          
+      - name: Prepare CA tools in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y ca-certificates jq
+          # Run Debian CA refresh (ok if no custom certs yet)
+          sudo update-ca-certificates || true
+          # Provide a no-op for RHEL's tool to avoid exit 127 if Keploy probes it
+          echo '#!/bin/sh
+          exit 0' | sudo tee /usr/local/bin/update-ca-trust >/dev/null
+          sudo chmod +x /usr/local/bin/update-ca-trust
+
+      - name: Run ${{ matrix.app.name }} application in WSL
+        shell: wsl-bash {0}
+        env:
+          WSL_WS: ${{ github.workspace }}
+          # Propagate WSL_WS as a path so Windows -> Linux path translation happens
+          WSLENV: WSL_WS/p
+        run: |
+          set -euo pipefail
+          WS="${WSL_WS}"
+          export RECORD_BIN="$WS/.wsl-bin/keploy_record"
+          export REPLAY_BIN="$WS/.wsl-bin/keploy_replay"
+          chmod +x "$RECORD_BIN" "$REPLAY_BIN" || true
+          sudo apt-get install -y golang-go curl git ca-certificates
+          cd "$WS/samples-go/${{ matrix.app.path }}"
+          # Source the existing Linux bash script under WSL
+          source "$WS/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh"

@@ -60,6 +60,7 @@ func commandExists(cmd string) bool {
 func updateCaStore(ctx context.Context) error {
 	commandRun := false
 	for _, cmd := range caStoreUpdateCmd {
+
 		if commandExists(cmd) {
 			commandRun = true
 			c := exec.CommandContext(ctx, cmd)

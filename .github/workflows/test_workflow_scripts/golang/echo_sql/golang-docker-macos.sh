@@ -1,28 +1,35 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+# macOS variant for echo-sql (docker compose). Uses BSD sed.
+set -euo pipefail
 
-# Build Docker Image
+
+# for the below shource make it such a way that if the file is not present or already present it does not error
+source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+
+
+# Build Docker Image(s)
 docker compose build
 
 # Remove any preexisting keploy tests and mocks.
-sudo rm -rf keploy/
+rm -rf keploy/
+rm ./keploy.yml >/dev/null 2>&1 || true
 
 # Generate the keploy-config file.
-sudo -E env PATH=$PATH $RECORD_BIN config --generate
+$RECORD_BIN config --generate
 
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+if [ -f "$config_file" ]; then
+  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
 
-container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID"
-    echo "Killing keploy"
-    sudo kill $pid
-}
+
 
 send_request(){
+    echo "Sending requests to the application..."
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
@@ -49,31 +56,30 @@ send_request(){
 
     curl -X GET http://localhost:8082/health
 
-    # Wait for 5 seconds for keploy to record the test cases and mocks.
-    sleep 5
-    container_kill
-    wait
+    # Wait for 3 seconds for keploy to record the test cases and mocks.
+    sleep 3
+    echo "Requests sent successfully."
 }
 
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "${container_name}.txt"
+   ($RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s)  2>&1 | tee  "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
-        cat "${container_name}.txt"
         exit 1
     fi
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
-        cat "${container_name}.txt"
         exit 1
     fi
     sleep 5
 
     echo "Recorded test case and mocks for iteration ${i}"
 done
+
+
 
 # Shutdown services before test mode - Keploy should use mocks for dependencies
 echo "Shutting down docker compose services before test mode..."
@@ -82,17 +88,15 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+($REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false || true)   2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
     exit 1
 fi
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "${test_container}.txt"
     exit 1
 fi
 
@@ -113,8 +117,9 @@ do
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
         echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
+        break
     fi
+
 done
 
 # Check the overall test status and exit accordingly
@@ -122,6 +127,5 @@ if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    cat "${test_container}.txt"
     exit 1
 fi
