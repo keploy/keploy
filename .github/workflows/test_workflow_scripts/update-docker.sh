@@ -46,7 +46,10 @@ enable_ssh_mount_for_go_mod() {
 }
 
 build_docker_image() {
-    echo "Building Docker image with BuildKit and SSH forwarding..."
+    echo "Building Docker image..."
+    cat "$DOCKERFILE_PATH"
+
+    # Enable Docker BuildKit and build the image, forwarding the SSH agent
     DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
 }
 
