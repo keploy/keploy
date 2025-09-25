@@ -1,7 +1,6 @@
 # Add fake installation-id for the workflow.
 if [ -d "$HOME/.keploy" ]; then
   echo "~/.keploy already exists, skipping installation-id setup."
-  exit 0
 else
   mkdir -p "$HOME/.keploy"
   touch "$HOME/.keploy/installation-id.yaml"

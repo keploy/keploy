@@ -5,7 +5,7 @@ set -euo pipefail
 
 
 # for the below shource make it such a way that if the file is not present or already present it does not error
-source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh > /dev/null 2>&1 || true
+source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 
 # Build Docker Image(s)
