@@ -2,8 +2,6 @@ name: Prepare Binary and Run Workflows (macOS)
 on:
   pull_request:
     branches: [main]
-  # push:
-  #   branches: [ main ]
 jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]

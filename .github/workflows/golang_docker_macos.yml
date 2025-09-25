@@ -4,7 +4,6 @@ on:
 
 jobs:
   golang_docker_macos:
-
     runs-on: [self-hosted, macOS, native]
     strategy:
       fail-fast: false

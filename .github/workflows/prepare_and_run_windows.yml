@@ -1,0 +1,87 @@
+name: Prepare Binary and Run Workflows (Windows)
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  # Ephemeral registry. We make the repo path unique per-commit to avoid collisions.
+  TTL_IMAGE_REPO: ttl.sh/keploy/keploy-win-${{ github.sha }}
+  TTL_TAG: 1h  # image expires after 1 hour (ttl.sh rule)
+
+jobs:
+  build-docker-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      IMAGE_REF: ${{ steps.export.outputs.IMAGE_REF }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Build exactly the code from this PR HEAD
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+      - name: Enable Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Enable cache for faster builds
+          driver-opts: |
+            image=moby/buildkit:buildx-stable-1
+
+      - name: Prepare Dockerfile for Fast Windows Build
+        shell: bash
+        run: |
+          chmod +x ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
+          ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
+
+      - name: Build & Push (ttl.sh)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          ssh: default
+          # Only build for linux/amd64 to speed up the build for testing
+          platforms: linux/amd64
+          push: true
+          # Push only to ttl.sh; repo includes SHA to avoid collisions; tag is TTL
+          tags: ${{ env.TTL_IMAGE_REPO }}:${{ env.TTL_TAG }}
+          # Enable caching for faster builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Build args - script will optimize the actual usage in Dockerfile
+          build-args: |
+            SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
+            VERSION=${{ github.sha }}
+            SERVER_URL=https://api.keploy.io
+            GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+
+      - name: Export image ref for downstream jobs
+        id: export
+        run: echo "IMAGE_REF=${{ env.TTL_IMAGE_REPO }}:${{ env.TTL_TAG }}" >> "$GITHUB_OUTPUT"
+
+  run_python_docker_windows:
+    needs: [build-docker-image]
+    uses: ./.github/workflows/python_docker_windows.yml
+    with:
+      image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}
+
+  run_golang_docker_windows:
+    needs: [build-docker-image]
+    uses: ./.github/workflows/golang_docker_windows.yml
+    with:
+      image_ref: ${{ needs.build-docker-image.outputs.IMAGE_REF }}
+

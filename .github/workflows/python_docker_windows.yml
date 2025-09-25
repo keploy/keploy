@@ -1,0 +1,455 @@
+name: Python On Docker (Windows)
+
+on:
+  workflow_call:
+    inputs:
+      image_ref:
+        description: "Docker image to pull (e.g., ttl.sh/keploy/keploy-win-<sha>:1h)"
+        required: true
+        type: string
+
+jobs:
+  python_docker_windows:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        app: 
+          - name: flask-mongo
+            path: flask-mongo
+            script_dir: flask-mongo
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup WSL (Ubuntu)
+        uses: Vampire/setup-wsl@v6
+        with:
+          distribution: Ubuntu-22.04
+          wsl-version: 2
+
+      # - name: Install WSL
+      #   shell: pwsh
+      #   run: |
+      #     $ErrorActionPreference = 'Continue'
+      #     function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+          
+      #     TS "Checking current WSL status"
+      #     try { wsl.exe -l -v } catch { TS "WSL not available or no distributions installed" }
+          
+      #     TS "Installing WSL with Ubuntu distribution"
+      #     # Enable WSL feature and install Ubuntu
+      #     wsl.exe --install -d Ubuntu --no-launch
+          
+      #     TS "Waiting for WSL installation to complete (up to 2 minutes)"
+      #     $deadline = (Get-Date).AddMinutes(2)
+      #     do {
+      #       try { 
+      #         $wslList = wsl.exe -l -v 2>&1
+      #         TS "WSL status: $wslList"
+      #         if ($wslList -match "Ubuntu") { 
+      #           TS "Ubuntu distribution detected in WSL"
+      #           break 
+      #         }
+      #       } catch { 
+      #         TS "WSL check failed: $($_.Exception.Message)" 
+      #       }
+      #       Start-Sleep -Seconds 10
+      #     } while ((Get-Date) -lt $deadline)
+          
+      #     TS "Final WSL status check"
+      #     try { wsl.exe -l -v } catch { TS "Final WSL check failed" }
+
+      # - name: Initialize Ubuntu WSL (non-interactive) & keep alive
+      #   shell: pwsh
+      #   run: |
+      #     $ErrorActionPreference = 'Stop'
+
+      #     # Force a first boot without interactive user creation by running as root
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "echo first-boot && uname -a"
+
+      #     # Make root default (CI-only, avoids any username prompts)
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "printf '[user]\ndefault=root\n' > /etc/wsl.conf"
+
+      #     # Keep the distro running so status stays 'Running'
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "nohup sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 &"
+
+      #     # Show final state
+      #     wsl.exe -l -v
+
+      # - name: Initialize Ubuntu WSL & keep alive
+      #   shell: pwsh
+      #   run: |
+      #     $ErrorActionPreference='Stop'
+      #     # First boot (non-interactive)
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "true"
+      #     # Default to root to avoid prompts (CI-only)
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "printf '[user]\ndefault=root\n' > /etc/wsl.conf"
+      #     # Keep the distro alive so status stays 'Running'
+      #     wsl.exe -d Ubuntu --user root -- bash -lc "nohup sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 &"
+          # wsl.exe -l -v
+
+
+      - name: Install Docker Desktop (verbose)
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 7
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $VerbosePreference = 'Continue'
+          $ProgressPreference = 'SilentlyContinue'
+
+          function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+          TS "winget version:"; winget --version
+          TS "winget sources:"; winget source list
+
+          TS "Attempting winget install Docker.DockerDesktop (silent)"
+          winget install --id Docker.DockerDesktop -e `
+            --accept-source-agreements --accept-package-agreements --silent `
+            --disable-interactivity --verbose-logs
+          $code = $LASTEXITCODE
+          TS "winget exit code: $code"
+          if ($code -ne 0) { TS "winget failed or partially installed (this is expected on GH-hosted Windows)"; }
+
+          TS "Checking if Docker Desktop CLI files exist"
+          $paths = @(
+            'C:\Program Files\Docker\Docker\Docker Desktop.exe',
+            'C:\Program Files\Docker\Docker\resources\bin\docker.exe',
+            'C:\Program Files\Docker\Docker\DockerCli.exe'
+          )
+          foreach($p in $paths){ TS "Exists? $p -> $([IO.File]::Exists($p))" }
+
+          TS "Printing PATH to see if docker is present"
+          $env:Path.Split(';') | ForEach-Object { TS "PATH: $_" }
+
+      - name: Probe Docker Desktop (before switching)
+        id: probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function TS($m){ Write-Host "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+          $ddExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          $dockerExe = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe'
+          $cliDir = Split-Path $dockerExe -Parent
+          if (Test-Path $cliDir) { $env:Path = "$env:Path;$cliDir" }
+
+          TS "== Executable presence =="
+          TS "Exists? $ddExe -> $([IO.File]::Exists($ddExe))"
+          TS "Exists? $dockerExe -> $([IO.File]::Exists($dockerExe))"
+
+          TS "== Docker client version =="
+          try { docker --version } catch { TS "docker.exe missing: $($_.Exception.Message)" }
+
+          TS "== Docker Desktop CLI version =="
+          $desktopCli = $false
+          try { docker desktop version; $desktopCli = $true } catch { TS "No 'docker desktop' subcommand" }
+
+          TS "== Docker Desktop status =="
+          $desktopStatus = ''
+          if ($desktopCli) {
+            try { $desktopStatus = docker desktop status } catch {}
+            TS "desktop status: $desktopStatus"
+          }
+
+          TS "== com.docker.service (Windows service) =="
+          $svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue
+          if ($null -ne $svc) { TS "com.docker.service: $($svc.Status)" } else { TS "service not found" }
+
+          TS "== FileVersion of Docker Desktop.exe (if present) =="
+          if (Test-Path $ddExe) {
+            $fv = (Get-Item $ddExe).VersionInfo.FileVersion
+            TS "Docker Desktop.exe FileVersion: $fv"
+          }
+
+          TS "== WSL distros =="
+          try { wsl.exe -l -v } catch { TS "wsl.exe not available: $($_.Exception.Message)" }
+
+          TS "== Docker server OS/version =="
+          $server = ''
+          try { $server = docker version --format '{{.Server.Os}}/{{.Server.Version}}' } catch {}
+          TS "Server: $server"
+
+          TS "== Docker contexts =="
+          try { docker context ls } catch {}
+
+          $present = [IO.File]::Exists($ddExe)
+          $running = ($desktopStatus -match 'running')
+
+          "present=$present"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "desktop_cli=$desktopCli"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "running=$running"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "server=$server"             | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          if (-not $running) {
+            TS "== Tail of Desktop log (if any) =="
+            $log = "$env:LOCALAPPDATA\Docker\log\log.txt"
+            if (Test-Path $log) { Get-Content $log -Tail 200 | Write-Host } else { TS "no log at $log" }
+          }
+
+      - name: Initialize Docker Desktop (WSL2 Linux engine)
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function TS($m){ Write-Host "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+          # Ensure CLI on PATH
+          $cliBin = 'C:\Program Files\Docker\Docker\resources\bin'
+          if (Test-Path $cliBin) { $env:Path = "$env:Path;$cliBin" }
+
+          # 1) Force Desktop to prefer WSL/Linux before first launch
+          $cfgDir = Join-Path $env:APPDATA 'Docker'
+          $cfg = Join-Path $cfgDir 'settings.json'
+          New-Item -Type Directory -Force -Path $cfgDir | Out-Null
+          $settings = @{
+            version = 3
+            autoStart = $true
+            useWindowsContainers = $false
+            wslEngineEnabled = $true
+            kubernetesEnabled = $false
+          } | ConvertTo-Json -Depth 4
+          Set-Content -Path $cfg -Value $settings -Encoding UTF8
+          TS "Wrote Docker settings.json to prefer WSL/Linux."
+
+          # 2) Make sure the Desktop Windows service is running (creates the backend named pipe)
+          $svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue
+          if ($null -ne $svc) {
+            if ($svc.Status -ne 'Running') {
+              TS "Starting Windows service: com.docker.service..."
+              Start-Service $svc.Name
+            } else {
+              TS "Service com.docker.service already Running."
+            }
+          } else {
+            TS "Service com.docker.service not found (OK on some versions)."
+          }
+
+          # 3) Launch Desktop headlessly (accept EULA)
+          $ddExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          if (!(Test-Path $ddExe)) { throw "Docker Desktop.exe not found at $ddExe" }
+          TS "Starting Docker Desktop (headless)..."
+          Start-Process -FilePath $ddExe -ArgumentList '--accept-license','--background' -WindowStyle Hidden
+          Start-Sleep -Seconds 5
+
+          # 4) Wait up to 7 min for 'docker desktop status' to become 'running'
+          $deadline = (Get-Date).AddMinutes(7)
+          $status = ""
+          do {
+            try { $status = docker desktop status 2>$null } catch { $status = "" }
+            TS "desktop status: $status"
+            Write-Host "Docker status output: $status"
+            if ($status -match 'running') { break }
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+
+          # print the status here
+          TS "Final desktop status after polling: $status"
+          Write-Host "Final Docker status output: $status"
+          
+          if ($status -notmatch 'running') {
+            TS "Docker Desktop never reported 'running' (continuing to force Linux engine anyway)"
+          }
+
+          # 5) If engine is still Windows, switch explicitly (new + legacy)
+          $serverOs = (docker version --format '{{.Server.Os}}' 2>$null)
+          TS "Initial Server.Os: $serverOs"
+          if ($serverOs -ne 'linux') {
+            TS "Attempting 'docker desktop engine use linux'..."
+            try { docker desktop engine use linux | Out-Null } catch {
+              TS "desktop engine switch via CLI failed: $($_.Exception.Message)"
+            }
+
+            if ((docker version --format '{{.Server.Os}}' 2>$null) -ne 'linux') {
+              $cli = 'C:\Program Files\Docker\Docker\DockerCli.exe'
+              if (Test-Path $cli) {
+                TS "Fallback: DockerCli.exe -SwitchLinuxEngine"
+                & $cli -SwitchLinuxEngine | Out-Null
+              }
+            }
+          }
+
+          # 6) Confirm WSL distros + Linux daemon
+          $ok = $false
+          for ($i=0; $i -lt 120; $i++) {
+            $wslList = & wsl.exe -l -v 2>$null
+            $haveDD = ($wslList -match 'docker-desktop') -and ($wslList -match 'docker-desktop-data')
+            $srv = (docker version --format '{{.Server.Os}}/{{.Server.Version}}' 2>$null)
+            TS "WSL distros ready: $haveDD  |  Server: $srv"
+            if ($haveDD -and $srv -like 'linux/*') { $ok = $true; break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $ok) {
+            TS "❌ Linux engine never came up."
+            TS "== Last 200 lines of Docker log =="
+            $log = "$env:LOCALAPPDATA\Docker\log\log.txt"
+            if (Test-Path $log) { Get-Content $log -Tail 200 | Write-Host } else { TS "no log at $log" }
+            TS "== WSL list =="; try { & wsl.exe -l -v } catch {}
+            throw "Docker Desktop did not switch to Linux engine in time"
+          }
+
+          # 7) Final diagnostics
+          TS "✅ Docker Desktop is running with Linux engine."
+          docker context ls
+          docker version
+          docker info | Select-String -Pattern 'OSType|Server Version|Kernel|Operating System|Default Runtime'
+
+      - name: Show Docker Desktop version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:Path += ';C:\Program Files\Docker\Docker\resources\bin'
+
+          Write-Host "== Docker CLI =="
+          try { docker --version } catch { Write-Host "docker client not found" }
+
+          Write-Host "== Docker Desktop CLI =="
+          try { docker desktop version } catch { Write-Host "No 'docker desktop' subcommand (pre-4.37)" }
+
+          Write-Host "== EXE FileVersion fallback =="
+          $exe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          if (Test-Path $exe) {
+            $fv = (Get-Item $exe).VersionInfo.FileVersion
+            Write-Host "Docker Desktop.exe FileVersion: $fv"
+          } else {
+            Write-Host "Docker Desktop.exe not found"
+          }
+
+          Write-Host "== Winget package =="
+          winget list --id Docker.DockerDesktop -e
+
+          $env:Path += ';C:\Program Files\Docker\Docker\resources\bin'
+
+          Write-Host "== Desktop status =="
+          docker desktop status 2>$null
+
+          Write-Host "== Engine OS / Server version =="
+          $os = docker version --format '{{.Server.Os}}/{{.Server.Version}}' 2>$null
+          Write-Host "Server: $os"
+
+          Write-Host "== WSL state =="
+          wsl.exe -l -v 2>$null
+
+
+      # - name: Start Docker Desktop & switch to Linux (deep logs)
+      #   shell: pwsh
+      #   continue-on-error: true
+      #   run: |
+      #     $ErrorActionPreference = 'Continue'
+      #     $VerbosePreference = 'Continue'
+      #     function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+
+      #     Start-Transcript -Path $env:USERPROFILE\docker-desktop-transcript.txt -Force
+
+      #     TS "WSL status"
+      #     try { wsl.exe -l -v } catch { TS "wsl.exe not available or fails: $($_.Exception.Message)" }
+
+      #     TS "Hyper-V feature status"
+      #     try { Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Format-List * } catch { TS "Hyper-V query failed" }
+
+      #     TS "Ensure CLI on PATH"
+      #     $cliBin = 'C:\Program Files\Docker\Docker\resources\bin'
+      #     if (Test-Path $cliBin) { $env:Path = "$env:Path;$cliBin" }
+
+      #     TS "docker --version (client)"
+      #     try { docker --version } catch { TS "docker client not found: $($_.Exception.Message)" }
+
+      #     TS "Trying: docker desktop start"
+      #     try { docker desktop start | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-start.log } catch { TS "desktop start threw: $($_.Exception.Message)" }
+
+      #     TS "Trying: docker desktop engine use linux"
+      #     try { docker desktop engine use linux | Tee-Object -FilePath $env:USERPROFILE\docker-desktop-engine.log } catch { TS "engine switch threw: $($_.Exception.Message)" }
+
+      #     TS "Wait up to 5 min for 'docker desktop status' to become 'running'"
+      #     $deadline = (Get-Date).AddMinutes(5)
+      #     $status = ""
+      #     do {
+      #       try { $status = docker desktop status 2>$null } catch { $status = "error:$($_.Exception.Message)" }
+      #       TS "desktop status: $status"
+      #       if ($status -match 'running') { break }
+      #       Start-Sleep -Seconds 3
+      #     } while ((Get-Date) -lt $deadline)
+      #     if ($status -notmatch 'running') { TS "Docker Desktop never reported 'running'"; }
+
+      #     TS "Probe dockerd availability (30 tries)"
+      #     $v=$null
+      #     1..30 | ForEach-Object {
+      #       try { $v = docker version --format '{{.Server.Version}}' 2>$null } catch {}
+      #       TS "Server.Version: $v"
+      #       if ($v) { return }
+      #       Start-Sleep -Seconds 3
+      #     }
+      #     if (-not $v) { TS "dockerd never became ready" }
+
+      #     TS "docker version (full)"
+      #     try { docker version } catch { TS "docker version failed: $($_.Exception.Message)" }
+
+      #     TS "docker info (key lines)"
+      #     try {
+      #       docker info | Tee-Object -FilePath $env:USERPROFILE\docker-info.txt
+      #       Select-String -Path $env:USERPROFILE\docker-info.txt -Pattern 'OSType|Server Version|Storage Driver|Default Isolation|Kernel|Operating System'
+      #     } catch { TS "docker info failed: $($_.Exception.Message)" }
+
+      #     TS "List Docker Desktop services/processes"
+      #     Get-Service *docker* | Format-Table -AutoSize | Out-String | Write-Host
+      #     Get-Process -Name "*docker*" -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
+
+      #     Stop-Transcript
+
+      - name: Check Docker Status (final)
+        shell: pwsh
+        run: |
+          function TS($m){ "$(Get-Date -Format 'HH:mm:ss')  $m" }
+          TS "--- Checking Docker Version ---"
+          try { docker version } catch { TS "docker version failed: $($_.Exception.Message)" }
+          TS "--- Checking Docker Daemon Status ---"
+          try { docker info } catch { TS "docker info failed: $($_.Exception.Message)" }
+
+      - name: Pull test image (from build job)
+        shell: bash
+        run: |
+          echo "Pulling ${{ inputs.image_ref }}"
+          docker pull "${{ inputs.image_ref }}"
+          # Optional: retag to the name your scripts expect
+          docker tag "${{ inputs.image_ref }}" ghcr.io/keploy/keploy:v2-dev
+          docker images | head -n 20
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-python
+          path: samples-python
+
+      - name: Run ${{ matrix.app.name }} application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        shell: bash
+        run: |
+          cd samples-python/${{ matrix.app.path }}
+          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-docker-windows.sh

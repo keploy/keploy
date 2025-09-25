@@ -61,7 +61,6 @@ send_request_and_shutdown() {
   curl -sS http://localhost:6000/students >/dev/null
   curl -sS -X DELETE http://localhost:6000/students/12345 >/dev/null
 
-
 }
 
 # --- Record sessions ---
