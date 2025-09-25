@@ -136,12 +136,6 @@ jobs:
           Write-Host "== WSL state =="
           wsl.exe -l -v 2>$null
 
-          # Fail fast if Desktop isn't actually running
-          if ((docker desktop status 2>$null) -notmatch 'running') {
-            Write-Error "Docker Desktop is not running (Linux engine won't be usable)."
-            exit 1
-          }
-
 
       - name: Start Docker Desktop & switch to Linux (deep logs)
         shell: pwsh
