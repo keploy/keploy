@@ -541,10 +541,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// Channel to monitor if the agent is up and running
 	runningChan := make(chan bool)
 
+	agentRunningCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+
 	go func() {
+		defer cancel()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-agentRunningCtx.Done():
 				// If the context is canceled, close the channel and return immediately
 				close(runningChan)
 				return
