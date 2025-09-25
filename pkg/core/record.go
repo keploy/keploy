@@ -22,3 +22,9 @@ func (c *Core) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingO
 
 	return m, nil
 }
+
+func (c *Core) StartIncomingProxy(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) error {
+	go c.IncomingProxy.Start(ctx, persister, opts)
+	c.logger.Debug("Ingress proxy manager started and is listening for bind events.")
+	return nil
+}

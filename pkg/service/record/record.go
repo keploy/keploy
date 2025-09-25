@@ -139,7 +139,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err := r.Instrument(hookCtx)
+	appID, err := r.Instrument(hookCtx, newTestSetID)
+
 	if err != nil {
 		stopReason = "failed to instrument the application"
 		utils.LogError(r.logger, err, stopReason)
@@ -159,28 +160,29 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
-
-	errGrp.Go(func() error {
-		for testCase := range frames.Incoming {
-			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
-			if reRecordCfg.TestSet == "" {
-				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-				if err != nil {
-					if ctx.Err() == context.Canceled {
-						continue
+	if !r.config.Record.BigPayload {
+		r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
+		errGrp.Go(func() error {
+			for testCase := range frames.Incoming {
+				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+				if reRecordCfg.TestSet == "" {
+					err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+					if err != nil {
+						if ctx.Err() == context.Canceled {
+							continue
+						}
+						insertTestErrChan <- err
+					} else {
+						testCount++
+						r.telemetry.RecordedTestAndMocks()
 					}
-					insertTestErrChan <- err
 				} else {
-					testCount++
-					r.telemetry.RecordedTestAndMocks()
+					r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 				}
-			} else {
-				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 			}
-		}
-		return nil
-	})
+			return nil
+		})
+	}
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
@@ -276,7 +278,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
+func (r *Recorder) Instrument(ctx context.Context, newTestSetID string) (uint64, error) {
 	var stopReason string
 	// setting up the environment for recording
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
@@ -299,7 +301,9 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			Rules:         r.config.BypassRules,
 			E2E:           r.config.E2E,
 			Port:          r.config.Port,
+			BigPayload:    r.config.Record.BigPayload,
 		}
+
 		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
@@ -309,20 +313,29 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			}
 			return appID, fmt.Errorf("%s", stopReason)
 		}
+
+		if r.config.Record.BigPayload && hooks.Mode == models.MODE_RECORD {
+			r.logger.Debug("BigPayload mode enabled, starting ingress proxy.")
+			incomingOpts := models.IncomingOptions{
+				Filters:  r.config.Record.Filters,
+				BasePath: r.config.Record.BasePath,
+			}
+			// Call the new core method to start the ingress proxy listener.
+			// This call is non-blocking.
+			var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+				return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			}
+			if err := r.instrumentation.StartIncomingProxy(ctx, persister, incomingOpts); err != nil {
+				stopReason = "failed to start the ingress proxy"
+				utils.LogError(r.logger, err, stopReason)
+				return appID, fmt.Errorf("%s", stopReason)
+			}
+		}
 	}
 	return appID, nil
 }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
-	incomingOpts := models.IncomingOptions{
-		Filters:  r.config.Record.Filters,
-		BasePath: r.config.Record.BasePath,
-	}
-	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
-	if err != nil {
-		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
-	}
-
 	outgoingOpts := models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
@@ -335,8 +348,22 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}
 
+	if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
+		incomingOpts := models.IncomingOptions{
+			Filters:  r.config.Record.Filters,
+			BasePath: r.config.Record.BasePath,
+		}
+		incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
+		if err != nil {
+			return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
+		}
+		return FrameChan{
+			Incoming: incomingChan,
+			Outgoing: outgoingChan,
+		}, nil
+	}
+
 	return FrameChan{
-		Incoming: incomingChan,
 		Outgoing: outgoingChan,
 	}, nil
 }
