@@ -253,10 +253,15 @@ jobs:
           do {
             try { $status = docker desktop status 2>$null } catch { $status = "" }
             TS "desktop status: $status"
+            Write-Host "Docker status output: $status"
             if ($status -match 'running') { break }
             Start-Sleep -Seconds 3
           } while ((Get-Date) -lt $deadline)
 
+          # print the status here
+          TS "Final desktop status after polling: $status"
+          Write-Host "Final Docker status output: $status"
+          
           if ($status -notmatch 'running') {
             TS "Docker Desktop never reported 'running' (continuing to force Linux engine anyway)"
           }
