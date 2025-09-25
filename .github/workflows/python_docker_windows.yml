@@ -49,8 +49,8 @@ jobs:
           # Enable WSL feature and install Ubuntu
           wsl.exe --install -d Ubuntu --no-launch
           
-          TS "Waiting for WSL installation to complete (up to 3 minutes)"
-          $deadline = (Get-Date).AddMinutes(3)
+          TS "Waiting for WSL installation to complete (up to 2 minutes)"
+          $deadline = (Get-Date).AddMinutes(2)
           do {
             try { 
               $wslList = wsl.exe -l -v 2>&1
@@ -85,10 +85,23 @@ jobs:
           # Show final state
           wsl.exe -l -v
 
+      - name: Initialize Ubuntu WSL & keep alive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          # First boot (non-interactive)
+          wsl.exe -d Ubuntu --user root -- bash -lc "true"
+          # Default to root to avoid prompts (CI-only)
+          wsl.exe -d Ubuntu --user root -- bash -lc "printf '[user]\ndefault=root\n' > /etc/wsl.conf"
+          # Keep the distro alive so status stays 'Running'
+          wsl.exe -d Ubuntu --user root -- bash -lc "nohup sh -c 'while true; do sleep 3600; done' >/dev/null 2>&1 &"
+          wsl.exe -l -v
+
 
       - name: Install Docker Desktop (verbose)
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 3
         run: |
           $ErrorActionPreference = 'Continue'
           $VerbosePreference = 'Continue'
