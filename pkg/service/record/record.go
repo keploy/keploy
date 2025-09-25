@@ -8,7 +8,6 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"sync"
 
 	"time"
 
@@ -114,12 +113,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
+		reqCtxCancel()
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
-
-		reqCtxCancel()
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
@@ -360,12 +358,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 		Filters: r.config.Record.Filters,
 	}
 
-	outgoingOpts := models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
-		MongoPassword:  r.config.Test.MongoPassword,
-		FallBackOnMiss: r.config.Test.FallBackOnMiss,
-	}
-
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.Mock)
@@ -384,63 +376,63 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 			errChan <- err
 			return fmt.Errorf("failed to get incoming test cases: %w", err)
 		}
-		for testCase := range ch {
-			incomingChan <- testCase
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case tc, ok := <-ch:
+				if !ok {
+					return nil
+				}
+				// forward but remain cancelable
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case incomingChan <- tc:
+				}
+			}
 		}
-		return nil
 	})
 
+	// OUTGOING
 	g.Go(func() error {
-
 		defer close(outgoingChan)
-		mockReceived := false
-		var mu sync.Mutex
-		// create a context without cancel
-		// change this name to some mockCtx error group
-		mockErrGrp, _ := errgroup.WithContext(ctx)
-		mockCtx := context.WithoutCancel(ctx)
-		mockCtx, mockCtxCancel := context.WithCancel(mockCtx)
 
-		defer func() {
-			mockCtxCancel()
-			err := mockErrGrp.Wait()
-			if err != nil && err != io.EOF {
-				utils.LogError(r.logger, err, "failed to stop request execution")
-			}
-		}()
+		// Create a cancelable child that we always cancel when ctx is done.
+		mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancel()
 
-		// listen for ctx canecllation in a go routine
+		// Cancel child as soon as parent is done
 		go func() {
 			<-ctx.Done()
-			mu.Lock()
-			defer mu.Unlock()
-			if !mockReceived {
-				mockCtxCancel()
-			}
+			cancel()
 		}()
 
-		ch, err := r.instrumentation.GetOutgoing(mockCtx, clientID, outgoingOpts)
+		ch, err := r.instrumentation.GetOutgoing(mockCtx, clientID, models.OutgoingOptions{
+			Rules:          r.config.BypassRules,
+			MongoPassword:  r.config.Test.MongoPassword,
+			FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		})
 		if err != nil {
-			r.logger.Error("failed to get outgoing mocks", zap.Error(err))
-			errChan <- err
 			return fmt.Errorf("failed to get outgoing mocks: %w", err)
 		}
 
-		for mock := range ch {
-			mu.Lock()
-			mockReceived = true // Set flag if a mock is received
-			mu.Unlock()
+		for {
 			select {
 			case <-ctx.Done():
-				if mock != nil {
-					outgoingChan <- mock
+				return ctx.Err()
+			case m, ok := <-ch:
+				if !ok {
+					return nil
 				}
-				return nil
-			default:
-				outgoingChan <- mock
+				select {
+				case <-ctx.Done():
+					outgoingChan <- m
+					return ctx.Err()
+				case outgoingChan <- m:
+				}
 			}
 		}
-		return nil
 	})
 
 	return FrameChan{
