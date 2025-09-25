@@ -1,3 +1,4 @@
-# Add fake installation-id for the workflow. Be idempotent on repeated runs.
-mkdir -p "$HOME/.keploy"
-printf "%s\n" "ObjectID('123456789')" > "$HOME/.keploy/installation-id.yaml"
+# Add fake installation-id for the workflow.
+sudo mkdir ~/.keploy
+sudo touch ~/.keploy/installation-id.yaml
+echo "ObjectID('123456789')" | sudo tee ~/.keploy/installation-id.yaml > /dev/null
