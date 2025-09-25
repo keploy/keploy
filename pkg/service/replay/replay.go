@@ -102,7 +102,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
-	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
 
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
@@ -118,6 +118,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if hookCancel != nil {
 			hookCancel()
 		}
+		cancel()
 		err := g.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
