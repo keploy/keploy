@@ -384,31 +384,33 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
-	g.Go(func() error {
-		defer close(incomingChan)
+	if !r.config.Record.BigPayload {
+		g.Go(func() error {
+			defer close(incomingChan)
 
-		ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
-		if err != nil {
-			errChan <- err
-			return fmt.Errorf("failed to get incoming test cases: %w", err)
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case tc, ok := <-ch:
-				if !ok {
-					return nil
-				}
-				// forward but remain cancelable
+			ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
+			if err != nil {
+				errChan <- err
+				return fmt.Errorf("failed to get incoming test cases: %w", err)
+			}
+			for {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case incomingChan <- tc:
+				case tc, ok := <-ch:
+					if !ok {
+						return nil
+					}
+					// forward but remain cancelable
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case incomingChan <- tc:
+					}
 				}
 			}
-		}
-	})
+		})
+	}
 
 	// OUTGOING
 	g.Go(func() error {
@@ -452,14 +454,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	})
 
 	if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
-		incomingOpts := models.IncomingOptions{
-			Filters:  r.config.Record.Filters,
-			BasePath: r.config.Record.BasePath,
-		}
-		incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
-		if err != nil {
-			return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
-		}
 		return FrameChan{
 			Incoming: incomingChan,
 			Outgoing: outgoingChan,
