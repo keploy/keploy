@@ -1,11 +1,15 @@
 package models
 
 import (
+	"context"
 	"crypto/tls"
 	"time"
 
 	"go.keploy.io/server/v2/config"
 )
+
+// TestCasePersister defines the function signature for saving a TestCase.
+type TestCasePersister func(ctx context.Context, testCase *TestCase) error
 
 type HookOptions struct {
 	Rules         []config.BypassRule
@@ -13,12 +17,18 @@ type HookOptions struct {
 	EnableTesting bool
 	E2E           bool
 	Port          uint32 // used for e2e filtering
-	Persister     TestCasePersister
-	Incoming      IncomingOptions
 	BigPayload    bool
 	IsDocker      bool
 	ProxyPort     uint32
 	ServerPort    uint32
+}
+
+type IngressEvent struct {
+	PID         uint32
+	Family      uint16
+	OrigAppPort uint16
+	NewAppPort  uint16
+	_           uint16 // Padding
 }
 
 type OutgoingOptions struct {

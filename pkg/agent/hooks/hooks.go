@@ -4,7 +4,9 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 
 	"go.keploy.io/server/v2/pkg/agent"
@@ -198,31 +201,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		return err
 	}
 	h.socket = socket
-	if opts.Mode != models.MODE_TEST && opts.BigPayload {
-		switch runtime.GOARCH {
-		case "amd64":
-			h.logger.Info("Attaching x86_64 (amd64) kprobes for bind syscall.")
-			// Attach the kprobe for bind syscall entry on x86
-			h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
-			if err != nil {
-				utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
-				return err
-			}
-		case "arm64":
-			h.logger.Info("Attaching arm64 kprobes for bind syscall.")
-			// Attach the kprobe for bind syscall entry on arm64
-			h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
-			if err != nil {
-				utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
-				return err
-			}
-
-		default:
-			err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-			utils.LogError(h.logger, err, "failed to attach bind hooks")
-			return err
-		}
-	}
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
 		h.clientRegistrationMap = objs.KeployClientRegistrationMap
@@ -271,6 +249,29 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 			return err
 		}
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
+
+			switch runtime.GOARCH {
+			case "amd64":
+				// Attach the kprobe for bind syscall entry on x86
+				h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
+				if err != nil {
+					utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
+					return err
+				}
+			case "arm64":
+				// Attach the kprobe for bind syscall entry on arm64
+				h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
+				if err != nil {
+					utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
+					return err
+				}
+
+			default:
+				err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+				utils.LogError(h.logger, err, "failed to attach bind hooks")
+				return err
+			}
+
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
 				Path:    cGroupPath,
@@ -841,10 +842,14 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		if h.cgBind4 != nil {
-			h.cgBind4.Close()
+			if err := h.cgBind4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgBind4")
+			}
 		}
 		if h.cgBind6 != nil {
-			h.cgBind6.Close()
+			if err := h.cgBind6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgBind6")
+			}
 		}
 		if h.bindEnter != nil {
 			if err := h.bindEnter.Close(); err != nil {
@@ -853,4 +858,43 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		}
 	}
 	h.logger.Info("eBPF resources released successfully...")
+}
+
+func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
+	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
+	if err != nil {
+		return nil, err // Return error if we can't create the reader
+	}
+
+	eventChan := make(chan models.IngressEvent, 10) // A buffered channel can be useful
+
+	go func() {
+		defer rb.Close()
+		defer close(eventChan)
+
+		for {
+			// Read raw data from the ring buffer
+			rec, err := rb.Read()
+			if err != nil {
+				// If the reader was closed, it's a clean shutdown.
+				if errors.Is(err, ringbuf.ErrClosed) {
+					return
+				}
+				continue
+			}
+
+			var e models.IngressEvent
+			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
+				utils.LogError(h.logger, err, "failed to decode ingress event")
+				continue
+			}
+			h.logger.Debug("Intercepted application bind event")
+			select {
+			case <-ctx.Done(): // Context was cancelled, so we shut down.
+				return
+			case eventChan <- e: // Send the decoded event to the channel.
+			}
+		}
+	}()
+	return eventChan, nil
 }

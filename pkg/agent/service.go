@@ -24,6 +24,7 @@ type Hooks interface {
 	SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error
 	DeleteKeployClientInfo(clientID uint64) error
 	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error
+	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 	GetUnloadDone() <-chan struct{}
 }
 
@@ -56,6 +57,10 @@ type Proxy interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
+}
+
+type IncomingProxy interface {
+	Start(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions)
 }
 
 type ProxyOptions struct {

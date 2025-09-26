@@ -66,7 +66,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 
 }
 
-func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
+func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	// h := hooks.NewHooks(logger, c)
 	// p := proxy.New(logger, h, c)
