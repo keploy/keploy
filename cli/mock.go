@@ -82,7 +82,7 @@ func UploadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Service
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			}
-			if err := replay.UploadMocks(ctx); err != nil {
+			if err := replay.UploadMocks(ctx, nil); err != nil {
 				utils.LogError(logger, err, "failed to upload mocks to the keploy registry")
 				return nil
 			}

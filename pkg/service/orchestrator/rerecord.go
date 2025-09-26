@@ -62,8 +62,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return testSets[i] < testSets[j]
 	})
 
-	var SelectedTests []string
-
+	var SelectedTests, ReRecordedTests []string
 	for _, testSet := range testSets {
 		if ctx.Err() != nil {
 			break
@@ -124,6 +123,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 				allRecorded, err := o.replayTests(recordCtx, testSet, mappingTestSet, isMappingEnabled)
 
 				if allRecorded && err == nil {
+					ReRecordedTests = append(ReRecordedTests, mappingTestSet)
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
 				}
 				if !allRecorded {
@@ -180,6 +180,8 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return nil
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
+
+	o.replay.UploadMocks(ctx, ReRecordedTests)
 	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
@@ -461,7 +463,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 		}
 
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, 50)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			if resp == nil {

@@ -796,7 +796,7 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 			continue
 		}
 		// Wait for this particular process to exit with a timeout of 3 seconds
-		err = waitForProcessExit(pid, 3*time.Second, logger)
+		err = waitForProcessExit(pid, 20*time.Second, logger)
 		if err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
 		}
