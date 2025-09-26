@@ -4,22 +4,26 @@
 set -euo pipefail
 
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
-
+# for the below shource make it such a way that if the file is not present or already present it does not error
+source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 # Build Docker Image(s)
 docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 rm -rf keploy/
+rm ./keploy.yml >/dev/null 2>&1 || true
 
 # Generate the keploy-config file.
 $RECORD_BIN config --generate
 
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
-
+if [ -f "$config_file" ]; then
+  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
 
 send_request(){
     echo "Sending requests to the application..."
@@ -57,16 +61,14 @@ send_request(){
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s &> "${container_name}.txt"
+   ($RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer=16s)  2>&1 | tee  "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
-        cat "${container_name}.txt"
         exit 1
     fi
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
-        cat "${container_name}.txt"
         exit 1
     fi
     sleep 5
@@ -83,11 +85,11 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false &> "${test_container}.txt" || true
+
+($REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false || true)   2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
     exit 1
 fi
 
@@ -98,7 +100,6 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
 fi
 
 cat "${test_container}.txt"  # For visibility in logs
-
 all_passed=true
 
 for i in {0..1}
@@ -126,6 +127,5 @@ if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    cat "${test_container}.txt"
     exit 1
 fi

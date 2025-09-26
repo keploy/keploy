@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
 # macOS variant. Requires Docker Desktop for Mac running.
-
 set -euo pipefail
 
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+# for the below shource make it such a way that if the file is not present or already present it does not error
+source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 # --- Networking: create once, quietly ---
 if ! docker network ls --format '{{.Name}}' | grep -q '^keploy-network$'; then
@@ -18,10 +18,23 @@ docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data
+
+rm ./keploy.yml >/dev/null 2>&1 || true
+
 docker build -t flask-app:1.0 .
 
-# Safe even if keploy.yml doesn't exist
-sed -i '' 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml" || true
+
+# Generate the keploy-config file.
+$RECORD_BIN config --generate
+
+# Update the global noise to ts in the config file.
+config_file="./keploy.yml"
+if [ -f "$config_file" ]; then
+  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
+
 sleep 5
 
 
@@ -63,8 +76,7 @@ for i in 1 2; do
     -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
     --container-name "$container_name" \
     --generate-github-actions=false \
-    --record-timer=10s \
-    &> "${container_name}.txt"
+    --record-timer=10s 2>&1 | tee "${container_name}.txt"
   
     cat "${container_name}.txt"  # For visibility in logs
   # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
@@ -96,9 +108,7 @@ echo "Starting test mode..."
   --container-name "$test_container" \
   --apiTimeout 60 \
   --delay 12 \
-  --generate-github-actions=false \
-  &> "${test_container}.txt"
-
+  --generate-github-actions=false 2>&1 | tee "${test_container}.txt"
 
 
 # --- Verify reports ---
@@ -121,21 +131,9 @@ for i in 0 1; do
   fi
 done
 
-# --- Outcome ---
-if [ "$all_passed" = true ]; then
+if $all_passed; then
   echo "All tests passed"
   exit 0
 else
-  cat "${test_container}.txt"
-  echo "--- Diagnostics: keploy directory tree (if any) ---"
-  if [ -d keploy ]; then
-    find keploy -maxdepth 5 -type f -print
-  else
-    echo "keploy directory not found"
-  fi
-  echo "--- Diagnostics: docker ps (recent) ---"
-  docker ps -a | head -n 20 || true
-  echo "--- Diagnostics: container logs ($test_container) ---"
-  docker logs "$test_container" 2>&1 | tail -n 200 || true
   exit 1
 fi
