@@ -7,7 +7,6 @@ set -euo pipefail
 # for the below shource make it such a way that if the file is not present or already present it does not error
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
-
 # --- Networking: create once, quietly ---
 if ! docker network ls --format '{{.Name}}' | grep -q '^keploy-network$'; then
   docker network create keploy-network
@@ -19,6 +18,7 @@ docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data
+
 rm ./keploy.yml >/dev/null 2>&1 || true
 
 docker build -t flask-app:1.0 .
@@ -77,7 +77,6 @@ for i in 1 2; do
     --container-name "$container_name" \
     --generate-github-actions=false \
     --record-timer=10s 2>&1 | tee "${container_name}.txt"
-     
   
     cat "${container_name}.txt"  # For visibility in logs
   # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
@@ -110,7 +109,6 @@ echo "Starting test mode..."
   --apiTimeout 60 \
   --delay 12 \
   --generate-github-actions=false 2>&1 | tee "${test_container}.txt"
-
 
 
 # --- Verify reports ---
