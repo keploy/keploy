@@ -90,17 +90,49 @@ echo "🚀 Starting 1000 RPC fuzz calls..."
 # Save the start time
 START_TIME=$(date +%s)
 
-# Run the test with a timeout of 10 minutes (600 seconds)
+# Create a temporary config file with the test settings
+cat > /tmp/grpc_test_config.json << 'EOL'
+{
+  "addr": "localhost:50051",
+  "seed": 42,
+  "total": 1000,
+  "text": false,
+  "timeout_sec": 120,
+  "max_diffs": 5,
+  "grpc": true,
+  "insecure": true,
+  "use_http2": true,
+  "http2_prior_knowledge": true,
+  "headers": [
+    {"name": "Content-Type", "value": "application/grpc+proto"},
+    {"name": "TE", "value": "trailers"},
+    {"name": "User-Agent", "value": "grpc-go/1.0.0"},
+    {"name": "Host", "value": "localhost:50051"}
+  ],
+  "http2_settings": {
+    "header_table_size": 4096,
+    "enable_push": 0,
+    "max_concurrent_streams": 100,
+    "initial_window_size": 6291456,
+    "max_frame_size": 16384,
+    "max_header_list_size": 262144
+  },
+  "grpc_metadata": [
+    {"key": ":authority", "value": "localhost:50051"},
+    {"key": ":method", "value": "POST"},
+    {"key": ":scheme", "value": "http"},
+    {"key": ":path", "value": "/fuzz.FuzzService/EchoValue"}
+  ]
+}
+EOL
+
+# Run the test with the config file
+echo "Using test configuration:"
+cat /tmp/grpc_test_config.json
+
 timeout 600 curl -v -X POST http://localhost:18080/run \
   -H 'Content-Type: application/json' \
-  -d '{
-    "addr": "localhost:50051",
-    "seed": 42,
-    "total": 1000,
-    "text": false,
-    "timeout_sec": 120,  # Increased per-request timeout to 120 seconds
-    "max_diffs": 5
-  }' &> curl_output.txt
+  --data @/tmp/grpc_test_config.json &> curl_output.txt
 
 CURL_EXIT_CODE=$?
 END_TIME=$(date +%s)
