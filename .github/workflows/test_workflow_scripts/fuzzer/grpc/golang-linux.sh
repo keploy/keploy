@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # Expects:
 #   MODE                -> 'incoming' or 'outgoing'   (argv[1])
 #   RECORD_BIN          -> path to keploy record binary (env)
@@ -8,19 +7,15 @@
 #   FUZZER_CLIENT_BIN   -> path to downloaded client bin (env)
 #   FUZZER_SERVER_BIN   -> path to downloaded server bin (env)
 
-
 set -Eeuo pipefail
 
-
 MODE=${1:-incoming}
-
 
 # If you keep test-iid.sh checks, source it from repo root:
 if [ -f "./.github/workflows/test_workflow_scripts/test-iid.sh" ]; then
 # shellcheck disable=SC1091
 source "./.github/workflows/test_workflow_scripts/test-iid.sh"
 fi
-
 
 # sanity
 command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
@@ -29,16 +24,12 @@ command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
 [ -x "${FUZZER_CLIENT_BIN:-}" ] || { echo "FUZZER_CLIENT_BIN not set or not executable"; exit 1; }
 [ -x "${FUZZER_SERVER_BIN:-}" ] || { echo "FUZZER_SERVER_BIN not set or not executable"; exit 1; }
 
-
 # Generate keploy config and add duration_ms noise to avoid timing diffs
 rm -f ./keploy.yml
 sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
 sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "./keploy.yml"
 
-
 SUCCESS_PHRASE="all 1000 unary RPCs validated successfully"
-
-
 
 
 check_for_errors() {
@@ -64,7 +55,6 @@ if [ -f "$logfile" ]; then
 fi
 }
 
-
 ensure_success_phrase() {
 for f in "$@"; do
   if [ -f "$f" ] && grep -qiF "$SUCCESS_PHRASE" "$f"; then
@@ -80,12 +70,8 @@ exit 1
 }
 
 
-
-
 if [ "$MODE" = "incoming" ]; then
 echo "🧪 Testing with incoming requests"
-
-
 
 
 # Start server with keploy in record mode
@@ -93,13 +79,9 @@ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" &> record_
 sleep 10
 
 
-
-
 # Start client HTTP driver
 "$FUZZER_CLIENT_BIN" --http :18080 &> client_incoming.txt &
 sleep 10
-
-
 
 
 # Kick off 1000 unary RPC fuzz calls
@@ -115,16 +97,10 @@ curl -sS -X POST http://localhost:18080/run \
   }'
 
 
-
-
 sleep 120
 
 
-
-
 echo "Stopping keploy record and server"
-
-
 
 
 # Stop keploy record
@@ -136,30 +112,26 @@ if [ -n "${pid:-}" ]; then
 fi
 
 
-
-
 echo "Waiting for processes to settle"
-
-
 
 
 check_for_errors record_incoming.txt
 check_for_errors client_incoming.txt
 
 
-
-
 echo "Replaying incoming requests"
 
 
+# Replay and check for errors immediately
+if ! sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt; then
+  echo "::error::Replay command failed!"
+  echo "--- DUMPING test_incoming.txt ---"
+  cat test_incoming.txt
+  exit 1
+fi
 
-
-# Replay
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt
 echo "checking for errors"
 check_for_errors test_incoming.txt
-
-
 
 
 # ✅ For INCOMING mode: no success-phrase check. Instead, verify Keploy reports PASSED.
@@ -169,8 +141,6 @@ if [[ -z "${RUN_DIR:-}" ]]; then
   exit 1
 fi
 echo "Using reports from: $RUN_DIR"
-
-
 
 
 all_passed=true
@@ -184,14 +154,10 @@ for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
 done
 
 
-
-
 if ! $found_any; then
   echo "::error::No test-set report files found in $RUN_DIR"
   exit 1
 fi
-
-
 
 
 if $all_passed; then
@@ -201,11 +167,8 @@ else
   exit 1
 fi
 
-
 elif [ "$MODE" = "outgoing" ]; then
 echo "🧪 Testing with outgoing requests"
-
-
 
 
 # Start server (no keploy here)
@@ -213,13 +176,9 @@ echo "🧪 Testing with outgoing requests"
 sleep 5
 
 
-
-
 # Record the client (it makes outgoing RPCs)
 sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" &> record_outgoing.txt &
 sleep 10
-
-
 
 
 curl -sS -X POST http://localhost:18080/run \
@@ -234,11 +193,7 @@ curl -sS -X POST http://localhost:18080/run \
   }'
 
 
-
-
 sleep 10
-
-
 
 
 pid=$(pgrep keploy || true)
@@ -250,25 +205,25 @@ fi
 sleep 5
 
 
-
-
 check_for_errors server_outgoing.txt
 check_for_errors record_outgoing.txt
 
 
-
-
 # Replay the client (relying on mocks)
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" &> test_outgoing.txt
+if ! sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" &> test_outgoing.txt; then
+  echo "::error::Replay command failed!"
+  echo "--- DUMPING test_outgoing.txt ---"
+  cat test_outgoing.txt
+  exit 1
+fi
+
 check_for_errors test_outgoing.txt
 ensure_success_phrase test_outgoing.txt
 echo "✅ Outgoing mode passed."
-
 
 else
 echo "❌ Invalid mode specified: $MODE"
 exit 1
 fi
-
 
 exit 0
