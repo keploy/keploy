@@ -19,8 +19,8 @@ command -v go >/dev/null 2>&1 || { echo "::error::go not found"; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "::error::curl not found"; exit 1; }
 
 # --- Helper Functions for Logging & Error Handling ---
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
+section() { echo "--- $* ---"; }
+endsec()  { :; } # This is a no-op; the end marker is not needed.
 
 # Final cleanup routine to ensure no processes are left running.
 cleanup() {
