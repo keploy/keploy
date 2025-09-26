@@ -85,7 +85,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        fuzzer:
+          - name: Go gRPC Fuzzer
+            script_dir: grpc
+        config:
           # incoming mode
           - job: incoming_record_latest_replay_build
             mode: incoming
@@ -112,21 +115,31 @@ jobs:
             mode: outgoing
             record_src: build
             replay_src: build
+        fuzzer_version:
+          - job: test_latest_fuzzer
+            s3_path: "releases/grpc-unary-fuzzer/latest/grpc-unary-fuzzer-linux-amd64.tar.gz"
 
-    name: ${{ matrix.job }}
+    name: ${{ matrix.fuzzer.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - id: record
+      - name: Download Binary (for Record)
+        id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.record_src }}
+          src: ${{ matrix.config.record_src }}
 
-      - id: replay
+      - name: Download Binary (for Replay)
+        id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.replay_src }}
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -139,7 +152,8 @@ jobs:
         id: fuzzer
         run: |
           set -euo pipefail
-          KEY="releases/grpc-unary-fuzzer/latest/grpc-unary-fuzzer-linux-amd64.tar.gz"
+          KEY="${{ matrix.fuzzer_version.s3_path }}"
+          echo "Downloading fuzzer from s3://${{ vars.AWS_S3_BUCKET }}/${KEY}"
           aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
           tar -xzf grpc-unary-fuzzer-linux-amd64.tar.gz
           chmod +x ./client ./server
@@ -153,6 +167,6 @@ jobs:
           FUZZER_CLIENT_BIN: ${{ steps.fuzzer.outputs.client }}
           FUZZER_SERVER_BIN: ${{ steps.fuzzer.outputs.server }}
         run: |
-          SCRIPT_PATH="$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh"
+          SCRIPT_PATH="$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/${{ matrix.fuzzer.script_dir }}/golang-linux.sh"
           chmod +x "$SCRIPT_PATH"
-          source "$SCRIPT_PATH" ${{ matrix.mode }}
+          source "$SCRIPT_PATH" ${{ matrix.config.mode }}
