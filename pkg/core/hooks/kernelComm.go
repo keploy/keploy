@@ -3,12 +3,17 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/ringbuf"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -128,4 +133,43 @@ func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppI
 	}
 
 	return nil
+}
+
+func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
+	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
+	if err != nil {
+		return nil, err // Return error if we can't create the reader
+	}
+
+	eventChan := make(chan models.IngressEvent, 10) // A buffered channel can be useful
+
+	go func() {
+		defer rb.Close()
+		defer close(eventChan)
+
+		for {
+			// Read raw data from the ring buffer
+			rec, err := rb.Read()
+			if err != nil {
+				// If the reader was closed, it's a clean shutdown.
+				if errors.Is(err, ringbuf.ErrClosed) {
+					return
+				}
+				continue
+			}
+
+			var e models.IngressEvent
+			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
+				utils.LogError(h.logger, err, "failed to decode ingress event")
+				continue
+			}
+			h.logger.Debug("Intercepted application bind event")
+			select {
+			case <-ctx.Done(): // Context was cancelled, so we shut down.
+				return
+			case eventChan <- e: // Send the decoded event to the channel.
+			}
+		}
+	}()
+	return eventChan, nil
 }

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 // GenerateTableDiff creates a human-readable key-value diff for two JSON strings.
+// (JSON-only, compact "Path / Old / New" style.)
 func GenerateTableDiff(expected, actual string) (string, error) {
 	exp, err1 := parseJSONLoose(expected)
 	act, err2 := parseJSONLoose(actual)
@@ -35,7 +38,6 @@ func GenerateTableDiff(expected, actual string) (string, error) {
 	sort.Strings(keys)
 
 	var sb strings.Builder
-	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
 	hasDiffs := false
 	for _, k := range keys {
@@ -71,6 +73,7 @@ func GenerateTableDiff(expected, actual string) (string, error) {
 }
 
 // parseJSONLoose parses a JSON string into an interface{}, using UseNumber to preserve number precision.
+// If it isn't valid JSON, return the original string so callers can still diff safely.
 func parseJSONLoose(s string) (any, error) {
 	dec := json.NewDecoder(strings.NewReader(s))
 	dec.UseNumber()
@@ -118,7 +121,6 @@ func flattenToMap(v any, base string, out map[string]string) {
 	default:
 		js, err := json.Marshal(x)
 		if err != nil {
-			// Fallback to Sprintf for non-marshallable types
 			js = []byte(fmt.Sprintf("%v", x))
 		}
 		out[pathWithDollar(base)] = string(js)
@@ -134,4 +136,44 @@ func pathWithDollar(base string) string {
 		return base
 	}
 	return "$." + base
+}
+
+// -------------------- Non-JSON (gRPC) compact diff --------------------
+
+// GeneratePlainOldNewDiff emits the old compact "Path / Expected / Actual" diff for non-JSON bodies.
+// For large payloads it prints short previews around the first difference, plus lengths,
+// so we avoid spewing megabytes while keeping the exact original lines/labels.
+func GeneratePlainOldNewDiff(expected, actual string, bodyType models.BodyType) string {
+	if expected == actual {
+		return "No differences found in body."
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Path: %s\n", bodyType))
+	sb.WriteString(fmt.Sprintf("  Expected: %s\n", escapeOneLine(expected)))
+	sb.WriteString(fmt.Sprintf("  Actual: %s\n", escapeOneLine(actual)))
+	return strings.TrimSpace(sb.String())
+}
+
+// escapeOneLine keeps output single-line and safe for terminals.
+func escapeOneLine(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if c >= 32 && c < 127 {
+				b.WriteByte(c)
+			} else {
+				fmt.Fprintf(&b, "\\x%02X", c)
+			}
+		}
+	}
+	return b.String()
 }
