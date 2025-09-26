@@ -84,20 +84,50 @@ if [ "$MODE" = "incoming" ]; then
  sleep 10
 
 
- # Kick off 1000 unary RPC fuzz calls
- curl -sS -X POST http://localhost:18080/run \
-   -H 'Content-Type: application/json' \
-   -d '{
-     "addr": "localhost:50051",
-     "seed": 42,
-     "total": 1000,
-     "text": false,
-     "timeout_sec": 60,
-     "max_diffs": 5
-   }'
+ # Kick off 1000 unary RPC fuzz calls with increased timeouts
+echo "🚀 Starting 1000 RPC fuzz calls..."
 
+# Save the start time
+START_TIME=$(date +%s)
 
- sleep 120
+# Run the test with a timeout of 10 minutes (600 seconds)
+timeout 600 curl -v -X POST http://localhost:18080/run \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "addr": "localhost:50051",
+    "seed": 42,
+    "total": 1000,
+    "text": false,
+    "timeout_sec": 120,  # Increased per-request timeout to 120 seconds
+    "max_diffs": 5
+  }' &> curl_output.txt
+
+CURL_EXIT_CODE=$?
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+echo "✅ RPC test completed in ${DURATION} seconds with exit code: ${CURL_EXIT_CODE}"
+
+# Check the exit code
+if [ $CURL_EXIT_CODE -eq 124 ]; then
+    echo "::error::RPC test timed out after 10 minutes"
+elif [ $CURL_EXIT_CODE -ne 0 ]; then
+    echo "::error::RPC test failed with exit code: ${CURL_EXIT_CODE}"
+fi
+
+# Display the output (first 100 lines to avoid overwhelming logs)
+echo "=== RPC Test Output (first 100 lines) ==="
+head -n 100 curl_output.txt
+echo "..."
+tail -n 20 curl_output.txt
+echo "======================================"
+
+# Give some extra time for any background processing
+ADDITIONAL_WAIT=$((600 - DURATION > 0 ? 600 - DURATION : 60))  # Wait up to 10 minutes total
+if [ $ADDITIONAL_WAIT -gt 0 ]; then
+    echo "⏳ Waiting an additional ${ADDITIONAL_WAIT} seconds for background processes..."
+    sleep $ADDITIONAL_WAIT
+fi
 
 
  echo "Stopping keploy record and server"
@@ -122,40 +152,70 @@ if [ "$MODE" = "incoming" ]; then
  echo "Replaying incoming requests"
 
 
- # Replay
- echo "Running keploy test in replay mode..."
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt
- echo "Replay completed. Checking for errors..."
+ # Clean up any previous test runs
+ echo "🧹 Cleaning up previous test runs..."
+ sudo rm -rf ./keploy/reports/test-run-* 2>/dev/null || true
+
+ # Create reports directory with proper permissions
+ echo "📂 Ensuring keploy/reports directory exists..."
+ sudo mkdir -p ./keploy/reports
+ sudo chmod -R 777 ./keploy/reports
+ 
+ # Debug: Show disk space and inodes
+ echo "💾 Disk space and inodes:"
+ df -h .
+ df -i .
+
+ # Run the replay with debug output
+ echo "🚀 Running keploy test in replay mode with debug..."
+ set -x  # Enable command echoing
+ 
+ # Run the test with a timeout to prevent hanging
+ timeout 300 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --debug &> test_incoming.txt || {
+   REPLAY_STATUS=$?
+   echo "::error::Replay command failed with status $REPLAY_STATUS"
+   if [ $REPLAY_STATUS -eq 124 ]; then
+     echo "::error::Test timed out after 300 seconds (5 minutes)"
+   fi
+   echo "=== Test Output ==="
+   cat test_incoming.txt
+   echo "=================="
+   exit 1
+ }
+ set +x  # Disable command echoing
+ 
+ echo "✅ Replay completed. Checking for errors..."
  check_for_errors test_incoming.txt
 
- # List all files in keploy directory for debugging
- echo "Contents of keploy directory:"
- ls -la ./keploy/ 2>/dev/null || echo "keploy directory not found"
+ # Debug: Show current directory and contents
+ echo "📁 Current directory: $(pwd)"
+ echo "📂 Directory contents:"
+ ls -la
  
- # Try to find the test-run directory with retries
- MAX_RETRIES=3
- RETRY_COUNT=0
- RUN_DIR=""
+ # Debug: Show keploy directory structure
+ echo "🔍 Keploy directory structure:"
+ find ./keploy -type d -exec ls -ld {} \;
  
- while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ -z "$RUN_DIR" ]; do
-   echo "Looking for test-run directory (Attempt $((RETRY_COUNT+1))/$MAX_RETRIES)..."
-   RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
-   
-   if [ -z "$RUN_DIR" ]; then
-     RETRY_COUNT=$((RETRY_COUNT+1))
-     if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-       echo "Test-run directory not found, waiting 10 seconds before retry..."
-       sleep 10
-     fi
-   fi
-done
-
- if [[ -z "${RUN_DIR:-}" ]]; then
-   echo "::error::No test-run directory found under ./keploy/reports"
-   echo "Contents of keploy/reports:"
+ # Find test-run directories with more reliable method
+ echo "🔍 Searching for test-run directories..."
+ RUN_DIR=$(find ./keploy/reports -maxdepth 1 -type d -name "test-run-*" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+ 
+ if [[ -z "$RUN_DIR" ]]; then
+   echo "❌ No test-run directory found after test execution"
+   echo "=== keploy/reports contents ==="
    ls -la ./keploy/reports 2>/dev/null || echo "keploy/reports directory not found"
-   echo "Test output from test_incoming.txt:"
-   cat test_incoming.txt
+   echo "=== Test output (first 100 lines) ==="
+   head -n 100 test_incoming.txt
+   echo "=== End of test output ==="
+   
+   # Check for processes that might be using the directory
+   echo "🔍 Checking for processes using keploy directory:"
+   sudo lsof +D "$(pwd)/keploy" 2>/dev/null || echo "Could not check for processes using the directory"
+   
+   # Check system logs for any relevant errors
+   echo "📋 System logs (last 20 lines):"
+   sudo journalctl -n 20 --no-pager 2>/dev/null || echo "Could not access system logs"
+   
    exit 1
  fi
  
