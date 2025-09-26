@@ -782,14 +782,14 @@ func (d *DiffsPrinter) Render() error {
 
 	// Status (only when actually different)
 	if d.statusExp != d.statusAct {
-		s := sprintDiff(d.statusExp, d.statusAct, "status"); 
+		s := sprintDiff(d.statusExp, d.statusAct, "status")
 		if s != "" {
 			diffs = append(diffs, s)
 		}
 	}
 
 	// Headers (skip when empty/identical)
-	s := sprintDiffHeader(d.headerExp, d.headerAct); 
+	s := sprintDiffHeader(d.headerExp, d.headerAct)
 	if s != "" {
 		diffs = append(diffs, s)
 	}

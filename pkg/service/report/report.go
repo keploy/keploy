@@ -352,7 +352,7 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 	// Attempt to parse the file into the canonical TestReport struct.
 	var tr models.TestReport
 	err = dec.Decode(&tr)
-	if  err == nil && (tr.Name != "" || len(tr.Tests) > 0) {
+	if err == nil && (tr.Name != "" || len(tr.Tests) > 0) {
 		// Summary-only
 		if r.config.Report.Summary {
 			m := map[string]*models.TestReport{tr.Name: &tr}
