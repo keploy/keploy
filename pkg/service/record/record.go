@@ -60,10 +60,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)
-	_, reqCtxCancel := context.WithCancel(reqCtx)
-	reqCtx = context.WithValue(ctx, models.ErrGroupKey, reqErrGrp)
-	var stopReason string
+	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+	reqCtx = context.WithValue(reqCtx, models.ErrGroupKey, reqErrGrp)
 
+	var stopReason string
 	// defining all the channels and variables required for the record
 	var runAppError models.AppError
 	var appErrChan = make(chan models.AppError, 1)
@@ -186,29 +186,28 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
-
 	// if !r.config.Record.BigPayload {
-		r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
-		errGrp.Go(func() error {
-			for testCase := range frames.Incoming {
-				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
-				if reRecordCfg.TestSet == "" {
-					err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-					if err != nil {
-						if ctx.Err() == context.Canceled {
-							continue
-						}
-						insertTestErrChan <- err
-					} else {
-						testCount++
-						r.telemetry.RecordedTestAndMocks()
+	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
+	errGrp.Go(func() error {
+		for testCase := range frames.Incoming {
+			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			if reRecordCfg.TestSet == "" {
+				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+				if err != nil {
+					if ctx.Err() == context.Canceled {
+						continue
 					}
+					insertTestErrChan <- err
 				} else {
-					r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
+					testCount++
+					r.telemetry.RecordedTestAndMocks()
 				}
+			} else {
+				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 			}
-			return nil
-		})
+		}
+		return nil
+	})
 	// }
 
 	errGrp.Go(func() error {
@@ -385,31 +384,31 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	}
 
 	// if !r.config.Record.BigPayload {
-		g.Go(func() error {
-			defer close(incomingChan)
+	g.Go(func() error {
+		defer close(incomingChan)
 
-			ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
-			if err != nil {
-				errChan <- err
-				return fmt.Errorf("failed to get incoming test cases: %w", err)
-			}
-			for {
+		ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
+		if err != nil {
+			errChan <- err
+			return fmt.Errorf("failed to get incoming test cases: %w", err)
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case tc, ok := <-ch:
+				if !ok {
+					return nil
+				}
+				// forward but remain cancelable
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case tc, ok := <-ch:
-					if !ok {
-						return nil
-					}
-					// forward but remain cancelable
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case incomingChan <- tc:
-					}
+				case incomingChan <- tc:
 				}
 			}
-		})
+		}
+	})
 	// }
 
 	// OUTGOING
@@ -454,15 +453,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	})
 
 	// if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
-		return FrameChan{
-			Incoming: incomingChan,
-			Outgoing: outgoingChan,
-		}, nil
-	// }
-
 	return FrameChan{
+		Incoming: incomingChan,
 		Outgoing: outgoingChan,
 	}, nil
+
 }
 
 func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {

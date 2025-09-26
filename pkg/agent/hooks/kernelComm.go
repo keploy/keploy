@@ -136,11 +136,15 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 		return nil, err // Return error if we can't create the reader
 	}
 
-	eventChan := make(chan models.IngressEvent, 10) // A buffered channel can be useful
+	eventChan := make(chan models.IngressEvent, 100) // A buffered channel can be useful
 
 	go func() {
 		defer rb.Close()
 		defer close(eventChan)
+		go func() {
+            <-ctx.Done()
+            rb.Close()
+        }()
 
 		for {
 			// Read raw data from the ring buffer
