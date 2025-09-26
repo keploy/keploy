@@ -123,18 +123,45 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Replay
+ echo "Running keploy test in replay mode..."
  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt
- echo "checking for errors"
+ echo "Replay completed. Checking for errors..."
  check_for_errors test_incoming.txt
 
+ # List all files in keploy directory for debugging
+ echo "Contents of keploy directory:"
+ ls -la ./keploy/ 2>/dev/null || echo "keploy directory not found"
+ 
+ # Try to find the test-run directory with retries
+ MAX_RETRIES=3
+ RETRY_COUNT=0
+ RUN_DIR=""
+ 
+ while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ -z "$RUN_DIR" ]; do
+   echo "Looking for test-run directory (Attempt $((RETRY_COUNT+1))/$MAX_RETRIES)..."
+   RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
+   
+   if [ -z "$RUN_DIR" ]; then
+     RETRY_COUNT=$((RETRY_COUNT+1))
+     if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+       echo "Test-run directory not found, waiting 10 seconds before retry..."
+       sleep 10
+     fi
+   fi
+done
 
- # ✅ For INCOMING mode: no success-phrase check. Instead, verify Keploy reports PASSED.
- RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
  if [[ -z "${RUN_DIR:-}" ]]; then
    echo "::error::No test-run directory found under ./keploy/reports"
+   echo "Contents of keploy/reports:"
+   ls -la ./keploy/reports 2>/dev/null || echo "keploy/reports directory not found"
+   echo "Test output from test_incoming.txt:"
+   cat test_incoming.txt
    exit 1
  fi
+ 
  echo "Using reports from: $RUN_DIR"
+ echo "Contents of $RUN_DIR:"
+ ls -la "$RUN_DIR" 2>/dev/null || echo "Could not list contents of $RUN_DIR"
 
 
  all_passed=true
