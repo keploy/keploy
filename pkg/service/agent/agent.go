@@ -85,6 +85,11 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 	return m, nil
 }
 
+func (a *Agent) StartIncomingProxy(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) error {
+	go a.IncomingProxy.Start(ctx, persister, opts)
+	return nil
+}
+
 func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 	a.logger.Debug("Inside MockOutgoing of agent binary !!")
 

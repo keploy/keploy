@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/utils"
 
-	grpc "go.keploy.io/server/v2/pkg/core/proxy/incoming/gRPC"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/agent"
+	grpc "go.keploy.io/server/v2/pkg/agent/proxy/incoming/gRPC"
+	"go.keploy.io/server/v2/pkg/agent/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
@@ -27,12 +27,12 @@ type IngressProxyManager struct {
 	active map[uint16]proxyStop
 	logger *zap.Logger
 	// deps         models.ProxyDependencies // Use the new dependency struct
-	hooks        core.Hooks
+	hooks        agent.Hooks
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
 }
 
-func New(logger *zap.Logger, h core.Hooks) *IngressProxyManager {
+func New(logger *zap.Logger, h agent.Hooks) *IngressProxyManager {
 	pm := &IngressProxyManager{
 		logger: logger,
 		hooks:  h,
