@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
 	"go.keploy.io/server/v2/pkg/agent/proxy"
+	incoming "go.keploy.io/server/v2/pkg/agent/proxy/incoming"
 
 	// "go.keploy.io/server/v2/pkg/agent/tester"
 	"go.keploy.io/server/v2/pkg/platform/docker"
@@ -43,7 +44,7 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 
 	switch cmd {
 	case "agent":
-		return agent.New(logger, commonServices.Instrumentation.Hooks, commonServices.Instrumentation.Proxy, commonServices.Instrumentation.Tester, client), nil
+		return agent.New(logger, commonServices.Instrumentation.Hooks, commonServices.Instrumentation.Proxy, commonServices.Instrumentation.Tester, client, commonServices.Instrumentation.IncomingProxy), nil
 	default:
 		return nil, errors.New("invalid command")
 	}
@@ -60,10 +61,10 @@ func GetAgentService(_ context.Context, c *config.Config, client docker.Client, 
 	}
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
+	ip := incoming.New(logger, h)
 
 	// t := tester.New(logger, h)
-
-	instrumentation := agent.New(logger, h, p, nil, client)
+	instrumentation := agent.New(logger, h, p, nil, client, ip)
 
 	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalServices{

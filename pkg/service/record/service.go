@@ -13,6 +13,7 @@ type Instrumentation interface {
 	// Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error)
+	// StartIncomingProxy(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) error Commenting out this for now need to move this and the instrument in the agent setup only
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 	GetContainerIP(ctx context.Context, id uint64) (string, error)

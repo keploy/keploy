@@ -32,19 +32,21 @@ type Agent struct {
 	agent.Hooks                 // embedding the Hooks interface to transfer the hooks methods to the core object
 	agent.Tester                // embedding the Tester interface to transfer the tester methods to the core object
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
+	agent.IncomingProxy
 	proxyStarted bool
 	// activeClients sync.Map
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
 }
 
-func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client) *Agent {
+func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client, ip agent.IncomingProxy) *Agent {
 	return &Agent{
-		logger:       logger,
-		Hooks:        hook,
-		Proxy:        proxy,
-		Tester:       tester,
-		dockerClient: client,
+		logger:        logger,
+		Hooks:         hook,
+		Proxy:         proxy,
+		IncomingProxy: ip,
+		Tester:        tester,
+		dockerClient:  client,
 	}
 }
 
@@ -81,6 +83,11 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 	}
 
 	return m, nil
+}
+
+func (a *Agent) StartIncomingProxy(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) error {
+	go a.IncomingProxy.Start(ctx, persister, opts)
+	return nil
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
