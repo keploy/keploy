@@ -16,6 +16,10 @@ fi
 
 rm -rf keploy/
 
+docker compose up mongo -d
+
+sleep 10
+
 # Generate the keploy-config file.
 sudo "$RECORD_BIN" config --generate
 
@@ -57,7 +61,8 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Start the go-http app in test mode.
+docker compose down
+sleep 5
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "go run ./server" --delay 7 --generateGithubActions=false &> test_logs.txt
 
 
