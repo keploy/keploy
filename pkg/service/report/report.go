@@ -339,14 +339,20 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 		r.logger.Error("failed to open report file", zap.String("report_path", reportPath), zap.Error(err))
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			r.logger.Error("failed to close report file", zap.String("report_path", reportPath), zap.Error(err))
+		}
+	}()
+
 	r.logger.Info("Generating report from file", zap.String("report_path", reportPath))
 
 	dec := yaml.NewDecoder(f)
 
 	// Attempt to parse the file into the canonical TestReport struct.
 	var tr models.TestReport
-	if err := dec.Decode(&tr); err == nil && (tr.Name != "" || len(tr.Tests) > 0) {
+	err = dec.Decode(&tr)
+	if  err == nil && (tr.Name != "" || len(tr.Tests) > 0) {
 		// Summary-only
 		if r.config.Report.Summary {
 			m := map[string]*models.TestReport{tr.Name: &tr}
@@ -381,7 +387,11 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			r.logger.Error("failed to close report file", zap.String("report_path", reportPath), zap.Error(err))
+		}
+	}()
 
 	// Define legacy report structure
 	type legacy struct {
@@ -390,7 +400,8 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 	var lg legacy
 	dec := yaml.NewDecoder(f)
-	if err := dec.Decode(&lg); err != nil {
+	err = dec.Decode(&lg)
+	if err != nil {
 		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), zap.Error(err))
 		return err
 	}

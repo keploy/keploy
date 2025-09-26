@@ -73,7 +73,7 @@ func applyCliColorsToDiff(diff string) string {
 	}
 
 	mustProcess := false
-	for _, prefix := range []string{"Path: ", "  Old: ", "  New: "} {
+	for _, prefix := range []string{"Path: ", "  Expected: ", "  Actual: "} {
 		if strings.Contains(diff, prefix) {
 			mustProcess = true
 			break
@@ -98,14 +98,14 @@ func applyCliColorsToDiff(diff string) string {
 			lines[i] = "Path: " + ansiYellow + value + ansiReset
 			continue
 		}
-		if strings.HasPrefix(line, "  Old: ") {
-			value := strings.TrimPrefix(line, "  Old: ")
-			lines[i] = "  Old: " + ansiRed + value + ansiReset
+		if strings.HasPrefix(line, "  Expected: ") {
+			value := strings.TrimPrefix(line, "  Expected: ")
+			lines[i] = "  Expected: " + ansiRed + value + ansiReset
 			continue
 		}
-		if strings.HasPrefix(line, "  New: ") {
-			value := strings.TrimPrefix(line, "  New: ")
-			lines[i] = "  New: " + ansiGreen + value + ansiReset
+		if strings.HasPrefix(line, "  Actual: ") {
+			value := strings.TrimPrefix(line, "  Actual: ")
+			lines[i] = "  Actual: " + ansiGreen + value + ansiReset
 			continue
 		}
 	}

@@ -140,7 +140,7 @@ func pathWithDollar(base string) string {
 
 // -------------------- Non-JSON (gRPC) compact diff --------------------
 
-// GeneratePlainOldNewDiff emits the old compact "Path / Old / New" diff for non-JSON bodies.
+// GeneratePlainOldNewDiff emits the old compact "Path / Expected / Actual" diff for non-JSON bodies.
 // For large payloads it prints short previews around the first difference, plus lengths,
 // so we avoid spewing megabytes while keeping the exact original lines/labels.
 func GeneratePlainOldNewDiff(expected, actual string, bodyType models.BodyType) string {
@@ -150,8 +150,8 @@ func GeneratePlainOldNewDiff(expected, actual string, bodyType models.BodyType) 
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Path: %s\n", bodyType))
-	sb.WriteString(fmt.Sprintf("  Old: %s\n", escapeOneLine(expected)))
-	sb.WriteString(fmt.Sprintf("  New: %s\n", escapeOneLine(actual)))
+	sb.WriteString(fmt.Sprintf("  Expected: %s\n", escapeOneLine(expected)))
+	sb.WriteString(fmt.Sprintf("  Actual: %s\n", escapeOneLine(actual)))
 	return strings.TrimSpace(sb.String())
 }
 
