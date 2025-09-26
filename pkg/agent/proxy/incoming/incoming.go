@@ -42,11 +42,10 @@ func New(logger *zap.Logger, h agent.Hooks) *IngressProxyManager {
 	return pm
 }
 
-func (pm *IngressProxyManager) Start(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) {
-	// pm.deps.Persister = persister
+func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase {
 	pm.incomingOpts = opts
-	go pm.persistTestCases(ctx, persister)
-	pm.ListenForIngressEvents(ctx)
+	go pm.ListenForIngressEvents(ctx)
+	return pm.tcChan
 }
 
 // Ensure starts a new ingress proxy on the given original app pory if it's not already running.

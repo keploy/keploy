@@ -21,8 +21,6 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent"
-	Hooks "go.keploy.io/server/v2/pkg/agent/hooks"
-	incomingTestCase "go.keploy.io/server/v2/pkg/agent/incoming"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
@@ -68,15 +66,12 @@ type Proxy struct {
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
-	hooks             *Hooks.Hooks
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	h := info.(*Hooks.Hooks)
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort, // default: 16789
-		hooks:             h,
 		DNSPort:           opts.DNSPort, // default: 26789
 		IP4:               "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
 		IP6:               "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
@@ -108,7 +103,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 
 // In proxy.go
 
-func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions, incomingOpts models.IncomingOptions) error {
+func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
@@ -211,35 +206,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions, incomin
 		return err
 	}
 
-	if opts.Mode != models.MODE_TEST && opts.BigPayload {
-		persister := opts.Persister
-		if persister == nil {
-			persister = func(ctx context.Context, testCase *models.TestCase) error {
-				p.logger.Debug("Proxy is not in record mode.")
-				return nil
-			}
-		}
-		deps := ProxyDependencies{
-			Logger:    p.logger,
-			Persister: persister,
-		}
-		tcCapture := incomingTestCase.NewTestcaseCapture()
-		// Start the eBPF listener for bind events
-		ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, tcCapture, incomingOpts)
-		go func() {
-			defer utils.Recover(p.logger)
-			ListenForIngressEvents(ctx, p.hooks, ingressProxyManager)
-		}()
-
-		// Setup a graceful shutdown for the ingress proxies.
-		g.Go(func() error {
-			<-ctx.Done()
-			p.logger.Info("Shutting down all dynamic ingress proxies...")
-			ingressProxyManager.StopAll()
-			return nil
-		})
-		p.logger.Debug("Successfully pinned proxy listener socket to eBPF sockmap.")
-	}
 
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 

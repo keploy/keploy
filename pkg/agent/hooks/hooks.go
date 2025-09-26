@@ -4,9 +4,7 @@
 package hooks
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +19,6 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 
 	"go.keploy.io/server/v2/pkg/agent"
@@ -292,14 +289,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 				return err
 			}
 			h.cgBind6 = cg6
-
-			netnsPath := "/proc/self/ns/net" // Or make this configurable
-			netns, err := os.Open(netnsPath)
-			if err != nil {
-				utils.LogError(h.logger, err, "failed to open netns", zap.String("path", netnsPath))
-				return err
-			}
-			defer netns.Close()
 			h.logger.Info("Attached ingress redirection hooks.")
 		}
 
@@ -856,43 +845,4 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		}
 	}
 	h.logger.Info("eBPF resources released successfully...")
-}
-
-func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
-	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
-	if err != nil {
-		return nil, err // Return error if we can't create the reader
-	}
-
-	eventChan := make(chan models.IngressEvent, 10) // A buffered channel can be useful
-
-	go func() {
-		defer rb.Close()
-		defer close(eventChan)
-
-		for {
-			// Read raw data from the ring buffer
-			rec, err := rb.Read()
-			if err != nil {
-				// If the reader was closed, it's a clean shutdown.
-				if errors.Is(err, ringbuf.ErrClosed) {
-					return
-				}
-				continue
-			}
-
-			var e models.IngressEvent
-			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
-				utils.LogError(h.logger, err, "failed to decode ingress event")
-				continue
-			}
-			h.logger.Debug("Intercepted application bind event")
-			select {
-			case <-ctx.Done(): // Context was cancelled, so we shut down.
-				return
-			case eventChan <- e: // Send the decoded event to the channel.
-			}
-		}
-	}()
-	return eventChan, nil
 }

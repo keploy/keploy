@@ -50,7 +50,7 @@ type App interface {
 
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
-	StartProxy(ctx context.Context, opts ProxyOptions, incomingOpts models.IncomingOptions) error
+	StartProxy(ctx context.Context, opts ProxyOptions) error
 	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
@@ -60,7 +60,7 @@ type Proxy interface {
 }
 
 type IncomingProxy interface {
-	Start(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions)
+	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
 }
 
 type ProxyOptions struct {
