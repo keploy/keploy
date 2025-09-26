@@ -57,11 +57,8 @@ send_request() {
 for i in {1..2}; do
     app_name="grpc-mongo_${i}"
     echo "--- Starting Recording for iteration ${i} ---"
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "go run ./server" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
-
-    sleep 15
-
     send_request $i &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "go run ./server" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
     
     # Error checking remains the same, but now it checks the file after we've already seen the output.
     if grep "ERROR" "${app_name}.txt"; then
