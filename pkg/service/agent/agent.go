@@ -74,6 +74,12 @@ func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.Incoming
 	return a.Hooks.Record(ctx, id, opts)
 }
 
+func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
+	tc := a.IncomingProxy.Start(ctx, opts)
+	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
+	return tc, nil
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, 500)
 
@@ -83,11 +89,6 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 	}
 
 	return m, nil
-}
-
-func (a *Agent) StartIncomingProxy(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) error {
-	go a.IncomingProxy.Start(ctx, persister, opts)
-	return nil
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
@@ -146,6 +147,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 		IsDocker:   opts.IsDocker,
 		KeployIPV4: "172.18.0.2",
 		Mode:       opts.Mode,
+		BigPayload: true,
 	})
 
 	if err != nil {
@@ -167,7 +169,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
 		DNSIPv4Addr: "172.18.0.2",
 		//DnsIPv6Addr: ""
-	}, models.IncomingOptions{})
+	})
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to start proxy")

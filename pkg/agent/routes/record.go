@@ -72,12 +72,30 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Call GetIncoming to get the channel
-	tc, err := a.agent.GetIncoming(ctx, incomingReq.ClientID, incomingReq.IncomingOptions)
+	// incomingOpts := models.IncomingOptions{
+	// 			Filters:  r.config,
+	// 			BasePath: r.config.Record.BasePath,
+	// 		}
+	// 		// Call the new core method to start the ingress proxy listener.
+	// 		// This call is non-blocking.
+	// 		var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+	// 			return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+	// 		}
+
+	fmt.Println("STARTING INCOMING PROXY")
+	tc, err := a.agent.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
-		http.Error(w, "Error retrieving test cases", http.StatusInternalServerError)
-		return
+		stopReason := "failed to start the ingress proxy"
+		a.logger.Error(stopReason, zap.Error(err))
+		http.Error(w, "Error starting incoming proxy", http.StatusInternalServerError)
+		return // Important: return after handling the error
 	}
+	// Call GetIncoming to get the channel
+	// tc, err := a.agent.GetIncoming(ctx, incomingReq.ClientID, incomingReq.IncomingOptions)
+	// if err != nil {
+	// 	http.Error(w, "Error retrieving test cases", http.StatusInternalServerError)
+	// 	return
+	// }
 
 	// Keep the connection alive and stream data
 	for t := range tc {
