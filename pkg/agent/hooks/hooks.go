@@ -201,8 +201,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 	h.socket = socket
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
-		h.clientRegistrationMap = objs.KeployClientRegistrationMap
-		h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 		h.proxyInfoMap = objs.KeployProxyInfo
 		// h.tbenchFilterPid = objs.TestbenchInfoMap
 		h.objects = objs

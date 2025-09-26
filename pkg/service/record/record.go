@@ -55,8 +55,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	setupErrGrp, _ := errgroup.WithContext(ctx)
 	setupCtx := context.WithoutCancel(ctx)
-	_, setupCtxCancel := context.WithCancel(setupCtx)
-	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)

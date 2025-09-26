@@ -39,6 +39,8 @@ type AgentClient struct {
 	apps         sync.Map
 	client       http.Client
 	conf         *config.Config
+	agentCmd     *exec.Cmd          // Track the agent process
+	agentCancel  context.CancelFunc // Function to cancel the agent context
 }
 
 //go:embed assets/initStop.sh
@@ -467,110 +469,210 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 	}
 }
 
+// startAgent starts the keploy agent process and handles its lifecycle
+func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerCmd bool, opts models.SetupOptions) error {
+	// Get the errgroup from context
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return fmt.Errorf("failed to get errorgroup from the context")
+	}
+
+	// Create a context for the agent that can be cancelled independently
+	agentCtx, cancel := context.WithCancel(ctx)
+	a.agentCancel = cancel
+
+	if isDockerCmd {
+		// Start the agent in Docker container using errgroup
+		grp.Go(func() error {
+			defer cancel() // Cancel agent context when Docker agent stops
+			if err := a.StartInDocker(agentCtx, a.logger); err != nil && !errors.Is(agentCtx.Err(), context.Canceled) {
+				a.logger.Error("failed to start Docker agent", zap.Error(err))
+				return err
+			}
+			return nil
+		})
+	} else {
+		// Start the agent as a native process
+		err := a.startNativeAgent(agentCtx, clientID, opts)
+		if err != nil {
+			cancel()
+			return err
+		}
+	}
+
+	// Monitor agent process and cancel client context if agent stops using errgroup
+	grp.Go(func() error {
+		a.monitorAgent(ctx, agentCtx)
+		return nil
+	})
+
+	return nil
+}
+
+// startNativeAgent starts the keploy agent as a native process
+func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opts models.SetupOptions) error {
+	// Get the errgroup from context
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return fmt.Errorf("failed to get errorgroup from the context")
+	}
+
+	// Open the log file (truncate to start fresh)
+	filepath := fmt.Sprintf("keploy_agent_%d.log", clientID)
+	logFile, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to open log file")
+		return err
+	}
+
+	keployBin, err := utils.GetCurrentBinaryPath()
+	if err != nil {
+		_ = logFile.Close()
+		utils.LogError(a.logger, err, "failed to get current keploy binary path")
+		return err
+	}
+
+	// Build command WITHOUT CommandContext: we'll handle ctx cancellation ourselves.
+	args := []string{
+		keployBin, "agent",
+		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
+		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
+		"--enable-testing", strconv.FormatBool(opts.EnableTesting),
+	}
+	cmd := exec.Command("sudo", args...)
+
+	// New process group so we can signal sudo + keploy children together via -pgid.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Redirect output to log
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	// Keep a reference for other methods
+	a.agentCmd = cmd
+
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		utils.LogError(a.logger, err, "failed to start keploy agent")
+		return err
+	}
+
+	pid := cmd.Process.Pid
+	// In Linux, pgid == leader's pid when Setpgid:true at start.
+	pgid := pid
+	a.logger.Info("keploy agent started", zap.Int("pid", pid), zap.Int("pgid", pgid))
+
+	// 1) Reaper: wait for process exit and close the log
+	grp.Go(func() error {
+		defer utils.Recover(a.logger)
+		defer logFile.Close()
+
+		err := cmd.Wait()
+		// If ctx was cancelled, treat agent exit as expected.
+		if err != nil && ctx.Err() == nil {
+			a.logger.Error("agent process exited with error", zap.Error(err))
+			return err
+		}
+		a.logger.Info("agent process stopped")
+		return nil
+	})
+
+	// 2) Cancellation watcher: on ctx cancel, signal the WHOLE GROUP (sudo + keploy)
+	grp.Go(func() error {
+		defer utils.Recover(a.logger)
+		<-ctx.Done()
+
+		// Graceful: SIGTERM the group
+		err = syscall.Kill(-pgid, syscall.SIGTERM)
+		if err != nil {
+			a.logger.Error("failed to send SIGTERM to agent process group", zap.Error(err))
+			// If we failed to send SIGTERM, force kill the group
+			if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+				utils.LogError(a.logger, err, "failed to force-kill keploy agent process group")
+			} else {
+				a.logger.Info("keploy agent process group killed")
+			}
+		}
+
+		return nil
+	})
+
+	return nil
+}
+
+// stopAgent stops the agent process gracefully
+func (a *AgentClient) stopAgent() {
+	if a.agentCancel != nil {
+		a.agentCancel()
+		a.agentCancel = nil
+	}
+
+	if a.agentCmd != nil && a.agentCmd.Process != nil {
+		a.logger.Info("Stopping keploy agent", zap.Int("pid", a.agentCmd.Process.Pid))
+		err := a.agentCmd.Process.Kill()
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to kill keploy agent process")
+		} else {
+			a.logger.Info("Keploy agent process killed successfully")
+		}
+		a.agentCmd = nil
+	}
+}
+
+// monitorAgent monitors the agent process and handles cleanup
+func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.Context) {
+	select {
+	case <-clientCtx.Done():
+		// Client context cancelled, stop the agent
+		a.logger.Info("Client context cancelled, stopping agent", zap.Error(clientCtx.Err()))
+		a.stopAgent()
+	case <-agentCtx.Done():
+		// Agent context cancelled or agent stopped
+		if errors.Is(agentCtx.Err(), context.Canceled) {
+			a.logger.Info("Agent was stopped intentionally")
+		} else {
+			a.logger.Warn("Agent stopped unexpectedly, client operations may be affected")
+		}
+	}
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
 	clientID := utils.GenerateID()
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
-	// check if the agent is running
-	isAgentRunning := a.isAgentRunning(ctx)
-	if opts.EnableTesting {
-		isAgentRunning = false
-		// get the client pid of the test client and send it to the record agent
+	// Now it will always starts it's own agent
+
+	// Start the keploy agent as a detached process and pipe the logs into a file
+	if !isDockerCmd && runtime.GOOS != "linux" {
+		return 0, fmt.Errorf("Operating system not supported for this feature")
 	}
 
-	if !isAgentRunning {
-		// Start the keploy agent as a detached process and pipe the logs into a file
-		if !isDockerCmd && runtime.GOOS != "linux" {
-			return 0, fmt.Errorf("Operating system not supported for this feature")
-		}
-
-		if isDockerCmd {
-			// run the docker container instead of the agent binary
-			go func() {
-				if err := a.StartInDocker(ctx, a.logger); err != nil && !errors.Is(ctx.Err(), context.Canceled) {
-					a.logger.Error("failed to start Docker agent", zap.Error(err))
-				}
-			}()
-		} else {
-			// Open the log file in append mode or create it if it doesn't exist
-			filepath := fmt.Sprintf("keploy_agent_%d.log", clientID)
-			logFile, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to open log file")
-				return 0, err
-			}
-
-			defer func() {
-				err := logFile.Close()
-				if err != nil {
-					utils.LogError(a.logger, err, "failed to close agent log file")
-				}
-			}()
-
-			keployBin, err := utils.GetCurrentBinaryPath()
-
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to get current keploy binary path")
-				return 0, err
-			}
-			agentCmd := exec.Command("sudo", keployBin, "agent", "--port", strconv.Itoa(int(a.conf.ServerPort)), "--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)), "--enable-testing", strconv.FormatBool(opts.EnableTesting))
-			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
-
-			// Redirect the standard output and error to the log file
-			agentCmd.Stdout = logFile
-			agentCmd.Stderr = logFile
-
-			if err := agentCmd.Start(); err != nil {
-				utils.LogError(a.logger, err, "failed to start keploy agent")
-				return 0, err
-			}
-
-			// if opts.Mode == models.MODE_TEST && opts.EnableTesting {
-			// 	clientID = 123456 // hardcode the test clientID to filter out in the record proxy
-			// 	err := a.SendKtPID(ctx, clientID)
-			// 	if err != nil {
-			// 		utils.LogError(a.logger, err, "failed to send the keployTest PID")
-			// 		return 0, err
-			// 	}
-			// }
-			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
-		}
+	// Find an available port for the agent
+	agentPort, err := utils.GetAvailablePort()
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to find available port for agent")
+		return 0, err
 	}
 
-	// Channel to monitor if the agent is up and running
-	runningChan := make(chan bool)
+	// Update the agent port in the configuration
+	a.conf.Agent.Port = agentPort
+	a.logger.Info("Using available port for agent", zap.Uint32("port", agentPort))
 
-	agentRunningCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-
-	go func() {
-		defer cancel()
-		for {
-			select {
-			case <-agentRunningCtx.Done():
-				// If the context is canceled, close the channel and return immediately
-				close(runningChan)
-				return
-			default:
-				if a.isAgentRunning(ctx) {
-					runningChan <- true
-					return
-				}
-				time.Sleep(1 * time.Second) // Poll every second
-			}
-		}
-	}()
-
-	// Wait until the agent is ready or context is canceled
-	select {
-	case <-ctx.Done():
-		// Handle context cancellation gracefully if Ctrl+C is pressed
-		a.logger.Info("Setup was canceled before the agent became ready")
-		return 0, fmt.Errorf("setup canceled before agent startup")
-	case <-runningChan:
-		// Proceed with setup if the agent becomes ready
-		a.logger.Info("Agent is now running, proceeding with setup")
+	// Start the agent process
+	err = a.startAgent(ctx, clientID, isDockerCmd, opts)
+	if err != nil {
+		return 0, fmt.Errorf("failed to start agent: %w", err)
 	}
+
+	// Wait for the agent to become ready
+	err = a.waitForAgent(ctx, 10*time.Second)
+	if err != nil {
+		a.stopAgent() // Clean up if agent failed to start
+		return 0, fmt.Errorf("agent did not become ready in time: %w", err)
+	}
+
+	a.logger.Info("Agent is now running, proceeding with setup")
 
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
@@ -580,7 +682,15 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	})
 	a.apps.Store(clientID, usrApp)
 
-	err := ptls.SetupCaCertEnv(a.logger)
+	// Set up cleanup on failure
+	defer func() {
+		if err != nil {
+			a.logger.Info("Setup failed, cleaning up agent")
+			a.stopAgent()
+		}
+	}()
+
+	err = ptls.SetupCaCertEnv(a.logger)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to set TLS environment")
 		return 0, err
@@ -594,28 +704,30 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if isDockerCmd {
 		opts.DockerNetwork = usrApp.KeployNetwork
-		inode, err := a.Initcontainer(ctx, app.Options{
+		inode, setupErr := a.Initcontainer(ctx, app.Options{
 			DockerNetwork: opts.DockerNetwork,
 			Container:     opts.Container,
 			DockerDelay:   opts.DockerDelay,
 		})
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to setup init container")
-			return 0, err
+		if setupErr != nil {
+			utils.LogError(a.logger, setupErr, "failed to setup init container")
+			return 0, setupErr
 		}
 		opts.AppInode = inode
 	}
 
 	opts.ClientID = clientID
-	if err := a.RegisterClient(ctx, opts); err != nil {
-		utils.LogError(a.logger, err, "failed to register client")
-		return 0, err
-	}
-	isAgentRunning = a.isAgentRunning(ctx)
-	if !isAgentRunning {
-		return 0, fmt.Errorf("keploy agent is not running, please start the agent first")
+	if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
+		utils.LogError(a.logger, registerErr, "failed to register client")
+		return 0, registerErr
 	}
 
+	// Final verification that agent is still running
+	if !a.isAgentRunning(ctx) {
+		return 0, fmt.Errorf("keploy agent is not running after setup")
+	}
+
+	a.logger.Info("Client setup completed successfully", zap.Uint64("clientID", clientID))
 	return clientID, nil
 }
 
@@ -870,18 +982,46 @@ func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint
 }
 
 func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
-
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send request to the agent server")
-	}
-	resp, err := a.client.Do(req)
-	if err != nil {
-		a.logger.Info("Keploy agent is not running in background, starting the agent")
 		return false
 	}
-	a.logger.Info("Setup request sent to the server", zap.String("status", resp.Status))
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		a.logger.Debug("Keploy agent health check failed", zap.Error(err))
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		a.logger.Debug("Agent health check returned non-OK status", zap.String("status", resp.Status))
+		return false
+	}
+
+	a.logger.Debug("Agent health check successful", zap.String("status", resp.Status))
 	return true
+}
+
+// waitForAgent waits for the agent to become available within the timeout period
+func (a *AgentClient) waitForAgent(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for agent to become ready: %w", ctx.Err())
+		case <-ticker.C:
+			if a.isAgentRunning(ctx) {
+				return nil
+			}
+		}
+	}
 }
 
 func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {

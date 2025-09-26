@@ -1006,6 +1006,20 @@ func GetPIDFromPort(_ context.Context, logger *zap.Logger, port int) (uint32, er
 	return 0, fmt.Errorf("no process found using port %d", port)
 }
 
+// GetAvailablePort finds and returns an available port on the system
+func GetAvailablePort() (uint32, error) {
+	// Use port 0 to let the OS assign an available port
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return 0, fmt.Errorf("failed to find available port: %w", err)
+	}
+	defer listener.Close()
+
+	// Extract the port from the listener's address
+	addr := listener.Addr().(*net.TCPAddr)
+	return uint32(addr.Port), nil
+}
+
 func EnsureRmBeforeName(cmd string) string {
 	parts := strings.Split(cmd, " ")
 	rmIndex := -1
