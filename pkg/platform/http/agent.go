@@ -125,7 +125,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 				// If the context is done, exit the loop
 				return
 			case tcChan <- &testCase:
-				a.logger.Debug("sending test case to the channel", zap.Any("testCase", testCase))
 				// Send the decoded test case to the channel
 			}
 		}
