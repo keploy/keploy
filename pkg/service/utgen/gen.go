@@ -238,7 +238,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 
 				// modify the source code for refactoring.
-				if !(strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") || strings.Contains(testsDetails.RefactoredSourceCode, "no refactoring")) {
+				if !strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") && !strings.Contains(testsDetails.RefactoredSourceCode, "no refactoring") {
 					if err := os.WriteFile(g.srcPath, []byte(testsDetails.RefactoredSourceCode), 0644); err != nil {
 						return fmt.Errorf("failed to refactor source code:%w", err)
 					}
@@ -805,7 +805,7 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 		builder.WriteString(strings.Repeat("-", 49) + "\n")
 	}
 
-	_, err = fileHandle.WriteString(fmt.Sprintf("%s\n", builder.String()))
+	_, err = fmt.Fprintf(fileHandle, "%s\n", builder.String())
 	if err != nil {
 		return fmt.Errorf("error writing to discarded tests file: %w", err)
 	}
