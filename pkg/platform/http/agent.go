@@ -537,6 +537,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		keployBin, "agent",
 		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
 		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
+		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
 		"--enable-testing", strconv.FormatBool(opts.EnableTesting),
 	}
 	cmd := exec.Command("sudo", args...)
@@ -655,9 +656,22 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, err
 	}
 
-	// Update the agent port in the configuration
+	// Check and allocate available ports for proxy and DNS
+	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
+		return 0, err
+	}
+
+	// Update the ports in the configuration
 	a.conf.Agent.Port = agentPort
-	a.logger.Info("Using available port for agent", zap.Uint32("port", agentPort))
+	a.conf.ProxyPort = proxyPort
+	a.conf.DNSPort = dnsPort
+
+	a.logger.Info("Using available ports",
+		zap.Uint32("agent-port", agentPort),
+		zap.Uint32("proxy-port", proxyPort),
+		zap.Uint32("dns-port", dnsPort))
 
 	// Start the agent process
 	err = a.startAgent(ctx, clientID, isDockerCmd, opts)

@@ -301,7 +301,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.Port, "Port used by the Keploy agent to communicate with Keploy's clients")
-		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+
 	default:
 		return errors.New("unknown command name")
 	}

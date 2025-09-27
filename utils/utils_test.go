@@ -517,3 +517,52 @@ func TestReplaceGrpcPort_AllCases_124(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPortAvailable(t *testing.T) {
+	// Test with a port that should be available (high port number)
+	available := isPortAvailable(0) // Port 0 should always be available for testing
+	assert.True(t, available)
+
+	// Test with a commonly used port that might not be available
+	// Note: This test might be flaky depending on the system, but port 80 is often restricted
+	// We'll use a high port number that's more likely to be available
+	highPort := isPortAvailable(65432)
+	assert.True(t, highPort) // Should generally be available
+}
+
+func TestEnsureAvailablePorts(t *testing.T) {
+	// Test with available ports (using high port numbers)
+	proxyPort := uint32(65430)
+	dnsPort := uint32(65431)
+
+	newProxyPort, newDNSPort, err := EnsureAvailablePorts(proxyPort, dnsPort)
+	assert.NoError(t, err)
+
+	// Since these high ports should be available, they should be returned unchanged
+	assert.Equal(t, proxyPort, newProxyPort)
+	assert.Equal(t, dnsPort, newDNSPort)
+
+	// Test with ports that might not be available (common system ports)
+	// The function should allocate new ports for these
+	systemProxyPort := uint32(80) // HTTP port - likely not available or restricted
+	systemDNSPort := uint32(53)   // DNS port - likely not available or restricted
+
+	newProxyPort2, newDNSPort2, err2 := EnsureAvailablePorts(systemProxyPort, systemDNSPort)
+	assert.NoError(t, err2)
+
+	// The new ports should be different from the system ports if they weren't available
+	// Note: This test might pass if running as root, but should generally allocate new ports
+	assert.True(t, newProxyPort2 > 0)
+	assert.True(t, newDNSPort2 > 0)
+}
+
+func TestGetAvailablePort(t *testing.T) {
+	port, err := GetAvailablePort()
+	assert.NoError(t, err)
+	assert.True(t, port > 0)
+	assert.True(t, port <= 65535) // Valid port range
+
+	// Test that the returned port is actually available
+	available := isPortAvailable(port)
+	assert.True(t, available)
+}

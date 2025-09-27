@@ -1020,6 +1020,46 @@ func GetAvailablePort() (uint32, error) {
 	return uint32(addr.Port), nil
 }
 
+// isPortAvailable checks if a specific port is available on the system
+func isPortAvailable(port uint32) bool {
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	defer listener.Close()
+	return true
+}
+
+// EnsureAvailablePorts checks if the proxy and DNS ports are available.
+// If they are available, it returns them unchanged.
+// If not, it allocates new available ports for them.
+func EnsureAvailablePorts(proxyPort, dnsPort uint32) (uint32, uint32, error) {
+	var newProxyPort, newDNSPort uint32
+	var err error
+
+	// Check if proxy port is available
+	if isPortAvailable(proxyPort) {
+		newProxyPort = proxyPort
+	} else {
+		newProxyPort, err = GetAvailablePort()
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
+		}
+	}
+
+	// Check if DNS port is available
+	if isPortAvailable(dnsPort) {
+		newDNSPort = dnsPort
+	} else {
+		newDNSPort, err = GetAvailablePort()
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to allocate new DNS port: %w", err)
+		}
+	}
+
+	return newProxyPort, newDNSPort, nil
+}
+
 func EnsureRmBeforeName(cmd string) string {
 	parts := strings.Split(cmd, " ")
 	rmIndex := -1
