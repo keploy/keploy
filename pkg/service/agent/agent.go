@@ -51,7 +51,7 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.T
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
-func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions) error {
+func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh chan struct{}) error {
 	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
 
 	err := a.Hook(ctx, 0, models.HookOptions{
@@ -63,6 +63,8 @@ func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions) error {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 		return err
 	}
+
+	startCh <- struct{}{}
 
 	<-ctx.Done()
 	a.logger.Info("Context cancelled, stopping the agent")

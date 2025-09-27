@@ -49,17 +49,11 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				return nil
 			}
 
+			startCh := make(chan struct{})
+
 			router := chi.NewRouter()
 
 			routes.New(router, a, logger)
-
-			go func() {
-				if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
-					logger.Error("failed to start HTTP server", zap.Error(err))
-				} else {
-					logger.Info("HTTP server started successfully on port ", zap.Uint32("port", port))
-				}
-			}()
 
 			opts := models.SetupOptions{
 				IsDocker:      isdocker,
@@ -69,8 +63,23 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			if enableTesting && port == 8090 {
 				opts.Mode = models.MODE_TEST
 			}
-			err = a.Setup(ctx, opts)
 
+			go func() {
+				select {
+				case <-ctx.Done():
+					logger.Info("context cancelled before agent http server could start")
+					return
+				case <-startCh:
+					logger.Info("keploy agent successfully loaded hooks and proxies, will start the http server now")
+					if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
+						logger.Error("failed to start HTTP server", zap.Error(err))
+					} else {
+						logger.Info("HTTP server started successfully on port ", zap.Uint32("port", port))
+					}
+				}
+			}()
+
+			err = a.Setup(ctx, opts, startCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
 				return nil
