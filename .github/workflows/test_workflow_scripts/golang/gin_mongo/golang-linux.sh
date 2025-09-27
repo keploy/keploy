@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+# source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
  
 # Checkout a different branch
 git fetch origin
@@ -15,7 +15,7 @@ if [ -f "./keploy.yml" ]; then
 fi
 
 # Generate the keploy-config file.
-sudo $RECORD_BIN config --generate
+sudo keploy config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -31,7 +31,8 @@ go build -o ginApp
 
 
 send_request(){
-    sleep 10
+    local kp_pid="$1"
+
     app_started=false
     while [ "$app_started" = false ]; do
         if curl --request POST \
@@ -64,17 +65,22 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
+    echo "$kp_pid Keploy PID"
     echo "Killing keploy"
-    sudo kill $pid
+    sudo kill "$kp_pid" 2>/dev/null || true
 }
 
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    send_request &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "./ginApp"    &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" keploy record -c "./ginApp"  \
+    > "${app_name}.txt" 2>&1 &
+    
+    KEPLOY_PID=$!
+
+    # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
+    send_request "$KEPLOY_PID"
+
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -97,7 +103,7 @@ docker rm mongoDb || true
 echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./ginApp" --delay 7    &> test_logs.txt
+sudo -E env PATH="$PATH" keploy test -c "./ginApp" --delay 7    &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."

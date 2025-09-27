@@ -510,6 +510,31 @@ func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerC
 
 // startNativeAgent starts the keploy agent as a native process
 func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opts models.SetupOptions) error {
+
+	// Find an available port for the agent
+	agentPort, err := utils.GetAvailablePort()
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to find available port for agent")
+		return err
+	}
+
+	// Check and allocate available ports for proxy and DNS
+	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
+		return err
+	}
+
+	// Update the ports in the configuration
+	a.conf.Agent.Port = agentPort
+	a.conf.ProxyPort = proxyPort
+	a.conf.DNSPort = dnsPort
+
+	a.logger.Info("Using available ports",
+		zap.Uint32("agent-port", agentPort),
+		zap.Uint32("proxy-port", proxyPort),
+		zap.Uint32("dns-port", dnsPort))
+
 	// Get the errgroup from context
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -656,32 +681,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, fmt.Errorf("Operating system not supported for this feature")
 	}
 
-	// Find an available port for the agent
-	agentPort, err := utils.GetAvailablePort()
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to find available port for agent")
-		return 0, err
-	}
-
-	// Check and allocate available ports for proxy and DNS
-	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
-		return 0, err
-	}
-
-	// Update the ports in the configuration
-	a.conf.Agent.Port = agentPort
-	a.conf.ProxyPort = proxyPort
-	a.conf.DNSPort = dnsPort
-
-	a.logger.Info("Using available ports",
-		zap.Uint32("agent-port", agentPort),
-		zap.Uint32("proxy-port", proxyPort),
-		zap.Uint32("dns-port", dnsPort))
-
 	// Start the agent process
-	err = a.startAgent(ctx, clientID, isDockerCmd, opts)
+	err := a.startAgent(ctx, clientID, isDockerCmd, opts)
 	if err != nil {
 		return 0, fmt.Errorf("failed to start agent: %w", err)
 	}
