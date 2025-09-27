@@ -52,7 +52,7 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.T
 
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh chan struct{}) error {
-	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
+	a.logger.Info("Starting the agent in ", zap.String("mode", string(opts.Mode)))
 
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)

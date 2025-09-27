@@ -537,8 +537,12 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
 		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
 		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
-		"--enable-testing", strconv.FormatBool(opts.EnableTesting),
 	}
+
+	if opts.EnableTesting {
+		args = append(args, "--enable-testing")
+	}
+
 	cmd := exec.Command("sudo", args...)
 
 	// New process group so we can signal sudo + keploy children together via -pgid.

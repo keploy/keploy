@@ -34,10 +34,23 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				return nil
 			}
 
-			isdocker, _ := cmd.Flags().GetBool("is-docker")
-			enableTesting, _ := cmd.Flags().GetBool("enable-testing")
+			isdocker, err := cmd.Flags().GetBool("is-docker")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get is-docker flag")
+				return nil
+			}
+			enableTesting, err := cmd.Flags().GetBool("enable-testing")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get enable-testing flag")
+				return nil
+			}
 
-			port, _ := cmd.Flags().GetUint32("port")
+			port, err := cmd.Flags().GetUint32("port")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get port flag")
+				return nil
+			}
+
 			if port == 0 {
 				port = 8086
 			}
@@ -59,8 +72,8 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				IsDocker:      isdocker,
 				EnableTesting: enableTesting,
 			}
-			// TODO: remove this later
-			if enableTesting && port == 8090 {
+
+			if enableTesting {
 				opts.Mode = models.MODE_TEST
 			}
 
