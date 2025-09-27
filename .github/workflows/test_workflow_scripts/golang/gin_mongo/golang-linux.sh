@@ -15,7 +15,7 @@ if [ -f "./keploy.yml" ]; then
 fi
 
 # Generate the keploy-config file.
-sudo keploy config --generate
+sudo "$RECORD_BIN" config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -73,7 +73,7 @@ send_request(){
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    sudo -E env PATH="$PATH" keploy record -c "./ginApp"  \
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp"  \
     > "${app_name}.txt" 2>&1 &
     
     KEPLOY_PID=$!
@@ -103,7 +103,7 @@ docker rm mongoDb || true
 echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" keploy test -c "./ginApp" --delay 7    &> test_logs.txt
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
