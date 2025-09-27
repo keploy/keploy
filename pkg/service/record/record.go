@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
+	fmt.Println("Starting the recording process...")
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
@@ -51,21 +53,23 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	runAppCtx := context.WithoutCancel(ctx)
 	runAppCtx, runAppCtxCancel := context.WithCancel(runAppCtx)
 
-	hookErrGrp, _ := errgroup.WithContext(ctx)
-	hookCtx := context.WithoutCancel(ctx)
-	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
-	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
-	// reRecordCtx, reRecordCancel := context.WithCancel(ctx)
-	// defer reRecordCancel() // Cancel the context when the function returns
+	setupErrGrp, _ := errgroup.WithContext(ctx)
+	setupCtx := context.WithoutCancel(ctx)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
+
+	reqErrGrp, _ := errgroup.WithContext(ctx)
+	reqCtx := context.WithoutCancel(ctx)
+	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+	reqCtx = context.WithValue(reqCtx, models.ErrGroupKey, reqErrGrp)
 
 	var stopReason string
-
 	// defining all the channels and variables required for the record
 	var runAppError models.AppError
 	var appErrChan = make(chan models.AppError, 1)
 	var insertTestErrChan = make(chan error, 10)
 	var insertMockErrChan = make(chan error, 10)
-	var appID uint64
+	var clientID uint64
 	var newTestSetID string
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
@@ -83,16 +87,33 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 			}
 		}
+
+		unregister := models.UnregisterReq{
+			ClientID: clientID,
+			Mode:     models.MODE_RECORD,
+		}
+
+		// Dont call the Unregister if there is an error in the running application
+		if runAppError.AppErrorType == "" {
+			err := r.instrumentation.UnregisterClient(ctx, unregister)
+			if err != nil && err != io.EOF {
+				utils.LogError(r.logger, err, "failed to unregister client")
+			}
+		}
+
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
-		hookCtxCancel()
-		err = hookErrGrp.Wait()
+
+		setupCtxCancel()
+		err = setupErrGrp.Wait()
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to stop hooks")
+			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
+
+		reqCtxCancel()
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
@@ -134,23 +155,29 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
 	case <-ctx.Done():
+		fmt.Println("Context cancelled, stopping the recording process...")
 		return nil
 	default:
 	}
 
+	// TODO: Ask this persister usecase and integrate
+	// var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+	// 	return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+	// }
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err := r.Instrument(hookCtx, newTestSetID)
+	clientID, err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough})
+	// appID, err := r.Instrument(hookCtx, newTestSetID)
 
 	if err != nil {
-		stopReason = "failed to instrument the application"
+		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.config.AppID = appID
-
+	r.config.ClientID = clientID
+	fmt.Println("Client ID from instrumentation setup is :", clientID)
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(ctx, appID)
+	frames, err := r.GetTestAndMockChans(reqCtx, clientID)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -159,33 +186,34 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
-
-	if !r.config.Record.BigPayload {
-		r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
-		errGrp.Go(func() error {
-			for testCase := range frames.Incoming {
-				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
-				if reRecordCfg.TestSet == "" {
-					err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-					if err != nil {
-						if ctx.Err() == context.Canceled {
-							continue
-						}
-						insertTestErrChan <- err
-					} else {
-						testCount++
-						r.telemetry.RecordedTestAndMocks()
+	// if !r.config.Record.BigPayload {
+	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
+	errGrp.Go(func() error {
+		for testCase := range frames.Incoming {
+			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			if reRecordCfg.TestSet == "" {
+				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+				if err != nil {
+					if ctx.Err() == context.Canceled {
+						continue
 					}
+					insertTestErrChan <- err
 				} else {
-					r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
+					testCount++
+					r.telemetry.RecordedTestAndMocks()
 				}
+			} else {
+				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 			}
-			return nil
-		})
-	}
+		}
+		return nil
+	})
+	// }
 
 	errGrp.Go(func() error {
+		fmt.Println("Starting recording with outgoing proxy")
 		for mock := range frames.Outgoing {
+			fmt.Println("Received mock of kind:", mock.GetKind())
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
 				currMockID := r.mockDB.GetCurrMockID()
@@ -213,16 +241,19 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return nil
 	})
 
-	if !r.config.E2E {
-		runAppErrGrp.Go(func() error {
-			runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
-			if runAppError.AppErrorType == models.ErrCtxCanceled {
-				return nil
-			}
-			appErrChan <- runAppError
+	fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
+
+	// if !r.config.E2E {
+	runAppErrGrp.Go(func() error {
+		fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
+		runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
+		if runAppError.AppErrorType == models.ErrCtxCanceled {
 			return nil
-		})
-	}
+		}
+		appErrChan <- runAppError
+		return nil
+	})
+	// }
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
@@ -264,7 +295,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
-			stopReason = "unknown error received from application, hence stopping keploy"
+			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
 
 	case err = <-insertTestErrChan:
@@ -278,97 +309,159 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) Instrument(ctx context.Context, newTestSetID string) (uint64, error) {
-	var stopReason string
-	// setting up the environment for recording
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
-	if err != nil {
-		stopReason = "failed setting up the environment"
-		utils.LogError(r.logger, err, stopReason)
-		return 0, fmt.Errorf("%s", stopReason)
-	}
-	r.config.AppID = appID
+// func (r *Recorder) Instrument(ctx context.Context, newTestSetID string) (uint64, error) {
+// 	var stopReason string
+// 	// setting up the environment for recording
+// 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+// 	if err != nil {
+// 		stopReason = "failed setting up the environment"
+// 		utils.LogError(r.logger, err, stopReason)
+// 		return 0, fmt.Errorf("%s", stopReason)
+// 	}
+// 	r.config.AppID = appID
 
-	// checking for context cancellation as we don't want to start the hooks and proxy if the context is cancelled
-	select {
-	case <-ctx.Done():
-		return appID, nil
-	default:
-		// Starting the hooks and proxy
-		hooks := models.HookOptions{
-			Mode:          models.MODE_RECORD,
-			EnableTesting: r.config.EnableTesting,
-			Rules:         r.config.BypassRules,
-			E2E:           r.config.E2E,
-			Port:          r.config.Port,
-			BigPayload:    r.config.Record.BigPayload,
-		}
+// 	// checking for context cancellation as we don't want to start the hooks and proxy if the context is cancelled
+// 	select {
+// 	case <-ctx.Done():
+// 		return appID, nil
+// 	default:
+// 		// Starting the hooks and proxy
+// 		hooks := models.HookOptions{
+// 			Mode:          models.MODE_RECORD,
+// 			EnableTesting: r.config.EnableTesting,
+// 			Rules:         r.config.BypassRules,
+// 			E2E:           r.config.E2E,
+// 			Port:          r.config.Port,
+// 			BigPayload:    r.config.Record.BigPayload,
+// 		}
 
-		err = r.instrumentation.Hook(ctx, appID, hooks)
-		if err != nil {
-			stopReason = "failed to start the hooks and proxy"
-			utils.LogError(r.logger, err, stopReason)
-			if ctx.Err() == context.Canceled {
-				return appID, err
-			}
-			return appID, fmt.Errorf("%s", stopReason)
-		}
+// 		err = r.instrumentation.Hook(ctx, appID, hooks)
+// 		if err != nil {
+// 			stopReason = "failed to start the hooks and proxy"
+// 			utils.LogError(r.logger, err, stopReason)
+// 			if ctx.Err() == context.Canceled {
+// 				return appID, err
+// 			}
+// 			return appID, fmt.Errorf("%s", stopReason)
+// 		}
 
-		if r.config.Record.BigPayload && hooks.Mode == models.MODE_RECORD {
-			r.logger.Debug("BigPayload mode enabled, starting ingress proxy.")
-			incomingOpts := models.IncomingOptions{
-				Filters:  r.config.Record.Filters,
-				BasePath: r.config.Record.BasePath,
-			}
-			// Call the new core method to start the ingress proxy listener.
-			// This call is non-blocking.
-			var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
-				return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-			}
-			if err := r.instrumentation.StartIncomingProxy(ctx, persister, incomingOpts); err != nil {
-				stopReason = "failed to start the ingress proxy"
-				utils.LogError(r.logger, err, stopReason)
-				return appID, fmt.Errorf("%s", stopReason)
-			}
-		}
-	}
-	return appID, nil
-}
+// 		if r.config.Record.BigPayload && hooks.Mode == models.MODE_RECORD {
+// 			r.logger.Debug("BigPayload mode enabled, starting ingress proxy.")
+// 			incomingOpts := models.IncomingOptions{
+// 				Filters:  r.config.Record.Filters,
+// 				BasePath: r.config.Record.BasePath,
+// 			}
+// 			// Call the new core method to start the ingress proxy listener.
+// 			// This call is non-blocking.
+// 			var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+// 				return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+// 			}
+// 			if err := r.instrumentation.StartIncomingProxy(ctx, persister, incomingOpts); err != nil {
+// 				stopReason = "failed to start the ingress proxy"
+// 				utils.LogError(r.logger, err, stopReason)
+// 				return appID, fmt.Errorf("%s", stopReason)
+// 			}
+// 		}
+// 	}
+// 	return appID, nil
+// }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
-	outgoingOpts := models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
-		MongoPassword:  r.config.Test.MongoPassword,
-		FallBackOnMiss: r.config.Test.FallBackOnMiss,
-		Backdate:       time.Now(),
+	clientID := appID
+
+	incomingOpts := models.IncomingOptions{
+		Filters: r.config.Record.Filters,
 	}
 
-	outgoingChan, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
-	if err != nil {
-		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
+	// Create channels to receive incoming and outgoing data
+	incomingChan := make(chan *models.TestCase)
+	outgoingChan := make(chan *models.Mock)
+	errChan := make(chan error, 2)
+
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
-	if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
-		incomingOpts := models.IncomingOptions{
-			Filters:  r.config.Record.Filters,
-			BasePath: r.config.Record.BasePath,
-		}
-		incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
+	// if !r.config.Record.BigPayload {
+	g.Go(func() error {
+		defer close(incomingChan)
+
+		ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
 		if err != nil {
-			return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
+			errChan <- err
+			return fmt.Errorf("failed to get incoming test cases: %w", err)
 		}
-		return FrameChan{
-			Incoming: incomingChan,
-			Outgoing: outgoingChan,
-		}, nil
-	}
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case tc, ok := <-ch:
+				if !ok {
+					return nil
+				}
+				// forward but remain cancelable
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case incomingChan <- tc:
+				}
+			}
+		}
+	})
+	// }
 
+	// OUTGOING
+	g.Go(func() error {
+		defer close(outgoingChan)
+
+		// Create a cancelable child that we always cancel when ctx is done.
+		mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancel()
+
+		// Cancel child as soon as parent is done
+		go func() {
+			<-ctx.Done()
+			cancel()
+		}()
+
+		ch, err := r.instrumentation.GetOutgoing(mockCtx, clientID, models.OutgoingOptions{
+			Rules:          r.config.BypassRules,
+			MongoPassword:  r.config.Test.MongoPassword,
+			FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to get outgoing mocks: %w", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case m, ok := <-ch:
+				if !ok {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					outgoingChan <- m
+					return ctx.Err()
+				case outgoingChan <- m:
+				}
+			}
+		}
+	})
+
+	// if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
 	return FrameChan{
+		Incoming: incomingChan,
 		Outgoing: outgoingChan,
 	}, nil
+
 }
 
 func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
+	fmt.Println("Inside RunApplication of agent binary !!..dfmlasdmf ")
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 

@@ -102,7 +102,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
-	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
+
+	setupErrGrp, _ := errgroup.WithContext(ctx)
+	setupCtx := context.WithoutCancel(ctx)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
@@ -118,7 +123,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if hookCancel != nil {
 			hookCancel()
 		}
+		cancel()
 		err := g.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop replaying")
+		}
+
+		setupCtxCancel()
+		err = setupErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
@@ -239,7 +251,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	// setting the appId for the first test-set.
-	inst.AppID = r.config.AppID
+	inst.ClientID = r.config.ClientID
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -261,21 +273,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
 
 			// Reload hooks for the new test set with retry mechanism
-			newInst, err := r.reloadHooks(ctx, inst.AppID)
-			if err != nil {
-				stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
-				utils.LogError(r.logger, err, stopReason)
-				if ctx.Err() == context.Canceled {
-					return err
-				}
-				return fmt.Errorf("%s", stopReason)
-			}
-			hookCancel = newInst.HookCancel
-			// Update the inst with the new hook cancel function, app ID, and unload done channel
-			inst.HookCancel = newInst.HookCancel
-			inst.AppID = newInst.AppID
-			inst.UnloadDone = newInst.UnloadDone
-			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
+			// newInst, err := r.reloadHooks(ctx, inst.ClientID)
+			// if err != nil {
+			// 	stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
+			// 	utils.LogError(r.logger, err, stopReason)
+			// 	if ctx.Err() == context.Canceled {
+			// 		return err
+			// 	}
+			// 	return fmt.Errorf("%s", stopReason)
+			// }
+			// hookCancel = newInst.HookCancel
+			// // Update the inst with the new hook cancel function, app ID, and unload done channel
+			// inst.HookCancel = newInst.HookCancel
+			// inst.ClientID = newInst.ClientID
+			// inst.UnloadDone = newInst.UnloadDone
+			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", inst.ClientID))
 		}
 
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
@@ -334,7 +346,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.ClientID, false)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
@@ -544,36 +556,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if !r.instrument {
-		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	// Instrument will setup the environment and start the hooks and proxy
+	fmt.Println("Instrumenting the environment", r.config.EnableTesting)
+	clientID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return &InstrumentState{}, err
-		}
-		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
+		stopReason := "failed setting up the environment"
+		utils.LogError(r.logger, err, stopReason)
+		return &InstrumentState{}, fmt.Errorf(stopReason)
 	}
-	r.config.AppID = appID
 
-	var cancel context.CancelFunc
-	// starting the hooks and proxy
-	select {
-	case <-ctx.Done():
-		return &InstrumentState{}, context.Canceled
-	default:
-		hookCtx := context.WithoutCancel(ctx)
-		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
-		if err != nil {
-			cancel()
-			if errors.Is(err, context.Canceled) {
-				return &InstrumentState{}, err
-			}
-			return &InstrumentState{}, fmt.Errorf("failed to start the hooks and proxy: %w", err)
-		}
-	}
-	return &InstrumentState{AppID: appID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(appID)}, nil
+	r.config.ClientID = clientID
+
+	return &InstrumentState{ClientID: clientID}, nil
 }
 
 // reloadHooks cancels existing hooks and reloads them for the next test set.
@@ -600,8 +597,8 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
 	}
 
-	// Update the config with the new app ID
-	r.config.AppID = newAppID
+	// Update the config with the new client ID
+	r.config.ClientID = newAppID
 
 	// Create a retry mechanism in case of temporary race conditions
 	var lastErr error
@@ -627,11 +624,11 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel := context.WithCancel(hookCtx)
 
-		err := r.instrumentation.Hook(hookCtx, newAppID, models.HookOptions{
-			Mode:          models.MODE_TEST,
-			EnableTesting: r.config.EnableTesting,
-			Rules:         r.config.BypassRules,
-		})
+		// err := r.instrumentation.Hook(hookCtx, newAppID, models.HookOptions{
+		// 	Mode:          models.MODE_TEST,
+		// 	EnableTesting: r.config.EnableTesting,
+		// 	Rules:         r.config.BypassRules,
+		// })
 		if err != nil {
 			cancel()
 			lastErr = err
@@ -650,7 +647,7 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 
 		// Success - return the new hook state with the new app ID
 		r.logger.Debug("Successfully reloaded eBPF hooks", zap.Uint64("oldAppID", appID), zap.Uint64("newAppID", newAppID), zap.Int("attempt", attempt))
-		return &InstrumentState{AppID: newAppID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(newAppID)}, nil
+		return &InstrumentState{ClientID: newAppID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(newAppID)}, nil
 	}
 
 	// This should never be reached, but just in case
@@ -794,6 +791,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
+	err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to store mocks on agent")
+		return models.TestSetStatusFailed, err
+	}
+
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
@@ -848,9 +851,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	// Initial mock setup - use empty mapping for initial setup
-	// For the initial setup, we always use mapping-based with empty mapping to get all unfiltered mocks
-	err = r.FilterAndSetMocksWithFallback(ctx, appID, filteredMocks, unfilteredMocks, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+	// Send initial filtering parameters to set up mocks for test set
+	err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
@@ -1029,9 +1031,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			respTime = testCase.GrpcResp.Timestamp
 		}
 
-		err = r.FilterAndSetMocksWithFallback(runTestSetCtx, appID, filteredMocks, unfilteredMocks, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+		err = r.NewUpdateMockParams(runTestSetCtx, appID, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to filter and set mocks")
+			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
 		}
 
@@ -1532,6 +1534,37 @@ func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, appID uint
 		return r.FilterAndSetMocks(ctx, appID, filtered, unfiltered, afterTime, beforeTime, totalConsumedMocks)
 	}
 
+}
+
+// NewUpdateMockParams sends filtering parameters to agent instead of sending filtered mocks
+func (r *Replayer) NewUpdateMockParams(ctx context.Context, appID uint64, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+	if !r.instrument {
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		return nil
+	}
+
+	// Build filter parameters
+	params := models.MockFilterParams{
+		AfterTime:          afterTime,
+		BeforeTime:         beforeTime,
+		MockMapping:        expectedMockMapping,
+		UseMappingBased:    useMappingBased,
+		TotalConsumedMocks: totalConsumedMocks,
+	}
+
+	// Send parameters to agent for filtering and mock updates
+	err := r.instrumentation.UpdateMockParams(ctx, appID, params)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+		return err
+	}
+
+	r.logger.Debug("Successfully sent mock filter parameters to agent",
+		zap.Uint64("appID", appID),
+		zap.Bool("useMappingBased", useMappingBased),
+		zap.Int("mockMappingCount", len(expectedMockMapping)))
+
+	return nil
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {

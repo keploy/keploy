@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"debug/elf"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/google/uuid"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -678,6 +680,31 @@ func GetAbsPath(path string) (string, error) {
 	return absPath, nil
 }
 
+func GenerateID() uint64 {
+	// Random AppId uint64 will be generated and maintain in a map and return the id to client
+	newUUID := uuid.New()
+
+	// app id will be sent by the client.
+	// Convert the first 8 bytes of the UUID to an int64
+	id := int64(binary.BigEndian.Uint64(newUUID[:8]))
+	return uint64(id)
+}
+
+func GetCurrentBinaryPath() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Resolve the full path (to avoid issues with symbolic links)
+	executablePath, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+
+	return executablePath, nil
+}
+
 func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	path := originalPath
 	//if user provides relative path
@@ -977,6 +1004,60 @@ func GetPIDFromPort(_ context.Context, logger *zap.Logger, port int) (uint32, er
 
 	// If we get here, no process was found using the given port
 	return 0, fmt.Errorf("no process found using port %d", port)
+}
+
+// GetAvailablePort finds and returns an available port on the system
+func GetAvailablePort() (uint32, error) {
+	// Use port 0 to let the OS assign an available port
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return 0, fmt.Errorf("failed to find available port: %w", err)
+	}
+	defer listener.Close()
+
+	// Extract the port from the listener's address
+	addr := listener.Addr().(*net.TCPAddr)
+	return uint32(addr.Port), nil
+}
+
+// isPortAvailable checks if a specific port is available on the system
+func isPortAvailable(port uint32) bool {
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	defer listener.Close()
+	return true
+}
+
+// EnsureAvailablePorts checks if the proxy and DNS ports are available.
+// If they are available, it returns them unchanged.
+// If not, it allocates new available ports for them.
+func EnsureAvailablePorts(proxyPort, dnsPort uint32) (uint32, uint32, error) {
+	var newProxyPort, newDNSPort uint32
+	var err error
+
+	// Check if proxy port is available
+	if isPortAvailable(proxyPort) {
+		newProxyPort = proxyPort
+	} else {
+		newProxyPort, err = GetAvailablePort()
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
+		}
+	}
+
+	// Check if DNS port is available
+	if isPortAvailable(dnsPort) {
+		newDNSPort = dnsPort
+	} else {
+		newDNSPort, err = GetAvailablePort()
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to allocate new DNS port: %w", err)
+		}
+	}
+
+	return newProxyPort, newDNSPort, nil
 }
 
 func EnsureRmBeforeName(cmd string) string {
@@ -1300,6 +1381,12 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 // 	}
 // 	return string(xmlBytes), nil
 // }
+
+func NetworkToHostShort(net uint16) uint16 {
+	b := make([]byte, 2)
+	binary.BigEndian.PutUint16(b, net)
+	return binary.LittleEndian.Uint16(b)
+}
 
 func ParseGRPCPath(p string) (serviceFull, method string, err error) {
 	// Trim whitespace and validate input

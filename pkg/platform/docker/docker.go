@@ -55,6 +55,42 @@ func (idc *Impl) SetContainerID(containerID string) {
 	idc.containerID = containerID
 }
 
+func (idc *Impl) SetInitPid(c *Compose, containerName string) error {
+	for _, service := range c.Services.Content {
+		var containerNameMatch bool
+		var pidFound bool
+
+		for i := 0; i < len(service.Content)-1; i++ {
+			if service.Content[i].Kind == yaml.ScalarNode && service.Content[i].Value == "container_name" &&
+				service.Content[i+1].Kind == yaml.ScalarNode && service.Content[i+1].Value == containerName {
+				containerNameMatch = true
+				break
+			}
+		}
+
+		if containerNameMatch {
+			for _, item := range service.Content {
+				if item.Value == "pid" {
+					pidFound = true
+					break
+				}
+			}
+
+			// Add `pid: container:keploy-init` only if not already present
+			if !pidFound {
+				service.Content = append(service.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
+					&yaml.Node{
+						Kind:  yaml.ScalarNode,
+						Value: "container:keploy-init",
+					},
+				)
+			}
+		}
+	}
+	return nil
+}
+
 // ExtractNetworksForContainer returns the list of all the networks that the container is a part of.
 // Note that if a user did not explicitly attach the container to a network, the Docker daemon attaches it
 // to a network called "bridge".
