@@ -54,6 +54,9 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.T
 func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh chan struct{}) error {
 	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
 
+	errGrp, ctx := errgroup.WithContext(ctx)
+	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+
 	err := a.Hook(ctx, 0, models.HookOptions{
 		Mode:          opts.Mode,
 		IsDocker:      opts.IsDocker,
@@ -67,6 +70,7 @@ func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh cha
 	startCh <- struct{}{}
 
 	<-ctx.Done()
+	errGrp.Wait()
 	a.logger.Info("Context cancelled, stopping the agent")
 	return context.Canceled
 
@@ -107,6 +111,8 @@ func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.Outgoin
 func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
 	hookErr := errors.New("failed to hook into the app")
 
+	parentErrGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -125,7 +131,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
 	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
 
-	hookErrGrp.Go(func() error {
+	parentErrGrp.Go(func() error {
 		<-ctx.Done()
 
 		proxyCtxCancel()
