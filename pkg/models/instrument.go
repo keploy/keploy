@@ -54,19 +54,20 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	Container     string
-	DockerNetwork string
-	DockerDelay   uint64
-	ClientInode   uint64
-	AppInode      uint64
-	Cmd           string
-	IsDocker      bool
-	CommandType   string
-	EnableTesting bool
-	ProxyPort     uint32
-	Mode          Mode
-	ClientNsPid   uint32
-	ClientID      uint64
+	Container         string
+	DockerNetwork     string
+	DockerDelay       uint64
+	ClientInode       uint64
+	AppInode          uint64
+	Cmd               string
+	IsDocker          bool
+	CommandType       string
+	EnableTesting     bool
+	ProxyPort         uint32
+	Mode              Mode
+	ClientNsPid       uint32
+	ClientID          uint64
+	GlobalPassthrough bool
 }
 
 type RunOptions struct {

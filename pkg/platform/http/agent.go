@@ -543,6 +543,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		args = append(args, "--enable-testing")
 	}
 
+	if opts.GlobalPassthrough {
+		args = append(args, "--global-passthrough")
+	}
+
 	cmd := exec.Command("sudo", args...)
 
 	// New process group so we can signal sudo + keploy children together via -pgid.
