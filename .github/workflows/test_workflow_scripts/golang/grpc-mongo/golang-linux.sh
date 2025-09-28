@@ -73,7 +73,6 @@ for i in {1..2}; do
     send_request $i &
     sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "go run main.go" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
     
-    # Error checking remains the same, but now it checks the file after we've already seen the output.
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         exit 1
@@ -89,7 +88,7 @@ done
 echo "shutting down mongo during test mode"
 docker stop mongo
 docker rm mongo
-sleep 5
+sleep 3
 
 echo "--- Starting Keploy Test Mode ---"
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "go run main.go" --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs.txt"
