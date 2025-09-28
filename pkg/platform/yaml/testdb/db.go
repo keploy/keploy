@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
@@ -37,6 +38,7 @@ type tcsInfo struct {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
+	tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err

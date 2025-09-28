@@ -38,3 +38,8 @@ runs:
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
         EOF
+    - name: Add any missing Go modules
+      shell: bash
+      run: |
+        echo "Tidying up Go modules..."
+        go mod tidy    

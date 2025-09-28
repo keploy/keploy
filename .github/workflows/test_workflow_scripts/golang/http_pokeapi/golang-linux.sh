@@ -31,7 +31,7 @@ sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
 send_request() {
     local index=$1  
 
-    sleep 10
+    sleep 6
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8080/api/locations; then
@@ -60,8 +60,8 @@ send_request() {
 
     curl -s -X GET http://localhost:8080/api/greet?format=xml
 
-    # Wait for 10 seconds for Keploy to record the tcs and mocks.
-    sleep 10
+    # Wait for 7 seconds for Keploy to record the tcs and mocks.
+    sleep 7
     pid=$(pgrep keploy)
     echo "$pid Keploy PID"
     echo "Killing Keploy"
@@ -89,6 +89,7 @@ done
 
 # Start the go-http app in test mode.
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false &> test_logs.txt
+
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."

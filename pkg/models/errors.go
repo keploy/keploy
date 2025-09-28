@@ -25,3 +25,21 @@ const (
 	ErrCtxCanceled    AppErrorType = "context canceled"
 	ErrTestBinStopped AppErrorType = "test binary stopped"
 )
+
+type ParserError struct {
+	ParserErrorType ParserErrorType
+	Err             error
+}
+
+type ParserErrorType string
+
+func (e ParserError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.ParserErrorType, e.Err)
+	}
+	return string(e.ParserErrorType)
+}
+
+const (
+	ErrMockNotFound ParserErrorType = "mock not found"
+)

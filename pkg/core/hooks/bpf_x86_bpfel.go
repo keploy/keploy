@@ -54,6 +54,10 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	HandleBindEnterArm               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_arm"`
+	HandleBindEnterX86               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_x86"`
+	K_bind4                          *ebpf.ProgramSpec `ebpf:"k_bind4"`
+	K_bind6                          *ebpf.ProgramSpec `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.ProgramSpec `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
@@ -97,6 +101,8 @@ type bpfMapSpecs struct {
 	ActiveReadArgsMap           *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.MapSpec `ebpf:"active_write_args_map"`
 	AppChildKernelPidMap        *ebpf.MapSpec `ebpf:"app_child_kernel_pid_map"`
+	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
+	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
 	ConnInfoMap                 *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
@@ -147,6 +153,8 @@ type bpfMaps struct {
 	ActiveReadArgsMap           *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.Map `ebpf:"active_write_args_map"`
 	AppChildKernelPidMap        *ebpf.Map `ebpf:"app_child_kernel_pid_map"`
+	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
+	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
 	ConnInfoMap                 *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
@@ -173,6 +181,8 @@ func (m *bpfMaps) Close() error {
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
 		m.AppChildKernelPidMap,
+		m.AppPortInfo,
+		m.BindEvents,
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
@@ -203,6 +213,10 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	HandleBindEnterArm               *ebpf.Program `ebpf:"handle_bind_enter_arm"`
+	HandleBindEnterX86               *ebpf.Program `ebpf:"handle_bind_enter_x86"`
+	K_bind4                          *ebpf.Program `ebpf:"k_bind4"`
+	K_bind6                          *ebpf.Program `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.Program `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.Program `ebpf:"k_getpeername4"`
@@ -239,6 +253,10 @@ type bpfPrograms struct {
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.HandleBindEnterArm,
+		p.HandleBindEnterX86,
+		p.K_bind4,
+		p.K_bind6,
 		p.K_connect4,
 		p.K_connect6,
 		p.K_getpeername4,

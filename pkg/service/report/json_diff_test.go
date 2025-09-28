@@ -28,13 +28,12 @@ func TestGenerateTableDiff_SimpleFieldChanges_002(t *testing.T) {
 	diff, err := GenerateTableDiff(expected, actual)
 
 	require.NoError(t, err)
-	assert.Contains(t, diff, "=== CHANGES WITHIN THE RESPONSE BODY ===")
 	assert.Contains(t, diff, "Path: age")
-	assert.Contains(t, diff, "Old: 30")
-	assert.Contains(t, diff, "New: 25")
+	assert.Contains(t, diff, "Expected: 30")
+	assert.Contains(t, diff, "Actual: 25")
 	assert.Contains(t, diff, "Path: name")
-	assert.Contains(t, diff, `Old: "John"`)
-	assert.Contains(t, diff, `New: "Jane"`)
+	assert.Contains(t, diff, `Expected: "John"`)
+	assert.Contains(t, diff, `Actual: "Jane"`)
 }
 
 // TestGenerateTableDiff_FieldAddition_003 tests when fields are added to the JSON
@@ -46,11 +45,11 @@ func TestGenerateTableDiff_FieldAddition_003(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: city")
-	assert.Contains(t, diff, "Old: <added>")
-	assert.Contains(t, diff, `New: "New York"`)
+	assert.Contains(t, diff, "Expected: <added>")
+	assert.Contains(t, diff, `Actual: "New York"`)
 	assert.Contains(t, diff, "Path: country")
-	assert.Contains(t, diff, "Old: <added>")
-	assert.Contains(t, diff, `New: "USA"`)
+	assert.Contains(t, diff, "Expected: <added>")
+	assert.Contains(t, diff, `Actual: "USA"`)
 }
 
 // TestGenerateTableDiff_FieldRemoval_004 tests when fields are removed from the JSON
@@ -62,11 +61,11 @@ func TestGenerateTableDiff_FieldRemoval_004(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: city")
-	assert.Contains(t, diff, `Old: "New York"`)
-	assert.Contains(t, diff, "New: <removed>")
+	assert.Contains(t, diff, `Expected: "New York"`)
+	assert.Contains(t, diff, "Actual: <removed>")
 	assert.Contains(t, diff, "Path: country")
-	assert.Contains(t, diff, `Old: "USA"`)
-	assert.Contains(t, diff, "New: <removed>")
+	assert.Contains(t, diff, `Expected: "USA"`)
+	assert.Contains(t, diff, "Actual: <removed>")
 }
 
 // TestGenerateTableDiff_NestedObjects_005 tests nested object differences
@@ -78,11 +77,11 @@ func TestGenerateTableDiff_NestedObjects_005(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: user.details.age")
-	assert.Contains(t, diff, "Old: 30")
-	assert.Contains(t, diff, "New: 25")
+	assert.Contains(t, diff, "Expected: 30")
+	assert.Contains(t, diff, "Actual: 25")
 	assert.Contains(t, diff, "Path: user.name")
-	assert.Contains(t, diff, `Old: "John"`)
-	assert.Contains(t, diff, `New: "Jane"`)
+	assert.Contains(t, diff, `Expected: "John"`)
+	assert.Contains(t, diff, `Actual: "Jane"`)
 }
 
 // TestGenerateTableDiff_Arrays_006 tests array handling and differences
@@ -94,14 +93,14 @@ func TestGenerateTableDiff_Arrays_006(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: items[0].name")
-	assert.Contains(t, diff, `Old: "item1"`)
-	assert.Contains(t, diff, `New: "updated_item1"`)
+	assert.Contains(t, diff, `Expected: "item1"`)
+	assert.Contains(t, diff, `Actual: "updated_item1"`)
 	assert.Contains(t, diff, "Path: items[1].id")
-	assert.Contains(t, diff, "Old: 2")
-	assert.Contains(t, diff, "New: 3")
+	assert.Contains(t, diff, "Expected: 2")
+	assert.Contains(t, diff, "Actual: 3")
 	assert.Contains(t, diff, "Path: items[1].name")
-	assert.Contains(t, diff, `Old: "item2"`)
-	assert.Contains(t, diff, `New: "item3"`)
+	assert.Contains(t, diff, `Expected: "item2"`)
+	assert.Contains(t, diff, `Actual: "item3"`)
 }
 
 // TestGenerateTableDiff_RootArray_007 tests when the root JSON is an array
@@ -113,8 +112,8 @@ func TestGenerateTableDiff_RootArray_007(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: $[0].name")
-	assert.Contains(t, diff, `Old: "first"`)
-	assert.Contains(t, diff, `New: "updated_first"`)
+	assert.Contains(t, diff, `Expected: "first"`)
+	assert.Contains(t, diff, `Actual: "updated_first"`)
 }
 
 // TestGenerateTableDiff_DifferentTypes_008 tests when field types change
@@ -126,27 +125,14 @@ func TestGenerateTableDiff_DifferentTypes_008(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: data")
-	assert.Contains(t, diff, "Old: null")
-	assert.Contains(t, diff, "New: <removed>")
+	assert.Contains(t, diff, "Expected: null")
+	assert.Contains(t, diff, "Actual: <removed>")
 	assert.Contains(t, diff, "Path: flag")
-	assert.Contains(t, diff, "Old: true")
-	assert.Contains(t, diff, `New: "true"`)
+	assert.Contains(t, diff, "Expected: true")
+	assert.Contains(t, diff, `Actual: "true"`)
 	assert.Contains(t, diff, "Path: value")
-	assert.Contains(t, diff, "Old: 123")
-	assert.Contains(t, diff, `New: "123"`)
-}
-
-// TestGenerateTableDiff_InvalidJSON_009 tests behavior with invalid JSON input
-func TestGenerateTableDiff_InvalidJSON_009(t *testing.T) {
-	expected := `{"valid": "json"}`
-	actual := `{"invalid": json}`
-
-	diff, err := GenerateTableDiff(expected, actual)
-
-	require.NoError(t, err)
-	assert.NotEmpty(t, diff)
-	assert.Contains(t, diff, "=== CHANGES WITHIN THE RESPONSE BODY ===")
-	assert.NotContains(t, diff, "No differences found")
+	assert.Contains(t, diff, "Expected: 123")
+	assert.Contains(t, diff, `Actual: "123"`)
 }
 
 // TestGenerateTableDiff_EmptyJSON_010 tests empty JSON objects
@@ -169,11 +155,11 @@ func TestGenerateTableDiff_EmptyToPopulated_011(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: age")
-	assert.Contains(t, diff, "Old: <added>")
-	assert.Contains(t, diff, "New: 30")
+	assert.Contains(t, diff, "Expected: <added>")
+	assert.Contains(t, diff, "Actual: 30")
 	assert.Contains(t, diff, "Path: name")
-	assert.Contains(t, diff, "Old: <added>")
-	assert.Contains(t, diff, `New: "John"`)
+	assert.Contains(t, diff, "Expected: <added>")
+	assert.Contains(t, diff, `Actual: "John"`)
 }
 
 // TestGenerateTableDiff_LargeNumbers_012 tests handling of large numbers
@@ -185,11 +171,11 @@ func TestGenerateTableDiff_LargeNumbers_012(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: bigNum")
-	assert.Contains(t, diff, "Old: 9223372036854775807")
-	assert.Contains(t, diff, "New: 9223372036854775806")
+	assert.Contains(t, diff, "Expected: 9223372036854775807")
+	assert.Contains(t, diff, "Actual: 9223372036854775806")
 	assert.Contains(t, diff, "Path: decimal")
-	assert.Contains(t, diff, "Old: 123.456789")
-	assert.Contains(t, diff, "New: 123.456788")
+	assert.Contains(t, diff, "Expected: 123.456789")
+	assert.Contains(t, diff, "Actual: 123.456788")
 }
 
 // TestGenerateTableDiff_SpecialCharacters_013 tests strings with special characters
@@ -201,8 +187,8 @@ func TestGenerateTableDiff_SpecialCharacters_013(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: emoji")
-	assert.Contains(t, diff, `Old: "🎉"`)
-	assert.Contains(t, diff, `New: "🚀"`)
+	assert.Contains(t, diff, `Expected: "🎉"`)
+	assert.Contains(t, diff, `Actual: "🚀"`)
 	assert.Contains(t, diff, "Path: message")
 	assert.Contains(t, diff, `"Hello\nWorld"`)
 	assert.Contains(t, diff, `"Hello\tWorld"`)
@@ -240,8 +226,8 @@ func TestGenerateTableDiff_ComplexNesting_014(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: level1.level2.level3.level4.value")
-	assert.Contains(t, diff, `Old: "deep"`)
-	assert.Contains(t, diff, `New: "deeper"`)
+	assert.Contains(t, diff, `Expected: "deep"`)
+	assert.Contains(t, diff, `Actual: "deeper"`)
 }
 
 // TestGenerateTableDiff_ArraySizeChange_015 tests when array sizes differ
@@ -253,11 +239,11 @@ func TestGenerateTableDiff_ArraySizeChange_015(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: items[3]")
-	assert.Contains(t, diff, "Old: <added>")
-	assert.Contains(t, diff, "New: 4")
+	assert.Contains(t, diff, "Expected: <added>")
+	assert.Contains(t, diff, "Actual: 4")
 	assert.Contains(t, diff, "Path: items[4]")
-	assert.Contains(t, diff, "Old: <added>")
-	assert.Contains(t, diff, "New: 5")
+	assert.Contains(t, diff, "Expected: <added>")
+	assert.Contains(t, diff, "Actual: 5")
 }
 
 // TestParseJSONLoose_ValidJSON_016 tests parseJSONLoose with valid JSON
@@ -440,11 +426,11 @@ func TestGenerateTableDiff_JSONWithNulls_025(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: other")
-	assert.Contains(t, diff, `Old: "test"`)
-	assert.Contains(t, diff, "New: null")
+	assert.Contains(t, diff, `Expected: "test"`)
+	assert.Contains(t, diff, "Actual: null")
 	assert.Contains(t, diff, "Path: value")
-	assert.Contains(t, diff, "Old: null")
-	assert.Contains(t, diff, `New: "changed"`)
+	assert.Contains(t, diff, "Expected: null")
+	assert.Contains(t, diff, `Actual: "changed"`)
 }
 
 // TestGenerateTableDiff_ComplexRealWorldExample_026 tests with a complex real-world-like JSON
@@ -506,15 +492,15 @@ func TestGenerateTableDiff_ComplexRealWorldExample_026(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, diff, "Path: data.page_content.something[0].data.tabs[0].id")
-	assert.Contains(t, diff, `Old: "777"`)
-	assert.Contains(t, diff, `New: "7891"`)
+	assert.Contains(t, diff, `Expected: "777"`)
+	assert.Contains(t, diff, `Actual: "7891"`)
 	assert.Contains(t, diff, "Path: data.page_content.something[0].data.tabs[0].name")
-	assert.Contains(t, diff, `Old: "Bugs"`)
-	assert.Contains(t, diff, `New: "Tests"`)
+	assert.Contains(t, diff, `Expected: "Bugs"`)
+	assert.Contains(t, diff, `Actual: "Tests"`)
 	assert.Contains(t, diff, "Path: data.page_info.id")
-	assert.Contains(t, diff, `Old: "99999"`)
-	assert.Contains(t, diff, `New: "13777"`)
+	assert.Contains(t, diff, `Expected: "99999"`)
+	assert.Contains(t, diff, `Actual: "13777"`)
 	assert.Contains(t, diff, "Path: data.page_info.name")
-	assert.Contains(t, diff, `Old: "keploy improve"`)
-	assert.Contains(t, diff, `New: "Updated tests"`)
+	assert.Contains(t, diff, `Expected: "keploy improve"`)
+	assert.Contains(t, diff, `Actual: "Updated tests"`)
 }

@@ -64,6 +64,51 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	return header
 }
 
+// CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
+// with an input header value (as a slice of strings). It normalizes whitespace,
+// splits the mock header value by commas, trims spaces, sorts both sets of values,
+// and returns true if they contain the same elements in any order.
+func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string) bool {
+	// early returns
+	if mockHeaderValue == "" && len(inputHeaderValue) == 0 {
+		return true
+	}
+
+	if mockHeaderValue == "" || len(inputHeaderValue) == 0 {
+		return false
+	}
+
+	mockValues := strings.Split(mockHeaderValue, ",")
+	normalizedMockValues := make([]string, len(mockValues))
+	for i, v := range mockValues {
+		normalizedMockValues[i] = strings.TrimSpace(v)
+	}
+
+	// Normalize input header values
+	normalizedInputValues := make([]string, len(inputHeaderValue))
+	for i, v := range inputHeaderValue {
+		normalizedInputValues[i] = strings.TrimSpace(v)
+	}
+
+	// Sort both slices for comparison
+	sort.Strings(normalizedMockValues)
+	sort.Strings(normalizedInputValues)
+
+	// Compare lengths first
+	if len(normalizedMockValues) != len(normalizedInputValues) {
+		return false
+	}
+
+	// Compare each value
+	for i, mockVal := range normalizedMockValues {
+		if mockVal != normalizedInputValues[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 	for i, j := range mockHeader {
@@ -786,6 +831,30 @@ func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock
 	return append(filteredMocks, unfilteredMocks...)
 }
 
+func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	filteredMocks, _ := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return filteredMocks
+}
+
+func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
+		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return append(filteredMocks, unfilteredMocks...)
+}
+
 func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
@@ -827,6 +896,41 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
+	return filteredMocks, unfilteredMocks
+}
+
+func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	isNonKeploy := false
+
+	for _, mock := range m {
+
+		tmp := *mock
+		p := &tmp
+
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+
+		for _, name := range mocksPresentInMapping {
+			if p.Name == name {
+				p.TestModeInfo.IsFiltered = true
+				filteredMocks = append(filteredMocks, p)
+				break
+			}
+		}
+
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
+	}
+
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+		return filteredMocks, unfilteredMocks
+	}
+
 	return filteredMocks, unfilteredMocks
 }
 

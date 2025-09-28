@@ -71,6 +71,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
+
+			h.Logger.Debug("Decoded HTTP request headers", zap.Any("headers", request.Header))
 			// Set the host header explicitely because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
@@ -106,6 +108,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					return
 				}
 			}
+
+			h.Logger.Debug("decodeHTTP debug logs for input",
+				zap.Any("method", input.method),
+				zap.Any("url", input.url),
+				zap.Any("header", input.header),
+				zap.Any("body", string(input.body)),
+				zap.Any("raw", string(input.raw)))
 
 			ok, stub, err := h.match(ctx, input, mockDb) // calling match function to match mocks
 			if err != nil {

@@ -20,6 +20,7 @@ type Hooks interface {
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 	GetUnloadDone() <-chan struct{}
 }
 
@@ -32,6 +33,7 @@ type HookCfg struct {
 	Rules      []config.BypassRule
 	E2E        bool
 	Port       uint32
+	BigPayload bool
 }
 
 type App interface {
@@ -48,6 +50,11 @@ type Proxy interface {
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
+	GetErrorChannel() <-chan error
+}
+
+type IncomingProxy interface {
+	Start(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions)
 }
 
 type ProxyOptions struct {

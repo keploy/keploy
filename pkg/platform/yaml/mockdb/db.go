@@ -316,3 +316,36 @@ func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath
 
 	return httpMocks, nil
 }
+
+func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) error {
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	path := filepath.Join(ys.MockPath, testSetID)
+
+	// Read the mocks from the yaml file
+	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+		return err
+	}
+
+	// Delete all contents of the mocks directory
+	err = os.RemoveAll(mockPath)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to delete old mocks", zap.String("path", mockPath))
+		return err
+	}
+
+	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))
+	return nil
+}
+
+func (ys *MockYaml) GetCurrMockID() int64 {
+	return atomic.LoadInt64(&ys.idCounter)
+}
+
+func (ys *MockYaml) ResetCounterID() {
+	atomic.StoreInt64(&ys.idCounter, -1)
+}
