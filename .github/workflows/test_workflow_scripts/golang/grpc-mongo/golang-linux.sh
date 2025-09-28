@@ -55,12 +55,11 @@ sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
 send_request() {
     local index=$1  
 
-    sleep 7
+    sleep 5
 
     echo "Sending request for iteration ${index}..."
     go run ./client
 
-    # Wait for 7 seconds for Keploy to record the tcs and mocks.
     sleep 5
     pid=$(pgrep keploy)
     echo "$pid Keploy PID"
@@ -72,9 +71,7 @@ for i in {1..2}; do
     app_name="grpc-mongo_${i}"
     echo "--- Starting Recording for iteration ${i} ---"
     send_request $i &
-    # Set MongoDB URI to use IPv4 localhost for consistent recording
-    export MONGO_URI="mongodb://127.0.0.1:27017"
-    sudo -E env PATH="$PATH" MONGO_URI="$MONGO_URI" "$RECORD_BIN" record -c "go run main.go" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "go run main.go" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
     
     # Error checking remains the same, but now it checks the file after we've already seen the output.
     if grep "ERROR" "${app_name}.txt"; then
@@ -93,9 +90,7 @@ docker compose down
 sleep 5
 
 echo "--- Starting Keploy Test Mode ---"
-# Set MongoDB URI to use IPv4 localhost to match recorded mocks
-export MONGO_URI="mongodb://127.0.0.1:27017"
-sudo -E env PATH="$PATH" MONGO_URI="$MONGO_URI" "$REPLAY_BIN" test -c "go run main.go" --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs.txt"
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "go run main.go" --delay 7 --fallBack-on-miss=false --generateGithubActions=false 2>&1 | tee "test_logs.txt"
 
 # Error checking remains the same.
 if grep "ERROR" "test_logs.txt"; then
