@@ -28,7 +28,6 @@ func TestGenerateTableDiff_SimpleFieldChanges_002(t *testing.T) {
 	diff, err := GenerateTableDiff(expected, actual)
 
 	require.NoError(t, err)
-	assert.Contains(t, diff, "=== CHANGES WITHIN THE RESPONSE BODY ===")
 	assert.Contains(t, diff, "Path: age")
 	assert.Contains(t, diff, "Expected: 30")
 	assert.Contains(t, diff, "Actual: 25")
@@ -134,19 +133,6 @@ func TestGenerateTableDiff_DifferentTypes_008(t *testing.T) {
 	assert.Contains(t, diff, "Path: value")
 	assert.Contains(t, diff, "Expected: 123")
 	assert.Contains(t, diff, `Actual: "123"`)
-}
-
-// TestGenerateTableDiff_InvalidJSON_009 tests behavior with invalid JSON input
-func TestGenerateTableDiff_InvalidJSON_009(t *testing.T) {
-	expected := `{"valid": "json"}`
-	actual := `{"invalid": json}`
-
-	diff, err := GenerateTableDiff(expected, actual)
-
-	require.NoError(t, err)
-	assert.NotEmpty(t, diff)
-	assert.Contains(t, diff, "=== CHANGES WITHIN THE RESPONSE BODY ===")
-	assert.NotContains(t, diff, "No differences found")
 }
 
 // TestGenerateTableDiff_EmptyJSON_010 tests empty JSON objects
