@@ -597,17 +597,17 @@ func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(path, out.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(path, out.Bytes(), 0777); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
 
-// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with 0644 perms.
+// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with 0777 perms.
 func WriteSecretsYAML(path string, secrets map[string]string) error {
 	b, err := yaml.Marshal(secrets)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0644)
+	return os.WriteFile(path, b, 0777)
 }
