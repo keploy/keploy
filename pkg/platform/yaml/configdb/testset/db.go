@@ -30,13 +30,13 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	filePath := filepath.Join(db.path, testSetID)
 
 	var config T
-	
+
 	// Try to read config.yaml, but continue if it doesn't exist
 	data, err := yaml.ReadFile(ctx, db.logger, filePath, "config")
 	if err != nil {
 		// Config file missing, create default config and continue with secret loading
 		db.logger.Debug("Config file not found, using default config", zap.String("testSet", testSetID), zap.String("filePath", filePath), zap.Error(err))
-		
+
 		// Since T is *models.TestSet, initialize a new TestSet instance
 		// Use type assertion to ensure we're working with the right type
 		emptyTestSet := &models.TestSet{}
