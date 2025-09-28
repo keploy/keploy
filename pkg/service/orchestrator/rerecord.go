@@ -181,7 +181,12 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
 
-	o.replay.UploadMocks(ctx, ReRecordedTests)
+	if !o.config.Test.DisableMockUpload {
+		o.replay.UploadMocks(ctx, ReRecordedTests)
+	} else {
+		o.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+	}
+
 	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
