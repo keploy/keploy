@@ -27,6 +27,11 @@ echo "Waiting for mongo to start"
 docker compose up mongo -d
 sleep 5
 
+# Pre-download Go modules to avoid HTTPS interception issues during recording
+echo "Pre-downloading Go modules..."
+go mod download
+go mod tidy
+
 # Generate the keploy-config file.
 echo "Generating Keploy config..."
 sudo "$RECORD_BIN" config --generate
@@ -35,6 +40,17 @@ sudo "$RECORD_BIN" config --generate
 config_file="./keploy.yml"
 echo "Updating global noise in config..."
 sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
+
+# # Add bypass rules to ignore external HTTPS traffic (Go module proxy, etc.)
+# echo "Adding bypass rules for external HTTPS traffic..."
+# sed -i '/bypassRules: \[\]/c\
+# bypassRules:\
+#   - host: "proxy.golang.org"\
+#   - host: "sum.golang.org"\
+#   - host: "goproxy.io"\
+#   - host: "*.googleapis.com"\
+#   - host: "*.googleusercontent.com"\
+#   - port: 443' "$config_file"
 
 send_request() {
     local index=$1  
