@@ -11,10 +11,9 @@ set -o pipefail
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh
 echo "iid.sh executed"
 
-# Checkout a different branch
 git fetch origin
 
 # Check if there is a keploy-config file, if there is, delete it.
