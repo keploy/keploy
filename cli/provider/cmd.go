@@ -931,6 +931,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
+
+				c.cfg.Test.APITimeout, err = cmd.Flags().GetUint64("api-timeout")
+				if err != nil {
+					errMsg := "failed to get the provided api-timeout"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 				// optional flag to show response diffs during rerecord
 				showDiff, err := cmd.Flags().GetBool("show-diff")
 				if err != nil {
