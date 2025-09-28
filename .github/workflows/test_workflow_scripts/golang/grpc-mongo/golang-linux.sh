@@ -86,11 +86,13 @@ for i in {1..2}; do
     echo "--- Recorded test case and mocks for iteration ${i} ---"
 done
 
-docker compose down
+echo "shutting down mongo during test mode"
+docker stop mongo
+docker rm mongo
 sleep 5
 
 echo "--- Starting Keploy Test Mode ---"
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "go run main.go" --delay 7 --fallBack-on-miss=false --generateGithubActions=false 2>&1 | tee "test_logs.txt"
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "go run main.go" --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs.txt"
 
 # Error checking remains the same.
 if grep "ERROR" "test_logs.txt"; then
