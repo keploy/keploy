@@ -14,10 +14,10 @@ docker network inspect keploy-network *> $null
 if ($LASTEXITCODE -ne 0) {
     docker network create keploy-network | Out-Null
 }
-# Ensure mongoDb container name is free, then start
-docker rm -f mongoDb 2>$null | Out-Null 
-Start-Sleep -Seconds 5
-docker compose up mongo
+# Ensure mongoDb container name is free, then start via compose (detached)
+docker rm -f mongoDb 2>$null | Out-Null
+Start-Sleep -Seconds 2
+docker compose up -d mongo
 
 # Generate the keploy-config file.
 # In PowerShell, we use '&' (the call operator) to execute commands from a variable path.
@@ -152,6 +152,9 @@ for ($i = 1; $i -le 2; $i++) {
 
 # --- Testing Phase ---
 Write-Host "Shutting down mongo before test mode..."
+# Prefer compose down to stop the mongo service started earlier
+docker compose down 2>$null | Out-Null
+# Best-effort extra cleanup if a standalone container exists
 docker stop mongoDb 2>$null | Out-Null
 docker rm mongoDb 2>$null | Out-Null
 Write-Host "MongoDB stopped. Keploy should now use mocks."
