@@ -15,8 +15,9 @@ if ($LASTEXITCODE -ne 0) {
     docker network create keploy-network | Out-Null
 }
 # Ensure mongoDb container name is free, then start
-docker rm -f mongoDb 2>$null | Out-Null
-docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+docker rm -f mongoDb 2>$null | Out-Null 
+Start-Sleep -Seconds 5
+docker compose up mongo
 
 # Generate the keploy-config file.
 # In PowerShell, we use '&' (the call operator) to execute commands from a variable path.
@@ -39,6 +40,7 @@ Write-Host "Starting recording phase..."
 # Avoid buildx error: image already exists
 docker rmi -f gin-mongo:latest 2>$null | Out-Null
 docker build -t gin-mongo .
+Start-Sleep -Seconds 5
 # Ensure previous app container is removed
 docker rm -f ginApp 2>$null | Out-Null
 
@@ -92,17 +94,45 @@ for ($i = 1; $i -le 2; $i++) {
     $containerName = "ginApp_${i}"
     $logFile = "${containerName}.txt"
 
-    # Start the request sending function in a background job
+    # --- START: MODIFICATION ---
+
+    # Define the script block to run Keploy in the background
+    $keployScriptBlock = {
+        param($RecordBin, $Cmd, $ContainerName, $LogFile)
+        
+        # Execute the keploy record command and redirect all its output to the log file.
+        # Using Out-File is often more robust for redirecting from long-running processes.
+        & $RecordBin record -c $Cmd --container-name $ContainerName *>&1 | Out-File -FilePath $LogFile
+    }
+
+    # Define the command to run the application
+    $appCommand = "docker run -p8080:8080 --net keploy-network --rm --name $containerName gin-mongo"
+
+    Write-Host "Starting Keploy record job for iteration ${i}..."
+    # Start the Keploy process as a background job
+    $keployJob = Start-Job -ScriptBlock $keployScriptBlock -ArgumentList $env:RECORD_BIN, $appCommand, $containerName, $logFile
+    
+    # Give Keploy a moment to start up before sending requests
+    Start-Sleep -Seconds 5
+
+    # --- END: MODIFICATION ---
+
+    # Start the request sending function in a background job (this part is correct)
     $requestJob = Start-Job -ScriptBlock ${function:Send-Requests}
 
-    Write-Host "Starting Keploy record for iteration ${i}..."
-    # The `*>&1` redirects all streams (stdout, stderr, etc.) to the output file.
-    & $env:RECORD_BIN record -c "docker run -p8080:8080 --net keploy-network --rm --name $containerName gin-mongo" --container-name "$containerName" *>&1 | Set-Content -Path $logFile
-
+    Write-Host "Waiting for request sender job to complete..."
     # Wait for the background job to finish
     Wait-Job $requestJob
     Receive-Job $requestJob # Display any output from the job
     Remove-Job $requestJob
+
+    # Now that requests are sent, stop the Keploy process
+    Stop-KeployProcess
+    
+    # Wait for the Keploy job to finish after the process is killed
+    Wait-Job $keployJob
+    Remove-Job $keployJob
+
 
     # Select-String is the PowerShell equivalent of grep.
     if (Select-String -Path $logFile -Pattern "WARNING: DATA RACE") {
@@ -110,7 +140,8 @@ for ($i = 1; $i -le 2; $i++) {
         Get-Content $logFile
         exit 1
     }
-    if (Select-String -Path $logFile -Pattern "ERROR") {
+    # Check for "error" case-insensitively
+    if (Select-String -Path $logFile -Pattern "error" -CaseSensitive:$false) {
         Write-Error "Error found in pipeline..."
         Get-Content $logFile
         exit 1
