@@ -1,0 +1,169 @@
+# PowerShell equivalent of the original bash script for Windows runners.
+
+# CRITICAL: The original script sourced 'test-iid.sh'. You MUST convert
+# 'test-iid.sh' to a PowerShell script ('test-iid.ps1') that sets any necessary
+# environment variables using the syntax: $env:VAR_NAME = "value"
+# Then, you would "dot source" it here like this:
+# . "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\test-iid.ps1"
+# For now, this line is commented out as the contents are unknown.
+
+# --- Setup ---
+
+. "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\test-iid.ps1"
+
+Write-Host "Starting setup..."
+docker network create keploy-network -ErrorAction SilentlyContinue
+docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+
+# Generate the keploy-config file.
+# In PowerShell, we use '&' (the call operator) to execute commands from a variable path.
+# No 'sudo' is needed as the runner usually has sufficient permissions.
+& $env:RECORD_BIN config --generate
+
+# Update the global noise to ts.
+# This is the PowerShell equivalent of `sed -i`. It reads the file, replaces the string, and writes it back.
+$configFile = ".\keploy.yml"
+(Get-Content $configFile) -replace 'global: {}', 'global: {"body": {"ts":[]}}' | Set-Content $configFile
+
+# Remove any preexisting keploy tests and mocks.
+# `Remove-Item` is the equivalent of `rm -rf`. -ErrorAction SilentlyContinue prevents errors if the folder doesn't exist.
+Remove-Item -Path "keploy" -Recurse -Force -ErrorAction SilentlyContinue
+
+docker logs mongoDb
+
+# --- Recording Phase ---
+Write-Host "Starting recording phase..."
+docker build -t gin-mongo .
+docker rm -f ginApp -ErrorAction SilentlyContinue
+
+# PowerShell function definitions
+function Stop-KeployProcess {
+    Write-Host "Attempting to stop Keploy process..."
+    $keployProcess = Get-Process keploy -ErrorAction SilentlyContinue
+    if ($keployProcess) {
+        Write-Host "Found Keploy PID: $($keployProcess.Id). Killing process."
+        Stop-Process -Id $keployProcess.Id -Force
+    } else {
+        Write-Host "Keploy process not found."
+    }
+}
+
+function Send-Requests {
+    Write-Host "Request sender started. Waiting for application to be ready..."
+    Start-Sleep -Seconds 10
+    $app_started = $false
+    while (-not $app_started) {
+        try {
+            # Invoke-WebRequest is the PowerShell equivalent of curl.
+            Invoke-WebRequest -Uri http://localhost:8080/CJBKJd92 -UseBasicParsing
+            $app_started = $true
+        } catch {
+            Write-Host "App not ready yet. Retrying in 3 seconds..."
+            Start-Sleep -Seconds 3
+        }
+    }
+    Write-Host "App started. Sending API requests to record."
+
+    # Use Invoke-RestMethod for API calls as it's cleaner for JSON.
+    $headers = @{ "content-type" = "application/json" }
+
+    $body1 = '{"url": "https://google.com"}'
+    Invoke-RestMethod -Method Post -Uri http://localhost:8080/url -Headers $headers -Body $body1
+
+    $body2 = '{"url": "https://facebook.com"}'
+    Invoke-RestMethod -Method Post -Uri http://localhost:8080/url -Headers $headers -Body $body2
+
+    Invoke-WebRequest -Uri http://localhost:8080/CJBKJd92 -UseBasicParsing
+
+    # Wait for Keploy to record the tcs and mocks.
+    Write-Host "Requests sent. Waiting 5 seconds for recording to complete."
+    Start-Sleep -Seconds 5
+    Stop-KeployProcess
+}
+
+# Loop for recording
+for ($i = 1; $i -le 2; $i++) {
+    $containerName = "ginApp_${i}"
+    $logFile = "${containerName}.txt"
+
+    # Start the request sending function in a background job
+    $requestJob = Start-Job -ScriptBlock ${function:Send-Requests}
+
+    Write-Host "Starting Keploy record for iteration ${i}..."
+    # The `*>&1` redirects all streams (stdout, stderr, etc.) to the output file.
+    & $env:RECORD_BIN record -c "docker run -p8080:8080 --net keploy-network --rm --name $containerName gin-mongo" --container-name "$containerName" *>&1 | Set-Content -Path $logFile
+
+    # Wait for the background job to finish
+    Wait-Job $requestJob
+    Receive-Job $requestJob # Display any output from the job
+    Remove-Job $requestJob
+
+    # Select-String is the PowerShell equivalent of grep.
+    if (Select-String -Path $logFile -Pattern "WARNING: DATA RACE") {
+        Write-Error "Race condition detected in recording, stopping pipeline..."
+        Get-Content $logFile
+        exit 1
+    }
+    if (Select-String -Path $logFile -Pattern "ERROR") {
+        Write-Error "Error found in pipeline..."
+        Get-Content $logFile
+        exit 1
+    }
+    Start-Sleep -Seconds 5
+    Write-Host "Recorded test case and mocks for iteration ${i}"
+}
+
+# --- Testing Phase ---
+Write-Host "Shutting down mongo before test mode..."
+docker stop mongoDb -ErrorAction SilentlyContinue
+docker rm mongoDb -ErrorAction SilentlyContinue
+Write-Host "MongoDB stopped. Keploy should now use mocks."
+
+$testContainer = "ginApp_test"
+$testLogFile = "${testContainer}.txt"
+Write-Host "Starting Keploy in test mode..."
+& $env:REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$testContainer" --apiTimeout 60 --delay 20 --generate-github-actions=$false *>&1 | Set-Content -Path $testLogFile
+
+if (Select-String -Path $testLogFile -Pattern "ERROR") {
+    Write-Error "Error found in pipeline..."
+    Get-Content $testLogFile
+    exit 1
+}
+if (Select-String -Path $testLogFile -Pattern "WARNING: DATA RACE") {
+    Write-Error "Race condition detected in test, stopping pipeline..."
+    Get-Content $testLogFile
+    exit 1
+}
+
+# --- Verification Phase ---
+Write-Host "Verifying test reports..."
+$all_passed = $true
+foreach ($i in 0..1) {
+    $reportFile = ".\keploy\reports\test-run-0\test-set-$i-report.yaml"
+    if (-not (Test-Path $reportFile)) {
+        Write-Error "Report file not found: $reportFile"
+        $all_passed = $false
+        break
+    }
+    # Read the YAML file and find the status line
+    $statusLine = Get-Content $reportFile | Select-String -Pattern 'status:' | Select-Object -First 1
+    # Split the line 'status: PASSED' at the colon and take the second part, then trim whitespace.
+    $testStatus = ($statusLine -split ':')[1].Trim()
+
+    Write-Host "Test status for test-set-$i: $testStatus"
+
+    if ($testStatus -ne "PASSED") {
+        $all_passed = $false
+        Write-Error "Test-set-$i did not pass."
+        break
+    }
+}
+
+if ($all_passed) {
+    Write-Host "All tests passed"
+    exit 0
+} else {
+    Write-Error "One or more tests failed."
+    Get-Content $testLogFile
+    exit 1
+}
