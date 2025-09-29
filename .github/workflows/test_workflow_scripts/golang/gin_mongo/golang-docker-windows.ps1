@@ -106,8 +106,8 @@ for ($i = 1; $i -le 2; $i++) {
     # Start keploy record in the foreground so logs are visible; also write to file
     $recordTask = Start-Job -ScriptBlock {
         param($RecordBin, $Cmd, $ContainerName, $LogFile)
-        & $RecordBin record -c $Cmd --container-name $ContainerName *>&1 | Tee-Object -FilePath $LogFile
-    } -ArgumentList $env:RECORD_BIN, $appCommand, $containerName, $logFile
+        & $RecordBin record -c $Cmd --container-name $ContainerName
+    } -ArgumentList $env:RECORD_BIN, $appCommand, $containerName
 
     # Give Keploy a moment to spin up before sending requests
     Start-Sleep -Seconds 5
