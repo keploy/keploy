@@ -9,6 +9,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
+        if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
@@ -37,6 +38,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
+        if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
@@ -74,6 +76,7 @@ jobs:
     needs: [build-and-upload, upload-latest,build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
   run_fuzzer_linux:
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
     secrets:
