@@ -19,88 +19,58 @@ runs:
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    # ---------------- Windows ----------------
-    - name: Configure Git/SSH and Fetch Integrations (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        # Use the service account's profile as HOME (NetworkService for runner service)
-        $env:HOME = $env:USERPROFILE
-
-        # Ensure ~/.ssh exists
-        $sshDir = Join-Path $env:HOME ".ssh"
-        New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
-
-        # 1) Trust GitHub host keys (rsa/ecdsa/ed25519) -> fixes "No ED25519 host key is known"
-        ssh-keyscan -t rsa,ecdsa,ed25519 github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii
-
-        # 2) Force SSH for ANY github.com URL flavors
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com:443/"
-        git config --global url."ssh://git@github.com/".insteadOf "git@github.com:"
-        # use our known_hosts explicitly with strict checking
-        $khPath = (Join-Path $sshDir "known_hosts")
-        git config --global core.sshCommand "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$khPath"
-
-        # 3) Tell Go these are private modules (use direct, no proxy/sumdb)
-        go env -w GOPRIVATE=github.com/keploy/*
-        go env -w GONOSUMDB=github.com/keploy/*
-
-        # 4) Clear Go's VCS cache so remotes are re-resolved (was cached as https)
-        $gomod = (& go env GOMODCACHE)
-        $vcsCache = Join-Path $gomod "cache\vcs"
-        if (Test-Path $vcsCache) {
-          Write-Host "Clearing Go VCS cache at $vcsCache ..."
-          Remove-Item -Recurse -Force $vcsCache
-        }
-
-        # 5) Now fetch and generate file
-        Write-Host "Fetching private integrations dependency via SSH..."
-        go get github.com/keploy/integrations
-
-        Write-Host "Creating extraparsers.go..."
-        New-Item -ItemType Directory -Force -Path pkg/core/proxy | Out-Null
-        @'
-        //go:build linux
-
-        package proxy
-
-        import (
-          _ "github.com/keploy/integrations/pkg/parsers"
-        )
-        '@ | Set-Content pkg/core/proxy/extraparsers.go -NoNewline
-
-        Write-Host "Tidying up Go modules..."
-        go mod tidy
-
-
-    # ---------------- Linux/macOS ----------------
-    - name: Configure Git/SSH and Fetch Integrations (Unix)
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File
       if: runner.os != 'Windows'
       shell: bash
       run: |
-        set -euo pipefail
-        mkdir -p "$HOME/.ssh"
-        ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> "$HOME/.ssh/known_hosts"
-
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
-        export GOPRIVATE=github.com/keploy/*
-        export GONOSUMDB=github.com/keploy/*
-
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        
         echo "Fetching private integrations dependency via SSH..."
-        go get github.com/keploy/integrations
-
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
+        
         echo "Creating extraparsers.go..."
         mkdir -p pkg/core/proxy
-        cat > pkg/core/proxy/extraparsers.go <<'EOF'
+        cat <<'EOF' > pkg/core/proxy/extraparsers.go
         //go:build linux
 
         package proxy
 
         import (
-          _ "github.com/keploy/integrations/pkg/parsers"
+        	_ "github.com/keploy/integrations/pkg/parsers"
         )
         EOF
 
+    - name: Add any missing Go modules
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
         echo "Tidying up Go modules..."
-        go mod tidy
+        go mod tidy    
+
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        
+        echo "Fetching private integrations dependency via SSH..."
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
+        
+        echo "Creating extraparsers.go..."
+        mkdir -p pkg/core/proxy
+        cat <<'EOF' > pkg/core/proxy/extraparsers.go
+        //go:build linux
+
+        package proxy
+
+        import (
+        	_ "github.com/keploy/integrations/pkg/parsers"
+        )
+        EOF
+
+    - name: Add any missing Go modules
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        echo "Tidying up Go modules..."
+        go mod tidy    
