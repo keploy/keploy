@@ -1,0 +1,132 @@
+name: Prepare Binary and Run Workflows (Windows)
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-upload:
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
+          
+      - name: Configure Git EOL on Windows
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+      - name: Build Keploy (PR) - Windows (windows/amd64)
+        shell: pwsh
+        run: |
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          $env:CGO_ENABLED = "0"
+          go build -tags=viper_bind_struct -o keploy.exe ./main.go
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with: 
+          name: build
+          path: keploy.exe
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
+
+  upload-latest:
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Download latest release (Windows)
+        shell: pwsh
+        run: |
+          # Get latest release tag
+          $response = Invoke-RestMethod -Uri "https://api.github.com/repos/keploy/keploy/releases/latest"
+          $latest = $response.tag_name
+          Write-Host "Latest version: $latest"
+          
+          # Download Windows tar.gz
+          $url = "https://github.com/keploy/keploy/releases/download/$latest/keploy_windows_amd64.tar.gz"
+          Write-Host "Downloading from: $url"
+          
+          Invoke-WebRequest -Uri $url -OutFile "keploy.tar.gz"
+          
+          # Extract using tar (available in Windows 10+)
+          tar -xzf keploy.tar.gz
+          
+          # Rename to keploy.exe if needed (the archive might contain keploy.exe already)
+          if (Test-Path "keploy") {
+            Move-Item "keploy" "keploy.exe"
+          }
+
+      - name: Upload latest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest
+          path: keploy.exe
+
+  # Note: Docker operations on Windows self-hosted runners might need special configuration
+  # Commenting out for now, can be enabled if Docker is properly configured on the runner
+  # build-docker-image:
+  #   runs-on: [self-hosted, Windows, X64]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Add Private Parsers
+  #       uses: ./.github/actions/setup-private-parsers
+  #       with:
+  #         ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+  #
+  #     - name: Build Docker image
+  #       shell: pwsh
+  #       run: |
+  #         # Windows Docker build commands would go here
+  #         # This would need to be adapted for Windows containers
+  #
+  #     - name: Push image
+  #       shell: pwsh
+  #       run: |
+  #         docker push ttl.sh/keploy/keploy:1h
+
+  # Windows-specific workflow calls would go here
+  # Currently, golang_wsl.yml is the main Windows workflow
+  # run_golang_wsl:
+  #   needs: [build-and-upload, upload-latest]
+  #   uses: ./.github/workflows/golang_wsl.yml
+
+  # Additional Windows-specific workflows can be added here as they are created
+  # For example:
+  # run_node_windows:
+  #   needs: [build-and-upload, upload-latest]
+  #   uses: ./.github/workflows/node_windows.yml
+  #
+  # run_python_windows:
+  #   needs: [build-and-upload, upload-latest]
+  #   uses: ./.github/workflows/python_windows.yml
+  #
+  # run_java_windows:
+  #   needs: [build-and-upload, upload-latest]
+  #   uses: ./.github/workflows/java_windows.yml
