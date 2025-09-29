@@ -149,7 +149,7 @@ kill_keploy_process() {
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    wait sudo kill -INT "$REC_PID" 2>/dev/null || true
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 # --- Main Logic ---
