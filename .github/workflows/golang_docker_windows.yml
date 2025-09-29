@@ -37,26 +37,36 @@ jobs:
       - name: Clean up git config
         if: always()
         continue-on-error: true
-        run: |
-          git config --global --unset url."git@github.com:".insteadOf
+        run: git config --global --unset url."git@github.com:".insteadOf
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - id: image
-        uses: ./.github/actions/download-image
-        env:
-          DOCKER_HOST: ""
-
-      - id: record
-        uses: ./.github/actions/download-binary
+      - name: Download Record Binary (${{ matrix.config.record_src }})
+        uses: actions/download-artifact@v4
         with:
-          src: ${{ matrix.config.record_src }}
+          name: ${{ matrix.config.record_src }}
+          path: record-bin
 
-      - id: replay
-        uses: ./.github/actions/download-binary
+      - name: Install Record Binary
+        id: setup_record
+        shell: pwsh
+        run: |
+          Move-Item -Path ".\record-bin\keploy.exe" -Destination "C:\Windows\System32\keploy-record.exe" -Force
+          echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Download Replay Binary (${{ matrix.config.replay_src }})
+        uses: actions/download-artifact@v4
         with:
-          src: ${{ matrix.config.replay_src }}
+          name: ${{ matrix.config.replay_src }}
+          path: replay-bin
+
+      - name: Install Replay Binary
+        id: setup_replay
+        shell: pwsh
+        run: |
+          Move-Item -Path ".\replay-bin\keploy.exe" -Destination "C:\Windows\System32\keploy-replay.exe" -Force
+          echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
 
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
@@ -66,8 +76,8 @@ jobs:
 
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
-          RECORD_BIN: ${{ steps.record.outputs.path }}
-          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          RECORD_BIN: ${{ steps.setup_record.outputs.bin_name }}
+          REPLAY_BIN: ${{ steps.setup_replay.outputs.bin_name }}
         shell: pwsh
         run: |
           cd samples-go/${{ matrix.app.path }}
@@ -76,5 +86,5 @@ jobs:
       - name: Clean up git config
         if: always()
         continue-on-error: true
-        run: |
-          git config --global --unset url."git@github.com:".insteadOf
+        run: git config --global --unset url."git@github.com:".insteadOf
+
