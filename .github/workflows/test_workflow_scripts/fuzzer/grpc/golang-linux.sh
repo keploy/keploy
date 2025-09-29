@@ -212,7 +212,7 @@ check_for_errors record_outgoing.txt
 # Replay the client (relying on mocks)
 if ! sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" &> test_outgoing.txt; then
   echo "::error::Replay command failed!"
-  echo "--- DUMPING test_outgoing.txt ---"
+  echo "--- DUMPING test_outgoing.txt ----"
   cat test_outgoing.txt
   exit 1
 fi
