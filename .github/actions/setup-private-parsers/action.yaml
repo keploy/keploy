@@ -52,34 +52,35 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        # HOME for the runner service account (NetworkService)
+        # Use the service account's profile (runner service runs as NetworkService)
         $env:HOME = $env:USERPROFILE
 
-        # Ensure ~/.ssh exists
+        # 1) ~/.ssh + known_hosts (fixes "No ED25519 host key is known")
         $sshDir = Join-Path $env:HOME ".ssh"
         New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+        # quiet ssh-keyscan (ignore KEX warnings)
+        ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com 2>$null |
+          Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii
 
-        # Trust GitHub host keys (fixes "No ED25519 host key is known")
-        ssh-keyscan -t rsa,ecdsa,ed25519 github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii
-
-        # Force SSH for any github.com URL (AFTER checkout)
+        # 2) Force SSH for ALL github.com URL variants (so Go/Git never use https)
         git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
         git config --global url."ssh://git@github.com/".insteadOf "https://github.com:443/"
+        git config --global url."ssh://git@github.com/".insteadOf "http://github.com/"
         git config --global url."ssh://git@github.com/".insteadOf "git@github.com:"
-
-        # Use our known_hosts with strict checking
+        # Strict host key checking with our known_hosts
         $kh = (Join-Path $sshDir "known_hosts")
         git config --global core.sshCommand "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$kh"
 
-        # Go private module settings
+        # 3) Tell Go these are private modules (no proxy/sumdb)
         go env -w GOPRIVATE=github.com/keploy/*
         go env -w GONOSUMDB=github.com/keploy/*
 
-        # Clear Go VCS cache so remotes re-resolve via SSH (in case https was cached)
+        # 4) Clear Go's VCS cache so remotes re-resolve with SSH (https was cached)
         $gomod = (& go env GOMODCACHE)
-        $vcs = Join-Path $gomod "cache\vcs"
+        $vcs   = Join-Path $gomod "cache\vcs"
         if (Test-Path $vcs) { Remove-Item -Recurse -Force $vcs }
 
+        # 5) Fetch the private dep and generate the file
         Write-Host "Fetching private integrations dependency via SSH..."
         go get github.com/keploy/integrations
 
