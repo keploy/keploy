@@ -34,27 +34,10 @@ jobs:
         with:
           go-version: ">=1.23"
 
-      - name: Add GitHub to known_hosts for Windows Runner
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # The $env:USERPROFILE variable will automatically point to the correct path, 
-          # e.g., C:\Windows\ServiceProfiles\NetworkService
-          $sshPath = Join-Path $env:USERPROFILE ".ssh"
-          
-          Write-Host "Ensuring .ssh directory exists at: $sshPath"
-          New-Item -Path $sshPath -ItemType Directory -Force | Out-Null
-          
-          Write-Host "Adding github.com to known_hosts..."
-          ssh-keyscan github.com >> (Join-Path $sshPath "known_hosts")
-          
-          Write-Host "Verification: Displaying known_hosts content..."
-          Get-Content (Join-Path $sshPath "known_hosts")
-
-      - name: Add Private Parsers
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+      # - name: Add Private Parsers
+      #   uses: ./.github/actions/setup-private-parsers
+      #   with:
+      #     ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: powershell
