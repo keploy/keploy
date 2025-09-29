@@ -20,7 +20,7 @@ runs:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
-      if: runner.os != 'Windows'
+      if: runner.os == 'Windows'
       shell: pwsh
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
@@ -44,14 +44,14 @@ runs:
 
     - name: Add any missing Go modules
       if: runner.os == 'Windows'
-      shell: bash
+      shell: pwsh
       run: |
         echo "Tidying up Go modules..."
         go mod tidy
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       if: runner.os != 'Windows'
-      shell: pwsh
+      shell: bash
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
@@ -72,7 +72,7 @@ runs:
 
     - name: Add any missing Go modules
       if: runner.os != 'Windows'
-      shell: pwsh
+      shell: basn
       run: |
         echo "Tidying up Go modules..."
         go mod tidy
