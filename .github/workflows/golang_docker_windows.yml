@@ -52,7 +52,13 @@ jobs:
         id: setup_record
         shell: pwsh
         run: |
-          Move-Item -Path ".\record-bin\keploy.exe" -Destination "C:\Windows\System32\keploy-record.exe" -Force
+          # Create a local bin directory
+          New-Item -Path "./bin" -ItemType Directory -Force
+          # Move the executable into our local bin directory
+          Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
+          # Add the new bin directory to the PATH for subsequent steps
+          echo "$env:GITHUB_WORKSPACE/bin" >> $env:GITHUB_PATH
+          # Set the output for the next step
           echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
 
       - name: Download Replay Binary (${{ matrix.config.replay_src }})
@@ -65,7 +71,11 @@ jobs:
         id: setup_replay
         shell: pwsh
         run: |
-          Move-Item -Path ".\replay-bin\keploy.exe" -Destination "C:\Windows\System32\keploy-replay.exe" -Force
+          # The bin directory already exists, but -Force prevents errors
+          New-Item -Path "./bin" -ItemType Directory -Force
+          # Move the executable into our local bin directory
+          Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
+          # Set the output for the next step
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
 
       - name: Checkout the samples-go repository
@@ -87,4 +97,3 @@ jobs:
         if: always()
         continue-on-error: true
         run: git config --global --unset url."git@github.com:".insteadOf
-

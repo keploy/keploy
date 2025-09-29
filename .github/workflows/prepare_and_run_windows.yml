@@ -91,6 +91,6 @@ jobs:
           name: latest
           path: keploy.exe
 
-  run_golang_docker_macos:
+  run_golang_docker_windows:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_docker_windows.yml
