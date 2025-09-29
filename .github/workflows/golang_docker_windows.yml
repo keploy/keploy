@@ -11,7 +11,7 @@ jobs:
         app:
           - name: gin-mongo
             path: gin-mongo
-            script_dir: gin-mongo
+            script_dir: gin_mongo
         config:
           - job: record_build_replay_build
             record_src: build
