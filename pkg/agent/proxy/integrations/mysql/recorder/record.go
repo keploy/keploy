@@ -64,7 +64,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		reqTimestamp := result.reqTimestamp
 
-		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp)
+		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, result.resTimestamp)
 
 		// reset the requests and responses
 		requests = []mysql.Request{}
@@ -108,7 +108,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 }
 
-func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time) {
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
@@ -125,7 +125,7 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			MySQLResponses:   responses,
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: reqTimestampMock,
-			ResTimestampMock: time.Now(),
+			ResTimestampMock: resTimestampMock,
 		},
 	}
 	mocks <- mysqlMock

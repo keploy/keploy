@@ -29,6 +29,7 @@ type handshakeRes struct {
 	requestOperation  string
 	responseOperation string
 	reqTimestamp      time.Time
+	resTimestamp      time.Time
 	tlsClientConn     net.Conn
 	tlsDestConn       net.Conn
 }
@@ -373,6 +374,8 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, fmt.Errorf("failed to handle ok packet: %w", err)
 		}
 	}
+
+	res.resTimestamp = time.Now()
 
 	setHandshakeResult(&res, authRes)
 

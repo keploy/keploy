@@ -62,7 +62,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			// handle no response commands like COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA, etc
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
-				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp)
+				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now())
 				// reset the requests and responses
 				requests = []mysql.Request{}
 				responses = []mysql.Response{}
@@ -70,7 +70,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				continue
 			}
 
-			commandRespPkt, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
+			commandRespPkt, resTimestamp, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
 			if err != nil {
 				if err == io.EOF && commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
 					logger.Debug("server closed the connection without any response")
@@ -85,7 +85,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			})
 
 			// record the mock
-			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp)
+			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp, resTimestamp)
 
 			// reset the requests and responses
 			requests = []mysql.Request{}
@@ -94,40 +94,41 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	}
 }
 
-func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
+func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, time.Time, error) {
 	// read the command response from the destination server
 	commandResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		if err != io.EOF {
 			utils.LogError(logger, err, "failed to read command response from the server")
 		}
-		return nil, err
+		return nil, time.Time{}, err
 	}
 
+	resTimestamp := time.Now()
 	// write the command response to the client
 	_, err = clientConn.Write(commandResp)
 	if err != nil {
 		utils.LogError(logger, err, "failed to write command response to the client")
-		return nil, err
+		return nil, resTimestamp, err
 	}
 
 	//decode the command response packet
 	commandRespPkt, err := wire.DecodePayload(ctx, logger, commandResp, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the command response packet")
-		return nil, err
+		return nil, resTimestamp, err
 	}
 
 	// check if the command response is an error or ok packet
 	if commandRespPkt.Header.Type == mysql.StatusToString(mysql.ERR) || commandRespPkt.Header.Type == mysql.StatusToString(mysql.OK) {
 		logger.Debug("command response packet", zap.Any("packet", commandRespPkt.Header.Type))
-		return commandRespPkt, nil
+		return commandRespPkt, resTimestamp, nil
 	}
 
 	// Get the last operation in order to handle current packet if it is not an error or ok packet
 	lastOp, ok := decodeCtx.LastOp.Load(clientConn)
 	if !ok {
-		return nil, fmt.Errorf("failed to get the last operation from the context while handling the query response")
+		return nil, resTimestamp, fmt.Errorf("failed to get the last operation from the context while handling the query response")
 	}
 
 	var queryResponsePkt *mysql.PacketBundle
@@ -138,7 +139,7 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		// handle the query response (TextResultSet)
 		queryResponsePkt, err = handleTextResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to handle the query response packet: %w", err)
+			return nil, resTimestamp, fmt.Errorf("failed to handle the query response packet: %w", err)
 		}
 
 	case mysql.COM_STMT_PREPARE:
@@ -146,21 +147,21 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		// handle the prepared statement response (COM_STMT_PREPARE_OK)
 		queryResponsePkt, err = handlePreparedStmtResponse(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to handle the prepared statement response: %w", err)
+			return nil, resTimestamp, fmt.Errorf("failed to handle the prepared statement response: %w", err)
 		}
 	case mysql.COM_STMT_EXECUTE:
 		logger.Debug("Handling binary protocol result set", zap.Any("lastOp", lastOp))
 		// handle the statment execute response (BinaryProtocolResultSet)
 		queryResponsePkt, err = handleBinaryResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to handle the statement execute response: %w", err)
+			return nil, resTimestamp, fmt.Errorf("failed to handle the statement execute response: %w", err)
 		}
 
 	default:
-		return nil, fmt.Errorf("unsupported operation: %x", lastOp)
+		return nil, resTimestamp, fmt.Errorf("unsupported operation: %x", lastOp)
 	}
 
-	return queryResponsePkt, nil
+	return queryResponsePkt, resTimestamp, nil
 }
 
 func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, commandRespPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
