@@ -20,7 +20,7 @@ runs:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
-      if: runner.os != 'Windows'
+      if: runner.os == 'Windows'
       shell: bash
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
@@ -41,65 +41,36 @@ runs:
         EOF
 
     - name: Add any missing Go modules
-      if: runner.os != 'Windows'
+      if: runner.os == 'Windows'
       shell: bash
       run: |
         echo "Tidying up Go modules..."
-        go mod tidy    
+        go mod tidy
 
-    # ---------------- Windows ----------------
-    - name: Configure Git/SSH and Fetch Integrations (Windows)
-      if: runner.os == 'Windows'
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File
+      if: runner.os != 'Windows'
       shell: pwsh
       run: |
-        # Use the service account's profile (runner service runs as NetworkService)
-        $env:HOME = $env:USERPROFILE
-
-        # 1) ~/.ssh + known_hosts (fixes "No ED25519 host key is known")
-        $sshDir = Join-Path $env:HOME ".ssh"
-        New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
-        # quiet ssh-keyscan (ignore KEX warnings)
-        ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com 2>$null |
-          Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii
-
-        # 2) Force SSH for ALL github.com URL variants (so Go/Git never use https)
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com:443/"
-        git config --global url."ssh://git@github.com/".insteadOf "http://github.com/"
-        git config --global url."ssh://git@github.com/".insteadOf "git@github.com:"
-        # Strict host key checking with our known_hosts
-        $kh = (Join-Path $sshDir "known_hosts")
-        git config --global core.sshCommand "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$kh"
-
-        # 3) Tell Go these are private modules (no proxy/sumdb)
-        go env -w GOPRIVATE=github.com/keploy/*
-        go env -w GONOSUMDB=github.com/keploy/*
-
-        # 4) Clear Go's VCS cache so remotes re-resolve with SSH (https was cached)
-        $gomod = (& go env GOMODCACHE)
-        $vcs   = Join-Path $gomod "cache\vcs"
-        if (Test-Path $vcs) { Remove-Item -Recurse -Force $vcs }
-
-        # 5) Fetch the private dep and generate the file
-        Write-Host "Fetching private integrations dependency via SSH..."
-        go get github.com/keploy/integrations
-
-        Write-Host "Creating extraparsers.go..."
-        New-Item -ItemType Directory -Force -Path pkg/core/proxy | Out-Null
-        @'
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        
+        echo "Fetching private integrations dependency via SSH..."
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
+        
+        echo "Creating extraparsers.go..."
+        mkdir -p pkg/core/proxy
+        cat <<'EOF' > pkg/core/proxy/extraparsers.go
         //go:build linux
 
         package proxy
 
         import (
-          _ "github.com/keploy/integrations/pkg/parsers"
+        	_ "github.com/keploy/integrations/pkg/parsers"
         )
-        '@ | Set-Content pkg/core/proxy/extraparsers.go -NoNewline
-
+        EOF
 
     - name: Add any missing Go modules
-      if: runner.os == 'Windows'
+      if: runner.os != 'Windows'
       shell: pwsh
       run: |
         echo "Tidying up Go modules..."
-        go mod tidy    
+        go mod tidy
