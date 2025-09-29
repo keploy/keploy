@@ -8,9 +8,6 @@
 # For now, this line is commented out as the contents are unknown.
 
 # --- Setup ---
-
-. "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\test-iid.ps1"
-
 Write-Host "Starting setup..."
 docker network create keploy-network -ErrorAction SilentlyContinue
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
