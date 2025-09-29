@@ -24,23 +24,37 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        # Ensure ~/.ssh exists for the service account (e.g., NetworkService)
-        $sshDir = "$env:USERPROFILE\.ssh"
+        # Use the service account's profile as HOME (NetworkService for runner service)
+        $env:HOME = $env:USERPROFILE
+
+        # Ensure ~/.ssh exists
+        $sshDir = Join-Path $env:HOME ".ssh"
         New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
 
-        # Trust GitHub host keys (fixes "Host key verification failed")
-        ssh-keyscan -t rsa,ecdsa,ed25519 github.com | Out-File -FilePath "$sshDir\known_hosts" -Encoding ascii -Append
+        # 1) Trust GitHub host keys (rsa/ecdsa/ed25519) -> fixes "No ED25519 host key is known"
+        ssh-keyscan -t rsa,ecdsa,ed25519 github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii
 
-        # Use SSH for any github.com URL
+        # 2) Force SSH for ANY github.com URL flavors
         git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+        git config --global url."ssh://git@github.com/".insteadOf "https://github.com:443/"
+        git config --global url."ssh://git@github.com/".insteadOf "git@github.com:"
+        # use our known_hosts explicitly with strict checking
+        $khPath = (Join-Path $sshDir "known_hosts")
+        git config --global core.sshCommand "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$khPath"
 
-        # (Optional) be lenient on first connection
-        git config --global core.sshCommand "ssh -o StrictHostKeyChecking=yes"
-
-        # Tell Go these are private modules (no proxy/sumdb)
+        # 3) Tell Go these are private modules (use direct, no proxy/sumdb)
         go env -w GOPRIVATE=github.com/keploy/*
         go env -w GONOSUMDB=github.com/keploy/*
 
+        # 4) Clear Go's VCS cache so remotes are re-resolved (was cached as https)
+        $gomod = (& go env GOMODCACHE)
+        $vcsCache = Join-Path $gomod "cache\vcs"
+        if (Test-Path $vcsCache) {
+          Write-Host "Clearing Go VCS cache at $vcsCache ..."
+          Remove-Item -Recurse -Force $vcsCache
+        }
+
+        # 5) Now fetch and generate file
         Write-Host "Fetching private integrations dependency via SSH..."
         go get github.com/keploy/integrations
 
@@ -58,6 +72,7 @@ runs:
 
         Write-Host "Tidying up Go modules..."
         go mod tidy
+
 
     # ---------------- Linux/macOS ----------------
     - name: Configure Git/SSH and Fetch Integrations (Unix)
