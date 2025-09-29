@@ -562,6 +562,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
 		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
 		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
+		"--debug",
 	}
 
 	if opts.EnableTesting {
@@ -657,7 +658,7 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 	select {
 	case <-clientCtx.Done():
 		// Client context cancelled, stop the agent
-		a.logger.Info("Client context cancelled, stopping agent", zap.Error(clientCtx.Err()))
+		a.logger.Info("Client context cancelled, stopping agent")
 		a.stopAgent()
 	case <-agentCtx.Done():
 		// Agent context cancelled or agent stopped
