@@ -7,7 +7,8 @@
 #   FUZZER_CLIENT_BIN   -> path to downloaded client bin (env)
 #   FUZZER_SERVER_BIN   -> path to downloaded server bin (env)
 
-set -Eeuo pipefail
+# --- CHANGE 1: Added 'set -x' to print every command before it runs ---
+set -Eeuox pipefail
 
 MODE=${1:-incoming}
 
@@ -63,6 +64,7 @@ ensure_success_phrase() {
    fi
  done
  echo "‼️ Did not find success phrase: '$SUCCESS_PHRASE' in logs: $*"
+ # The original script already prints the logs on failure, which is good.
  for f in "$@"; do
    [ -f "$f" ] && { echo "--- $f ---"; tail -n +1 "$f"; echo "--------------"; }
  done
@@ -124,6 +126,12 @@ if [ "$MODE" = "incoming" ]; then
 
  # Replay
  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt
+
+ # --- CHANGE 2: Always display the replay log, even on success ---
+ echo "--- Contents of replay log (test_incoming.txt) ---"
+ cat test_incoming.txt
+ echo "----------------------------------------------------"
+
  echo "checking for errors"
  check_for_errors test_incoming.txt
 
@@ -203,8 +211,16 @@ elif [ "$MODE" = "outgoing" ]; then
  check_for_errors record_outgoing.txt
 
 
+ echo "🎬 Starting replay of the client..."
  # Replay the client (relying on mocks)
  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" &> test_outgoing.txt
+
+ # --- CHANGE 2 (repeated for outgoing mode): Always display the replay log ---
+ echo "--- Contents of replay log (test_outgoing.txt) ---"
+ cat test_outgoing.txt
+ echo "----------------------------------------------------"
+
+ echo "🕵️‍♀️ Checking for errors and success phrase in the log..."
  check_for_errors test_outgoing.txt
  ensure_success_phrase test_outgoing.txt
  echo "✅ Outgoing mode passed."
