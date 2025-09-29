@@ -2,11 +2,10 @@ name: Prepare Binary and Run Workflows (macOS)
 on:
   pull_request:
     branches: [main]
-  # push:
-  #   branches: [ main ]
 jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
     steps:
       - name: Clear docker images and cache
         run: |
@@ -73,6 +72,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
       - name: Build image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
