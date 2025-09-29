@@ -30,7 +30,7 @@ runs:
         go get github.com/keploy/integrations
         
         echo "Creating extraparsers.go..."
-        mkdir pkg/core/proxy
+        mkdir pkg/core/proxy -Force
         
         @'
         //go:build linux
