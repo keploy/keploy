@@ -7,13 +7,16 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, Windows, X64]
     steps:
-      - name: Clean up git config
+      - name: Clean up git config (ensure HTTPS for checkout)
         if: always()
         continue-on-error: true
         shell: powershell
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
-          
+          git config --global --unset-all url."git@github.com:".insteadof  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
+          git config --global --list
+
       - name: Configure Git EOL on Windows
         shell: powershell
         run: |

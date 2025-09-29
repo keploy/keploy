@@ -47,30 +47,58 @@ runs:
         echo "Tidying up Go modules..."
         go mod tidy    
 
-    - name: Configure Git, Fetch Dependencies, and Create Parsers File
+    # ---------------- Windows ----------------
+    - name: Configure Git/SSH and Fetch Integrations (Windows)
       if: runner.os == 'Windows'
-      shell: bash
+      shell: pwsh
       run: |
-        git config --global url."git@github.com:".insteadOf "https://github.com/"
-        
-        echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
-        
-        echo "Creating extraparsers.go..."
-        mkdir -p pkg/core/proxy
-        cat <<'EOF' > pkg/core/proxy/extraparsers.go
+        # HOME for the runner service account (NetworkService)
+        $env:HOME = $env:USERPROFILE
+
+        # Ensure ~/.ssh exists
+        $sshDir = Join-Path $env:HOME ".ssh"
+        New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+
+        # Trust GitHub host keys (fixes "No ED25519 host key is known")
+        ssh-keyscan -t rsa,ecdsa,ed25519 github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii
+
+        # Force SSH for any github.com URL (AFTER checkout)
+        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+        git config --global url."ssh://git@github.com/".insteadOf "https://github.com:443/"
+        git config --global url."ssh://git@github.com/".insteadOf "git@github.com:"
+
+        # Use our known_hosts with strict checking
+        $kh = (Join-Path $sshDir "known_hosts")
+        git config --global core.sshCommand "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$kh"
+
+        # Go private module settings
+        go env -w GOPRIVATE=github.com/keploy/*
+        go env -w GONOSUMDB=github.com/keploy/*
+
+        # Clear Go VCS cache so remotes re-resolve via SSH (in case https was cached)
+        $gomod = (& go env GOMODCACHE)
+        $vcs = Join-Path $gomod "cache\vcs"
+        if (Test-Path $vcs) { Remove-Item -Recurse -Force $vcs }
+
+        Write-Host "Fetching private integrations dependency via SSH..."
+        go get github.com/keploy/integrations
+
+        Write-Host "Creating extraparsers.go..."
+        New-Item -ItemType Directory -Force -Path pkg/core/proxy | Out-Null
+        @'
         //go:build linux
 
         package proxy
 
         import (
-        	_ "github.com/keploy/integrations/pkg/parsers"
+          _ "github.com/keploy/integrations/pkg/parsers"
         )
-        EOF
+        '@ | Set-Content pkg/core/proxy/extraparsers.go -NoNewline
+
 
     - name: Add any missing Go modules
       if: runner.os == 'Windows'
-      shell: bash
+      shell: pwsh
       run: |
         echo "Tidying up Go modules..."
         go mod tidy    
