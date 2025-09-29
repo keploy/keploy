@@ -72,7 +72,7 @@ runs:
 
     - name: Add any missing Go modules
       if: runner.os != 'Windows'
-      shell: basn
+      shell: bash
       run: |
         echo "Tidying up Go modules..."
         go mod tidy
