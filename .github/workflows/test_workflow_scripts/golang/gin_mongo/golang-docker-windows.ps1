@@ -9,7 +9,13 @@
 
 # --- Setup ---
 Write-Host "Starting setup..."
-docker network create keploy-network -ErrorAction SilentlyContinue
+# Ensure network exists
+docker network inspect keploy-network *> $null
+if ($LASTEXITCODE -ne 0) {
+    docker network create keploy-network | Out-Null
+}
+# Ensure mongoDb container name is free, then start
+docker rm -f mongoDb 2>$null | Out-Null
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
@@ -26,12 +32,15 @@ $configFile = ".\keploy.yml"
 # `Remove-Item` is the equivalent of `rm -rf`. -ErrorAction SilentlyContinue prevents errors if the folder doesn't exist.
 Remove-Item -Path "keploy" -Recurse -Force -ErrorAction SilentlyContinue
 
-docker logs mongoDb
+docker logs mongoDb 2>$null | Out-Null
 
 # --- Recording Phase ---
 Write-Host "Starting recording phase..."
+# Avoid buildx error: image already exists
+docker rmi -f gin-mongo:latest 2>$null | Out-Null
 docker build -t gin-mongo .
-docker rm -f ginApp -ErrorAction SilentlyContinue
+# Ensure previous app container is removed
+docker rm -f ginApp 2>$null | Out-Null
 
 # PowerShell function definitions
 function Stop-KeployProcess {
@@ -112,8 +121,8 @@ for ($i = 1; $i -le 2; $i++) {
 
 # --- Testing Phase ---
 Write-Host "Shutting down mongo before test mode..."
-docker stop mongoDb -ErrorAction SilentlyContinue
-docker rm mongoDb -ErrorAction SilentlyContinue
+docker stop mongoDb 2>$null | Out-Null
+docker rm mongoDb 2>$null | Out-Null
 Write-Host "MongoDB stopped. Keploy should now use mocks."
 
 $testContainer = "ginApp_test"
