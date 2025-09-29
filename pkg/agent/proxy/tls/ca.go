@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package tls provides functionality for handling tls connetions.
 package tls
 
