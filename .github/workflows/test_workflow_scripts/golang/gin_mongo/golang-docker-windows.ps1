@@ -147,7 +147,7 @@ foreach ($i in 0..1) {
     # Split the line 'status: PASSED' at the colon and take the second part, then trim whitespace.
     $testStatus = ($statusLine -split ':')[1].Trim()
 
-    Write-Host "Test status for test-set-$i: $testStatus"
+    Write-Host "Test status for test-set-${i}: $testStatus"
 
     if ($testStatus -ne "PASSED") {
         $all_passed = $false
