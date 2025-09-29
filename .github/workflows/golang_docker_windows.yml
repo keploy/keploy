@@ -88,10 +88,30 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.setup_record.outputs.bin_name }}
           REPLAY_BIN: ${{ steps.setup_replay.outputs.bin_name }}
+          SCRIPT_DIR: ${{ matrix.app.script_dir }}
         shell: pwsh
         run: |
-          cd samples-go/${{ matrix.app.path }}
-          & "$env:GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-windows.ps1"
+          # Build the script path robustly
+          $script = Join-Path $env:GITHUB_WORKSPACE ".github/workflows/test_workflow_scripts/golang/$env:SCRIPT_DIR/golang-docker-windows.ps1"
+
+          Write-Host "Looking for script at: $script"
+          if (!(Test-Path $script)) {
+            Write-Host "::error::Script not found at expected path."
+            Write-Host "Tree under .github/workflows/test_workflow_scripts:"
+            Get-ChildItem -Recurse -File (Join-Path $env:GITHUB_WORKSPACE ".github/workflows/test_workflow_scripts") | ForEach-Object { $_.FullName }
+            exit 1
+          }
+
+          # Ensure script can run
+          Unblock-File $script
+
+          # Move into the sample app directory so the script's relative paths (keploy.yml, etc.) are correct
+          Set-Location "samples-go/${{ matrix.app.path }}"
+
+          # Show where we are (useful for debugging)
+          Write-Host "PWD:" (Get-Location)
+          Write-Host "Running script..."
+          & $script
 
       - name: Clean up git config
         if: always()
