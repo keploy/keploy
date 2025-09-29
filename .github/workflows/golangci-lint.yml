@@ -53,6 +53,7 @@ jobs:
           fi
 
       - name: Check for Deprecated Dependencies
+        if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
         env:
           GOPRIVATE: github.com/keploy/*
         run: |
