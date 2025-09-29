@@ -26,10 +26,13 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
 
-      - name: Clear docker images and cache
-        run: |
-          docker builder prune --all -f
-          docker volume prune -f
+      - name: Prune Docker Builder Cache
+        run: docker builder prune --all -f
+        continue-on-error: true
+
+      - name: Prune Docker Volumes
+        run: docker volume prune -f
+        continue-on-error: true
 
       - name: Clean up git config
         if: always()
