@@ -10,12 +10,12 @@ jobs:
       - name: Clean up git config
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: powershell
         run: |
           git config --global --unset url."git@github.com:".insteadOf
           
       - name: Configure Git EOL on Windows
-        shell: pwsh
+        shell: powershell
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
@@ -37,7 +37,7 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
-        shell: pwsh
+        shell: powershell
         run: |
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
@@ -53,7 +53,7 @@ jobs:
       - name: Clean up git config
         if: always()
         continue-on-error: true
-        shell: pwsh
+        shell: powershell
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
@@ -61,7 +61,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Download latest release (Windows)
-        shell: pwsh
+        shell: powershell
         run: |
           # Get latest release tag
           $response = Invoke-RestMethod -Uri "https://api.github.com/repos/keploy/keploy/releases/latest"
@@ -101,13 +101,13 @@ jobs:
   #         ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
   #
   #     - name: Build Docker image
-  #       shell: pwsh
+  #       shell: powershell
   #       run: |
   #         # Windows Docker build commands would go here
   #         # This would need to be adapted for Windows containers
   #
   #     - name: Push image
-  #       shell: pwsh
+  #       shell: powershell
   #       run: |
   #         docker push ttl.sh/keploy/keploy:1h
 
