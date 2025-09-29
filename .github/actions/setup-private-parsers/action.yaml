@@ -19,17 +19,19 @@ runs:
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    - name: Configure Git, Fetch Dependencies, and Create Parsers File
-      shell: bash
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
-        
-        echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
-        
-        echo "Creating extraparsers.go..."
-        mkdir -p pkg/core/proxy
-        cat <<'EOF' > pkg/core/proxy/extraparsers.go
+        Write-Host "Fetching private integrations dependency via SSH..."
+        $env:GOPRIVATE = "github.com/keploy/integrations"
+        go env -w GOPRIVATE=$env:GOPRIVATE
+        go get github.com/keploy/integrations
+
+        Write-Host "Creating extraparsers.go..."
+        New-Item -ItemType Directory -Force -Path pkg/core/proxy | Out-Null
+        @'
         //go:build linux
 
         package proxy
@@ -37,9 +39,40 @@ runs:
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
-        EOF
-    - name: Add any missing Go modules
+        '@ | Set-Content pkg/core/proxy/extraparsers.go -NoNewline
+
+    - name: Tidy Go modules (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Write-Host "Tidying up Go modules..."
+        go mod tidy
+
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File (Unix)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
+        set -euo pipefail
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        echo "Fetching private integrations dependency via SSH..."
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
+
+        echo "Creating extraparsers.go..."
+        mkdir -p pkg/core/proxy
+        cat > pkg/core/proxy/extraparsers.go <<'EOF'
+        //go:build linux
+
+        package proxy
+
+        import (
+          _ "github.com/keploy/integrations/pkg/parsers"
+        )
+        EOF
+
+    - name: Tidy Go modules (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
         echo "Tidying up Go modules..."
-        go mod tidy    
+        go mod tidy
