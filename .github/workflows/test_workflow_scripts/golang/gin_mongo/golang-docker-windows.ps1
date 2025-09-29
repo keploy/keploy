@@ -94,44 +94,36 @@ for ($i = 1; $i -le 2; $i++) {
     $containerName = "ginApp_${i}"
     $logFile = "${containerName}.txt"
 
-    # --- START: MODIFICATION ---
-
-    # Define the script block to run Keploy in the background
-    $keployScriptBlock = {
-        param($RecordBin, $Cmd, $ContainerName, $LogFile)
-        
-        # Execute the keploy record command and redirect all its output to the log file.
-        # Using Out-File is often more robust for redirecting from long-running processes.
-        & $RecordBin record -c $Cmd --container-name $ContainerName *>&1 | Out-File -FilePath $LogFile
-    }
-
     # Define the command to run the application
     $appCommand = "docker run -p8080:8080 --net keploy-network --rm --name $containerName gin-mongo"
 
-    Write-Host "Starting Keploy record job for iteration ${i}..."
-    # Start the Keploy process as a background job
-    $keployJob = Start-Job -ScriptBlock $keployScriptBlock -ArgumentList $env:RECORD_BIN, $appCommand, $containerName, $logFile
-    
-    # Give Keploy a moment to start up before sending requests
-    Start-Sleep -Seconds 5
-
-    # --- END: MODIFICATION ---
+    Write-Host "Starting Keploy record for iteration ${i}... (logs will stream below)"
 
     # Start the request sending function in a background job (this part is correct)
     $requestJob = Start-Job -ScriptBlock ${function:Send-Requests}
 
     Write-Host "Waiting for request sender job to complete..."
-    # Wait for the background job to finish
+    # Start keploy record in the foreground so logs are visible; also write to file
+    $recordTask = Start-Job -ScriptBlock {
+        param($RecordBin, $Cmd, $ContainerName, $LogFile)
+        & $RecordBin record -c $Cmd --container-name $ContainerName *>&1 | Tee-Object -FilePath $LogFile
+    } -ArgumentList $env:RECORD_BIN, $appCommand, $containerName, $logFile
+
+    # Give Keploy a moment to spin up before sending requests
+    Start-Sleep -Seconds 5
+
+    # Wait for requests to complete
     Wait-Job $requestJob
-    Receive-Job $requestJob # Display any output from the job
+    Receive-Job $requestJob | Write-Host
     Remove-Job $requestJob
 
-    # Now that requests are sent, stop the Keploy process
+    # Stop Keploy after requests are sent so the record job exits
     Stop-KeployProcess
-    
-    # Wait for the Keploy job to finish after the process is killed
-    Wait-Job $keployJob
-    Remove-Job $keployJob
+
+    # Stream and finalize the record job output
+    Wait-Job $recordTask
+    Receive-Job $recordTask | Write-Host
+    Remove-Job $recordTask
 
 
     # Select-String is the PowerShell equivalent of grep.
