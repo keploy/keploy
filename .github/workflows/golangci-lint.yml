@@ -29,6 +29,7 @@ jobs:
           cache: false
 
       - name: Setup SSH for private modules
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
@@ -52,6 +53,7 @@ jobs:
           fi
 
       - name: Check for Deprecated Dependencies
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         env:
           GOPRIVATE: github.com/keploy/*
         run: |
