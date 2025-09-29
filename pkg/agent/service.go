@@ -1,5 +1,3 @@
-//go:build linux
-
 package agent
 
 import (
@@ -18,7 +16,6 @@ import (
 type Hooks interface {
 	// AppInfo
 	DestInfo
-	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error
@@ -90,11 +87,6 @@ type Tester interface {
 type TestBenchInfo interface {
 	// SendKeployPids(key models.ModeKey, pid uint32) error
 	// SendKeployPorts(key models.ModeKey, port uint32) error
-}
-
-// ----------------------
-
-type OutgoingInfo interface {
 }
 
 type NetworkAddress struct {

@@ -1,6 +1,6 @@
 //go:build linux
 
-package hooks
+package linux
 
 import (
 	"bytes"
@@ -46,27 +46,27 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 	}, nil
 }
 
-func (h *Hooks) DeleteClientInfo(id uint64) error {
-	h.m.Lock()
-	defer h.m.Unlock()
+func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
+	h.M.Lock()
+	defer h.M.Unlock()
 	fmt.Println("Deleting client info from ebpf program with clientId", id)
 	err := h.clientRegistrationMap.Delete(id)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
+		utils.LogError(h.Logger, err, "failed to send the app info to the ebpf program")
 		return err
 	}
-	h.logger.Info("successfully removed the client info from the ebpf program with clientId", zap.Any("clientId", id))
+	h.Logger.Info("successfully removed the client info from the ebpf program with clientId", zap.Any("clientId", id))
 	return nil
 }
 
-// SendProxyInfo sends the network information to the kernel
-func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
-	h.m.Lock()
-	defer h.m.Unlock()
+// SendClientProxyInfo sends the network information to the kernel
+func (h *Hooks) SendClientProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
+	h.M.Lock()
+	defer h.M.Unlock()
 	fmt.Println("Sending proxy info to ebpf program", proxInfo)
 	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the proxy info to the ebpf program")
+		utils.LogError(h.Logger, err, "failed to send the proxy info to the ebpf program")
 		return err
 	}
 	return nil
@@ -74,8 +74,8 @@ func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
 
 // GetDestinationInfo retrieves destination information associated with a source port.
 func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
-	h.m.Lock()
-	defer h.m.Unlock()
+	h.M.Lock()
+	defer h.M.Unlock()
 	destInfo := structs.DestInfo{}
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
 		return nil, err
@@ -88,22 +88,22 @@ func (h *Hooks) Delete(_ context.Context, srcPort uint16) error {
 }
 
 func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
-	h.m.Lock()
-	defer h.m.Unlock()
+	h.M.Lock()
+	defer h.M.Unlock()
 	err := h.redirectProxyMap.Delete(srcPort)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to remove entry from redirect proxy map")
+		utils.LogError(h.Logger, err, "failed to remove entry from redirect proxy map")
 		return err
 	}
-	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Uint16("(Key)/SourcePort", srcPort))
+	h.Logger.Debug("successfully removed entry from redirect proxy map", zap.Uint16("(Key)/SourcePort", srcPort))
 	return nil
 }
 
-func (h *Hooks) SendClientInfo(id uint64, clientInfo structs.ClientInfo) error {
+func (h *Hooks) SendKeployClientInfo(id uint64, clientInfo structs.ClientInfo) error {
 	fmt.Println("Sending client info to ebpf program", clientInfo)
 	err := h.clientRegistrationMap.Update(id, clientInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
+		utils.LogError(h.Logger, err, "failed to send the app info to the ebpf program")
 		return err
 	}
 	return nil
@@ -114,7 +114,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	fmt.Println("Sending agent info to ebpf program", agentInfo)
 	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
+		utils.LogError(h.Logger, err, "failed to send the agent info to the ebpf program")
 		return err
 	}
 	return nil
@@ -124,7 +124,7 @@ func (h *Hooks) SendE2EInfo(pid uint32) error {
 	key := 0
 	err := h.e2eAppRegistrationMap.Update(uint64(key), pid, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the E2E info to the ebpf program")
+		utils.LogError(h.Logger, err, "failed to send the E2E info to the ebpf program")
 		return err
 	}
 	return nil
@@ -142,9 +142,9 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 		defer rb.Close()
 		defer close(eventChan)
 		go func() {
-            <-ctx.Done()
-            rb.Close()
-        }()
+			<-ctx.Done()
+			rb.Close()
+		}()
 
 		for {
 			// Read raw data from the ring buffer
@@ -159,10 +159,10 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 
 			var e models.IngressEvent
 			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
-				utils.LogError(h.logger, err, "failed to decode ingress event")
+				utils.LogError(h.Logger, err, "failed to decode ingress event")
 				continue
 			}
-			h.logger.Debug("Intercepted application bind event")
+			h.Logger.Debug("Intercepted application bind event")
 			select {
 			case <-ctx.Done(): // Context was cancelled, so we shut down.
 				return

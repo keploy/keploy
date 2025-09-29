@@ -1,5 +1,3 @@
-//go:build linux
-
 package provider
 
 import (
@@ -59,7 +57,7 @@ func GetAgentService(_ context.Context, c *config.Config, client docker.Client, 
 	if c.ProxyPort != 0 {
 		c.Agent.ProxyPort = c.ProxyPort
 	}
-	h := hooks.NewHooks(logger, c)
+	h := hooks.New(logger, c)
 	p := proxy.New(logger, h, c)
 	ip := incoming.New(logger, h)
 

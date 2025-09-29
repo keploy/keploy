@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package proxy handles all the outgoing network calls and captures/forwards the request and response messages.
 // It also handles the DNS resolution mechanism.
 package proxy
@@ -72,9 +70,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort, // default: 16789
-		DNSPort:           opts.DNSPort, // default: 26789
-		IP4:               "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		DNSPort:           opts.DNSPort,   // default: 26789
+		IP4:               "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
+		IP6:               "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:           &sync.Mutex{},
 		connMutex:         &sync.Mutex{},
 		DestInfo:          info,
@@ -205,7 +203,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	if err := <-readyChan; err != nil {
 		return err
 	}
-
 
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
