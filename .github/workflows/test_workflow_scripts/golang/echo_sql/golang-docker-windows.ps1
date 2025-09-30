@@ -6,7 +6,23 @@
   - Standardizes flags to kebab-case
 #>
 
+
+
 $ErrorActionPreference = 'Stop'
+# Force a user home that Docker Desktop can share
+$env:USERPROFILE = 'C:\Users\offic'
+$env:HOMEDRIVE  = 'C:'
+$env:HOMEPATH   = '\Users\offic'
+$env:HOME       = $env:USERPROFILE
+
+# Ensure the mount sources exist and are writable
+$cfg = Join-Path $env:USERPROFILE '.keploy-config'
+$home= Join-Path $env:USERPROFILE '.keploy'
+New-Item -ItemType Directory -Force -Path $cfg,$home | Out-Null
+
+# Make sure the runner/Docker can write there (avoid ServiceProfiles ACLs)
+icacls $cfg  /grant "Users:(OI)(CI)(M)" /T | Out-Null
+icacls $home /grant "Users:(OI)(CI)(M)" /T | Out-Null
 
 # --- Resolve Keploy binaries (defaults for local dev) ---
 $defaultKeploy = 'C:\Users\offic\Downloads\keploy_win\keploy.exe'
@@ -101,7 +117,7 @@ for ($i = 1; $i -le 2; $i++) {
   & $env:RECORD_BIN record `
       -c 'docker compose up' `
       --container-name $containerName `
-      --generate-github-actions=false 2>&1 | Tee-Object -FilePath $logPath
+      --generate-github-actions=false --debug 2>&1 | Tee-Object -FilePath $logPath
 
   # Wait for traffic job to finish
   try {
