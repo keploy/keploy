@@ -84,20 +84,29 @@ jobs:
         shell: pwsh
         run: |
           $tar = Get-ChildItem .\record-image\*.tar | Select-Object -First 1
+          if (-not $tar) { throw "Record image tar not found." }
           docker load -i $tar.FullName | Write-Output
-          # Tag whatever was loaded to a stable name for the record phase
-          # Prefer ghcr.io/<repo>:pr-<sha> if present, else re-tag the latest
+
+          # Prefer PR-tagged image; else use the newest ghcr.io/keploy/keploy:* we just loaded
           $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
                     | Select-String "pr-" -SimpleMatch | Select-Object -First 1
           if ($cand) {
             docker tag $cand keploy:record
           } else {
-            # Grab the newest ghcr.io/keploy/keploy:* that just got loaded
             $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
                       | Select-Object -First 1)
-            if ($first) { docker tag $first keploy:record }
+            if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (record)." }
+            docker tag $first keploy:record
           }
+
+          # ALWAYS also tag the fallback that Keploy defaults to if env var is missed
+          docker tag keploy:record ghcr.io/keploy/keploy:v2-dev
+
+          # Sanity
+          docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:record ghcr.io/keploy/keploy:v2-dev"
+
           echo "image=keploy:record" >> $env:GITHUB_OUTPUT
+
 
       - name: Download Replay Docker image (${{ matrix.config.replay_src }})
         uses: actions/download-artifact@v4
@@ -110,7 +119,9 @@ jobs:
         shell: pwsh
         run: |
           $tar = Get-ChildItem .\replay-image\*.tar | Select-Object -First 1
+          if (-not $tar) { throw "Replay image tar not found." }
           docker load -i $tar.FullName | Write-Output
+
           $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
                     | Select-String "pr-" -SimpleMatch | Select-Object -First 1
           if ($cand) {
@@ -118,8 +129,15 @@ jobs:
           } else {
             $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
                       | Select-Object -First 1)
-            if ($first) { docker tag $first keploy:replay }
+            if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (replay)." }
+            docker tag $first keploy:replay
           }
+
+          # ALWAYS add the fallback tag too (belt-and-suspenders)
+          docker tag keploy:replay ghcr.io/keploy/keploy:v2-dev
+
+          docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:replay ghcr.io/keploy/keploy:v2-dev"
+
           echo "image=keploy:replay" >> $env:GITHUB_OUTPUT
 
       # Samples repo

@@ -116,6 +116,10 @@ for ($i = 1; $i -le 2; $i++) {
   }
 
   Write-Host "Starting keploy record (iteration $i)..."
+
+  $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD -and $env:DOCKER_IMAGE_RECORD -ne '') { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
+  Write-Host "Record phase image: $env:KEPLOY_DOCKER_IMAGE"
+
   & $env:RECORD_BIN record `
       -c 'docker compose up' `
       --container-name $containerName `
@@ -161,6 +165,8 @@ if ($env:DOCKER_IMAGE_REPLAY) {
 }
 
 Write-Host "Starting keploy test..."
+$env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_REPLAY -and $env:DOCKER_IMAGE_REPLAY -ne '') { $env:DOCKER_IMAGE_REPLAY } else { 'keploy:replay' }
+Write-Host "Replay phase image: $env:KEPLOY_DOCKER_IMAGE"
 & $env:REPLAY_BIN test `
     -c 'docker compose up' `
     --container-name $testContainer `
