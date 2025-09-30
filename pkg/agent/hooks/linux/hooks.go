@@ -541,7 +541,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 	}
 
 	//sending keploy pid to kernel to get filtered
-	inode, err := agent.GetSelfInodeNumber()
+	inode, err := GetSelfInodeNumber()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get inode of the keploy process")
 		return err
@@ -582,7 +582,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 	var agentInfo = structs.AgentInfo{}
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
-	agentInfo.KeployAgentInode, err = agent.GetSelfInodeNumber()
+	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get inode of the keploy process")
 		return err

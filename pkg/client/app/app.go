@@ -1,5 +1,3 @@
-//go:build !windows
-
 // Package app provides functionality for managing applications.
 package app
 
@@ -16,9 +14,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -329,119 +324,124 @@ func (a *App) injectNetwork(network string) error {
 	}
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
-func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 
-	if e.Action != "start" {
-		return false, nil
-	}
-	// Fetch container details by inspecting using container ID to check if container is created
-	info, err := a.docker.ContainerInspect(ctx, e.ID)
-	if err != nil {
-		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
-		return false, err
-	}
+// Commenting out for now as it might not be needed now after docker changes, will check this
 
-	// Check if the container's name matches the desired name
-	if info.Name != "/"+a.container {
-		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
-		return false, nil
-	}
+// func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 
-	// Set Docker Container ID
-	a.docker.SetContainerID(e.ID)
-	a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
-	if info.State.Pid == 0 {
-		return false, errors.New("failed to get the pid of the container")
-	}
-	a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
-	inode, err := getInode(info.State.Pid)
-	if err != nil {
-		return false, err
-	}
+// 	if e.Action != "start" {
+// 		return false, nil
+// 	}
+// 	// Fetch container details by inspecting using container ID to check if container is created
+// 	info, err := a.docker.ContainerInspect(ctx, e.ID)
+// 	if err != nil {
+// 		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
+// 		return false, err
+// 	}
 
-	a.inodeChan <- inode
-	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
-	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
-		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
-		return false, nil
-	}
+// 	// Check if the container's name matches the desired name
+// 	if info.Name != "/"+a.container {
+// 		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
+// 		return false, nil
+// 	}
 
-	n, ok := info.NetworkSettings.Networks[a.containerNetwork]
-	if !ok || n == nil {
-		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
-		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
-	}
-	a.SetContainerIPv4Addr(n.IPAddress)
-	return inode != 0 && n.IPAddress != "", nil
-}
+// 	// Set Docker Container ID
+// 	a.docker.SetContainerID(e.ID)
+// 	a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
+// 	if info.State.Pid == 0 {
+// 		return false, errors.New("failed to get the pid of the container")
+// 	}
+// 	a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
+// 	inode, err := getInode(info.State.Pid)
+// 	if err != nil {
+// 		return false, err
+// 	}
 
-func (a *App) getDockerMeta(ctx context.Context) <-chan error {
-	// listen for the docker daemon events
-	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
+// 	a.inodeChan <- inode
+// 	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
+// 	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
+// 		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
+// 		return false, nil
+// 	}
 
-	errCh := make(chan error, 1)
-	timer := time.NewTimer(time.Duration(a.containerDelay) * time.Second)
-	logTicker := time.NewTicker(1 * time.Second)
-	defer logTicker.Stop()
+// 	n, ok := info.NetworkSettings.Networks[a.containerNetwork]
+// 	if !ok || n == nil {
+// 		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
+// 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
+// 	}
+// 	a.SetContainerIPv4Addr(n.IPAddress)
+// 	return inode != 0 && n.IPAddress != "", nil
+// }
 
-	eventFilter := filters.NewArgs(
-		filters.KeyValuePair{Key: "type", Value: "container"},
-		filters.KeyValuePair{Key: "type", Value: "network"},
-		filters.KeyValuePair{Key: "action", Value: "create"},
-		filters.KeyValuePair{Key: "action", Value: "connect"},
-		filters.KeyValuePair{Key: "action", Value: "start"},
-	)
+// func (a *App) getDockerMeta(ctx context.Context) <-chan error {
+// 	// listen for the docker daemon events
+// 	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
 
-	messages, errCh2 := a.docker.Events(ctx, types.EventsOptions{
-		Filters: eventFilter,
-	})
+// 	errCh := make(chan error, 1)
+// 	timer := time.NewTimer(time.Duration(a.containerDelay) * time.Second)
+// 	logTicker := time.NewTicker(1 * time.Second)
+// 	defer logTicker.Stop()
 
-	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		errCh <- errors.New("failed to get the error group from the context")
-		return errCh
-	}
+// 	eventFilter := filters.NewArgs(
+// 		filters.KeyValuePair{Key: "type", Value: "container"},
+// 		filters.KeyValuePair{Key: "type", Value: "network"},
+// 		filters.KeyValuePair{Key: "action", Value: "create"},
+// 		filters.KeyValuePair{Key: "action", Value: "connect"},
+// 		filters.KeyValuePair{Key: "action", Value: "start"},
+// 	)
 
-	g.Go(func() error {
-		defer utils.Recover(a.logger)
-		// closing the channels in any case when returning.
-		defer func() {
-			a.logger.Debug("closing err, containerIPv4 and inode channels ")
-			close(errCh)
-			close(a.containerIPv4)
-			close(a.inodeChan)
-		}()
-		for {
-			select {
-			case <-timer.C:
-				errCh <- errors.New("timeout waiting for the container to start")
-				return nil
-			case <-ctx.Done():
-				a.logger.Debug("context cancelled, stopping the listener for container creation event.")
-				errCh <- ctx.Err()
-				return nil
-			case e := <-messages:
-				done, err := a.extractMeta(ctx, e)
-				if err != nil {
-					errCh <- err
-					return nil
-				}
+// 	messages, errCh2 := a.docker.Events(ctx, types.EventsOptions{
+// 		Filters: eventFilter,
+// 	})
 
-				if done {
-					return nil
-				}
-			// for debugging purposes
-			case <-logTicker.C:
-				a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
-				return nil
-			case err := <-errCh2:
-				errCh <- err
-				return nil
-			}
-		}
-	})
-	return errCh
-}
+// 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+// 	if !ok {
+// 		errCh <- errors.New("failed to get the error group from the context")
+// 		return errCh
+// 	}
+
+// 	g.Go(func() error {
+// 		defer utils.Recover(a.logger)
+// 		// closing the channels in any case when returning.
+// 		defer func() {
+// 			a.logger.Debug("closing err, containerIPv4 and inode channels ")
+// 			close(errCh)
+// 			close(a.containerIPv4)
+// 			close(a.inodeChan)
+// 		}()
+// 		for {
+// 			select {
+// 			case <-timer.C:
+// 				errCh <- errors.New("timeout waiting for the container to start")
+// 				return nil
+// 			case <-ctx.Done():
+// 				a.logger.Debug("context cancelled, stopping the listener for container creation event.")
+// 				errCh <- ctx.Err()
+// 				return nil
+// 			case e := <-messages:
+// 				done, err := a.extractMeta(ctx, e)
+// 				if err != nil {
+// 					errCh <- err
+// 					return nil
+// 				}
+
+// 				if done {
+// 					return nil
+// 				}
+// 			// for debugging purposes
+// 			case <-logTicker.C:
+// 				a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
+// 				return nil
+// 			case err := <-errCh2:
+// 				errCh <- err
+// 				return nil
+// 			}
+// 		}
+// 	})
+// 	return errCh
+// }
+
+// Have commented out the code to extract docker meta data as it might not be needed now after docker changes, will check this
 
 func (a *App) runDocker(ctx context.Context) models.AppError {
 	// if a.cmd is empty, it means the user wants to run the application manually,
@@ -453,10 +453,10 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-	dockerMetaCtx, cancel := context.WithCancel(ctx)
+	// dockerMetaCtx, cancel := context.WithCancel(ctx)
 
 	defer func() {
-		cancel()
+		// cancel()
 		err := g.Wait()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to run dockerized app")
@@ -466,7 +466,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	errCh := make(chan error, 1)
 
 	// listen for the "create container" event in order to send the inode of the container to the kernel
-	errCh2 := a.getDockerMeta(dockerMetaCtx)
+	// errCh2 := a.getDockerMeta(dockerMetaCtx)
 
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
@@ -485,11 +485,11 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
-	case err := <-errCh2:
-		if err != nil && errors.Is(err, context.Canceled) {
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
-		}
-		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
+	// case err := <-errCh2:
+	// 	if err != nil && errors.Is(err, context.Canceled) {
+	// 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
+	// 	}
+	// 	return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	}

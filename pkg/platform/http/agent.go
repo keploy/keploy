@@ -1,5 +1,3 @@
-//go:build !windows
-
 // Package http contains the client side code to communicate with the agent server
 package http
 
@@ -23,11 +21,11 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/agent/hooks"
 	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
+	agentUtils "go.keploy.io/server/v2/pkg/platform/http/utils"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -510,7 +508,6 @@ func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerC
 
 // startNativeAgent starts the keploy agent as a native process
 func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opts models.SetupOptions) error {
-
 	// Find an available port for the agent
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
@@ -556,28 +553,23 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		return err
 	}
 
-	// Build command WITHOUT CommandContext: we'll handle ctx cancellation ourselves.
+	// Build args (binary is passed separately to utils)
 	args := []string{
-		keployBin, "agent",
+		"agent",
 		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
 		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
 		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
 		"--debug",
 	}
-
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")
 	}
-
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
 
-	cmd := exec.Command("sudo", args...)
-
-	// New process group so we can signal sudo + keploy children together via -pgid.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
+	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
+	cmd := agentUtils.NewAgentCommand(keployBin, args)
 	// Redirect output to log
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -585,16 +577,15 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	// Keep a reference for other methods
 	a.agentCmd = cmd
 
-	if err := cmd.Start(); err != nil {
+	// Start (OS-specific tweaks happen inside utils.StartCommand)
+	if err := agentUtils.StartCommand(cmd); err != nil {
 		_ = logFile.Close()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
 	}
 
 	pid := cmd.Process.Pid
-	// In Linux, pgid == leader's pid when Setpgid:true at start.
-	pgid := pid
-	a.logger.Info("keploy agent started", zap.Int("pid", pid), zap.Int("pgid", pgid))
+	a.logger.Info("keploy agent started", zap.Int("pid", pid))
 
 	// 1) Reaper: wait for process exit and close the log
 	grp.Go(func() error {
@@ -602,7 +593,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		defer logFile.Close()
 
 		err := cmd.Wait()
-		// If ctx was cancelled, treat agent exit as expected.
+		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
 			a.logger.Error("agent process exited with error", zap.Error(err))
 			return err
@@ -611,23 +602,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		return nil
 	})
 
-	// 2) Cancellation watcher: on ctx cancel, signal the WHOLE GROUP (sudo + keploy)
+	// 2) Cancellation watcher: on ctx cancel, terminate the agent (and children, per-OS)
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-
-		// Graceful: SIGTERM the group
-		err = syscall.Kill(-pgid, syscall.SIGTERM)
-		if err != nil {
-			a.logger.Error("failed to send SIGTERM to agent process group", zap.Error(err))
-			// If we failed to send SIGTERM, force kill the group
-			if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-				utils.LogError(a.logger, err, "failed to force-kill keploy agent process group")
-			} else {
-				a.logger.Info("keploy agent process group killed")
-			}
+		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
+			utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
 		}
-
 		return nil
 	})
 
@@ -784,13 +765,16 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	// keploy agent would have already runnning,
 	var inode uint64
 	var err error
-	if runtime.GOOS == "linux" {
-		// send the network info to the kernel
-		inode, err = hooks.GetSelfInodeNumber()
-		if err != nil {
-			a.logger.Error("failed to get inode number")
-		}
-	}
+
+	// This is commented out becuase now we do not require the inode at the client side
+
+	// if runtime.GOOS == "linux" {
+	// 	// send the network info to the kernel
+	// 	inode, err = linuxHooks.GetSelfInodeNumber()
+	// 	if err != nil {
+	// 		a.logger.Error("failed to get inode number")
+	// 	}
+	// }
 
 	// Register the client with the server
 	requestBody := models.RegisterReq{

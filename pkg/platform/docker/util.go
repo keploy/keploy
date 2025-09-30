@@ -1,5 +1,3 @@
-//go:build !windows
-
 package docker
 
 import (
@@ -114,32 +112,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		return err
 	}
 
-	var cmd *exec.Cmd
-
-	//nolint:staticcheck // runtime.GOOS lint suppression
-	if runtime.GOOS == "windows" {
-		var args []string
-		args = append(args, "/C")
-		args = append(args, strings.Split(keployAlias, " ")...)
-		args = append(args, os.Args[1:]...)
-		// Use cmd.exe /C for Windows
-		cmd = exec.CommandContext(
-			ctx,
-			"cmd.exe",
-			args...,
-		)
-	} else {
-		// Use sh -c for Unix-like systems
-		cmd = exec.CommandContext(
-			ctx,
-			"sh",
-			"-c",
-			keployAlias,
-		)
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true,
-		}
-	}
+	cmd := PrepareDockerCommand(ctx, keployAlias)
 
 	cmd.Cancel = func() error {
 		err := utils.SendSignal(logger, -cmd.Process.Pid, syscall.SIGINT)
@@ -312,39 +285,4 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 	networkName := networkNameMatches[2]
 
 	return containerName, networkName, nil
-}
-
-// ExtractInodeByPid extracts the inode of the PID namespace of a given PID
-func ExtractInodeByPid(pid int) (string, error) {
-	// Check the OS
-	if runtime.GOOS != "linux" {
-		// Execute command in the container to get the PID namespace
-		output, err := exec.Command("docker", "exec", "keploy-init", "stat", "/proc/1/ns/pid").Output()
-		if err != nil {
-			return "", err
-		}
-		outputStr := string(output)
-
-		// Use a regular expression to extract the inode from the output
-		re := regexp.MustCompile(`pid:\[(\d+)\]`)
-		match := re.FindStringSubmatch(outputStr)
-
-		if len(match) < 2 {
-			return "", fmt.Errorf("failed to extract PID namespace inode")
-		}
-
-		pidNamespace := match[1]
-		return pidNamespace, nil
-	}
-
-	// Check the namespace file in /proc
-	nsPath := fmt.Sprintf("/proc/%d/ns/pid", pid)
-	fileInfo, err := os.Stat(nsPath)
-	if err != nil {
-		return "", err
-	}
-
-	// Retrieve inode number
-	inode := fileInfo.Sys().(*syscall.Stat_t).Ino
-	return fmt.Sprintf("%d", inode), nil
 }
