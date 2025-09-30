@@ -9,9 +9,9 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - name: gin-mongo
-            path: gin-mongo
-            script_dir: gin_mongo
+          - name: echo-sql
+            path: echo-sql
+            script_dir: echo_sql
         config:
           - job: record_build_replay_build
             record_src: build
