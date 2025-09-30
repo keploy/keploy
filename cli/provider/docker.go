@@ -87,6 +87,45 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 	return nil
 }
 
+// quoteAppCmdArgsWindows takes args (excluding argv[0]) and ensures that the
+// application command after "-c" is merged and quoted (e.g. -c "docker compose up").
+func quoteAppCmdArgsWindows(args []string, logger *zap.Logger) []string {
+	idx := -1
+	for i, a := range args {
+		if a == "-c" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx+1 >= len(args) {
+		logger.Debug("no -c or nothing after -c", zap.String("args", strings.Join(args, " ")))
+		return args // no -c or nothing after -c
+	}
+
+	// Collect app command tokens after -c until the next flag (starting with '-')
+	j := idx + 1
+	var app []string
+	for ; j < len(args); j++ {
+		if strings.HasPrefix(args[j], "-") {
+			break
+		}
+		app = append(app, args[j])
+	}
+	if len(app) == 0 {
+		return args // nothing to quote
+	}
+	logger.Debug("app in quoteAppCmdArgsWindows", zap.String("app", strings.Join(app, " ")))
+
+	quoted := strconv.Quote(strings.Join(app, " "))
+
+	// Rebuild: everything before -c, then -c "joined app", then the remaining flags
+	out := make([]string, 0, len(args)-(len(app)-1))
+	out = append(out, args[:idx]...)
+	out = append(out, "-c", quoted)
+	out = append(out, args[j:]...)
+	return out
+}
+
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	client, err := docker.New(logger)
 	if err != nil {
@@ -139,13 +178,11 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		args = append(args, "/C")
 		args = append(args, strings.Split(keployAlias, " ")...)
 
-		// Quote the application command (after -c) if present
-		if len(os.Args) > 2 && os.Args[1] == "-c" {
-			quotedAppCmd := strconv.Quote(strings.Join(os.Args[2:], " "))
-			args = append(args, "-c", quotedAppCmd)
-		} else {
-			args = append(args, os.Args[1:]...)
-		}
+		// Ensure -c value is quoted on Windows
+		winArgs := quoteAppCmdArgsWindows(os.Args[1:])
+		logger.Debug("winArgs", zap.String("winArgs", strings.Join(winArgs, " ")))
+		args = append(args, winArgs...)
+		logger.Debug("args", zap.String("args", strings.Join(args, " ")))
 
 		cmd = exec.CommandContext(ctx, "cmd.exe", args...)
 	} else {
