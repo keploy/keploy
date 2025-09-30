@@ -274,11 +274,11 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 		m.logger.Info("uploading mock file...", zap.String("testSet", testSetID))
 
-		// err = m.storage.Upload(ctx, mockFileReader, mockHash, m.cfg.AppName, m.token)
-		// if err != nil {
-		// 	m.logger.Error("Failed to upload mock file", zap.Error(err))
-		// 	return err
-		// }
+		err = m.storage.Upload(ctx, mockFileReader, mockHash, m.cfg.AppName, m.token)
+		if err != nil {
+			m.logger.Error("Failed to upload mock file", zap.Error(err))
+			return err
+		}
 
 		err = m.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
@@ -386,7 +386,11 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 
 	// 5. Handle the response
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			m.logger.Error("Failed to read error response body from config push", zap.Error(err))
+			return err
+		}
 		m.logger.Error("API server returned an error for config push",
 			zap.Int("statusCode", resp.StatusCode),
 			zap.String("response", string(respBody)))
