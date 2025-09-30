@@ -9,25 +9,27 @@
 
 
 $ErrorActionPreference = 'Stop'
-# Force a user home that Docker Desktop can share
-$env:USERPROFILE = 'C:\Users\offic'
-$env:HOMEDRIVE  = 'C:'
-$env:HOMEPATH   = '\Users\offic'
-$env:HOME       = $env:USERPROFILE
-
-# Ensure the mount sources exist and are writable
-$cfg = Join-Path $env:USERPROFILE '.keploy-config'
-$home= Join-Path $env:USERPROFILE '.keploy'
-New-Item -ItemType Directory -Force -Path $cfg,$home | Out-Null
-
-# Make sure the runner/Docker can write there (avoid ServiceProfiles ACLs)
-icacls $cfg  /grant "Users:(OI)(CI)(M)" /T | Out-Null
-icacls $home /grant "Users:(OI)(CI)(M)" /T | Out-Null
 
 # --- Resolve Keploy binaries (defaults for local dev) ---
 $defaultKeploy = 'C:\Users\offic\Downloads\keploy_win\keploy.exe'
 if (-not $env:RECORD_BIN) { $env:RECORD_BIN = $defaultKeploy }
 if (-not $env:REPLAY_BIN) { $env:REPLAY_BIN = $defaultKeploy }
+
+# Ensure USERPROFILE is set (needed for docker volume mounts inside keploy)
+if (-not $env:USERPROFILE -or $env:USERPROFILE -eq '') {
+  $candidate = "$env:HOMEDRIVE$env:HOMEPATH"
+  if ($candidate -and $candidate -ne '') { $env:USERPROFILE = $candidate }
+}
+
+# Create keploy config/data dirs so docker doesn't fall back to NetworkService profile
+try {
+  if ($env:USERPROFILE -and $env:USERPROFILE -ne '') {
+    $keployCfg = Join-Path $env:USERPROFILE ".keploy-config"
+    $keployHome = Join-Path $env:USERPROFILE ".keploy"
+    New-Item -ItemType Directory -Path $keployCfg -Force -ErrorAction SilentlyContinue | Out-Null
+    New-Item -ItemType Directory -Path $keployHome -Force -ErrorAction SilentlyContinue | Out-Null
+  }
+} catch {}
 
 # Optionally parameterize app URLs (kept your current defaults)
 $env:APP_HEALTH_URL    = $env:APP_HEALTH_URL    ?? 'http://localhost:8082/health'

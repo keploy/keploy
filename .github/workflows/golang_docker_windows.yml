@@ -129,6 +129,11 @@ jobs:
           repository: keploy/samples-go
           path: samples-go
 
+      - name: Docker works?
+        run: |
+          docker version
+          docker run --rm hello-world
+
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
