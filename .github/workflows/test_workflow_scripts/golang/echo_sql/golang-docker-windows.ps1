@@ -120,7 +120,14 @@ for ($i = 1; $i -le 2; $i++) {
   $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD -and $env:DOCKER_IMAGE_RECORD -ne '') { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
   Write-Host "Record phase image: $env:KEPLOY_DOCKER_IMAGE"
 
-  & $env:RECORD_BIN record -c 'docker compose up' --container-name $containerName --generate-github-actions=false --debug 2>&1 | Tee-Object -FilePath $logPath
+  $recArgs = @(
+    'record',
+    '-c', 'docker compose up',
+    '--container-name', $containerName,
+    '--generate-github-actions=false',
+    '--debug'
+  )
+  & $env:RECORD_BIN @recArgs 2>&1 | Tee-Object -FilePath $logPath
 
   # Wait for traffic job to finish
   try {
@@ -164,7 +171,15 @@ if ($env:DOCKER_IMAGE_REPLAY) {
 Write-Host "Starting keploy test..."
 $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_REPLAY -and $env:DOCKER_IMAGE_REPLAY -ne '') { $env:DOCKER_IMAGE_REPLAY } else { 'keploy:replay' }
 Write-Host "Replay phase image: $env:KEPLOY_DOCKER_IMAGE"
-& $env:REPLAY_BIN test -c 'docker compose up' --container-name $testContainer --api-timeout 60 --delay 20 --generate-github-actions=false 2>&1 | Tee-Object -FilePath $testLog
+$testArgs = @(
+  'test',
+  '-c', 'docker compose up',
+  '--container-name', $testContainer,
+  '--api-timeout', '60',
+  '--delay', '20',
+  '--generate-github-actions=false'
+)
+& $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
 
 # Check test log
 if (Select-String -Path $testLog -Pattern 'ERROR' -SimpleMatch) {
