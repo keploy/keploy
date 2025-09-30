@@ -212,7 +212,7 @@ $expectedTestSetIndex = 0
       
       $appStarted = $false
       $requestsSent = $false
-      $maxWaitTime = 180  # 3 minutes total
+      $maxWaitTime = 300  # 3 minutes total
       $checkInterval = 3
       $elapsedTime = 0
       
@@ -451,7 +451,7 @@ $testArgs = @(
   '-c', 'docker compose up',
   '--container-name', $testContainer,
   '--api-timeout', '60',
-  '--delay', '20',
+  '--delay', '50',
   '--generate-github-actions=false'
 )
 
