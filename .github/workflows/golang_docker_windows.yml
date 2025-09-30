@@ -152,6 +152,27 @@ jobs:
           docker version
           docker run --rm hello-world
 
+
+      - name: Pre-clean Keploy containers/volumes
+        shell: pwsh
+        run: |
+          Write-Host "Killing any lingering Keploy containers..."
+          $names = @('keploy-v2','echoApp','ginMongoApp','grpcApp')  # add any other names your samples use
+          foreach ($n in $names) {
+            $id = (docker ps -a --filter "name=^/${n}$" --format "{{.ID}}")
+            if ($id) {
+              Write-Host "Removing container $n ($id)"
+              docker rm -f $id | Out-Null
+            }
+          }
+
+          # Extra defensive sweep for any container started from the keploy agent image
+          $keployIds = docker ps -a --filter "ancestor=ghcr.io/keploy/keploy" --format "{{.ID}}"
+          foreach ($id in $keployIds) { docker rm -f $id | Out-Null }
+
+          # Remove the named volume Keploy uses for debugfs (created in your logs)
+          docker volume rm -f debugfs 2>$null | Out-Null
+
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
