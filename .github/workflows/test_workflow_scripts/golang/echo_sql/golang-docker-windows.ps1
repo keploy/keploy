@@ -1,8 +1,8 @@
 <# 
   PowerShell test runner for Keploy (Windows).
   - Uses a simplified, more reliable recording loop.
-  - Controls the keploy process directly instead of using a complex background job.
-  - Corrected syntax for calling .NET static methods.
+  - Controls the keploy process directly using the .NET Process class for robust stream handling.
+  - Corrected async logging to use .NET methods to avoid Runspace errors.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -29,8 +29,7 @@ try {
 } catch {}
 
 # Optionally parameterize app URLs
-# FIX: Changed health URL to a path that will respond (even with a 404) instead of a non-existent endpoint.
-$env:APP_HEALTH_URL    = if ($env:APP_HEALTH_URL) { $env:APP_HEALTH_URL } else { 'http://localhost:8082/' }
+$env:APP_HEALTH_URL    = if ($env:APP_HEALTH_URL) { $env:APP_HEALTH_URL } else { 'http://localhost:8082/health' }
 $env:APP_POST_URL      = if ($env:APP_POST_URL) { $env:APP_POST_URL } else { 'http://localhost:8082/url' }
 
 Write-Host "Using RECORD_BIN = $env:RECORD_BIN"
@@ -73,19 +72,53 @@ for ($i = 1; $i -le 2; $i++) {
   
   $recArgs = @(
     'record',
-    '-c', '"docker compose up"',
+    '-c', '"docker compose up"', # Important: Quote the command for Start-Process
     '--container-name', $containerName,
     '--generate-github-actions=false'
   )
 
   $keployProcess = $null
   try {
-    # FIX #2: Use Start-Process for robust background execution and logging.
-    # This avoids the ".NET Task Runspace" error entirely.
-    Write-Host "Starting Keploy record process... Logs will be written to $logPath"
-    $keployProcess = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $recArgs -NoNewWindow -PassThru -RedirectStandardOutput $logPath -RedirectStandardError $logPath
-    Write-Host "Keploy started with PID $($keployProcess.Id)."
+    # 1. Start Keploy as a background process that we can control
+    Write-Host "Starting Keploy record process..."
+    
+    # <# --- FIX --- #>
+    # Use the .NET Process class to start the application. This is more robust than Start-Process
+    # because it allows us to redirect both StandardOutput and StandardError streams to be read
+    # by our script, which we then write to a single log file. Start-Process does not allow
+    # redirecting both streams to the same file.
+    $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processStartInfo.FileName = $env:RECORD_BIN
+    $processStartInfo.Arguments = $recArgs -join ' '
+    $processStartInfo.RedirectStandardOutput = $true
+    $processStartInfo.RedirectStandardError = $true
+    $processStartInfo.UseShellExecute = $false
+    
+    $keployProcess = [System.Diagnostics.Process]::Start($processStartInfo)
+    $outputReader = $keployProcess.StandardOutput
+    $errorReader = $keployProcess.StandardError
+    # <# --- END FIX --- #>
+    
+    # Create/clear log file before starting async writers
+    Set-Content -Path $logPath -Value ""
+    
+    # Start asynchronous reading of the output streams using .NET methods to avoid Runspace errors
+    $outputTask = [System.Threading.Tasks.Task]::Run([Action]{ 
+        while (-not $outputReader.EndOfStream) { 
+            $line = $outputReader.ReadLine()
+            [System.IO.File]::AppendAllText($logPath, "$line`r`n")
+        }
+    })
+    
+    $errorTask = [System.Threading.Tasks.Task]::Run([Action]{ 
+        while (-not $errorReader.EndOfStream) { 
+            $line = $errorReader.ReadLine()
+            [System.IO.File]::AppendAllText($logPath, "$line`r`n")
+        }
+    })
 
+    Write-Host "Keploy started with PID $($keployProcess.Id). Logs will be written to $logPath"
+    
     # 2. Wait for the application to become healthy
     Write-Host "Waiting for application to become healthy at $env:APP_HEALTH_URL..."
     $maxWaitSeconds = 90
@@ -93,25 +126,16 @@ for ($i = 1; $i -le 2; $i++) {
     $appIsHealthy = $false
     while ($stopwatch.Elapsed.TotalSeconds -lt $maxWaitSeconds) {
         try {
-            # FIX #1: Check for any response, even an error code like 404.
-            # A response proves the server is up. Invoke-WebRequest throws an error on non-200 codes.
-            # We catch it and treat it as a success signal for the health check.
-            Invoke-WebRequest -Uri $env:APP_HEALTH_URL -UseBasicParsing -TimeoutSec 5
-            # If we get here, it means a 200 OK was received (unlikely but possible)
-            Write-Host "Application is healthy (received 200 OK)!"
-            $appIsHealthy = $true
-            break
-        } catch [Microsoft.PowerShell.Commands.HttpResponseException] {
-            # This is the expected case: the server responded with an error (e.g., 404).
-            # This confirms the server is running.
-            Write-Host "Application is healthy (received HTTP response)!"
-            $appIsHealthy = $true
-            break
+            $response = Invoke-WebRequest -Uri $env:APP_HEALTH_URL -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            if ($response.StatusCode -eq 200) {
+                Write-Host "Application is healthy!"
+                $appIsHealthy = $true
+                break
+            }
         } catch {
-            # This catch block will handle connection errors (server not up yet).
             Write-Host "App not ready, waiting..."
-            Start-Sleep -Seconds 5
         }
+        Start-Sleep -Seconds 5
     }
 
     if (-not $appIsHealthy) {
@@ -137,15 +161,20 @@ for ($i = 1; $i -le 2; $i++) {
     Start-Sleep -Seconds 10
 
   } finally {
-    # 5. Stop the Keploy process
+    # 5. Stop the Keploy process (this will run even if the 'try' block fails)
     if ($null -ne $keployProcess -and -not $keployProcess.HasExited) {
         Write-Host "Stopping Keploy process (PID: $($keployProcess.Id))..."
-        Stop-Process -Id $keployProcess.Id -Force # Use idiomatic Stop-Process
+        $keployProcess.Kill() # Use Kill() for forceful termination
+        $keployProcess.WaitForExit(5000) # Wait up to 5 seconds for it to exit
         Write-Host "Keploy process stopped."
     } else {
         Write-Host "Keploy process already exited or was not started."
     }
-    # The complex Task.WaitAll is no longer needed.
+    
+    # Wait for the async log readers to finish
+    Write-Host "Waiting for log writers to finish..."
+    [System.Threading.Tasks.Task]::WaitAll($outputTask, $errorTask)
+    Write-Host "Log writers finished."
   }
 
   # --- Verification ---
