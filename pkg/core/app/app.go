@@ -162,16 +162,16 @@ func (a *App) SetupCompose() error {
 	composeChanged := false
 
 	// hook: allow compose mutation before further processing
-	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
-		if err != nil {
-			utils.LogError(a.logger, err, "hook failed during compose mutation")
-			return err
-		}
-		if changed {
-			composeChanged = true
-		}
-	}
+	// if HookImpl != nil {
+	// 	changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, err, "hook failed during compose mutation")
+	// 		return err
+	// 	}
+	// 	if changed {
+	// 		composeChanged = true
+	// 	}
+	// }
 
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)
