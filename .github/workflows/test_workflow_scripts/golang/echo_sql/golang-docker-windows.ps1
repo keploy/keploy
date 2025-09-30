@@ -29,7 +29,8 @@ try {
 } catch {}
 
 # Optionally parameterize app URLs
-$env:APP_HEALTH_URL    = if ($env:APP_HEALTH_URL) { $env:APP_HEALTH_URL } else { 'http://localhost:8082/health' }
+# FIX: Changed health URL to a path that will respond (even with a 404) instead of a non-existent endpoint.
+$env:APP_HEALTH_URL    = if ($env:APP_HEALTH_URL) { $env:APP_HEALTH_URL } else { 'http://localhost:8082/' }
 $env:APP_POST_URL      = if ($env:APP_POST_URL) { $env:APP_POST_URL } else { 'http://localhost:8082/url' }
 
 Write-Host "Using RECORD_BIN = $env:RECORD_BIN"
@@ -72,45 +73,19 @@ for ($i = 1; $i -le 2; $i++) {
   
   $recArgs = @(
     'record',
-    '-c', '"docker compose up"', # Important: Quote the command for Start-Process
+    '-c', '"docker compose up"',
     '--container-name', $containerName,
     '--generate-github-actions=false'
   )
 
   $keployProcess = $null
   try {
-    # 1. Start Keploy as a background process that we can control
-    Write-Host "Starting Keploy record process..."
-    # We redirect output to a file to capture logs without blocking
-    $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $processStartInfo.FileName = $env:RECORD_BIN
-    $processStartInfo.Arguments = $recArgs -join ' '
-    $processStartInfo.RedirectStandardOutput = $true
-    $processStartInfo.RedirectStandardError = $true
-    $processStartInfo.UseShellExecute = $false
-    
-    $keployProcess = [System.Diagnostics.Process]::Start($processStartInfo)
-    $outputReader = $keployProcess.StandardOutput
-    $errorReader = $keployProcess.StandardError
-    
-    # Start asynchronous reading of the output streams
-    $outputTask = [System.IO.File]::WriteAllTextAsync($logPath, "") # Create/clear log file
-    
-    # CORRECTED SYNTAX: [System.Threading.Tasks.Task]::Run(...)
-    $outputTask = [System.Threading.Tasks.Task]::Run([Action]{ 
-        while (-not $outputReader.EndOfStream) { 
-            Add-Content -Path $logPath -Value $outputReader.ReadLine()
-        }
-    })
-    # CORRECTED SYNTAX: [System.Threading.Tasks.Task]::Run(...)
-    $errorTask = [System.Threading.Tasks.Task]::Run([Action]{ 
-        while (-not $errorReader.EndOfStream) { 
-            Add-Content -Path $logPath -Value $errorReader.ReadLine() 
-        }
-    })
+    # FIX #2: Use Start-Process for robust background execution and logging.
+    # This avoids the ".NET Task Runspace" error entirely.
+    Write-Host "Starting Keploy record process... Logs will be written to $logPath"
+    $keployProcess = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $recArgs -NoNewWindow -PassThru -RedirectStandardOutput $logPath -RedirectStandardError $logPath
+    Write-Host "Keploy started with PID $($keployProcess.Id)."
 
-    Write-Host "Keploy started with PID $($keployProcess.Id). Logs will be written to $logPath"
-    
     # 2. Wait for the application to become healthy
     Write-Host "Waiting for application to become healthy at $env:APP_HEALTH_URL..."
     $maxWaitSeconds = 90
@@ -118,16 +93,25 @@ for ($i = 1; $i -le 2; $i++) {
     $appIsHealthy = $false
     while ($stopwatch.Elapsed.TotalSeconds -lt $maxWaitSeconds) {
         try {
-            $response = Invoke-WebRequest -Uri $env:APP_HEALTH_URL -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-            if ($response.StatusCode -eq 200) {
-                Write-Host "Application is healthy!"
-                $appIsHealthy = $true
-                break
-            }
+            # FIX #1: Check for any response, even an error code like 404.
+            # A response proves the server is up. Invoke-WebRequest throws an error on non-200 codes.
+            # We catch it and treat it as a success signal for the health check.
+            Invoke-WebRequest -Uri $env:APP_HEALTH_URL -UseBasicParsing -TimeoutSec 5
+            # If we get here, it means a 200 OK was received (unlikely but possible)
+            Write-Host "Application is healthy (received 200 OK)!"
+            $appIsHealthy = $true
+            break
+        } catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+            # This is the expected case: the server responded with an error (e.g., 404).
+            # This confirms the server is running.
+            Write-Host "Application is healthy (received HTTP response)!"
+            $appIsHealthy = $true
+            break
         } catch {
+            # This catch block will handle connection errors (server not up yet).
             Write-Host "App not ready, waiting..."
+            Start-Sleep -Seconds 5
         }
-        Start-Sleep -Seconds 5
     }
 
     if (-not $appIsHealthy) {
@@ -153,18 +137,15 @@ for ($i = 1; $i -le 2; $i++) {
     Start-Sleep -Seconds 10
 
   } finally {
-    # 5. Stop the Keploy process (this will run even if the 'try' block fails)
+    # 5. Stop the Keploy process
     if ($null -ne $keployProcess -and -not $keployProcess.HasExited) {
         Write-Host "Stopping Keploy process (PID: $($keployProcess.Id))..."
-        $keployProcess.Kill() # Use Kill() for forceful termination
-        $keployProcess.WaitForExit(5000) # Wait up to 5 seconds for it to exit
+        Stop-Process -Id $keployProcess.Id -Force # Use idiomatic Stop-Process
         Write-Host "Keploy process stopped."
     } else {
         Write-Host "Keploy process already exited or was not started."
     }
-    # Wait for the async log readers to finish
-    # CORRECTED SYNTAX: [System.Threading.Tasks.Task]::WaitAll(...)
-    [System.Threading.Tasks.Task]::WaitAll($outputTask, $errorTask)
+    # The complex Task.WaitAll is no longer needed.
   }
 
   # --- Verification ---
