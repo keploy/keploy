@@ -417,9 +417,11 @@ if ($criticalErrors) {
 Start-Sleep -Seconds 5
 Write-Host "Successfully recorded test-set-$expectedTestSetIndex"
 
-# --- Stop services before test mode ---
-Write-Host "Shutting down docker compose services before test mode..."
-docker compose down
+Write-Host "Shutting down docker compose services and volumes before test mode..."
+docker compose down --volumes --remove-orphans
+Write-Host "Waiting for 5 seconds to ensure all resources are released..."
+Start-Sleep -Seconds 5
+
 
 # --- Test (replay) ---
 $testContainer = "echoApp"
