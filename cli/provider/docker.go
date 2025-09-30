@@ -135,10 +135,12 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
+		// For Windows, construct the entire command as a single string like Unix does
+		// This ensures proper handling of commands with spaces like "docker compose up"
+		fullCommand := keployAlias + " " + strings.Join(quotedArgs, " ")
 		var args []string
 		args = append(args, "/C")
-		args = append(args, strings.Split(keployAlias, " ")...)
-		args = append(args, os.Args[1:]...)
+		args = append(args, fullCommand)
 		// Use cmd.exe /C for Windows
 		cmd = exec.CommandContext(
 			ctx,
