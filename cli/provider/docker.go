@@ -179,7 +179,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		args = append(args, strings.Split(keployAlias, " ")...)
 
 		// Ensure -c value is quoted on Windows
-		winArgs := quoteAppCmdArgsWindows(os.Args[1:])
+		winArgs := quoteAppCmdArgsWindows(os.Args[1:], logger)
 		logger.Debug("winArgs", zap.String("winArgs", strings.Join(winArgs, " ")))
 		args = append(args, winArgs...)
 		logger.Debug("args", zap.String("args", strings.Join(args, " ")))
