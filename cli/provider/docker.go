@@ -87,74 +87,6 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 	return nil
 }
 
-// quoteAppCmdArgsWindows takes args (excluding argv[0]) and ensures that the
-// application command after "-c" is merged and quoted (e.g. -c "docker compose up").
-func quoteAppCmdArgsWindows(args []string, logger *zap.Logger) []string {
-	idx := -1
-	for i, a := range args {
-		if a == "-c" {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 || idx+1 >= len(args) {
-		logger.Debug("no -c or nothing after -c", zap.String("args", strings.Join(args, " ")))
-		return args // no -c or nothing after -c
-	}
-
-	// Collect app command tokens after -c until the next flag (starting with '-')
-	j := idx + 1
-	var app []string
-	for ; j < len(args); j++ {
-		if strings.HasPrefix(args[j], "-") {
-			break
-		}
-		app = append(app, args[j])
-	}
-	if len(app) == 0 {
-		return args // nothing to quote
-	}
-	logger.Debug("app in quoteAppCmdArgsWindows", zap.String("app", strings.Join(app, " ")))
-
-	quoted := strconv.Quote(strings.Join(app, " "))
-
-	// Rebuild: everything before -c, then -c "joined app", then the remaining flags
-	out := make([]string, 0, len(args)-(len(app)-1))
-	out = append(out, args[:idx]...)
-	out = append(out, "-c", quoted)
-	out = append(out, args[j:]...)
-	return out
-}
-
-// Merge everything after -c into one token until the next flag (starting with '-').
-func mergeAppCmdAfterDashC(args []string) []string {
-	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-c" && i+1 < len(args) {
-			j := i + 1
-			var app []string
-			for ; j < len(args); j++ {
-				if strings.HasPrefix(args[j], "-") {
-					break
-				}
-				app = append(app, args[j])
-			}
-			if len(app) > 0 {
-				out = append(out, "-c", strings.Join(app, " "))
-				i = j - 1
-				continue
-			}
-		}
-		out = append(out, args[i])
-	}
-	return out
-}
-
-func splitFieldsPreserveSpaces(s string) []string {
-	// Simple fields split is fine for keployAlias (it has no quoted spaces).
-	return strings.Fields(s)
-}
-
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	client, err := docker.New(logger)
 	if err != nil {
@@ -203,30 +135,16 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
-		aliasParts := strings.Fields(keployAlias)
-		if len(aliasParts) == 0 || aliasParts[0] != "docker" {
-			return errors.New("invalid keployAlias: must start with 'docker'")
-		}
-
-		// Base args from alias (drop leading "docker")
-		dockerArgs := append([]string{}, aliasParts[1:]...)
-
-		// Rebuild args so that -c value is one single token wrapped in quotes
-		args := []string{}
-		for i := 1; i < len(os.Args); i++ {
-			if os.Args[i] == "-c" && i+1 < len(os.Args) {
-				appCmd := strings.Join(os.Args[i+1:], " ")
-				// instead of escaping, literally wrap it with quotes
-				args = append(args, "-c", `"`+appCmd+`"`)
-				break
-			}
-			args = append(args, os.Args[i])
-		}
-
-		finalArgs := append(dockerArgs, args...)
-
-		// Call docker directly, not via cmd.exe
-		cmd = exec.CommandContext(ctx, "docker", finalArgs...)
+		var args []string
+		args = append(args, "/C")
+		args = append(args, strings.Split(keployAlias, " ")...)
+		args = append(args, os.Args[1:]...)
+		// Use cmd.exe /C for Windows
+		cmd = exec.CommandContext(
+			ctx,
+			"cmd.exe",
+			args...,
+		)
 	} else {
 		// Use sh -c for Unix-like systems
 		cmd = exec.CommandContext(
