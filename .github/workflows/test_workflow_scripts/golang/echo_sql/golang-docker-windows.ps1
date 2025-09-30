@@ -165,7 +165,7 @@ for ($idx = 0; $idx -le 1; $idx++) {
 
   $line = Select-String -Path $report -Pattern 'status:' | Select-Object -First 1
   $status = ($line.ToString() -replace '.*status:\s*', '').Trim()
-  Write-Host "Test status for test-set-$idx: $status"
+  Write-Host "Test status for test-set-${idx}: $status"
 
   if ($status -ne 'PASSED') {
     $allPassed = $false
