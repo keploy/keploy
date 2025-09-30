@@ -105,8 +105,8 @@ for ($i = 1; $i -le 2; $i++) {
     Write-Host "Waiting for request sender job to complete..."
     # Start keploy record in the foreground so logs are visible; also write to file
     $recordTask = Start-Job -ScriptBlock {
-        param($RecordBin, $Cmd, $ContainerName, $LogFile)
-        & $RecordBin record -c $Cmd --container-name $ContainerName
+        param($RecordBin, $Cmd, $ContainerName)
+        & $RecordBin record -c $Cmd --container-name $ContainerName --debug
     } -ArgumentList $env:RECORD_BIN, $appCommand, $containerName
 
     # Give Keploy a moment to spin up before sending requests
