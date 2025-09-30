@@ -32,10 +32,11 @@ var DockerConfig = DockerConfigStruct{
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
+		// Always quote values; Windows prefers double-quotes, *nix can use single quotes.
 		if runtime.GOOS == "windows" {
-			envs = append(envs, fmt.Sprintf("-e %s=%s", key, value))
+			envs = append(envs, fmt.Sprintf(`-e %s=%q`, key, value)) // -e KEY="VALUE"
 		} else {
-			envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
+			envs = append(envs, fmt.Sprintf(`-e %s='%s'`, key, value)) // -e KEY='VALUE'
 		}
 	}
 	return strings.Join(envs, " ")
@@ -118,6 +119,8 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	var quotedArgs []string
 
 	for _, arg := range os.Args[1:] {
+		// Quote every CLI arg so flags like: -c "docker compose up"
+		// are preserved as a single argument on all platforms.
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
 
@@ -135,16 +138,8 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
-		var args []string
-		args = append(args, "/C")
-		args = append(args, strings.Split(keployAlias, " ")...)
-		args = append(args, os.Args[1:]...)
-		// Use cmd.exe /C for Windows
-		cmd = exec.CommandContext(
-			ctx,
-			"cmd.exe",
-			args...,
-		)
+		full := keployAlias + " " + strings.Join(quotedArgs, " ")
+		cmd = exec.CommandContext(ctx, "cmd.exe", "/C", full)
 	} else {
 		// Use sh -c for Unix-like systems
 		cmd = exec.CommandContext(
