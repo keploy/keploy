@@ -1,56 +1,58 @@
 <# 
-  PowerShell equivalent of the provided bash script.
-
-  Notes:
-  - Set RECORD_BIN and REPLAY_BIN env vars to your keploy.exe. 
-    If not set, we fall back to C:\Users\offic\Downloads\keploy_win\keploy.exe
-  - If you had logic in test-iid.sh, create a test-iid.ps1 and dot-source it where indicated.
+  PowerShell test runner for Keploy (Windows).
+  - Honors RECORD_BIN / REPLAY_BIN (resolved via PATH if only a file name)
+  - Honors DOCKER_IMAGE_RECORD / DOCKER_IMAGE_REPLAY via KEPLOY_DOCKER_IMAGE
+  - Fixes Stop-Keploy to catch keploy-record.exe as well
+  - Standardizes flags to kebab-case
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# --- Optional: dot-source your PS version of test-iid.sh if you have it ---
-# $root = Split-Path -Parent $PSScriptRoot
-# $testIid = Join-Path $root "..\..\ .github\workflows\test_workflow_scripts\test-iid.ps1"
-# if (Test-Path $testIid) { . $testIid } else { Write-Host "Skipping test-iid.ps1 (not found)" }
-
-# --- Resolve Keploy binaries (defaults for your path) ---
+# --- Resolve Keploy binaries (defaults for local dev) ---
 $defaultKeploy = 'C:\Users\offic\Downloads\keploy_win\keploy.exe'
 if (-not $env:RECORD_BIN) { $env:RECORD_BIN = $defaultKeploy }
 if (-not $env:REPLAY_BIN) { $env:REPLAY_BIN = $defaultKeploy }
 
-# --- Build Docker image (compose) ---
-Write-Host "Building Docker image(s)..."
+# Optionally parameterize app URLs (kept your current defaults)
+$env:APP_HEALTH_URL    = $env:APP_HEALTH_URL    ?? 'http://localhost:8082/health'
+$env:APP_POST_URL      = $env:APP_POST_URL      ?? 'http://localhost:8082/url'
+
+Write-Host "Using RECORD_BIN = $env:RECORD_BIN"
+Write-Host "Using REPLAY_BIN = $env:REPLAY_BIN"
+
+# --- Build Docker image(s) defined by compose ---
+Write-Host "Building Docker image(s) with docker compose..."
 docker compose build
 
-# --- Remove any preexisting keploy tests and mocks ---
+# --- Clean previous keploy outputs ---
 Write-Host "Cleaning .\keploy\ directory (if exists)..."
 Remove-Item -LiteralPath ".\keploy" -Recurse -Force -ErrorAction SilentlyContinue
 
-# --- Generate keploy-config file ---
+# --- Generate keploy.yml ---
 Write-Host "Generating keploy config..."
 & $env:RECORD_BIN config --generate
 
-# --- Update global noise to ts in keploy.yml (sed equivalent) ---
+# --- Update global noise in keploy.yml ---
 $configFile = ".\keploy.yml"
 if (-not (Test-Path $configFile)) {
   throw "Config file '$configFile' not found after generation."
 }
-# Replace 'global: {}' with 'global: {"body": {"ts":[]}}' (loose on whitespace)
-$text = Get-Content $configFile -Raw
-$text = $text -replace 'global:\s*\{\s*\}', 'global: {"body": {"ts":[]}}'
-Set-Content -Path $configFile -Value $text -Encoding UTF8
+(Get-Content $configFile -Raw) -replace 'global:\s*\{\s*\}', 'global: {"body": {"ts":[]}}' |
+  Set-Content -Path $configFile -Encoding UTF8
 Write-Host "Updated global noise in keploy.yml"
 
 function Stop-Keploy {
   try {
-    $p = Get-Process -Name 'keploy' -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending | Select-Object -First 1
+    # Match both keploy.exe and keploy-record.exe
+    $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.Name -match '^keploy(-record)?$' -or $_.Path -match 'keploy(-record)?\.exe$'
+    } | Sort-Object StartTime -Descending
+    $p = $procs | Select-Object -First 1
     if ($null -ne $p) {
-      Write-Host "$($p.Id) Keploy PID"
-      Write-Host "Killing keploy"
+      Write-Host "Stopping Keploy PID $($p.Id) ($($p.ProcessName))"
       Stop-Process -Id $p.Id -Force
     } else {
-      Write-Host "No keploy process found to kill."
+      Write-Host "No Keploy process found to kill."
     }
   } catch {
     Write-Warning "Failed to stop keploy: $_"
@@ -62,8 +64,7 @@ function Send-Request {
   $appStarted = $false
   while (-not $appStarted) {
     try {
-      # Health probe
-      Invoke-WebRequest -Method GET -Uri "http://localhost:8082/health" -TimeoutSec 5 | Out-Null
+      Invoke-WebRequest -Method GET -Uri $env:APP_HEALTH_URL -TimeoutSec 5 | Out-Null
       $appStarted = $true
     } catch {
       Start-Sleep -Seconds 3
@@ -71,36 +72,38 @@ function Send-Request {
   }
   Write-Host "App started"
 
-  # Record some traffic
-  $body1 = @{ url = "https://google.com" } | ConvertTo-Json -Compress
-  Invoke-RestMethod -Method POST -Uri "http://localhost:8082/url" -ContentType "application/json" -Body $body1 | Out-Null
+  foreach ($u in @('https://google.com','https://facebook.com')) {
+    $body = @{ url = $u } | ConvertTo-Json -Compress
+    Invoke-RestMethod -Method POST -Uri $env:APP_POST_URL -ContentType "application/json" -Body $body | Out-Null
+  }
 
-  $body2 = @{ url = "https://facebook.com" } | ConvertTo-Json -Compress
-  Invoke-RestMethod -Method POST -Uri "http://localhost:8082/url" -ContentType "application/json" -Body $body2 | Out-Null
-
-  # final health ping
-  try { Invoke-WebRequest -Method GET -Uri "http://localhost:8082/health" -TimeoutSec 5 | Out-Null } catch {}
-
-  # Allow keploy to finish recording, then stop it
+  try { Invoke-WebRequest -Method GET -Uri $env:APP_HEALTH_URL -TimeoutSec 5 | Out-Null } catch {}
   Start-Sleep -Seconds 5
   Stop-Keploy
 }
 
 # --- Record twice ---
 for ($i = 1; $i -le 2; $i++) {
-  $containerName = "echoApp"
-  $logPath = "$containerName.txt"
+  $containerName = "echoApp"   # adjust per sample if needed
+  $logPath = "$containerName.record.$i.txt"
 
-  # Start background request job (equivalent to & in bash)
+  # Launch traffic generator in background
   $jobName = "SendRequest_$i"
   $job = Start-Job -Name $jobName -ScriptBlock { Send-Request }
 
-  # Run keploy record; capture stdout+stderr and tee to file
-  Write-Host "Starting keploy record (iteration $i)..."
-  & $env:RECORD_BIN record -c 'docker compose up' --container-name $containerName --generateGithubActions=false 2>&1 |
-    Tee-Object -FilePath $logPath
+  # If the workflow provided an agent image for recording, honor it
+  if ($env:DOCKER_IMAGE_RECORD) {
+    $env:KEPLOY_DOCKER_IMAGE = $env:DOCKER_IMAGE_RECORD
+    Write-Host "Record phase will use agent image: $env:KEPLOY_DOCKER_IMAGE"
+  }
 
-  # Wait for the background job to finish (best-effort)
+  Write-Host "Starting keploy record (iteration $i)..."
+  & $env:RECORD_BIN record `
+      -c 'docker compose up' `
+      --container-name $containerName `
+      --generate-github-actions=false 2>&1 | Tee-Object -FilePath $logPath
+
+  # Wait for traffic job to finish
   try {
     Wait-Job -Name $jobName -Timeout 120 | Out-Null
     Receive-Job -Name $jobName | Out-Null
@@ -109,16 +112,14 @@ for ($i = 1; $i -le 2; $i++) {
     if (Get-Job -Name $jobName -ErrorAction SilentlyContinue) { Remove-Job -Name $jobName -Force | Out-Null }
   }
 
-  # Check for race conditions or errors in the log
-  $hasRace  = Select-String -Path $logPath -Pattern 'WARNING:\s*DATA\s*RACE' -SimpleMatch
-  if ($hasRace) {
-    Write-Host "Race condition detected in recording, stopping pipeline..."
+  # Guard-rails
+  if (Select-String -Path $logPath -Pattern 'WARNING:\s*DATA\s*RACE' -SimpleMatch) {
+    Write-Host "Race condition detected in recording."
     Get-Content $logPath
     exit 1
   }
-  $hasError = Select-String -Path $logPath -Pattern 'ERROR' -SimpleMatch
-  if ($hasError) {
-    Write-Host "Error found in pipeline..."
+  if (Select-String -Path $logPath -Pattern 'ERROR' -SimpleMatch) {
+    Write-Host "Error found in recording."
     Get-Content $logPath
     exit 1
   }
@@ -127,28 +128,36 @@ for ($i = 1; $i -le 2; $i++) {
   Write-Host "Recorded test case and mocks for iteration $i"
 }
 
-# --- Shutdown services before test mode ---
+# --- Stop services before test mode ---
 Write-Host "Shutting down docker compose services before test mode..."
 docker compose down
-Write-Host "Services stopped - Keploy should now use mocks for dependency interactions"
 
-# --- Start keploy in test mode ---
+# --- Test (replay) ---
 $testContainer = "echoApp"
-$testLog = "$testContainer.txt"
-Write-Host "Starting keploy test..."
-& $env:REPLAY_BIN test -c 'docker compose up' --containerName $testContainer --apiTimeout 60 --delay 20 --generate-github-actions=false 2>&1 |
-  Tee-Object -FilePath $testLog
+$testLog = "$testContainer.test.txt"
 
-# Check test log for errors/races
-$testErr = Select-String -Path $testLog -Pattern 'ERROR' -SimpleMatch
-if ($testErr) {
-  Write-Host "Error found in pipeline..."
+# If the workflow provided an agent image for replay, honor it
+if ($env:DOCKER_IMAGE_REPLAY) {
+  $env:KEPLOY_DOCKER_IMAGE = $env:DOCKER_IMAGE_REPLAY
+  Write-Host "Replay phase will use agent image: $env:KEPLOY_DOCKER_IMAGE"
+}
+
+Write-Host "Starting keploy test..."
+& $env:REPLAY_BIN test `
+    -c 'docker compose up' `
+    --container-name $testContainer `
+    --api-timeout 60 `
+    --delay 20 `
+    --generate-github-actions=false 2>&1 | Tee-Object -FilePath $testLog
+
+# Check test log
+if (Select-String -Path $testLog -Pattern 'ERROR' -SimpleMatch) {
+  Write-Host "Error found during test."
   Get-Content $testLog
   exit 1
 }
-$testRace = Select-String -Path $testLog -Pattern 'WARNING:\s*DATA\s*RACE' -SimpleMatch
-if ($testRace) {
-  Write-Host "Race condition detected in test, stopping pipeline..."
+if (Select-String -Path $testLog -Pattern 'WARNING:\s*DATA\s*RACE' -SimpleMatch) {
+  Write-Host "Race condition detected during test."
   Get-Content $testLog
   exit 1
 }
@@ -162,11 +171,9 @@ for ($idx = 0; $idx -le 1; $idx++) {
     $allPassed = $false
     break
   }
-
   $line = Select-String -Path $report -Pattern 'status:' | Select-Object -First 1
   $status = ($line.ToString() -replace '.*status:\s*', '').Trim()
   Write-Host "Test status for test-set-${idx}: $status"
-
   if ($status -ne 'PASSED') {
     $allPassed = $false
     Write-Host "Test-set-$idx did not pass."
@@ -174,10 +181,4 @@ for ($idx = 0; $idx -le 1; $idx++) {
   }
 }
 
-if ($allPassed) {
-  Write-Host "All tests passed"
-  exit 0
-} else {
-  Get-Content $testLog
-  exit 1
-}
+if ($allPassed) { Write-Host "All tests passed"; exit 0 } else { Get-Content $testLog; exit 1 }

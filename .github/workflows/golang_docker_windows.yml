@@ -42,6 +42,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --- CLI binaries (same as before) ---
       - name: Download Record Binary (${{ matrix.config.record_src }})
         uses: actions/download-artifact@v4
         with:
@@ -52,13 +53,9 @@ jobs:
         id: setup_record
         shell: pwsh
         run: |
-          # Create a local bin directory
-          New-Item -Path "./bin" -ItemType Directory -Force
-          # Move the executable into our local bin directory
+          New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
-          # Add the new bin directory to the PATH for subsequent steps
           echo "$env:GITHUB_WORKSPACE/bin" >> $env:GITHUB_PATH
-          # Set the output for the next step
           echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
 
       - name: Download Replay Binary (${{ matrix.config.replay_src }})
@@ -71,13 +68,61 @@ jobs:
         id: setup_replay
         shell: pwsh
         run: |
-          # The bin directory already exists, but -Force prevents errors
-          New-Item -Path "./bin" -ItemType Directory -Force
-          # Move the executable into our local bin directory
+          New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
-          # Set the output for the next step
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
 
+      # --- Docker images (NEW) ---
+      - name: Download Record Docker image (${{ matrix.config.record_src }})
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-${{ matrix.config.record_src }}
+          path: record-image
+
+      - name: Load & Tag Record Docker image
+        id: record_img
+        shell: pwsh
+        run: |
+          $tar = Get-ChildItem .\record-image\*.tar | Select-Object -First 1
+          docker load -i $tar.FullName | Write-Output
+          # Tag whatever was loaded to a stable name for the record phase
+          # Prefer ghcr.io/<repo>:pr-<sha> if present, else re-tag the latest
+          $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
+                    | Select-String "pr-" -SimpleMatch | Select-Object -First 1
+          if ($cand) {
+            docker tag $cand keploy:record
+          } else {
+            # Grab the newest ghcr.io/keploy/keploy:* that just got loaded
+            $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
+                      | Select-Object -First 1)
+            if ($first) { docker tag $first keploy:record }
+          }
+          echo "image=keploy:record" >> $env:GITHUB_OUTPUT
+
+      - name: Download Replay Docker image (${{ matrix.config.replay_src }})
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-${{ matrix.config.replay_src }}
+          path: replay-image
+
+      - name: Load & Tag Replay Docker image
+        id: replay_img
+        shell: pwsh
+        run: |
+          $tar = Get-ChildItem .\replay-image\*.tar | Select-Object -First 1
+          docker load -i $tar.FullName | Write-Output
+          $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
+                    | Select-String "pr-" -SimpleMatch | Select-Object -First 1
+          if ($cand) {
+            docker tag $cand keploy:replay
+          } else {
+            $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
+                      | Select-Object -First 1)
+            if ($first) { docker tag $first keploy:replay }
+          }
+          echo "image=keploy:replay" >> $env:GITHUB_OUTPUT
+
+      # Samples repo
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
         with:
@@ -86,8 +131,11 @@ jobs:
 
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
-          RECORD_BIN: ${{ steps.setup_record.outputs.bin_name }}
-          REPLAY_BIN: ${{ steps.setup_replay.outputs.bin_name }}
+          RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
+          REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
+          # NEW: pass the image tags to your script
+          DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
+          DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
         shell: pwsh
         run: |
           cd samples-go/${{ matrix.app.path }}

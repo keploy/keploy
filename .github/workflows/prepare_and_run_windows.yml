@@ -34,11 +34,6 @@ jobs:
         with:
           go-version: ">=1.23"
 
-      # - name: Add Private Parsers
-      #   uses: ./.github/actions/setup-private-parsers
-      #   with:
-      #     ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: powershell
         run: |
@@ -47,7 +42,7 @@ jobs:
           $env:CGO_ENABLED = "0"
           go build -tags=viper_bind_struct -o keploy.exe ./main.go
 
-      - name: Upload build artifact
+      - name: Upload build artifact (Windows CLI)
         uses: actions/upload-artifact@v4
         with: 
           name: build
@@ -59,6 +54,36 @@ jobs:
         shell: powershell
         run: |
           git config --global --unset url."git@github.com:".insteadOf
+
+  docker-image-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set PR image tag
+        run: echo "PR_IMAGE_TAG=ghcr.io/${GITHUB_REPOSITORY}:pr-${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build a single-platform linux/amd64 image and export to a local tarball
+      - name: Build PR Docker image (linux/amd64) -> tar
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: ${{ env.PR_IMAGE_TAG }}
+          outputs: type=docker,dest=keploy-image-pr.tar
+
+      - name: Upload PR Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-build
+          path: keploy-image-pr.tar
 
   upload-latest:
     runs-on: [self-hosted, Windows, X64]
@@ -77,20 +102,30 @@ jobs:
           
           Invoke-WebRequest -Uri $url -OutFile "keploy.tar.gz"
           
-          # Extract using tar (available in Windows 10+)
           tar -xzf keploy.tar.gz
-          
-          # Rename to keploy.exe if needed (the archive might contain keploy.exe already)
-          if (Test-Path "keploy") {
-            Move-Item "keploy" "keploy.exe"
-          }
+          if (Test-Path "keploy") { Move-Item "keploy" "keploy.exe" }
 
-      - name: Upload latest artifact
+      - name: Upload latest artifact (Windows CLI)
         uses: actions/upload-artifact@v4
         with:
           name: latest
           path: keploy.exe
 
+      - name: Download & save latest Docker image
+        shell: pwsh
+        run: |
+          $response = Invoke-RestMethod -Uri "https://api.github.com/repos/keploy/keploy/releases/latest"
+          $latest = $response.tag_name
+          Write-Host "Pulling ghcr.io/keploy/keploy:$latest"
+          docker pull ghcr.io/keploy/keploy:$latest
+          docker save ghcr.io/keploy/keploy:$latest -o keploy-image-latest.tar
+
+      - name: Upload latest Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-latest
+          path: keploy-image-latest.tar
+
   run_golang_docker_windows:
-    needs: [build-and-upload, upload-latest]
+    needs: [build-and-upload, docker-image-build, upload-latest]
     uses: ./.github/workflows/golang_docker_windows.yml
