@@ -212,7 +212,7 @@ $expectedTestSetIndex = 0
       
       $appStarted = $false
       $requestsSent = $false
-      $maxWaitTime = 300  # 3 minutes total
+      $maxWaitTime = 300  # 5 minutes total
       $checkInterval = 3
       $elapsedTime = 0
       
@@ -426,8 +426,9 @@ if ($criticalErrors) {
 Start-Sleep -Seconds 5
 Write-Host "Successfully recorded test-set-$expectedTestSetIndex"
 
-Write-Host "Shutting down docker compose services and volumes before test mode..."
-docker compose down --volumes --remove-orphans
+# --- FIX: Replicate Ubuntu logic by NOT deleting volumes ---
+Write-Host "Shutting down docker compose services before test mode (preserving volumes)..."
+docker compose down
 Write-Host "Waiting for 5 seconds to ensure all resources are released..."
 Start-Sleep -Seconds 5
 
@@ -442,8 +443,6 @@ if ($env:DOCKER_IMAGE_REPLAY) {
 } else {
   $env:KEPLOY_DOCKER_IMAGE = 'keploy:replay'
 }
-
-docker compose down
 
 Write-Host "Starting keploy test..."
 Write-Host "Replay phase image: $env:KEPLOY_DOCKER_IMAGE"
