@@ -353,7 +353,7 @@ $recArgs = @(
   'record',
   '-c', 'docker compose up',
   '--container-name', $containerName,
-  '--generate-github-actions=false',
+  '--generate-github-actions=false'
 )
 
 # This command blocks until the background job kills it
