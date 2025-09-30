@@ -2,6 +2,7 @@
   PowerShell test runner for Keploy (Windows).
   - Uses a simplified, more reliable recording loop.
   - Controls the keploy process directly instead of using a complex background job.
+  - Corrected syntax for calling .NET static methods.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -12,7 +13,7 @@ if (-not $env:RECORD_BIN) { $env:RECORD_BIN = $defaultKeploy }
 if (-not $env:REPLAY_BIN) { $env:REPLAY_BIN = $defaultKeploy }
 
 # Ensure USERPROFILE is set (needed for docker volume mounts inside keploy)
-if (-not $env:USERPROFILE -or $env:USERUSERPROFILE -eq '') {
+if (-not $env:USERPROFILE -or $env:USERPROFILE -eq '') {
   $candidate = "$env:HOMEDRIVE$env:HOMEPATH"
   if ($candidate -and $candidate -ne '') { $env:USERPROFILE = $candidate }
 }
@@ -57,10 +58,6 @@ if (-not (Test-Path $configFile)) {
   Set-Content -Path $configFile -Encoding UTF8
 Write-Host "Updated global noise in keploy.yml"
 
-# =========================================================================
-# === START OF REVISED RECORDING LOGIC                                  ===
-# =========================================================================
-
 # --- Record twice ---
 for ($i = 1; $i -le 2; $i++) {
   $containerName = "echoApp"
@@ -98,12 +95,15 @@ for ($i = 1; $i -le 2; $i++) {
     
     # Start asynchronous reading of the output streams
     $outputTask = [System.IO.File]::WriteAllTextAsync($logPath, "") # Create/clear log file
-    $outputTask = Task.Run([Action]{ 
+    
+    # CORRECTED SYNTAX: [System.Threading.Tasks.Task]::Run(...)
+    $outputTask = [System.Threading.Tasks.Task]::Run([Action]{ 
         while (-not $outputReader.EndOfStream) { 
             Add-Content -Path $logPath -Value $outputReader.ReadLine()
         }
     })
-    $errorTask = Task.Run([Action]{ 
+    # CORRECTED SYNTAX: [System.Threading.Tasks.Task]::Run(...)
+    $errorTask = [System.Threading.Tasks.Task]::Run([Action]{ 
         while (-not $errorReader.EndOfStream) { 
             Add-Content -Path $logPath -Value $errorReader.ReadLine() 
         }
@@ -163,7 +163,8 @@ for ($i = 1; $i -le 2; $i++) {
         Write-Host "Keploy process already exited or was not started."
     }
     # Wait for the async log readers to finish
-    Task.WaitAll($outputTask, $errorTask)
+    # CORRECTED SYNTAX: [System.Threading.Tasks.Task]::WaitAll(...)
+    [System.Threading.Tasks.Task]::WaitAll($outputTask, $errorTask)
   }
 
   # --- Verification ---
@@ -187,10 +188,6 @@ for ($i = 1; $i -le 2; $i++) {
   Write-Host "Successfully recorded test-set-$expectedTestSetIndex."
   Start-Sleep -Seconds 5 # Small delay before next iteration
 }
-
-# =========================================================================
-# === END OF REVISED RECORDING LOGIC                                    ===
-# =========================================================================
 
 # --- Stop services before test mode ---
 Write-Host "Shutting down docker compose services before test mode..."
