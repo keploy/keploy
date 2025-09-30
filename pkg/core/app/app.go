@@ -113,14 +113,14 @@ func (a *App) SetupDocker() error {
 
 	a.logger.Debug("inside setup docker", zap.String("cmd", a.cmd))
 
-	if HookImpl != nil {
-		newCmd, err := HookImpl.BeforeDockerSetup(context.Background(), a.cmd)
-		if err != nil {
-			utils.LogError(a.logger, err, "hook failed during docker setup")
-			return err
-		}
-		a.cmd = newCmd
-	}
+	// if HookImpl != nil {
+	// 	newCmd, err := HookImpl.BeforeDockerSetup(context.Background(), a.cmd)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, err, "hook failed during docker setup")
+	// 		return err
+	// 	}
+	// 	a.cmd = newCmd
+	// }
 
 	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
@@ -162,16 +162,16 @@ func (a *App) SetupCompose() error {
 	composeChanged := false
 
 	// hook: allow compose mutation before further processing
-	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
-		if err != nil {
-			utils.LogError(a.logger, err, "hook failed during compose mutation")
-			return err
-		}
-		if changed {
-			composeChanged = true
-		}
-	}
+	// if HookImpl != nil {
+	// 	changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, err, "hook failed during compose mutation")
+	// 		return err
+	// 	}
+	// 	if changed {
+	// 		composeChanged = true
+	// 	}
+	// }
 
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)
