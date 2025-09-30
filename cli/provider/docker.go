@@ -32,11 +32,10 @@ var DockerConfig = DockerConfigStruct{
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
-		// Always quote values; Windows prefers double-quotes, *nix can use single quotes.
 		if runtime.GOOS == "windows" {
-			envs = append(envs, fmt.Sprintf(`-e %s=%q`, key, value)) // -e KEY="VALUE"
+			envs = append(envs, fmt.Sprintf("-e %s=%s", key, value))
 		} else {
-			envs = append(envs, fmt.Sprintf(`-e %s='%s'`, key, value)) // -e KEY='VALUE'
+			envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
 		}
 	}
 	return strings.Join(envs, " ")
@@ -119,8 +118,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	var quotedArgs []string
 
 	for _, arg := range os.Args[1:] {
-		// Quote every CLI arg so flags like: -c "docker compose up"
-		// are preserved as a single argument on all platforms.
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
 
@@ -138,8 +135,16 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
-		full := keployAlias + " " + strings.Join(quotedArgs, " ")
-		cmd = exec.CommandContext(ctx, "cmd.exe", "/C", full)
+		var args []string
+		args = append(args, "/C")
+		args = append(args, strings.Split(keployAlias, " ")...)
+		args = append(args, os.Args[1:]...)
+		// Use cmd.exe /C for Windows
+		cmd = exec.CommandContext(
+			ctx,
+			"cmd.exe",
+			args...,
+		)
 	} else {
 		// Use sh -c for Unix-like systems
 		cmd = exec.CommandContext(
@@ -223,12 +228,12 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + Volumes + " -v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
+			alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + Volumes + " -v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
+		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "darwin":
 		// Get the context and docker daemon endpoint.
