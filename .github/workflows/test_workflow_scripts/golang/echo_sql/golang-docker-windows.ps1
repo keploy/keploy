@@ -83,8 +83,6 @@ function Get-RunnerWorkPath {
 }
 
 
-docker compose up postgres -d
-
 # --- Record once ---
 $containerName = "echoApp"   # adjust per sample if needed
 $logPath = "$containerName.record.txt"
@@ -354,7 +352,7 @@ Write-Host "Record phase image: $env:KEPLOY_DOCKER_IMAGE"
 
 $recArgs = @(
   'record',
-  '-c', 'docker compose up go-app',
+  '-c', 'docker compose up',
   '--container-name', $containerName,
   '--generate-github-actions=false'
 )
@@ -440,11 +438,9 @@ if ($env:DOCKER_IMAGE_REPLAY) {
 Write-Host "Starting keploy test..."
 Write-Host "Replay phase image: $env:KEPLOY_DOCKER_IMAGE"
 
-docker compose down postgres
-
 $testArgs = @(
   'test',
-  '-c', 'docker compose up go-app',
+  '-c', 'docker compose up',
   '--container-name', $testContainer,
   '--api-timeout', '60',
   '--delay', '20',
