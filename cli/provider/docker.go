@@ -126,6 +126,35 @@ func quoteAppCmdArgsWindows(args []string, logger *zap.Logger) []string {
 	return out
 }
 
+// Merge everything after -c into one token until the next flag (starting with '-').
+func mergeAppCmdAfterDashC(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-c" && i+1 < len(args) {
+			j := i + 1
+			var app []string
+			for ; j < len(args); j++ {
+				if strings.HasPrefix(args[j], "-") {
+					break
+				}
+				app = append(app, args[j])
+			}
+			if len(app) > 0 {
+				out = append(out, "-c", strings.Join(app, " "))
+				i = j - 1
+				continue
+			}
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
+func splitFieldsPreserveSpaces(s string) []string {
+	// Simple fields split is fine for keployAlias (it has no quoted spaces).
+	return strings.Fields(s)
+}
+
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	client, err := docker.New(logger)
 	if err != nil {
@@ -174,17 +203,30 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
-		var args []string
-		args = append(args, "/C")
-		args = append(args, strings.Split(keployAlias, " ")...)
+		aliasParts := strings.Fields(keployAlias)
+		if len(aliasParts) == 0 || aliasParts[0] != "docker" {
+			return errors.New("invalid keployAlias: must start with 'docker'")
+		}
 
-		// Ensure -c value is quoted on Windows
-		winArgs := quoteAppCmdArgsWindows(os.Args[1:], logger)
-		logger.Debug("winArgs", zap.String("winArgs", strings.Join(winArgs, " ")))
-		args = append(args, winArgs...)
-		logger.Debug("args", zap.String("args", strings.Join(args, " ")))
+		// Base args from alias (drop leading "docker")
+		dockerArgs := append([]string{}, aliasParts[1:]...)
 
-		cmd = exec.CommandContext(ctx, "cmd.exe", args...)
+		// Rebuild args so that -c value is one single token wrapped in quotes
+		args := []string{}
+		for i := 1; i < len(os.Args); i++ {
+			if os.Args[i] == "-c" && i+1 < len(os.Args) {
+				appCmd := strings.Join(os.Args[i+1:], " ")
+				// instead of escaping, literally wrap it with quotes
+				args = append(args, "-c", `"`+appCmd+`"`)
+				break
+			}
+			args = append(args, os.Args[i])
+		}
+
+		finalArgs := append(dockerArgs, args...)
+
+		// Call docker directly, not via cmd.exe
+		cmd = exec.CommandContext(ctx, "docker", finalArgs...)
 	} else {
 		// Use sh -c for Unix-like systems
 		cmd = exec.CommandContext(
