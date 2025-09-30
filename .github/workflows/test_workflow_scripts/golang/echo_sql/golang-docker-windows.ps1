@@ -443,6 +443,8 @@ if ($env:DOCKER_IMAGE_REPLAY) {
   $env:KEPLOY_DOCKER_IMAGE = 'keploy:replay'
 }
 
+docker compose down
+
 Write-Host "Starting keploy test..."
 Write-Host "Replay phase image: $env:KEPLOY_DOCKER_IMAGE"
 
