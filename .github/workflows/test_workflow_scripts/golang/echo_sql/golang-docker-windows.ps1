@@ -357,9 +357,17 @@ $recArgs = @(
   '--generate-github-actions=false'
 )
 
-# This command blocks until the background job kills it
+# This command blocks until the background job kills it.
+# We expect it to be terminated, so we wrap it in a try...catch
+# to prevent its non-zero exit code from halting the script.
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
-& $env:RECORD_BIN @recArgs 2>&1 | Tee-Object -FilePath $logPath
+try {
+    & $env:RECORD_BIN @recArgs 2>&1 | Tee-Object -FilePath $logPath
+} catch {
+    # The process was terminated by the background job, which is the expected behavior.
+    # We log this and allow the script to continue.
+    Write-Host "Keploy record process was terminated as expected by the background job."
+}
 
 # Wait for job to complete
 Write-Host "Keploy stopped. Checking background job status..."
