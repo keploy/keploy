@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
@@ -760,8 +761,29 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, fmt.Errorf("failed to start agent: %w", err)
 	}
 	time.Sleep(10 * time.Second)
+	
+	inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+	if err != nil {
+		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+		return 0, err
+	}
+	var keployIPv4 string
+	keployIPv4 = inspect.NetworkSettings.IPAddress
 
-	a.logger.Info("Agent is now running, proceeding with setup")
+	// Check if the Networks map is not empty
+	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+		// Iterate over the map to get the first available IP
+		for _, network := range inspect.NetworkSettings.Networks {
+			keployIPv4 = network.IPAddress
+			if keployIPv4 != "" {
+				break // Exit the loop once we've found an IP
+			}
+		}
+	}
+
+	pkg.AgentIP = keployIPv4
+	fmt.Println("here is the agent's IP address in client :", keployIPv4)
+	
 
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
