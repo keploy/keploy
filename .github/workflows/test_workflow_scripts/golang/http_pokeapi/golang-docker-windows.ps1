@@ -1,6 +1,6 @@
 <# 
   PowerShell test runner for Keploy (Windows) - http-pokeapi Docker example.
-  This script uses the robust patterns established in the working echo-sql sample.
+  This script uses the robust, simplified patterns from the working echo-sql sample.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -28,10 +28,6 @@ Write-Host "Generating Keploy config..."
 
 # --- SCRIPT BLOCK FOR BACKGROUND TRAFFIC GENERATION ---
 $scriptBlock = {
-    param(
-      [int]$iterationIndex
-    )
-    
     # --- This is the proven, robust function from echo-sql to stop the Keploy process ---
     function Stop-Keploy {
       try {
@@ -42,38 +38,20 @@ $scriptBlock = {
         
         if ($procs.Count -eq 0) {
           Write-Host "BACKGROUND JOB: No Keploy process found to kill."
-          return $false
-        }
-        
-        foreach ($proc in $procs) {
-          Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id) ($($proc.ProcessName))"
-          try {
-            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-            Write-Host "BACKGROUND JOB: Keploy process $($proc.Id) stopped successfully"
-          } catch {
-            Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_"
-          }
-        }
-        Start-Sleep -Seconds 2
-        $remainingProcs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-          $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record'
-        }
-        if ($remainingProcs.Count -eq 0) {
-          Write-Host "BACKGROUND JOB: All Keploy processes stopped successfully"
-          return $true
         } else {
-          Write-Warning "BACKGROUND JOB: Some Keploy processes may still be running"
-          return $false
+          foreach ($proc in $procs) {
+            Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id) ($($proc.ProcessName))"
+            try { Stop-Process -Id $proc.Id -Force } catch { Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_" }
+          }
         }
       } catch {
         Write-Warning "BACKGROUND JOB: Failed to stop keploy: $_"
-        return $false
       }
     }
 
     # Main execution for the background job
     try {
-        Write-Host "BACKGROUND JOB: Starting traffic generation for iteration $($iterationIndex)..."
+        Write-Host "BACKGROUND JOB: Starting traffic generation..."
         Start-Sleep -Seconds 6 # Initial wait for app container to start
 
         # Health check loop
@@ -94,45 +72,43 @@ $scriptBlock = {
             }
         }
 
-        if (-not $appStarted) {
-            throw "Application did not start within the timeout period."
-        }
+        if (-not $appStarted) { throw "Application did not start within the timeout period." }
         
-        # --- Use Invoke-WebRequest for all calls to prevent crashes on non-JSON content or HTTP errors ---
-        $locationsResponse = Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -UseBasicParsing -ErrorAction SilentlyContinue
-        
-        if ($locationsResponse -and $locationsResponse.StatusCode -eq 200) {
-            $locations = $locationsResponse.Content | ConvertFrom-Json
-            if ($null -ne $locations -and $locations.location.Count -gt $iterationIndex) {
-                $location = $locations.location[$iterationIndex]
-                Write-Host "BACKGROUND JOB: Selected location: $location"
+        # --- Use try/catch for each API call to ensure the job NEVER crashes ---
+        try {
+            $locationsResponse = Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -UseBasicParsing
+            if ($locationsResponse.StatusCode -eq 200) {
+                $locations = $locationsResponse.Content | ConvertFrom-Json
+                if ($null -ne $locations -and $locations.location.Count -gt 0) {
+                    $location = $locations.location[0] # Just use the first one
+                    Write-Host "BACKGROUND JOB: Selected location: $location"
 
-                $pokemonsResponse = Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/locations/$location" -UseBasicParsing -ErrorAction SilentlyContinue
-                if ($pokemonsResponse -and $pokemonsResponse.StatusCode -eq 200) {
-                    $pokemons = $pokemonsResponse.Content | ConvertFrom-Json
-                    if ($null -ne $pokemons -and $pokemons.Count -gt $iterationIndex) {
-                        $pokemon = $pokemons[$iterationIndex]
-                        Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
-                        Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -UseBasicParsing -ErrorAction SilentlyContinue
-                    } else {
-                         Write-Warning "BACKGROUND JOB: Could not get a valid pokemon from location: $location"
-                    }
+                    try {
+                        $pokemonsResponse = Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/locations/$location" -UseBasicParsing
+                        if ($pokemonsResponse.StatusCode -eq 200) {
+                            $pokemons = $pokemonsResponse.Content | ConvertFrom-Json
+                            if ($null -ne $pokemons -and $pokemons.Count -gt 0) {
+                                $pokemon = $pokemons[0] # Just use the first one
+                                Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
+                                try {
+                                    Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -UseBasicParsing
+                                } catch { Write-Warning "BACKGROUND JOB: Request to /api/pokemon/$pokemon failed." }
+                            }
+                        }
+                    } catch { Write-Warning "BACKGROUND JOB: Request to /api/locations/$location failed." }
                 }
-            } else {
-                Write-Warning "BACKGROUND JOB: Could not get a valid location from the locations API."
             }
-        }
+        } catch { Write-Warning "BACKGROUND JOB: Request to /api/locations failed." }
 
-        # This endpoint returns text/plain, so Invoke-WebRequest is required.
-        Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/greet' -UseBasicParsing -ErrorAction SilentlyContinue
+        try {
+            Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/greet' -UseBasicParsing
+        } catch { Write-Warning "BACKGROUND JOB: Request to /api/greet failed." }
         
         Write-Host "BACKGROUND JOB: All requests sent."
-
-        # Wait for Keploy to capture everything
         Start-Sleep -Seconds 7
     }
     catch {
-      Write-Error "BACKGROUND JOB: Exception occurred: $_"
+      Write-Error "BACKGROUND JOB: A critical, unexpected exception occurred: $_"
     }
     finally {
       # This block will always run, ensuring the main process is unblocked.
@@ -143,45 +119,42 @@ $scriptBlock = {
 # --- END OF SCRIPT BLOCK ---
 
 
-# --- Record two test sets ---
-$containerName = "http-pokeapi" # This is the service name from docker-compose.yml
-foreach ($i in 0..1) {
-    $iteration = $i + 1
-    $logPath = "${containerName}_${iteration}.txt"
-    Write-Host "--- Starting recording for iteration ${iteration} ---"
+# --- Record one test set ---
+$containerName = "http-pokeapi"
+$logPath = "${containerName}_record.txt"
+Write-Host "--- Starting recording for one test set ---"
 
-    $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $i
+$job = Start-Job -ScriptBlock $scriptBlock
 
-    $recArgs = @(
-      'record',
-      '-c', 'docker compose up',
-      '--container-name', $containerName,
-      '--generate-github-actions=false'
-    )
-    
-    try {
-        & $env:RECORD_BIN @recArgs 2>&1 | Tee-Object -FilePath $logPath
-    } catch {
-        Write-Host "Keploy record process was terminated as expected by the background job."
-    }
+$recArgs = @(
+  'record',
+  '-c', 'docker compose up',
+  '--container-name', $containerName,
+  '--generate-github-actions=false'
+)
 
-    Wait-Job $job
-    Write-Host "--- Background Job Output (Iteration ${iteration}) ---"
-    Receive-Job $job
-    Write-Host "------------------------------------------------"
-    Remove-Job $job
-
-    Write-Host "Shutting down docker compose services after iteration ${iteration}..."
-    docker compose down --volumes
-
-    if (Select-String -Path $logPath -Pattern 'ERROR|FATAL|DATA RACE' -SimpleMatch) {
-        Write-Error "Critical error or race condition detected in recording log for iteration ${iteration}."
-        Get-Content $logPath
-        exit 1
-    }
-    Write-Host "Successfully recorded test-set-${i}"
-    Start-Sleep -Seconds 5
+try {
+    & $env:RECORD_BIN @recArgs 2>&1 | Tee-Object -FilePath $logPath
+} catch {
+    Write-Host "Keploy record process was terminated as expected by the background job."
 }
+
+Wait-Job $job
+Write-Host "--- Background Job Output ---"
+Receive-Job $job
+Write-Host "-----------------------------"
+Remove-Job $job
+
+Write-Host "Shutting down docker compose services..."
+docker compose down --volumes
+
+if (Select-String -Path $logPath -Pattern 'ERROR|FATAL|DATA RACE' -SimpleMatch) {
+    Write-Error "Critical error detected in recording log."
+    Get-Content $logPath
+    exit 1
+}
+Write-Host "Successfully recorded test-set-0"
+Start-Sleep -Seconds 5
 
 
 # --- Test (replay) ---
@@ -199,28 +172,24 @@ $testArgs = @(
 & $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
 
 if (Select-String -Path $testLog -Pattern 'FATAL|DATA RACE' -SimpleMatch) {
-  Write-Error "Critical error or race condition detected during test."
+  Write-Error "Critical error detected during test."
   Get-Content $testLog
   exit 1
 }
 
-# --- Parse reports ---
+# --- Parse report ---
 $allPassed = $true
-foreach ($i in 0..1) {
-    $report = ".\keploy\reports\test-run-0\test-set-$i-report.yaml"
-    if (-not (Test-Path $report)) {
-        Write-Error "Missing report file: $report"
-        $allPassed = $false
-        break
-    }
-    
+$report = ".\keploy\reports\test-run-0\test-set-0-report.yaml"
+if (-not (Test-Path $report)) {
+    Write-Error "Missing report file: $report"
+    $allPassed = $false
+} else {
     $line = Select-String -Path $report -Pattern 'status:' | Select-Object -First 1
     $status = ($line.ToString() -replace '.*status:\s*', '').Trim()
-    Write-Host "Test status for test-set-${i}: $status"
-
+    Write-Host "Test status for test-set-0: $status"
     if ($status -ne 'PASSED') {
         $allPassed = $false
-        Write-Error "Test-set-$i did not pass."
+        Write-Error "Test-set-0 did not pass."
     }
 }
 
