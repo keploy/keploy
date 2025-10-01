@@ -761,29 +761,30 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, fmt.Errorf("failed to start agent: %w", err)
 	}
 	time.Sleep(10 * time.Second)
-	
-	inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
-	if err != nil {
-		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-		return 0, err
-	}
-	var keployIPv4 string
-	keployIPv4 = inspect.NetworkSettings.IPAddress
 
-	// Check if the Networks map is not empty
-	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
-		// Iterate over the map to get the first available IP
-		for _, network := range inspect.NetworkSettings.Networks {
-			keployIPv4 = network.IPAddress
-			if keployIPv4 != "" {
-				break // Exit the loop once we've found an IP
+	if isDockerCmd {
+		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+		if err != nil {
+			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+			return 0, err
+		}
+		var keployIPv4 string
+		keployIPv4 = inspect.NetworkSettings.IPAddress
+
+		// Check if the Networks map is not empty
+		if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+			// Iterate over the map to get the first available IP
+			for _, network := range inspect.NetworkSettings.Networks {
+				keployIPv4 = network.IPAddress
+				if keployIPv4 != "" {
+					break // Exit the loop once we've found an IP
+				}
 			}
 		}
-	}
 
-	pkg.AgentIP = keployIPv4
-	fmt.Println("here is the agent's IP address in client :", keployIPv4)
-	
+		pkg.AgentIP = keployIPv4
+		fmt.Println("here is the agent's IP address in client :", keployIPv4)
+	}
 
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
