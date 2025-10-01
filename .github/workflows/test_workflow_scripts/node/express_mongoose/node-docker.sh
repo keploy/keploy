@@ -13,11 +13,17 @@ sudo rm -rf keploy/
 docker build -t node-app:1.0 .
 
 container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    sudo kill $pid
+    pid=$(pgrep -f "keploy record")
+    echo "$pid Keploy record PID" 
+    echo "Killing keploy record"
+    sudo kill -9 $pid
+
+    pid=$(pgrep -f "keploy agent")
+    echo "$pid Keploy agent PID" 
+    echo "Killing keploy agent"
+    sudo kill -9 $pid
 }
+
 
 send_request(){
     sleep 10
