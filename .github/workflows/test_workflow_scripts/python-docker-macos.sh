@@ -73,7 +73,7 @@ for i in 1 2; do
   
   # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
   "$RECORD_BIN" record \
-    -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
+    -c "docker run -p 6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
     --container-name "$container_name" \
     --generate-github-actions=false \
     --record-timer=10s 2>&1 | tee "${container_name}.txt"
@@ -105,7 +105,7 @@ docker stop mongo >/dev/null 2>&1 || true
 test_container="flaskApp_test"
 echo "Starting test mode..."
 "$REPLAY_BIN" test \
-  -c "docker run -p6000:6000 --net keploy-network --name $test_container flask-app:1.0" \
+  -c "docker run -p 6000:6000 --net keploy-network --name $test_container flask-app:1.0" \
   --container-name "$test_container" \
   --apiTimeout 60 \
   --delay 12 \
