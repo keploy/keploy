@@ -1,5 +1,5 @@
 <# 
-  PowerShell test runner for Keploy (Windows) - http-pokeapi native binary example.
+  PowerShell test runner for Keploy (Windows) - http-pokeapi Docker example.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -16,12 +16,9 @@ Write-Host "Cleaning keploy/ directory and config file (if they exist)..."
 Remove-Item -LiteralPath ".\keploy" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
 
-# --- Build Go binary ---
-Write-Host "Building Go binary..."
-go build -o http-pokeapi.exe
-if (-not (Test-Path ".\http-pokeapi.exe")) {
-    throw "Go build failed, executable not found."
-}
+# --- Build Docker Image ---
+Write-Host "Building Docker image with docker compose..."
+docker compose build
 
 # --- Generate and update Keploy config ---
 Write-Host "Generating Keploy config..."
@@ -42,9 +39,10 @@ $scriptBlock = {
       [int]$iterationIndex
     )
     
-    # This function stops the Keploy process
+    # This function stops the Keploy process (which is running docker compose)
     function Stop-Keploy {
       try {
+        # Find the parent keploy process that needs to be stopped
         $proc = Get-Process -Name "keploy-record" -ErrorAction SilentlyContinue
         if ($proc) {
             Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id)..."
@@ -61,8 +59,8 @@ $scriptBlock = {
     # Main execution for the background job
     try {
         Write-Host "BACKGROUND JOB: Starting traffic generation for iteration $($iterationIndex)..."
-        Start-Sleep -Seconds 6 # Initial wait for app to start
-      
+        Start-Sleep -Seconds 6 # Initial wait for app container to start
+
         # Health check loop to wait for the app to be ready
         $appStarted = $false
         $maxWait = 60 # Wait up to 60 seconds
@@ -85,11 +83,11 @@ $scriptBlock = {
         
         # --- Send API Requests (PowerShell equivalent of curl + jq) ---
         $locationsResponse = Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations'
-        $location = $locationsResponse.location[$iterationIndex] # Use index to get a different location per iteration
+        $location = $locationsResponse.location[$iterationIndex]
         Write-Host "BACKGROUND JOB: Selected location: $location"
 
         $pokemonsResponse = Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/locations/$location"
-        $pokemon = $pokemonsResponse[$iterationIndex] # Use index to get a different pokemon per iteration
+        $pokemon = $pokemonsResponse[$iterationIndex]
         Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
 
         Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon"
@@ -115,9 +113,10 @@ $scriptBlock = {
 
 
 # --- Record two test sets ---
+$containerName = "http-pokeapi"
 foreach ($i in 0..1) {
     $iteration = $i + 1
-    $logPath = "http-pokeapi_${iteration}.txt"
+    $logPath = "${containerName}_${iteration}.txt"
     Write-Host "--- Starting recording for iteration ${iteration} ---"
 
     # Launch traffic generator in background
@@ -126,7 +125,8 @@ foreach ($i in 0..1) {
     # Start Keploy record command (this will block until the job kills it)
     $recArgs = @(
       'record',
-      '-c', '.\http-pokeapi.exe',
+      '-c', 'docker compose up',
+      '--container-name', $containerName,
       '--generate-github-actions=false'
     )
     
@@ -142,6 +142,10 @@ foreach ($i in 0..1) {
     Receive-Job $job
     Write-Host "------------------------------------------------"
     Remove-Job $job
+
+    # Clean up Docker environment before next iteration
+    Write-Host "Shutting down docker compose services after iteration ${iteration}..."
+    docker compose down
 
     # Check for errors in the recording log
     if (Select-String -Path $logPath -Pattern 'ERROR|FATAL|DATA RACE' -SimpleMatch) {
@@ -160,7 +164,8 @@ Write-Host "--- Starting Keploy test run ---"
 
 $testArgs = @(
   'test',
-  '-c', '.\http-pokeapi.exe',
+  '-c', 'docker compose up',
+  '--container-name', $containerName,
   '--delay', '7',
   '--generate-github-actions=false'
 )
