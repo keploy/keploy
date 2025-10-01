@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/agent/routes"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/agent"
@@ -51,6 +52,13 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				return nil
 			}
 
+			clientPid, err := cmd.Flags().GetUint32("client-pid")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get clientPID flag")
+				return nil
+			}
+			pkg.ClientPid = clientPid
+
 			if port == 0 {
 				port = 8086
 			}
@@ -83,7 +91,8 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case <-startCh:
-					logger.Info("keploy agent successfully loaded hooks and proxies, will start the http server now")
+					logger.Info("keploy agent successfully loaded hooks and proxies, will start the http server now :")
+					fmt.Println(port)
 					if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
 						logger.Error("failed to start HTTP server", zap.Error(err))
 					} else {

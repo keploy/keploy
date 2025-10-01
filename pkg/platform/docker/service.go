@@ -28,6 +28,8 @@ type Client interface {
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
 	SetInitPid(c *Compose, containerName string) error
+	SetPidContainer(c *Compose, appContainerName string, agentContainerName string) error
+	SetAgentNamespacesInCompose(c *Compose, appContainerName string, agentContainerName string) error
 	IsContainerRunning(containerName string) (bool, error)
 	CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error
 }

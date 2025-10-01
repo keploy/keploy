@@ -96,6 +96,9 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// 	http.Error(w, "Error retrieving test cases", http.StatusInternalServerError)
 	// 	return
 	// }
+	// <-r.Context().Done()
+	// fmt.Println("CONTEXT CANCELLED of request")
+	// return
 
 	// Keep the connection alive and stream data
 	for t := range tc {
@@ -169,6 +172,7 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 		ClientID: registerReq.SetupOptions.ClientID,
 		Error:    nil,
 	}
+	// agentIP := registerReq.SetupOptions.AgentIP
 
 	if err != nil {
 		register.Error = err

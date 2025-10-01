@@ -105,10 +105,10 @@ func (b *BaseHooks) SignalUnloadDone() {
 // might not be supported on all platforms.
 
 // DeleteKeployClientInfo provides a default implementation that may be overridden.
-func (b *BaseHooks) DeleteKeployClientInfo(id uint64) error {
-	b.logger.Warn("DeleteKeployClientInfo not implemented for this platform")
-	return nil
-}
+// func (b *BaseHooks) DeleteKeployClientInfo(id uint64) error {
+// 	b.logger.Warn("DeleteKeployClientInfo not implemented for this platform")
+// 	return nil
+// }
 
 // SendClientProxyInfo provides a default implementation that may be overridden.
 func (b *BaseHooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
@@ -117,7 +117,7 @@ func (b *BaseHooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.Proxy
 }
 
 // SendKeployClientInfo provides a default implementation that may be overridden.
-func (b *BaseHooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error {
-	b.logger.Warn("SendKeployClientInfo not implemented for this platform")
-	return nil
-}
+// func (b *BaseHooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error {
+// 	b.logger.Warn("SendKeployClientInfo not implemented for this platform")
+// 	return nil
+// }

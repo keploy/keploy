@@ -18,7 +18,7 @@ type Hooks interface {
 	DestInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
-	SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error
+	SendKeployClientInfo(clientInfo structs.ClientInfo) error
 	DeleteKeployClientInfo(clientID uint64) error
 	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
@@ -65,9 +65,8 @@ type ProxyOptions struct {
 	DNSIPv4Addr string
 	// DNSIPv6Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv6Addr string
-	Persister   models.TestCasePersister
-	BigPayload  bool
-	Mode        models.Mode
+	// BigPayload  bool
+	// Mode        models.Mode
 }
 
 type DestInfo interface {

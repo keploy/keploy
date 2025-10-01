@@ -4,23 +4,29 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	_ "embed" // necessary for embedding
 	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
@@ -37,12 +43,12 @@ type AgentClient struct {
 	apps         sync.Map
 	client       http.Client
 	conf         *config.Config
-	agentCmd     *exec.Cmd          // Track the agent process
+	agentCmd     *exec.Cmd // Track the agent process
+	mu           sync.Mutex
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 }
 
-//go:embed assets/initStop.sh
-var initStopScript []byte
+// var initStopScript []byte
 
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
 
@@ -155,6 +161,8 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 	if err != nil {
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
+	fmt.Println("Here is the response for getting outgoing :")
+	spew.Dump(res)
 
 	mockChan := make(chan *models.Mock)
 
@@ -482,7 +490,7 @@ func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerC
 		// Start the agent in Docker container using errgroup
 		grp.Go(func() error {
 			defer cancel() // Cancel agent context when Docker agent stops
-			if err := a.StartInDocker(agentCtx, a.logger); err != nil && !errors.Is(agentCtx.Err(), context.Canceled) {
+			if err := a.StartInDocker(agentCtx, a.logger, opts); err != nil && !errors.Is(agentCtx.Err(), context.Canceled) {
 				a.logger.Error("failed to start Docker agent", zap.Error(err))
 				return err
 			}
@@ -559,6 +567,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
 		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
 		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
+		"--client-pid", strconv.Itoa(int(os.Getpid())),
 		"--debug",
 	}
 	if opts.EnableTesting {
@@ -575,8 +584,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	cmd.Stderr = logFile
 
 	// Keep a reference for other methods
+	a.mu.Lock()
 	a.agentCmd = cmd
-
+	a.mu.Unlock()
+	fmt.Println(cmd)
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
 		_ = logFile.Close()
@@ -617,6 +628,8 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 
 // stopAgent stops the agent process gracefully
 func (a *AgentClient) stopAgent() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.agentCancel != nil {
 		a.agentCancel()
 		a.agentCancel = nil
@@ -653,14 +666,62 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
-	clientID := utils.GenerateID()
+	clientID := uint64(0)
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
+	opts.IsDocker = isDockerCmd
 
 	// Now it will always starts it's own agent
 
 	// Start the keploy agent as a detached process and pipe the logs into a file
 	if !isDockerCmd && runtime.GOOS != "linux" {
-		return 0, fmt.Errorf("Operating system not supported for this feature")
+		return 0, fmt.Errorf("operating system not supported for this feature")
+	}
+
+	if isDockerCmd {
+		fmt.Println("HERE IS THE DOCKER COMMAND :", cmd)
+		randomBytes := make([]byte, 2)
+		// Read cryptographically secure random bytes.
+		if _, err := rand.Read(randomBytes); err != nil {
+			// Handle the error appropriately in your application.
+			log.Fatal("Failed to generate random part for container name:", err)
+		}
+		// Encode the 2 bytes into a 4-character hexadecimal string.
+		uuidSuffix := hex.EncodeToString(randomBytes)
+
+		// Append the random string.
+		opts.KeployContainer = "keploy-v2-" + uuidSuffix
+
+		fmt.Println("ORIGINAL DOCKER COMMAND:", cmd)
+
+		// Regex to find all port mapping flags (-p or --publish)
+		portRegex := regexp.MustCompile(`\s+(-p|--publish)\s+[^\s]+`)
+
+		// Find all port arguments in the command string
+		portArgs := portRegex.FindAllString(cmd, -1)
+
+		// Clean and store the extracted port arguments in opts
+		cleanedPorts := []string{}
+		for _, p := range portArgs {
+			cleanedPorts = append(cleanedPorts, strings.TrimSpace(p))
+		}
+		opts.AppPorts = cleanedPorts // Store the extracted ports
+
+		// Remove the port arguments from the original command string
+		cmd = portRegex.ReplaceAllString(cmd, "")
+
+		networkRegex := regexp.MustCompile(`\s+--network\s+([^\s]+)`)
+
+		// Find the first match and its submatches (the captured group).
+		networkMatches := networkRegex.FindStringSubmatch(cmd)
+
+		if len(networkMatches) > 1 {
+			opts.AppNetwork = networkMatches[1] // Store the extracted network name
+			fmt.Println("FOUND APP NETWORK:", opts.AppNetwork)
+
+			// Remove the network argument from the original command string
+			cmd = networkRegex.ReplaceAllString(cmd, "")
+		}
+		fmt.Println("COMMAND AFTER REMOVING PORTS:", cmd)
 	}
 
 	// Start the agent process
@@ -668,21 +729,16 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if err != nil {
 		return 0, fmt.Errorf("failed to start agent: %w", err)
 	}
-
-	// Wait for the agent to become ready
-	err = a.waitForAgent(ctx, 10*time.Second)
-	if err != nil {
-		a.stopAgent() // Clean up if agent failed to start
-		return 0, fmt.Errorf("agent did not become ready in time: %w", err)
-	}
+	time.Sleep(10 * time.Second)
 
 	a.logger.Info("Agent is now running, proceeding with setup")
 
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
-		DockerNetwork: opts.DockerNetwork,
-		Container:     opts.Container,
-		DockerDelay:   opts.DockerDelay,
+		DockerNetwork:   opts.DockerNetwork,
+		KeployContainer: opts.KeployContainer,
+		Container:       opts.Container,
+		DockerDelay:     opts.DockerDelay,
 	})
 	a.apps.Store(clientID, usrApp)
 
@@ -707,20 +763,33 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	if isDockerCmd {
-		opts.DockerNetwork = usrApp.KeployNetwork
-		inode, setupErr := a.Initcontainer(ctx, app.Options{
-			DockerNetwork: opts.DockerNetwork,
-			Container:     opts.Container,
-			DockerDelay:   opts.DockerDelay,
-		})
-		if setupErr != nil {
-			utils.LogError(a.logger, setupErr, "failed to setup init container")
-			return 0, setupErr
+		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
+		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+		if err != nil {
+			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+			return 0, err
 		}
-		opts.AppInode = inode
+		var keployIPv4 string
+		keployIPv4 = inspect.NetworkSettings.IPAddress
+
+		// Check if the Networks map is not empty
+		if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+			// Iterate over the map to get the first available IP
+			for _, network := range inspect.NetworkSettings.Networks {
+				keployIPv4 = network.IPAddress
+				if keployIPv4 != "" {
+					break // Exit the loop once we've found an IP
+				}
+			}
+		}
+
+		pkg.AgentIP = keployIPv4
+		fmt.Println("here is the agent's IP address in client :", keployIPv4)
+		opts.AgentIP = keployIPv4
 	}
 
 	opts.ClientID = clientID
+	spew.Dump(opts)
 	if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
 		utils.LogError(a.logger, registerErr, "failed to register client")
 		return 0, registerErr
@@ -780,6 +849,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	requestBody := models.RegisterReq{
 		SetupOptions: models.SetupOptions{
 			DockerNetwork: opts.DockerNetwork,
+			AgentIP:       opts.AgentIP,
 			ClientNsPid:   clientPid,
 			Mode:          opts.Mode,
 			ClientID:      opts.ClientID,
@@ -857,138 +927,147 @@ func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.Unre
 	return nil
 }
 
-func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) error {
-	// Start the Keploy agent in a Docker container, directly using the passed context for cancellation
-	fmt.Println("Starting the keploy agent in docker container....")
-	agentCtx := context.WithoutCancel(ctx)
-	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
-		InstallationID: a.conf.InstallationID,
-	})
+// In platform/http/agent.go
+// In platform/http/agent.go
+
+func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
+
+	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
-		utils.LogError(logger, err, "failed to start keploy agent in docker")
+		utils.LogError(a.logger, err, "failed to find available port for agent")
 		return err
 	}
+
+	// Check and allocate available ports for proxy and DNS
+	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
+		return err
+	}
+
+	opts.AgentPort = agentPort
+	opts.ProxyPort = proxyPort
+
+	// Update the ports in the configuration
+	a.conf.Agent.Port = agentPort
+	a.conf.ProxyPort = proxyPort
+	a.conf.DNSPort = dnsPort
+
+	a.logger.Info("Using available ports",
+		zap.Uint32("agent-port", agentPort),
+		zap.Uint32("proxy-port", proxyPort),
+		zap.Uint32("dns-port", dnsPort))
+
+	fmt.Println("Starting the keploy agent in docker container....")
+
+	// Step 1: Prepare the Docker environment and get the command components.
+	// We delegate all Docker-specific setup to the new helper function.
+	keployAlias, err := kdocker.GetDockerCommandAndSetup(ctx, logger, &config.Config{
+		InstallationID: a.conf.InstallationID,
+	}, opts)
+	if err != nil {
+		utils.LogError(logger, err, "failed to prepare docker command and environment")
+		return err
+	}
+	defer func() {
+		// This is where you would close log files and delete temp files.
+		// This code will run when the application exits gracefully.
+		if utils.LogFile != nil {
+			utils.LogFile.Close()
+		}
+		_ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
+		_ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
+	}()
+
+	// Step 2: Append any additional arguments passed to the main CLI.
+	// This preserves the pass-through functionality from your original RunInDocker.
+	// programArgs = append(programArgs, os.Args[1:]...)
+
+	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
+
+	// // Step 3: Create the command, handling Windows vs. Unix-like systems.
+	// // We execute the program directly to avoid the problematic 'sh -c' wrapper.
+	// if runtime.GOOS == "windows" {
+	// 	var args []string
+	// 	args = append(args, "/C")
+	// 	args = append(args, strings.Split(keployAlias, " ")...)
+	// 	args = append(args, os.Args[1:]...)
+	// 	// Use cmd.exe /C for Windows
+	// 	cmd = exec.CommandContext(
+	// 		ctx,
+	// 		"cmd.exe",
+	// 		args...,
+	// 	)
+	// } else {
+	// 	// Use sh -c for Unix-like systems
+	// 	cmd = exec.CommandContext(
+	// 		ctx,
+	// 		"sh",
+	// 		"-c",
+	// 		keployAlias,
+	// 	)
+	// 	cmd.SysProcAttr = &syscall.SysProcAttr{
+	// 		Setsid: true,
+	// 	}
+	// }
+
+	// Step 4: Define the cancellation behavior for graceful shutdown.
+	cmd.Cancel = func() error {
+		logger.Info("Context cancelled. Explicitly stopping the 'keploy-v2' Docker container.")
+
+		// Define the container name that you set in the getAlias function.
+		containerName := opts.KeployContainer
+
+		// Create a new, separate command to stop the container.
+		// We use "sudo" here because the original run command also used it.
+		stopCmd := exec.Command("sudo", "docker", "stop", containerName)
+
+		// Execute the stop command. We use CombinedOutput to capture any errors.
+		if output, err := stopCmd.CombinedOutput(); err != nil {
+			logger.Warn("Could not stop the docker container. It may have already stopped.",
+				zap.String("container", containerName),
+				zap.Error(err),
+				zap.String("output", string(output)))
+		} else {
+			logger.Info("Successfully sent stop command to the container.", zap.String("container", containerName))
+		}
+
+		// Finally, forcefully kill the original `sh` process to ensure cleanup.
+		// The container is already stopping gracefully via the command above.
+		if cmd.Process != nil {
+			return utils.SendSignal(logger, cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+
+	// Step 5: Redirect output to the console, as in the original function.
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// 👈 Step 6: This is the critical fix. Store the command so stopAgent can find it.
+	a.mu.Lock()
+	a.agentCmd = cmd
+	a.mu.Unlock()
+
+	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))
+
+	// Step 7: Run the command. This blocks until the command exits or is cancelled.
+	if err := cmd.Run(); err != nil {
+		// A "context canceled" error is expected on normal shutdown, so we don't treat it as a failure.
+		if ctx.Err() == context.Canceled {
+			cmd.Process.Kill()
+			logger.Info("Docker agent run cancelled gracefully.")
+			return nil
+		}
+		utils.LogError(logger, err, "failed to run keploy agent in docker")
+		return err
+	}
+
 	return nil
 }
 
-func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint64, error) {
-	// Create a temporary file for the embedded initStop.sh script
-	initFile, err := os.CreateTemp("", "initStop.sh")
-	if err != nil {
-		a.logger.Error("failed to create temporary file", zap.Error(err))
-		return 0, err
-	}
-	defer func() {
-		err := os.Remove(initFile.Name())
-		if err != nil {
-			a.logger.Error("failed to remove temporary file", zap.Error(err))
-		}
-	}()
-
-	_, err = initFile.Write(initStopScript)
-	if err != nil {
-		a.logger.Error("failed to write script to temporary file", zap.Error(err))
-		return 0, err
-	}
-
-	// Close the file after writing to avoid 'text file busy' error
-	if err := initFile.Close(); err != nil {
-		a.logger.Error("failed to close temporary file", zap.Error(err))
-		return 0, err
-	}
-
-	err = os.Chmod(initFile.Name(), 0755)
-	if err != nil {
-		a.logger.Error("failed to make temporary script executable", zap.Error(err))
-		return 0, err
-	}
-
-	// Create a channel to signal when the container starts
-	containerStarted := make(chan struct{})
-
-	// Start the Docker events listener in a separate goroutine
-	go func() {
-		events, errs := a.dockerClient.Events(ctx, types.EventsOptions{})
-		for {
-			select {
-			case event := <-events:
-				if event.Type == "container" && event.Action == "start" && event.Actor.Attributes["name"] == "keploy-init" {
-					a.logger.Info("Container keploy-init started")
-					containerStarted <- struct{}{}
-					return
-				}
-			case err := <-errs:
-				a.logger.Error("Error while listening to Docker events", zap.Error(err))
-				return
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	// Start the init container to get the PID namespace inode
-	cmdCancel := func(cmd *exec.Cmd) func() error {
-		return func() error {
-			a.logger.Info("sending SIGINT to the Initcontainer", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
-			err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
-			return err
-		}
-	}
-
-	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm -v%s:/initStop.sh alpine /initStop.sh", opts.DockerNetwork, initFile.Name())
-
-	// Execute the command
-	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return 0, fmt.Errorf("failed to get errorgroup from the context")
-	}
-
-	grp.Go(func() error {
-		println("Executing the init container command")
-		cmdErr := utils.ExecuteCommand(ctx, a.logger, cmd, cmdCancel, 25*time.Second)
-		if cmdErr.Err != nil && cmdErr.Type == utils.Init {
-			utils.LogError(a.logger, cmdErr.Err, "failed to execute init container command")
-		}
-
-		println("Init container stopped")
-		return nil
-	})
-
-	// Wait for the container to start or context to cancel
-	select {
-	case <-containerStarted:
-		a.logger.Info("keploy-init container is running")
-	case <-ctx.Done():
-		return 0, fmt.Errorf("context canceled while waiting for container to start")
-	}
-
-	// Get the PID of the container's first process
-	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-init")
-	if err != nil {
-		a.logger.Error("failed to inspect container", zap.Error(err))
-		return 0, err
-	}
-
-	pid := inspect.State.Pid
-	a.logger.Info("Container PID", zap.Int("pid", pid))
-
-	// Extract inode from the PID namespace
-	pidNamespaceInode, err := kdocker.ExtractInodeByPid(pid)
-	if err != nil {
-		a.logger.Error("failed to extract PID namespace inode", zap.Error(err))
-		return 0, err
-	}
-
-	a.logger.Info("PID Namespace Inode", zap.String("inode", pidNamespaceInode))
-	iNode, err := strconv.ParseUint(pidNamespaceInode, 10, 64)
-	if err != nil {
-		a.logger.Error("failed to convert inode to uint64", zap.Error(err))
-		return 0, err
-	}
-	return iNode, nil
-}
-
 func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
+	fmt.Println("chekcing on port :", a.conf.Agent.Port)
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send request to the agent server")
@@ -1040,3 +1119,41 @@ func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {
 func (a *AgentClient) GetErrorChannel() <-chan error {
 	return nil
 }
+
+// func FindAvailableContainerName(ctx context.Context, cli *kdocker.Client, logger *zap.Logger, baseName string) (string, error) {
+// 	// 1. First, check if the base name itself is available.
+// 	_, err := cli.ContainerInspect(ctx, baseName)
+// 	if err != nil {
+// 		if errdefs.IsNotFound(err) {
+// 			logger.Info("Base container name is available", zap.String("name", baseName))
+// 			// The container was not found, so the name is available.
+// 			return baseName, nil
+// 		}
+// 		// For any other error (e.g., Docker daemon not running), return it.
+// 		return "", fmt.Errorf("failed to inspect container '%s': %w", baseName, err)
+// 	}
+
+// 	// 2. If the base name is taken (no error from Inspect), start looping.
+// 	logger.Warn("Base container name is already in use, finding an alternative.", zap.String("name", baseName))
+
+// 	// Limit attempts to prevent an infinite loop in an edge case.
+// 	const maxAttempts = 100
+// 	for i := 1; i <= maxAttempts; i++ {
+// 		candidateName := fmt.Sprintf("%s-%d", baseName, i)
+
+// 		_, err := cli.ContainerInspect(ctx, candidateName)
+// 		if err != nil {
+// 			if errdefs.IsNotFound(err) {
+// 				logger.Info("Found available container name.", zap.String("name", candidateName))
+// 				// Success! This name is not in use.
+// 				return candidateName, nil
+// 			}
+// 			// Another error occurred.
+// 			return "", fmt.Errorf("failed to inspect container '%s': %w", candidateName, err)
+// 		}
+// 		// If err is nil, this name is also taken. The loop will try the next number.
+// 	}
+
+// 	// If the loop finishes, we've failed to find a name after all attempts.
+// 	return "", fmt.Errorf("could not find an available name for base '%s' after %d attempts", baseName, maxAttempts)
+// }
