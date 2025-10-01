@@ -20,18 +20,10 @@ Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
 Write-Host "Building Docker image with docker compose..."
 docker compose build
 
-# --- Generate and update Keploy config ---
+# --- Generate Keploy config ---
 Write-Host "Generating Keploy config..."
 & $env:RECORD_BIN config --generate
-
-$configFile = ".\keploy.yml"
-if (-not (Test-Path $configFile)) {
-  throw "Config file '$configFile' not found after generation."
-}
-(Get-Content $configFile -Raw) -replace 'global:\s*\{\s*\}', 'global: {"body": {"updated_at":[]}}' |
-  Set-Content -Path $configFile -Encoding UTF8
-Write-Host "Updated global noise in keploy.yml"
-
+# No noise config needed for this app, but the file must exist.
 
 # --- SCRIPT BLOCK FOR BACKGROUND TRAFFIC GENERATION ---
 $scriptBlock = {
@@ -89,6 +81,7 @@ $scriptBlock = {
         $elapsed = 0
         while (-not $appStarted -and $elapsed -lt $maxWait) {
             try {
+                # Use the correct health check endpoint for this app
                 Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations' -TimeoutSec 2
                 $appStarted = $true
                 Write-Host "BACKGROUND JOB: App is responding!"
@@ -103,22 +96,20 @@ $scriptBlock = {
             throw "Application did not start within the timeout period."
         }
         
-        # Send API Requests
+        # --- Send API Requests specific to http-pokeapi ---
         $locationsResponse = Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations'
+        # Select a different location for each test set to create unique tests
         $location = $locationsResponse.location[$iterationIndex]
         Write-Host "BACKGROUND JOB: Selected location: $location"
 
         $pokemonsResponse = Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/locations/$location"
+        # Select a different pokemon for each test set
         $pokemon = $pokemonsResponse[$iterationIndex]
         Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
 
         Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon"
+        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet'
         
-        # --- FIX: Add -ErrorAction SilentlyContinue to tolerate 404s ---
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet' -ErrorAction SilentlyContinue
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet?format=html' -ErrorAction SilentlyContinue
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet?format=xml' -ErrorAction SilentlyContinue
-
         Write-Host "BACKGROUND JOB: All requests sent."
 
         # Wait for Keploy to capture everything
@@ -137,7 +128,7 @@ $scriptBlock = {
 
 
 # --- Record two test sets ---
-$containerName = "http-pokeapi"
+$containerName = "http-pokeapi" # This is the service name from docker-compose.yml
 foreach ($i in 0..1) {
     $iteration = $i + 1
     $logPath = "${containerName}_${iteration}.txt"
@@ -185,7 +176,7 @@ $testArgs = @(
   'test',
   '-c', 'docker compose up',
   '--container-name', $containerName,
-  '--delay', '7',
+  '--delay', '10',
   '--generate-github-actions=false'
 )
 
