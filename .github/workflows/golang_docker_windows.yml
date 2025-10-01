@@ -172,7 +172,6 @@ jobs:
           docker volume rm -f debugfs 2>$null | Out-Null
 
       - name: Run ${{ matrix.app.name }} application (Windows)
-        shell: pwsh
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
           REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}

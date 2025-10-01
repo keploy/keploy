@@ -29,7 +29,9 @@ Write-Host "Generating Keploy config..."
 # --- SCRIPT BLOCK FOR BACKGROUND TRAFFIC GENERATION ---
 $scriptBlock = {
     # Make Invoke-WebRequest non-terminating on 4xx/5xx and quiet by default
-    $PSDefaultParameterValues['Invoke-WebRequest:SkipHttpErrorCheck'] = $true  # PS 7+
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+      $PSDefaultParameterValues['Invoke-WebRequest:SkipHttpErrorCheck'] = $true
+    }
     $PSDefaultParameterValues['Invoke-WebRequest:ErrorAction'] = 'Continue'
     function Stop-Keploy {
       try {
@@ -141,17 +143,17 @@ try {
     Write-Host "Keploy record process was terminated as expected by the background job."
 }
 
-Wait-Job $job
+Wait-Job -Job $job
+
 Write-Host "--- Background Job Output ---"
-# Don't let job errors terminate the step
-$jobOutput = Receive-Job -Keep -ErrorAction SilentlyContinue
+$jobOutput = Receive-Job -Job $job -Keep -ErrorAction SilentlyContinue  # PS 5.1 needs -Job
 if ($job.State -ne 'Completed') {
   Write-Warning "BACKGROUND JOB exited with state: $($job.State). Treating as non-fatal."
 }
 $jobOutput | Write-Host
 Write-Host "-----------------------------"
-Remove-Job $job -Force
 
+Remove-Job -Job $job -Force
 
 Write-Host "Shutting down docker compose services..."
 docker compose down --volumes
