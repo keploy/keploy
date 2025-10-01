@@ -122,7 +122,7 @@ function Get-RunnerWorkPath {
 
 
 # --- Record once ---
-$containerName = "go-app"   # adjust per sample if needed
+$containerName = "echoApp"   # adjust per sample if needed
 $logPath = "$containerName.record.txt"
 $expectedTestSetIndex = 0
 
@@ -472,7 +472,7 @@ Write-Host "Successfully recorded test-set-$expectedTestSetIndex"
 
 
 # --- Test (replay) ---
-$testContainer = "go-app"
+$testContainer = "echoApp"
 $testLog = "$testContainer.test.txt"
 
 # Configure Docker image for replay
