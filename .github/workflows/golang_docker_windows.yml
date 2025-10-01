@@ -9,9 +9,12 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - name: echo-sql
-            path: echo-sql
-            script_dir: echo_sql
+          - name: go-dedup
+            path: go-dedup
+            script_dir: go-dedup
+          # - name: echo-sql
+          #   path: echo-sql
+          #   script_dir: echo_sql
         config:
           - job: record_build_replay_build
             record_src: build
