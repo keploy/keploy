@@ -24,7 +24,7 @@ container_kill() {
 
 send_request(){
     local container_name=$1
-    sleep 10
+    sleep 30
     app_started=false
     while [ "$app_started" = false ]; do
         if curl --silent http://localhost:6000/students; then
@@ -42,7 +42,7 @@ send_request(){
     curl -X DELETE http://localhost:6000/students/12345
 
     # Wait for 5 seconds for keploy to record the tcs and mocks.
-    sleep 5
+    sleep 15
     container_kill
     wait
 }
