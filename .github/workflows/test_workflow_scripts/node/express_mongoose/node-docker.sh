@@ -16,17 +16,12 @@ container_kill() {
     pid=$(pgrep -f "keploy record")
     echo "$pid Keploy record PID" 
     echo "Killing keploy record"
-    sudo kill -9 $pid
-
-    pid=$(pgrep -f "keploy agent")
-    echo "$pid Keploy agent PID" 
-    echo "Killing keploy agent"
-    sudo kill -9 $pid
+    sudo kill $pid
 }
 
 
 send_request(){
-    sleep 10
+    sleep 30
    # Wait for the application to start.
     app_started=false
     while [ "$app_started" = false ]; do
