@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -27,7 +28,7 @@ type DockerConfigStruct struct {
 }
 
 var DockerConfig = DockerConfigStruct{
-	DockerImage: "ghcr.io/keploy/keploy",
+	DockerImage: "keploy-oss",
 }
 
 func GenerateDockerEnvs(config DockerConfigStruct) string {
@@ -45,7 +46,7 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 // StartInDocker will check if the docker command is provided as an input
 // then start the Keploy as a docker container and run the command
 // should also return a boolean if the execution is moved to docker
-func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config) error {
+func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) error {
 
 	if DockerConfig.Envs == nil {
 		DockerConfig.Envs = map[string]string{
@@ -66,7 +67,7 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 	// }
 	fmt.Println("Keploy is running inside docker...")
 	// pass the all the commands and args to the docker version of Keploy
-	err := RunInDocker(ctx, logger)
+	err := RunInDocker(ctx, logger, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to run the command in docker")
 		return err
@@ -87,24 +88,65 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 		}
 	}
 
-	os.Exit(0)
+	// os.Exit(0)
 	return nil
 }
 
-func RunInDocker(ctx context.Context, logger *zap.Logger) error {
+func GetDockerCommandAndSetup(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
+	// Preserves your environment variable setup
+	if DockerConfig.Envs == nil {
+		DockerConfig.Envs = map[string]string{
+			"INSTALLATION_ID": conf.InstallationID,
+		}
+	} else {
+		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
+	}
+
+	// Preserves your Docker client initialization and setup
+	client, err := New(logger)
+	if err != nil {
+		return "", fmt.Errorf("failed to initialise docker: %w", err)
+	}
+
+	addKeployNetwork(ctx, logger, client)
+	err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
+		"type":   "debugfs",
+		"device": "debugfs",
+	})
+	if err != nil {
+		// Log the error but don't fail, consistent with original logic.
+		utils.LogError(logger, err, "failed to create debugfs volume")
+	}
+
+	// Preserves the alias generation
+	keployalias, err := getAlias(ctx, logger, opts)
+	if err != nil {
+		return "", err
+	}
+
+	// Split the alias into program and arguments for direct execution
+	// parts := strings.Fields(keployAlias)
+	// if len(parts) == 0 {
+	// 	return "", fmt.Errorf("generated docker command alias is empty")
+	// }
+
+	return keployalias, nil
+}
+
+func RunInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
+
 	//Get the correct keploy alias.
-	keployAlias, err := getAlias(ctx, logger)
+	keployAlias, err := getAlias(ctx, logger, opts)
 	if err != nil {
 		return err
 	}
-
 	client, err := New(logger)
 	if err != nil {
 		utils.LogError(logger, err, "failed to initalise docker")
 		return err
 	}
 
-	addKeployNetwork(ctx, logger, client)
+	// addKeployNetwork(ctx, logger, client)
 	err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
 		"type":   "debugfs",
 		"device": "debugfs",
@@ -154,10 +196,12 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	cmd.Stderr = os.Stderr
 
 	logger.Info("running the following command in docker", zap.String("command", cmd.String()))
+
 	err = cmd.Run()
 	if err != nil {
 		if ctx.Err() == context.Canceled {
-			return ctx.Err()
+			logger.Info("Docker agent run cancelled gracefully.")
+			return nil
 		}
 		utils.LogError(logger, err, "failed to start keploy in docker")
 		return err
@@ -165,7 +209,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	return nil
 }
 
-func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
+func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
@@ -175,12 +219,34 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	if envs != "" {
 		envs = envs + " "
 	}
+	appPortsStr := ""
+    if len(opts.AppPorts) > 0 {
+        appPortsStr = " " + strings.Join(opts.AppPorts, " ")
+    }
+	appNetworkStr := ""
+    if opts.AppNetwork != "" {
+        appNetworkStr = " --network " + opts.AppNetwork
+    }
 
 	switch osName {
 	case "linux":
-		alias := "sudo docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " + 
+		fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) + 
+		" -p " + fmt.Sprintf("%d", opts.ProxyPort)+ ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+		" --privileged" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + 
+		" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + 
+		"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		
+		
+		if opts.EnableTesting {
+			alias += " --enable-testing"
+		}
+		alias += " --port " + fmt.Sprintf("%d" , opts.AgentPort)
+		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
 		return alias, nil
 	case "windows":
+
 		// Get the current working directory
 		pwd, err := os.Getwd()
 		if err != nil {

@@ -31,7 +31,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		cmd:              cmd,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
-		keployContainer:  "keploy-v2",
+		keployContainer:  opts.KeployContainer,
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
@@ -60,9 +60,10 @@ type App struct {
 type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
-	Container     string
-	DockerDelay   uint64
-	DockerNetwork string
+	Container       string
+	KeployContainer string
+	DockerDelay     uint64
+	DockerNetwork   string
 }
 
 func (a *App) Setup(_ context.Context) error {
@@ -125,15 +126,15 @@ func (a *App) SetupDocker() error {
 
 	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
-	//injecting appNetwork to keploy.
-	err := a.injectNetwork(a.containerNetwork)
-	if err != nil {
-		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
-		return err
-	}
+	// injecting appNetwork to keploy.
+	// err := a.injectNetwork(a.containerNetwork)
+	// if err != nil {
+	// 	utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
+	// 	return err
+	// }
 
 	// attaching the init container's PID namespace to the app container
-	err = a.attachInitPid(context.Background())
+	err := a.attachInitPid(context.Background())
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to attach init pid")
 		return err
@@ -147,7 +148,9 @@ func (a *App) attachInitPid(_ context.Context) error {
 		return fmt.Errorf("no command provided to modify")
 	}
 
-	pidMode := fmt.Sprintf("--pid=container:%s", "keploy-init")
+	pidMode := fmt.Sprintf("--pid=container:%s", a.keployContainer)
+	networkMode := fmt.Sprintf("--network=container:%s", a.keployContainer)
+
 	// Inject the pidMode flag after 'docker run' in the command
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
 	if len(parts) < 3 {
@@ -155,8 +158,9 @@ func (a *App) attachInitPid(_ context.Context) error {
 	}
 
 	// Modify the command to insert the pidMode
-	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], pidMode, parts[2])
-	fmt.Println("Modified Command..:", a.cmd)
+	// a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], pidMode, parts[2])
+	a.cmd = fmt.Sprintf("%s %s %s %s %s", parts[0], parts[1], pidMode, networkMode, parts[2])
+	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
 }
 
@@ -214,14 +218,14 @@ func (a *App) SetupCompose() error {
 	// Checking info about the network and whether its external:true
 	info := a.docker.GetNetworkInfo(compose)
 
-	if info == nil {
-		info, err = a.docker.SetKeployNetwork(compose)
-		if err != nil {
-			utils.LogError(a.logger, nil, "failed to set default network in the compose file", zap.String("network", a.KeployNetwork))
-			return err
-		}
-		composeChanged = true
-	}
+	// if info == nil {
+	// 	info, err = a.docker.SetKeployNetwork(compose)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, nil, "failed to set default network in the compose file", zap.String("network", a.KeployNetwork))
+	// 		return err
+	// 	}
+	// 	composeChanged = true
+	// }
 
 	if !info.External {
 		err = a.docker.MakeNetworkExternal(compose)
@@ -232,31 +236,43 @@ func (a *App) SetupCompose() error {
 		composeChanged = true
 	}
 
-	a.KeployNetwork = info.Name
-	ok, err = a.docker.NetworkExists(a.KeployNetwork)
-	if err != nil {
-		utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.KeployNetwork))
-		return err
-	}
+	// a.KeployNetwork = info.Name
+	// ok, err = a.docker.NetworkExists(a.KeployNetwork)
+	// if err != nil {
+	// 	utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.KeployNetwork))
+	// 	return err
+	// }
 
-	//if keploy-network doesn't exist locally then create it
-	if !ok {
-		err = a.docker.CreateNetwork(a.KeployNetwork)
-		if err != nil {
-			utils.LogError(a.logger, nil, "failed to create default network", zap.String("network", a.KeployNetwork))
-			return err
-		}
-	}
+	// //if keploy-network doesn't exist locally then create it
+	// if !ok {
+	// 	err = a.docker.CreateNetwork(a.KeployNetwork)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, nil, "failed to create default network", zap.String("network", a.KeployNetwork))
+	// 		return err
+	// 	}
+	// }
 
 	//check if compose file has keploy-init container
 	// adding keploy init pid to the compose file
-	err = a.docker.SetInitPid(compose, a.container)
+	// err = a.docker.SetInitPid(compose, a.container)
+	// if err != nil {
+	// 	utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
+	// 	return err
+	// }
+	// composeChanged = true
+
+	// err = a.docker.SetPidContainer(compose, a.container, a.keployContainer)
+	// if err != nil {
+	// 	utils.LogError(a.logger, nil, "failed to set agent's pid namespace in the compose file")
+	// 	return err
+	// }
+	// composeChanged = true
+
+	err = a.docker.SetAgentNamespacesInCompose(compose, a.container, a.keployContainer)
 	if err != nil {
-		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
+		utils.LogError(a.logger, nil, "failed to set agent's namespaces in the compose file")
 		return err
 	}
-	composeChanged = true
-
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {
@@ -330,11 +346,11 @@ func (a *App) injectNetwork(network string) error {
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
 func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
-
+	// return true, nil
 	if e.Action != "start" {
 		return false, nil
 	}
-	// Fetch container details by inspecting using container ID to check if container is created
+	// Fetch container details by inspecting using container  ID to check if container is created
 	info, err := a.docker.ContainerInspect(ctx, e.ID)
 	if err != nil {
 		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
@@ -366,13 +382,15 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		return false, nil
 	}
 
-	n, ok := info.NetworkSettings.Networks[a.containerNetwork]
-	if !ok || n == nil {
-		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
-		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
-	}
-	a.SetContainerIPv4Addr(n.IPAddress)
-	return inode != 0 && n.IPAddress != "", nil
+	// n, ok := info.NetworkSettings.Networks[a.containerNetwork]
+	// if !ok || n == nil {
+	// 	a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
+	// 	return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
+	// }
+
+	// a.SetContainerIPv4Addr(n.IPAddress)
+	// return inode != 0 && n.IPAddress != "", nil
+	return true, nil
 }
 
 func (a *App) getDockerMeta(ctx context.Context) <-chan error {

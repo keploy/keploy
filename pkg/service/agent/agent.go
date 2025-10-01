@@ -7,8 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"sync"
 
+	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
@@ -37,6 +40,7 @@ type Agent struct {
 	// activeClients sync.Map
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
+	Ip          string
 }
 
 func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client, ip agent.IncomingProxy) *Agent {
@@ -174,6 +178,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	default:
 	}
 
+	
 	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
 		DNSIPv4Addr: "172.18.0.2",
 		//DnsIPv6Addr: ""
@@ -243,11 +248,10 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 		a.logger.Error("failed to send network info to the kernel", zap.Error(err))
 		return err
 	}
-
+	ppid := uint32(os.Getppid())
 	clientInfo := structs.ClientInfo{
 		KeployClientNsPid: opts.ClientNsPid,
 		IsDockerApp:       0,
-		KeployClientInode: opts.ClientInode,
 		AppInode:          opts.AppInode,
 	}
 
@@ -262,9 +266,20 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 
 	if opts.IsDocker {
 		clientInfo.IsDockerApp = 1
+		clientInfo.KeployClientNsPid = ppid
 	}
-
-	return a.Hooks.SendKeployClientInfo(opts.ClientID, clientInfo)
+	clientInfo.ClientPID = pkg.ClientPid
+	// ports := GetPortToSendToKernel(ctx, agent.HookCfg.Rules)
+	// for i := 0; i < 10; i++ {
+	// 	if len(ports) <= i {
+	// 		clientInfo.PassThroughPorts[i] = -1
+	// 		continue
+	// 	}
+	// 	clientInfo.PassThroughPorts[i] = int32(ports[i])
+	// }
+	fmt.Println("here is the client pid whic we have sent :", pkg.ClientPid)
+	spew.Dump(clientInfo)
+	return a.Hooks.SendKeployClientInfo(clientInfo)
 }
 
 func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) error {
@@ -278,47 +293,37 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 			IP6:  [4]uint32{0, 0, 0, 0},
 			Port: opts.ProxyPort,
 		}
-		err = a.Hooks.SendClientProxyInfo(opts.ClientID, proxyInfo)
+		fmt.Println("MAJOR BIG DUMP")
+		spew.Dump(opts)
+		spew.Dump(proxyInfo)
+		err = a.Hooks.SendClientProxyInfo(uint64(0), proxyInfo)
 		if err != nil {
 			return err
 		}
 		return nil
 	}
 
-	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-v2")
-	if err != nil {
-		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-		return err
-	}
+	fmt.Println("here is the agent ip address :", opts.AgentIP)
 
-	keployNetworks := inspect.NetworkSettings.Networks
-	var keployIPv4 string
-	for n, settings := range keployNetworks {
-		if n == opts.DockerNetwork {
-			keployIPv4 = settings.IPAddress //keploy container IP
-			break
-		}
-	}
-
-	ipv4, err := hooks.IPv4ToUint32(keployIPv4)
+	ipv4, err := hooks.IPv4ToUint32(opts.AgentIP)
 	if err != nil {
 		return err
 	}
 
 	var ipv6 [4]uint32
 	if opts.IsDocker {
-		ipv6, err := hooks.ToIPv4MappedIPv6(keployIPv4)
+		ipv6, err := hooks.ToIPv4MappedIPv6(opts.AgentIP)
 		if err != nil {
 			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
 		}
-		a.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", keployIPv4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+		a.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", opts.AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
 
 	}
 
 	proxyInfo := structs.ProxyInfo{
 		IP4:  ipv4,
 		IP6:  ipv6,
-		Port: 36789,
+		Port: opts.ProxyPort,
 	}
 
 	err = a.Hooks.SendClientProxyInfo(opts.ClientID, proxyInfo)
@@ -326,6 +331,42 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		return err
 	}
 	return nil
+}
+
+func getContainerIPv4() (string, error) {
+	// Get all network interfaces of the container.
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	// Loop through each interface.
+	for _, i := range interfaces {
+		// Get all addresses assigned to this interface.
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue // Try next interface on error.
+		}
+
+		// Loop through each address.
+		for _, addr := range addrs {
+			var ip net.IP
+			// Type-switch to see if we have an IP address.
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			// Check if the IP is a valid, non-loopback IPv4 address.
+			if ip != nil && !ip.IsLoopback() && ip.To4() != nil {
+				return ip.String(), nil // Return the first one we find.
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not find a non-loopback IPv4 address")
 }
 
 // StoreMocks stores the filtered and unfiltered mocks for a client ID

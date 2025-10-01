@@ -62,33 +62,13 @@ type bpfProgramSpecs struct {
 	K_connect6                       *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	K_getpeername6                   *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
-	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
-	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
-	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
-	SyscallProbeEntryReadv           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_readv"`
-	SyscallProbeEntryRecvfrom        *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_recvfrom"`
-	SyscallProbeEntrySendto          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_sendto"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
 	SyscallProbeEntryTcpV6Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v6_connect"`
 	SyscallProbeEntryTcpV6PreConnect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v6_pre_connect"`
 	SyscallProbeEntryUdpPreConnect   *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_udp_pre_connect"`
-	SyscallProbeEntryWrite           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_write"`
-	SyscallProbeEntryWritev          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_writev"`
-	SyscallProbeRetAccept            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept"`
-	SyscallProbeRetAccept4           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept4"`
-	SyscallProbeRetClose             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_close"`
-	SyscallProbeRetConnect           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_connect"`
-	SyscallProbeRetRead              *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_read"`
-	SyscallProbeRetReadv             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_readv"`
-	SyscallProbeRetRecvfrom          *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_recvfrom"`
-	SyscallProbeRetSendto            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_sendto"`
 	SyscallProbeRetTcpV4Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v4_connect"`
 	SyscallProbeRetTcpV6Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v6_connect"`
-	SyscallProbeRetWrite             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
-	SyscallProbeRetWritev            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_writev"`
-	SyscallProbeEntryConnect         *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_connect"`
 	SyscallProbeEntrySocket          *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -221,33 +201,13 @@ type bpfPrograms struct {
 	K_connect6                       *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.Program `ebpf:"k_getpeername4"`
 	K_getpeername6                   *ebpf.Program `ebpf:"k_getpeername6"`
-	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
-	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
-	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
-	SyscallProbeEntryReadv           *ebpf.Program `ebpf:"syscall__probe_entry_readv"`
-	SyscallProbeEntryRecvfrom        *ebpf.Program `ebpf:"syscall__probe_entry_recvfrom"`
-	SyscallProbeEntrySendto          *ebpf.Program `ebpf:"syscall__probe_entry_sendto"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
 	SyscallProbeEntryTcpV4PreConnect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_pre_connect"`
 	SyscallProbeEntryTcpV6Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v6_connect"`
 	SyscallProbeEntryTcpV6PreConnect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v6_pre_connect"`
 	SyscallProbeEntryUdpPreConnect   *ebpf.Program `ebpf:"syscall__probe_entry_udp_pre_connect"`
-	SyscallProbeEntryWrite           *ebpf.Program `ebpf:"syscall__probe_entry_write"`
-	SyscallProbeEntryWritev          *ebpf.Program `ebpf:"syscall__probe_entry_writev"`
-	SyscallProbeRetAccept            *ebpf.Program `ebpf:"syscall__probe_ret_accept"`
-	SyscallProbeRetAccept4           *ebpf.Program `ebpf:"syscall__probe_ret_accept4"`
-	SyscallProbeRetClose             *ebpf.Program `ebpf:"syscall__probe_ret_close"`
-	SyscallProbeRetConnect           *ebpf.Program `ebpf:"syscall__probe_ret_connect"`
-	SyscallProbeRetRead              *ebpf.Program `ebpf:"syscall__probe_ret_read"`
-	SyscallProbeRetReadv             *ebpf.Program `ebpf:"syscall__probe_ret_readv"`
-	SyscallProbeRetRecvfrom          *ebpf.Program `ebpf:"syscall__probe_ret_recvfrom"`
-	SyscallProbeRetSendto            *ebpf.Program `ebpf:"syscall__probe_ret_sendto"`
 	SyscallProbeRetTcpV4Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v4_connect"`
 	SyscallProbeRetTcpV6Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v6_connect"`
-	SyscallProbeRetWrite             *ebpf.Program `ebpf:"syscall__probe_ret_write"`
-	SyscallProbeRetWritev            *ebpf.Program `ebpf:"syscall__probe_ret_writev"`
-	SyscallProbeEntryConnect         *ebpf.Program `ebpf:"syscall_probe_entry_connect"`
 	SyscallProbeEntrySocket          *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -261,33 +221,13 @@ func (p *bpfPrograms) Close() error {
 		p.K_connect6,
 		p.K_getpeername4,
 		p.K_getpeername6,
-		p.SyscallProbeEntryAccept,
-		p.SyscallProbeEntryAccept4,
-		p.SyscallProbeEntryClose,
-		p.SyscallProbeEntryRead,
-		p.SyscallProbeEntryReadv,
-		p.SyscallProbeEntryRecvfrom,
-		p.SyscallProbeEntrySendto,
 		p.SyscallProbeEntryTcpV4Connect,
 		p.SyscallProbeEntryTcpV4PreConnect,
 		p.SyscallProbeEntryTcpV6Connect,
 		p.SyscallProbeEntryTcpV6PreConnect,
 		p.SyscallProbeEntryUdpPreConnect,
-		p.SyscallProbeEntryWrite,
-		p.SyscallProbeEntryWritev,
-		p.SyscallProbeRetAccept,
-		p.SyscallProbeRetAccept4,
-		p.SyscallProbeRetClose,
-		p.SyscallProbeRetConnect,
-		p.SyscallProbeRetRead,
-		p.SyscallProbeRetReadv,
-		p.SyscallProbeRetRecvfrom,
-		p.SyscallProbeRetSendto,
 		p.SyscallProbeRetTcpV4Connect,
 		p.SyscallProbeRetTcpV6Connect,
-		p.SyscallProbeRetWrite,
-		p.SyscallProbeRetWritev,
-		p.SyscallProbeEntryConnect,
 		p.SyscallProbeEntrySocket,
 	)
 }

@@ -91,6 +91,7 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 	pm.logger.Debug("Listening for application bind events to start ingress proxies...")
 
 	for e := range eventChan {
+
 		pm.logger.Debug("Intercepted application bind event",
 			zap.Uint32("pid", e.PID),
 			zap.Uint16("Orig_App_Port", e.OrigAppPort),
@@ -98,7 +99,6 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
-
 	pm.logger.Info("Stopping ingress event listener as the event channel was closed.")
 	pm.StopAll()
 }

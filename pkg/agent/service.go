@@ -21,7 +21,7 @@ type Hooks interface {
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
-	SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error
+	SendKeployClientInfo(clientInfo structs.ClientInfo) error
 	DeleteKeployClientInfo(clientID uint64) error
 	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
@@ -29,15 +29,15 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	ClientID   uint64
-	Pid        uint32
-	IsDocker   bool
-	KeployIPV4 string
-	Mode       models.Mode
-	Rules      []config.BypassRule
-	E2E        bool
-	Port       uint32
-	BigPayload bool
+	ClientID           uint64
+	Pid                uint32
+	IsDocker           bool
+	KeployIPV4         string
+	Mode               models.Mode
+	Rules              []config.BypassRule
+	E2E                bool
+	Port               uint32
+	BigPayload         bool
 }
 
 // TODO: should not be in the agent package
@@ -68,9 +68,8 @@ type ProxyOptions struct {
 	DNSIPv4Addr string
 	// DNSIPv6Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv6Addr string
-	Persister   models.TestCasePersister
-	BigPayload  bool
-	Mode        models.Mode
+	// BigPayload  bool
+	// Mode        models.Mode
 }
 
 type DestInfo interface {

@@ -53,26 +53,23 @@ type DockerAppInfo struct {
 // };
 
 type ClientInfo struct {
-	KeployClientInode uint64 // 8 bytes
 	KeployClientNsPid uint32 // 4 bytes
 	Mode              uint32 // 4 bytes
 	IsDockerApp       uint32 // 4 bytes
+	ClientPID         uint32
 
 	IsKeployClientRegistered uint32    // 4 bytes
 	PassThroughPorts         [10]int32 // 40 bytes
+	_                        uint32
 	AppInode                 uint64
 }
-
-// struct agent_info
-// {
-//     u32 keploy_agent_ns_pid;
-//     u32 keploy_agent_inode;
-//     struct proxy_info proxy_info;
-//     s32 dns_port;
-// };
 
 type AgentInfo struct {
 	KeployAgentNsPid uint32
 	DNSPort          int32
 	KeployAgentInode uint64
+	IsDocker         uint32
+	_                [4]byte
+	// KeployAgentNetNsID  uint32
+	// KeployAgentCgroupID uint64
 }

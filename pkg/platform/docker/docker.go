@@ -91,6 +91,98 @@ func (idc *Impl) SetInitPid(c *Compose, containerName string) error {
 	return nil
 }
 
+func (idc *Impl) SetPidContainer(c *Compose, appContainerName string, agentContainerName string) error {
+    // Construct the value for the 'pid' field, e.g., "container:keploy-v2"
+    pidValue := fmt.Sprintf("container:%s", agentContainerName)
+
+    // Iterate over all services defined in the docker-compose file.
+    for _, service := range c.Services.Content {
+        var containerNameMatch bool
+        var pidFound bool
+
+        // This loop finds the service that matches the application's container name.
+        for i := 0; i < len(service.Content)-1; i++ {
+            if service.Content[i].Kind == yaml.ScalarNode && service.Content[i].Value == "container_name" &&
+                service.Content[i+1].Kind == yaml.ScalarNode && service.Content[i+1].Value == appContainerName {
+                containerNameMatch = true
+                break
+            }
+        }
+
+        // If we found the correct service for the application...
+        if containerNameMatch {
+            // ...check if a 'pid' key already exists.
+            for _, item := range service.Content {
+                if item.Value == "pid" {
+                    pidFound = true
+                    break
+                }
+            }
+
+            // If the 'pid' key is not already present, add it.
+            if !pidFound {
+                service.Content = append(service.Content,
+                    &yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
+                    &yaml.Node{
+                        Kind:  yaml.ScalarNode,
+                        Value: pidValue, // Use the new dynamic value here.
+                    },
+                )
+            }
+        }
+    }
+    return nil
+}
+
+func (idc *Impl) SetAgentNamespacesInCompose(c *Compose, appContainerName string, agentContainerName string) error {
+    pidValue := fmt.Sprintf("container:%s", agentContainerName)
+    networkValue := fmt.Sprintf("container:%s", agentContainerName)
+
+    for _, service := range c.Services.Content {
+        var containerNameMatch bool
+        pidFound := false
+        networkModeFound := false
+
+        // Find the service that matches the application's container name.
+        for i := 0; i < len(service.Content)-1; i++ {
+            if service.Content[i].Kind == yaml.ScalarNode && service.Content[i].Value == "container_name" &&
+                service.Content[i+1].Kind == yaml.ScalarNode && service.Content[i+1].Value == appContainerName {
+                containerNameMatch = true
+                break
+            }
+        }
+
+        if containerNameMatch {
+            // Check if 'pid' and 'network_mode' keys already exist.
+            for i := 0; i < len(service.Content); i++ {
+                if service.Content[i].Value == "pid" {
+                    pidFound = true
+                }
+                if service.Content[i].Value == "network_mode" {
+                    networkModeFound = true
+                }
+            }
+
+            // If 'pid' is not present, add it.
+            if !pidFound {
+                service.Content = append(service.Content,
+                    &yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
+                    &yaml.Node{Kind: yaml.ScalarNode, Value: pidValue},
+                )
+            }
+
+            // If 'network_mode' is not present, add it.
+            if !networkModeFound {
+                service.Content = append(service.Content,
+                    &yaml.Node{Kind: yaml.ScalarNode, Value: "network_mode"},
+                    &yaml.Node{Kind: yaml.ScalarNode, Value: networkValue},
+                )
+            }
+        }
+    }
+    return nil
+}
+
 // ExtractNetworksForContainer returns the list of all the networks that the container is a part of.
 // Note that if a user did not explicitly attach the container to a network, the Docker daemon attaches it
 // to a network called "bridge".
