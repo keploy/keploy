@@ -20,37 +20,6 @@ runs:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        git config --global url."git@github.com:".insteadOf "https://github.com/"
-        
-        echo "Fetching private integrations dependency via SSH..."
-        $env:GOPRIVATE = "github.com/keploy/integrations"
-        go get github.com/keploy/integrations
-        
-        echo "Creating extraparsers.go..."
-        mkdir pkg/core/proxy -Force
-        
-        @'
-        //go:build linux
-
-        package proxy
-
-        import (
-          _ "github.com/keploy/integrations/pkg/parsers"
-        )
-        '@ | Set-Content -Path pkg/core/proxy/extraparsers.go
-
-    - name: Add any missing Go modules
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        echo "Tidying up Go modules..."
-        go mod tidy
-
-    - name: Configure Git, Fetch Dependencies, and Create Parsers File
-      if: runner.os != 'Windows'
       shell: bash
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
@@ -60,7 +29,7 @@ runs:
         
         echo "Creating extraparsers.go..."
         mkdir -p pkg/core/proxy
-        cat << 'EOF' > pkg/core/proxy/extraparsers.go
+        cat <<'EOF' > pkg/core/proxy/extraparsers.go
         //go:build linux
 
         package proxy
@@ -69,10 +38,8 @@ runs:
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
         EOF
-
     - name: Add any missing Go modules
-      if: runner.os != 'Windows'
       shell: bash
       run: |
         echo "Tidying up Go modules..."
-        go mod tidy
+        go mod tidy    

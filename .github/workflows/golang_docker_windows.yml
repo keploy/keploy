@@ -37,11 +37,6 @@ jobs:
         run: docker volume prune -f
         continue-on-error: true
 
-      - name: Clean up git config
-        if: always()
-        continue-on-error: true
-        run: git config --global --unset url."git@github.com:".insteadOf
-
       - name: Checkout repository
         uses: actions/checkout@v4
 

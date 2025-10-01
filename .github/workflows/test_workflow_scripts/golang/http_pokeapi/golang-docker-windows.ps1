@@ -39,20 +39,48 @@ $scriptBlock = {
       [int]$iterationIndex
     )
     
-    # This function stops the Keploy process (which is running docker compose)
+    # --- THIS IS THE CORRECT, ROBUST FUNCTION FROM THE ECHO-SQL SCRIPT ---
     function Stop-Keploy {
       try {
-        # Find the parent keploy process that needs to be stopped
-        $proc = Get-Process -Name "keploy-record" -ErrorAction SilentlyContinue
-        if ($proc) {
-            Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id)..."
+        # Find all keploy processes using multiple criteria for robustness
+        $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+          $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record' -or 
+          $_.Path -like '*keploy*.exe' -or $_.CommandLine -like '*keploy*'
+        } | Sort-Object StartTime -Descending
+        
+        if ($procs.Count -eq 0) {
+          Write-Host "BACKGROUND JOB: No Keploy process found to kill."
+          return $false
+        }
+        
+        foreach ($proc in $procs) {
+          Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id) ($($proc.ProcessName))"
+          try {
             Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-            Write-Host "BACKGROUND JOB: Keploy process stopped successfully."
+            Write-Host "BACKGROUND JOB: Keploy process $($proc.Id) stopped successfully"
+          } catch {
+            Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_"
+          }
+        }
+        
+        # Wait a moment for processes to fully terminate
+        Start-Sleep -Seconds 2
+        
+        # Verify all processes are stopped
+        $remainingProcs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+          $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record'
+        }
+        
+        if ($remainingProcs.Count -eq 0) {
+          Write-Host "BACKGROUND JOB: All Keploy processes stopped successfully"
+          return $true
         } else {
-            Write-Warning "BACKGROUND JOB: Keploy record process not found."
+          Write-Warning "BACKGROUND JOB: Some Keploy processes may still be running"
+          return $false
         }
       } catch {
         Write-Warning "BACKGROUND JOB: Failed to stop keploy: $_"
+        return $false
       }
     }
 
@@ -113,7 +141,7 @@ $scriptBlock = {
 
 
 # --- Record two test sets ---
-$containerName = "http-pokeapi"
+$containerName = "http-pokeapi" # This is the service name from docker-compose.yml
 foreach ($i in 0..1) {
     $iteration = $i + 1
     $logPath = "${containerName}_${iteration}.txt"
@@ -145,7 +173,7 @@ foreach ($i in 0..1) {
 
     # Clean up Docker environment before next iteration
     Write-Host "Shutting down docker compose services after iteration ${iteration}..."
-    docker compose down
+    docker compose down --volumes # Use --volumes for a clean slate
 
     # Check for errors in the recording log
     if (Select-String -Path $logPath -Pattern 'ERROR|FATAL|DATA RACE' -SimpleMatch) {
