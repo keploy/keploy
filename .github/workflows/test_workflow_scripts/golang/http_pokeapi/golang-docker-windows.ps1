@@ -82,7 +82,8 @@ $scriptBlock = {
         $elapsed = 0
         while (-not $appStarted -and $elapsed -lt $maxWait) {
             try {
-                Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations' -TimeoutSec 2
+                # --- FIX: Use Invoke-WebRequest for more robust health checking ---
+                Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -TimeoutSec 2 -UseBasicParsing
                 $appStarted = $true
                 Write-Host "BACKGROUND JOB: App is responding!"
             } catch {
@@ -96,19 +97,21 @@ $scriptBlock = {
             throw "Application did not start within the timeout period."
         }
         
-        # --- Send API Requests with proper error handling to prevent the job from crashing ---
-        $locationsResponse = Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations' -ErrorAction SilentlyContinue
+        # --- FIX: Use Invoke-WebRequest and manually parse JSON to avoid "response ended prematurely" error ---
+        $locationsResponseJson = (Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -UseBasicParsing -ErrorAction SilentlyContinue).Content
+        $locationsResponse = $locationsResponseJson | ConvertFrom-Json
         
         if ($null -ne $locationsResponse -and $locationsResponse.location.Count -gt $iterationIndex) {
             $location = $locationsResponse.location[$iterationIndex]
             Write-Host "BACKGROUND JOB: Selected location: $location"
 
-            $pokemonsResponse = Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/locations/$location" -ErrorAction SilentlyContinue
+            $pokemonsResponseJson = (Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/locations/$location" -UseBasicParsing -ErrorAction SilentlyContinue).Content
+            $pokemonsResponse = $pokemonsResponseJson | ConvertFrom-Json
             
             if ($null -ne $pokemonsResponse -and $pokemonsResponse.Count -gt $iterationIndex) {
                 $pokemon = $pokemonsResponse[$iterationIndex]
                 Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
-                Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -ErrorAction SilentlyContinue
+                Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -UseBasicParsing -ErrorAction SilentlyContinue
             } else {
                 Write-Warning "BACKGROUND JOB: Could not get a valid pokemon from location: $location"
             }
@@ -116,7 +119,8 @@ $scriptBlock = {
             Write-Warning "BACKGROUND JOB: Could not get a valid location from the locations API."
         }
 
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet' -ErrorAction SilentlyContinue
+        # This endpoint returns text/plain, so Invoke-WebRequest is required
+        Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/greet' -UseBasicParsing -ErrorAction SilentlyContinue
         
         Write-Host "BACKGROUND JOB: All requests sent."
 
