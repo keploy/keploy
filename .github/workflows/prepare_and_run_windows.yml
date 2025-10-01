@@ -4,58 +4,58 @@ on:
     branches: [main]
 
 jobs:
-  build-and-upload:
-    runs-on: [self-hosted, Windows, X64]
-    steps:
-      - name: Clean up git config (ensure HTTPS for checkout)
-        if: always()
-        continue-on-error: true
-        shell: powershell
-        run: |
-          git config --global --unset-all url."git@github.com:".insteadof  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
-          git config --global --unset-all core.sshCommand  2>$null
-          git config --global --list
+  # build-and-upload:
+  #   runs-on: [self-hosted, Windows, X64]
+  #   steps:
+  #     - name: Clean up git config (ensure HTTPS for checkout)
+  #       if: always()
+  #       continue-on-error: true
+  #       shell: powershell
+  #       run: |
+  #         git config --global --unset-all url."git@github.com:".insteadof  2>$null
+  #         git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
+  #         git config --global --unset-all core.sshCommand  2>$null
+  #         git config --global --list
 
-      - name: Configure Git EOL on Windows
-        shell: powershell
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
+  #     - name: Configure Git EOL on Windows
+  #       shell: powershell
+  #       run: |
+  #         git config --global core.autocrlf false
+  #         git config --global core.eol lf
 
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
+  #     - name: Checkout Repository
+  #       uses: actions/checkout@v4
+  #       with:
+  #         persist-credentials: false
+  #         fetch-depth: 0
 
-      # - name: Set up Go
-      #   uses: actions/setup-go@v5
-      #   with:
-      #     go-version: ">=1.23"
+  #     # - name: Set up Go
+  #     #   uses: actions/setup-go@v5
+  #     #   with:
+  #     #     go-version: ">=1.23"
 
-      - name: Build Keploy (PR) - Windows (windows/amd64)
-        shell: powershell
-        run: |
-          $env:GOOS = "windows"
-          $env:GOARCH = "amd64"
-          $env:CGO_ENABLED = "0"
-          go build -tags=viper_bind_struct -o keploy.exe ./main.go
+  #     - name: Build Keploy (PR) - Windows (windows/amd64)
+  #       shell: powershell
+  #       run: |
+  #         $env:GOOS = "windows"
+  #         $env:GOARCH = "amd64"
+  #         $env:CGO_ENABLED = "0"
+  #         go build -tags=viper_bind_struct -o keploy.exe ./main.go
 
-      - name: Upload build artifact (Windows CLI)
-        uses: actions/upload-artifact@v4
-        with: 
-          name: build
-          path: keploy.exe
+  #     - name: Upload build artifact (Windows CLI)
+  #       uses: actions/upload-artifact@v4
+  #       with: 
+  #         name: build
+  #         path: keploy.exe
 
-      - name: Clean up git config
-        if: always()
-        continue-on-error: true
-        shell: powershell
-        run: |
-          git config --global --unset url."git@github.com:".insteadOf
+  #     - name: Clean up git config
+  #       if: always()
+  #       continue-on-error: true
+  #       shell: powershell
+  #       run: |
+  #         git config --global --unset url."git@github.com:".insteadOf
 
-  docker-image-build:
+  # docker-image-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -128,5 +128,5 @@ jobs:
 
   run_golang_docker_windows:
     # needs: [build-and-upload, docker-image-build, upload-latest]
-    needs: [build-and-upload, docker-image-build]
+    # needs: [build-and-upload, docker-image-build]
     uses: ./.github/workflows/golang_docker_windows.yml
