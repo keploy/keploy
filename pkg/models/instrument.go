@@ -55,6 +55,7 @@ type IncomingOptions struct {
 
 type SetupOptions struct {
 	Container         string
+	KeployContainer   string
 	DockerNetwork     string
 	DockerDelay       uint64
 	ClientInode       uint64
@@ -67,7 +68,11 @@ type SetupOptions struct {
 	Mode              Mode
 	ClientNsPid       uint32
 	ClientID          uint64
+	AgentIP           string
 	GlobalPassthrough bool
+	AgentPort         uint32
+	AppPorts          []string
+	AppNetwork        string
 }
 
 type RunOptions struct {

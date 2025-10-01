@@ -100,7 +100,6 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 }
 
 // In proxy.go
-
 func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 	//first initialize the integrations

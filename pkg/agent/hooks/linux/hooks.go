@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/davecgh/go-spew/spew"
 
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks/common"
@@ -348,185 +349,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		h.gp6 = gp6
 	}
 
-	// The hook sys_connect is used to identify outgoing connections to avoid misclassifying reused FDs
-	//  as incoming, especially when analyzing `write` syscalls.
-
-	//Open a kprobe at the entry of connect syscall
-	cnt, err := link.Kprobe("sys_connect", objs.SyscallProbeEntryConnect, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_connect")
-		return err
-	}
-	h.connect = cnt
-
-	//Opening a kretprobe at the exit of connect syscall
-	cntr, err := link.Kretprobe("sys_connect", objs.SyscallProbeRetConnect, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_connect")
-		return err
-	}
-	h.connectRet = cntr
-
-	// ------------ For Ingress using Kprobes --------------
-
-	//Open a kprobe at the entry of sendto syscall
-	snd, err := link.Kprobe("sys_sendto", objs.SyscallProbeEntrySendto, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_sendto")
-		return err
-	}
-	h.sendto = snd
-
-	//Opening a kretprobe at the exit of sendto syscall
-	sndr, err := link.Kretprobe("sys_sendto", objs.SyscallProbeRetSendto, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_sendto")
-		return err
-	}
-	h.sendtoRet = sndr
-
-	// Open a Kprobe at the entry point of the kernel function and attach the
-	// pre-compiled program.
-	ac, err := link.Kprobe("sys_accept", objs.SyscallProbeEntryAccept, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_accept")
-		return err
-	}
-	h.accept = ac
-
-	// Open a Kprobe at the exit point of the kernel function and attach the
-	// pre-compiled program.
-	acRet, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_accept")
-		return err
-	}
-	h.acceptRet = acRet
-
-	// Open a Kprobe at the entry point of the kernel function and attach the
-	// pre-compiled program.
-	ac4, err := link.Kprobe("sys_accept4", objs.SyscallProbeEntryAccept4, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_accept4")
-		return err
-	}
-	h.accept4 = ac4
-
-	// Open a Kprobe at the exit point of the kernel function and attach the
-	// pre-compiled program.
-	ac4Ret, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_accept4")
-		return err
-	}
-	h.accept4Ret = ac4Ret
-
-	// Open a Kprobe at the entry point of the kernel function and attach the
-	// pre-compiled program.
-	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_read")
-		return err
-	}
-	h.read = rd
-
-	// Open a Kprobe at the exit point of the kernel function and attach the
-	// pre-compiled program.
-	rdRet, err := link.Kretprobe("sys_read", objs.SyscallProbeRetRead, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_read")
-		return err
-	}
-	h.readRet = rdRet
-
-	// Open a Kprobe at the entry point of the kernel function and attach the
-	// pre-compiled program.
-	wt, err := link.Kprobe("sys_write", objs.SyscallProbeEntryWrite, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_write")
-		return err
-	}
-	h.write = wt
-
-	// Open a Kprobe at the exit point of the kernel function and attach the
-	// pre-compiled program.
-	wtRet, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_write")
-		return err
-	}
-	h.writeRet = wtRet
-
-	// Open a Kprobe at the entry point of the kernel function and attach the
-	// pre-compiled program for readv.
-	readv, err := link.Kprobe("sys_readv", objs.SyscallProbeEntryReadv, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_readv")
-		return err
-	}
-	h.readv = readv
-
-	// Open a Kprobe at the exit point of the kernel function and attach the
-	// pre-compiled program for readv.
-	readvRet, err := link.Kretprobe("sys_readv", objs.SyscallProbeRetReadv, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_readv")
-		return err
-	}
-	h.readvRet = readvRet
-
-	// Open a Kprobe at the entry point of the kernel function and attach the
-	// pre-compiled program for writev.
-	wtv, err := link.Kprobe("sys_writev", objs.SyscallProbeEntryWritev, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_writev")
-		return err
-	}
-	h.writev = wtv
-
-	// Open a Kprobe at the exit point of the kernel function and attach the
-	// pre-compiled program for writev.
-	wtvRet, err := link.Kretprobe("sys_writev", objs.SyscallProbeRetWritev, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_writev")
-		return err
-	}
-	h.writevRet = wtvRet
-
-	// Open a Kprobe at the entry point of the kernel function and attach the
-	// pre-compiled program.
-	cl, err := link.Kprobe("sys_close", objs.SyscallProbeEntryClose, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_close")
-		return err
-	}
-	h.close = cl
-
-	//Attaching a kprobe at the entry of recvfrom syscall
-	rcv, err := link.Kprobe("sys_recvfrom", objs.SyscallProbeEntryRecvfrom, nil)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_recvfrom")
-		return err
-	}
-	h.recvfrom = rcv
-
-	//Attaching a kretprobe at the exit of recvfrom syscall
-	rcvr, err := link.Kretprobe("sys_recvfrom", objs.SyscallProbeRetRecvfrom, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_recvfrom")
-		return err
-	}
-	h.recvfromRet = rcvr
-
-	// Open a Kprobe at the exit point of the kernel function and attach the
-	// pre-compiled program.
-	clRet, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on sys_close")
-		return err
-	}
-	h.closeRet = clRet
-
 	h.Logger.Info("keploy initialized and probes added to the kernel.")
 
 	var clientInfo = structs.ClientInfo{}
@@ -540,14 +362,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		clientInfo.Mode = uint32(0)
 	}
 
-	//sending keploy pid to kernel to get filtered
-	inode, err := GetSelfInodeNumber()
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to get inode of the keploy process")
-		return err
-	}
-
-	clientInfo.KeployClientInode = inode
 	clientInfo.KeployClientNsPid = uint32(os.Getpid())
 	if opts.E2E {
 		pid, err := utils.GetPIDFromPort(ctx, h.Logger, int(opts.Port))
@@ -580,18 +394,24 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 	// 	return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
 	// }
 
+	// // 3. Get the container's main process ID from the inspection result
+	// containerPID := inspect.State.Pid
+	// h.Logger.Info("Successfully inspected agent container", zap.Int("pid", containerPID))
+
 	var agentInfo = structs.AgentInfo{}
+	// agentInfo.KeployAgentNsPid = uint32(opts.KeployContainerPID)
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
+	// agentInfo.KeployAgentInode, err = GetInodeForPID(opts.KeployContainerPID)
 	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	agentInfo.IsDocker = 0
+	if opts.IsDocker {
+		agentInfo.IsDocker = 1
+	}
+	fmt.Println("here is clients pid : ", uint32(os.Getpid()))
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get inode of the keploy process")
-		return err
+		// return err
 	}
-	// agentInfo.ProxyInfo = structs.ProxyInfo{
-	// 	IP4:  proxyIP,
-	// 	IP6:  h.ProxyIP6,
-	// 	Port: h.ProxyPort,
-	// }
 
 	agentInfo.DNSPort = int32(h.DNSPort)
 
@@ -610,11 +430,13 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
 
-	err = h.SendKeployClientInfo(opts.ClientID, clientInfo)
+	err = h.SendClientInfo(clientInfo)
 	if err != nil {
 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 		return err
 	}
+	fmt.Println("Sending agent information :")
+	spew.Dump(agentInfo)
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.Logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
@@ -643,6 +465,45 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 // 	}
 // 	return nil
 // }
+
+// func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
+// 	err := h.DeleteClientInfo(id)
+// 	if err != nil {
+// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+// 		return err
+// 	}
+// 	return nil
+// }
+
+// func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
+// 	err := h.SendProxyInfo(clientID, proxyInfo)
+// 	if err != nil {
+// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+// 		return err
+// 	}
+// 	return nil
+// }
+
+// func (h *Hooks) SendKtInfo(_ context.Context, tb structs.TestBenchInfo) error {
+
+// 	err := h.SendKeployPids(models.TestKey, tb)
+// 	if err != nil {
+// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+// 		return err
+// 	}
+// 	return nil
+// }
+
+func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
+
+	err := h.SendClientInfo(clientInfo)
+	if err != nil {
+		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
+
+	return nil
+}
 
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events

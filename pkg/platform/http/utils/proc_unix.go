@@ -59,13 +59,6 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
 		logger.Warn("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
 	}
-	// Give it a moment
-	time.Sleep(3 * time.Second)
 
-	// If still running, SIGKILL group
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		logger.Warn("failed to SIGKILL process group; falling back to parent kill", zap.Int("pgid", pgid), zap.Error(err))
-		return cmd.Process.Kill()
-	}
 	return nil
 }

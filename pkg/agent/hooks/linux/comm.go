@@ -27,16 +27,6 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 		return nil, err
 	}
 
-	// Use the current client ID with proper synchronization
-	// h.m.Lock()
-	// currentClientID := h.clientID
-	// h.m.Unlock()
-
-	// s, ok := h.sess.Get(currentAppID)
-	// if !ok {
-	// 	return nil, fmt.Errorf("session not found")
-	// }
-
 	return &agent.NetworkAddress{
 		ClientID: d.ClientID,
 		Version:  d.IPVersion,
@@ -99,13 +89,25 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	return nil
 }
 
-func (h *Hooks) SendKeployClientInfo(id uint64, clientInfo structs.ClientInfo) error {
+func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
 	fmt.Println("Sending client info to ebpf program", clientInfo)
-	err := h.clientRegistrationMap.Update(id, clientInfo, ebpf.UpdateAny)
+	err := h.clientRegistrationMap.Update(uint64(0), clientInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to send the app info to the ebpf program")
 		return err
 	}
+
+	var retrievedInfo structs.ClientInfo
+
+	// 2. Look up the key and pass a pointer to your variable.
+	err = h.clientRegistrationMap.Lookup(uint64(0), &retrievedInfo)
+	if err != nil {
+		utils.LogError(h.Logger, err, "failed to read the app info from the ebpf program")
+		return err
+	}
+
+	// 3. Print the retrieved value.
+	fmt.Println("Value at index 0 is:", retrievedInfo)
 	return nil
 }
 
@@ -162,7 +164,8 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 				utils.LogError(h.Logger, err, "failed to decode ingress event")
 				continue
 			}
-			h.Logger.Debug("Intercepted application bind event")
+			fmt.Println("GOT BIND EVENT")
+			h.Logger.Info("Intercepted application bind event")
 			select {
 			case <-ctx.Done(): // Context was cancelled, so we shut down.
 				return
@@ -172,36 +175,3 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 	}()
 	return eventChan, nil
 }
-
-// func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppInfo) error {
-// 	h.m.Lock()
-// 	defer h.m.Unlock()
-
-// 	// Use the provided app ID or the current app ID, don't generate a random one
-// 	dockerAppID := appID
-// 	if dockerAppID == 0 {
-// 		dockerAppID = h.appID
-// 	}
-
-// 	if h.appID != 0 && h.appID != dockerAppID {
-// 		err := h.dockerAppRegistrationMap.Delete(h.appID)
-// 		if err != nil {
-// 			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Uint64("(Key)/AppID", h.appID))
-// 			return err
-// 		}
-// 	}
-
-// 	// Don't override the app ID with a random number - use the real app ID
-// 	err := h.dockerAppRegistrationMap.Update(dockerAppID, dockerAppInfo, ebpf.UpdateAny)
-// 	if err != nil {
-// 		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program", zap.Uint64("appID", dockerAppID))
-// 		return err
-// 	}
-
-// 	// Update the app ID only if we received a valid one
-// 	if appID != 0 {
-// 		h.appID = appID
-// 	}
-
-// 	return nil
-// }

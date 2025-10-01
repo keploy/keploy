@@ -783,7 +783,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
 	cmdType := utils.CmdType(r.config.CommandType)
-	var userIP string
+	// var userIP string
 
 	// Get all mocks for mapping-based filtering
 	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
@@ -907,12 +907,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		if utils.IsDockerCmd(cmdType) {
-			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
-			if err != nil {
-				return models.TestSetStatusFailed, err
-			}
-		}
+		// if utils.IsDockerCmd(cmdType) {
+		// 	// userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
+		// 	// userIP = pkg.AgentIP;
+		// 	// if err != nil {
+		// 	// 	return models.TestSetStatusFailed, err
+		// 	// }
+		// }
 	}
 
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
@@ -1039,7 +1040,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// Handle Docker environment IP replacement
 		if utils.IsDockerCmd(cmdType) {
-			err = r.replaceHostInTestCase(testCase, userIP, "docker container's IP")
+			err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
 			if err != nil {
 				break
 			}

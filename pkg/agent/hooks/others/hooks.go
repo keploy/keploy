@@ -62,7 +62,7 @@ func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
 }
 
 // SendKeployClientInfo implements the SendKeployClientInfo method for non-Linux platforms.
-func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error {
+func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
 	h.Logger.Warn("SendKeployClientInfo not implemented for non-Linux platforms")
 	return nil
 }
