@@ -23,11 +23,6 @@ jobs:
           git config --global core.autocrlf false
           git config --global core.eol lf
 
-      - name: Add Private Parsers
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:

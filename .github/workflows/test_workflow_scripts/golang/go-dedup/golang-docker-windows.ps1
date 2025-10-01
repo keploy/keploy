@@ -2,7 +2,7 @@
   PowerShell test runner for Keploy (Windows), adapted for the go-dedup sample.
   - Honors RECORD_BIN / REPLAY_BIN (resolved via PATH if only a file name)
   - Honors DOCKER_IMAGE_RECORD / DOCKER_IMAGE_REPLAY via KEPLOY_DOCKER_IMAGE
-  - Fixes Stop-Keploy to catch keploy-record.exe as well
+  - Fixes Stop-Keploy to terminate the entire process tree, preventing hangs.
   - Standardizes flags to kebab-case
 #>
 
@@ -53,7 +53,10 @@ function Remove-KeployDirs {
         $_.CommandLine -like '*keploy*'
       } |
       Sort-Object StartTime -Descending |
-      ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+      ForEach-Object {
+        # Use taskkill here as well for robustness
+        taskkill /PID $_.Id /T /F | Out-Null -ErrorAction SilentlyContinue
+      }
   } catch {}
 
   foreach ($p in $Candidates) {
@@ -73,10 +76,6 @@ function Remove-KeployDirs {
 # Build candidate paths to clean
 $candidates = @(".\keploy")
 if ($env:GITHUB_WORKSPACE) { $candidates += (Join-Path $env:GITHUB_WORKSPACE 'keploy') }
-for ($i = 0; $i -le 10; $i++) {
-  # Updated path for go-dedup sample
-  $candidates += "C:\actions-runners\runner-$i\_work\keploy\keploy\samples-go\go-dedup\keploy"
-}
 
 # Also remove any old keploy.yml alongside the directory
 Remove-KeployDirs -Candidates $candidates
@@ -101,15 +100,6 @@ function Get-RunnerWorkPath {
   if ($env:GITHUB_WORKSPACE) {
     return $env:GITHUB_WORKSPACE
   }
-  
-  # Check common runner paths for the go-dedup sample
-  for ($i = 0; $i -le 10; $i++) {
-    $runnerPath = "C:\actions-runners\runner-$i\_work\keploy\keploy\samples-go\go-dedup"
-    if (Test-Path $runnerPath) {
-      return $runnerPath
-    }
-  }
-  
   return (Get-Location).Path
 }
 
@@ -142,12 +132,16 @@ $expectedTestSetIndex = 0
         }
         
         foreach ($proc in $procs) {
-          Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id) ($($proc.ProcessName))"
+          $pid = $proc.Id
+          Write-Host "BACKGROUND JOB: Stopping Keploy process tree (root PID $pid)..."
           try {
-            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-            Write-Host "BACKGROUND JOB: Keploy process $($proc.Id) stopped successfully"
+            # <# --- FIX --- #>
+            # Use taskkill with /T to terminate the process and its entire tree (i.e., docker compose).
+            # Simply killing the keploy process would orphan `docker compose up`, causing a hang later.
+            taskkill /PID $pid /T /F | Out-Null -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            Write-Host "BACKGROUND JOB: Keploy process tree for PID $pid stopped."
           } catch {
-            Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_"
+            Write-Warning "BACKGROUND JOB: Failed to stop process tree for PID $pid: $_"
           }
         }
         
@@ -182,13 +176,6 @@ $expectedTestSetIndex = 0
         Join-Path $workDir "keploy\test-set-$testSetIndex\tests",
         ".\keploy\test-set-$testSetIndex\tests"
       )
-      
-      for ($runner = 0; $runner -le 10; $runner++) {
-        $runnerTestPath = "C:\actions-runners\runner-$runner\_work\keploy\keploy\samples-go\go-dedup\keploy\test-set-$testSetIndex\tests"
-        if (Test-Path (Split-Path $runnerTestPath -Parent)) {
-          $testPaths += $runnerTestPath
-        }
-      }
       
       foreach ($testPath in $testPaths) {
         Write-Host "BACKGROUND JOB: Checking for test files in: $testPath"
@@ -240,7 +227,8 @@ $expectedTestSetIndex = 0
       while ($elapsedTime -lt $maxWaitTime) {
         if (-not $appStarted) {
           try {
-            $response = Invoke-WebRequest -Method GET -Uri "$baseUrl/" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+            # NOTE: Updated to check a known valid endpoint for this app
+            $response = Invoke-WebRequest -Method GET -Uri "$baseUrl/timestamp" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
             if ($response.StatusCode -eq 200) {
               $appStarted = $true
               Write-Host "BACKGROUND JOB: App is responding!"
@@ -347,7 +335,7 @@ $expectedTestSetIndex = 0
 
 # Launch traffic generator in background
 $jobName = "SendRequest"
-Write-Host "Starting background job: $jobName for test-set-$expectedTestSetIndex"
+Write-Host "Starting background job: $jobName for test-set-$expectedTestIndex"
 $job = Start-Job -Name $jobName -ScriptBlock $scriptBlock `
   -ArgumentList $env:APP_BASE_URL, 1, $workDir, $expectedTestSetIndex
 
