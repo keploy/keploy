@@ -45,7 +45,8 @@ type AgentClient struct {
 	apps         sync.Map
 	client       http.Client
 	conf         *config.Config
-	agentCmd     *exec.Cmd          // Track the agent process
+	agentCmd     *exec.Cmd // Track the agent process
+	mu           sync.Mutex
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 }
 
@@ -590,7 +591,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	cmd.Stderr = logFile
 
 	// Keep a reference for other methods
+	a.mu.Lock() 
 	a.agentCmd = cmd
+	a.mu.Unlock()
 	fmt.Println(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
@@ -643,6 +646,8 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 
 // stopAgent stops the agent process gracefully
 func (a *AgentClient) stopAgent() {
+	a.mu.Lock()
+	defer a.mu.Unlock() 
 	if a.agentCancel != nil {
 		a.agentCancel()
 		a.agentCancel = nil
@@ -657,7 +662,7 @@ func (a *AgentClient) stopAgent() {
 			a.logger.Info("Keploy agent process killed successfully")
 		}
 		a.agentCmd = nil
-	}
+	} 
 }
 
 // monitorAgent monitors the agent process and handles cleanup
@@ -1055,7 +1060,9 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 	cmd.Stderr = os.Stderr
 
 	// 👈 Step 6: This is the critical fix. Store the command so stopAgent can find it.
+	a.mu.Lock() 
 	a.agentCmd = cmd
+	a.mu.Unlock() 
 
 	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))
 
