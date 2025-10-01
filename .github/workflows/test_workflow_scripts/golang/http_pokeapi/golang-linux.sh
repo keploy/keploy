@@ -6,6 +6,27 @@ echo "$REPLAY_BIN"
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 echo "iid.sh executed"
 
+# Function to print all keploy-agent log files
+print_keploy_agent_logs() {
+    echo "=== Printing all keploy-agent log files ==="
+    
+    # Find all files starting with "keploy-agent"
+    agent_log_files=$(find . -maxdepth 2 -name "keploy-agent*" -type f 2>/dev/null)
+    
+    if [ -z "$agent_log_files" ]; then
+        echo "No keploy-agent log files found."
+        return
+    fi
+    
+    # Print each log file
+    for log_file in $agent_log_files; do
+        echo "=== Contents of $log_file ==="
+        cat "$log_file"
+        echo "=== End of $log_file ==="
+        echo ""
+    done
+}
+
 # Checkout a different branch
 git fetch origin
 #git checkout native-linux
@@ -75,12 +96,14 @@ for i in {1..2}; do
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
-        exit 1
+        print_keploy_agent_logs
+        exit 1 
     fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then
       echo "Race condition detected in recording, stopping pipeline..."
       cat "${app_name}.txt"
-      exit 1
+      print_keploy_agent_logs
+      exit 1 
     fi
     sleep 5
     wait
@@ -94,13 +117,15 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --gene
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs.txt"
-    exit 1
+    print_keploy_agent_logs
+    exit 1 
 fi
 
 if grep "WARNING: DATA RACE" "test_logs.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs.txt"
-    exit 1
+    print_keploy_agent_logs
+    exit 1 
 fi
 
 all_passed=true
@@ -121,15 +146,17 @@ do
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
         echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
+        break # Exit t he loop early as all tests need to pass
     fi
 done
 
-# Check the overall test status and exit accordingly
+# Check the overall test status and exit a ccordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
-    exit 0
+    print_keploy_agent_logs
+    exit 0 
 else
     cat "test_logs.txt"
-    exit 1
+    print_keploy_agent_logs
+    exit 1 
 fi
