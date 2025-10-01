@@ -39,10 +39,9 @@ $scriptBlock = {
       [int]$iterationIndex
     )
     
-    # --- THIS IS THE CORRECT, ROBUST FUNCTION FROM THE ECHO-SQL SCRIPT ---
+    # This is the robust function that correctly stops the Keploy process
     function Stop-Keploy {
       try {
-        # Find all keploy processes using multiple criteria for robustness
         $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
           $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record' -or 
           $_.Path -like '*keploy*.exe' -or $_.CommandLine -like '*keploy*'
@@ -62,15 +61,10 @@ $scriptBlock = {
             Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_"
           }
         }
-        
-        # Wait a moment for processes to fully terminate
         Start-Sleep -Seconds 2
-        
-        # Verify all processes are stopped
         $remainingProcs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
           $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record'
         }
-        
         if ($remainingProcs.Count -eq 0) {
           Write-Host "BACKGROUND JOB: All Keploy processes stopped successfully"
           return $true
@@ -89,9 +83,9 @@ $scriptBlock = {
         Write-Host "BACKGROUND JOB: Starting traffic generation for iteration $($iterationIndex)..."
         Start-Sleep -Seconds 6 # Initial wait for app container to start
 
-        # Health check loop to wait for the app to be ready
+        # Health check loop
         $appStarted = $false
-        $maxWait = 60 # Wait up to 60 seconds
+        $maxWait = 60
         $elapsed = 0
         while (-not $appStarted -and $elapsed -lt $maxWait) {
             try {
@@ -109,7 +103,7 @@ $scriptBlock = {
             throw "Application did not start within the timeout period."
         }
         
-        # --- Send API Requests (PowerShell equivalent of curl + jq) ---
+        # Send API Requests
         $locationsResponse = Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations'
         $location = $locationsResponse.location[$iterationIndex]
         Write-Host "BACKGROUND JOB: Selected location: $location"
@@ -119,9 +113,11 @@ $scriptBlock = {
         Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
 
         Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon"
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet'
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet?format=html'
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet?format=xml'
+        
+        # --- FIX: Add -ErrorAction SilentlyContinue to tolerate 404s ---
+        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet' -ErrorAction SilentlyContinue
+        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet?format=html' -ErrorAction SilentlyContinue
+        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet?format=xml' -ErrorAction SilentlyContinue
 
         Write-Host "BACKGROUND JOB: All requests sent."
 
@@ -141,16 +137,14 @@ $scriptBlock = {
 
 
 # --- Record two test sets ---
-$containerName = "http-pokeapi" # This is the service name from docker-compose.yml
+$containerName = "http-pokeapi"
 foreach ($i in 0..1) {
     $iteration = $i + 1
     $logPath = "${containerName}_${iteration}.txt"
     Write-Host "--- Starting recording for iteration ${iteration} ---"
 
-    # Launch traffic generator in background
     $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $i
 
-    # Start Keploy record command (this will block until the job kills it)
     $recArgs = @(
       'record',
       '-c', 'docker compose up',
@@ -164,18 +158,15 @@ foreach ($i in 0..1) {
         Write-Host "Keploy record process was terminated as expected by the background job."
     }
 
-    # Wait for the job and get its output for debugging
     Wait-Job $job
     Write-Host "--- Background Job Output (Iteration ${iteration}) ---"
     Receive-Job $job
     Write-Host "------------------------------------------------"
     Remove-Job $job
 
-    # Clean up Docker environment before next iteration
     Write-Host "Shutting down docker compose services after iteration ${iteration}..."
-    docker compose down --volumes # Use --volumes for a clean slate
+    docker compose down --volumes
 
-    # Check for errors in the recording log
     if (Select-String -Path $logPath -Pattern 'ERROR|FATAL|DATA RACE' -SimpleMatch) {
         Write-Error "Critical error or race condition detected in recording log for iteration ${iteration}."
         Get-Content $logPath
@@ -200,14 +191,13 @@ $testArgs = @(
 
 & $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
 
-# Check test log for critical errors
 if (Select-String -Path $testLog -Pattern 'FATAL|DATA RACE' -SimpleMatch) {
   Write-Error "Critical error or race condition detected during test."
   Get-Content $testLog
   exit 1
 }
 
-# --- Parse reports and ensure all test sets passed ---
+# --- Parse reports ---
 $allPassed = $true
 foreach ($i in 0..1) {
     $report = ".\keploy\reports\test-run-0\test-set-$i-report.yaml"
@@ -232,6 +222,5 @@ if ($allPassed) {
   exit 0 
 } else { 
   Write-Error "Some tests failed. See full log for details."
-  # The full log was already printed to the console by Tee-Object
   exit 1 
 }
