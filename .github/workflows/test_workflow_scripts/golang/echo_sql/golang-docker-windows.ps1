@@ -465,10 +465,10 @@ Start-Sleep -Seconds 5
 Write-Host "Successfully recorded test-set-$expectedTestSetIndex"
 
 # --- FIX: Replicate Ubuntu logic by NOT deleting volumes ---
-# Write-Host "Shutting down docker compose services before test mode (preserving volumes)..."
-# docker compose down
-# Write-Host "Waiting for 5 seconds to ensure all resources are released..."
-# Start-Sleep -Seconds 5
+Write-Host "Shutting down docker compose services before test mode (preserving volumes)..."
+docker compose down
+Write-Host "Waiting for 5 seconds to ensure all resources are released..."
+Start-Sleep -Seconds 5
 
 
 # --- Test (replay) ---
