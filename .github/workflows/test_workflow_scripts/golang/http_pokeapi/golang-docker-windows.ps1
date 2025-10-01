@@ -82,10 +82,11 @@ $scriptBlock = {
         $elapsed = 0
         while (-not $appStarted -and $elapsed -lt $maxWait) {
             try {
-                # --- FIX: Use Invoke-WebRequest for more robust health checking ---
-                Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -TimeoutSec 2 -UseBasicParsing
-                $appStarted = $true
-                Write-Host "BACKGROUND JOB: App is responding!"
+                $response = Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -TimeoutSec 2 -UseBasicParsing
+                if ($response.StatusCode -eq 200) {
+                    $appStarted = $true
+                    Write-Host "BACKGROUND JOB: App is responding!"
+                }
             } catch {
                 Write-Host "BACKGROUND JOB: App not ready yet. Waiting..."
                 Start-Sleep -Seconds 3
@@ -97,29 +98,32 @@ $scriptBlock = {
             throw "Application did not start within the timeout period."
         }
         
-        # --- FIX: Use Invoke-WebRequest and manually parse JSON to avoid "response ended prematurely" error ---
-        $locationsResponseJson = (Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -UseBasicParsing -ErrorAction SilentlyContinue).Content
-        $locationsResponse = $locationsResponseJson | ConvertFrom-Json
+        # --- Use Invoke-WebRequest for all calls to prevent crashes on non-JSON content or HTTP errors ---
+        $locationsResponse = Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/locations' -UseBasicParsing -ErrorAction SilentlyContinue
         
-        if ($null -ne $locationsResponse -and $locationsResponse.location.Count -gt $iterationIndex) {
-            $location = $locationsResponse.location[$iterationIndex]
-            Write-Host "BACKGROUND JOB: Selected location: $location"
+        if ($locationsResponse -and $locationsResponse.StatusCode -eq 200) {
+            $locations = $locationsResponse.Content | ConvertFrom-Json
+            if ($null -ne $locations -and $locations.location.Count -gt $iterationIndex) {
+                $location = $locations.location[$iterationIndex]
+                Write-Host "BACKGROUND JOB: Selected location: $location"
 
-            $pokemonsResponseJson = (Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/locations/$location" -UseBasicParsing -ErrorAction SilentlyContinue).Content
-            $pokemonsResponse = $pokemonsResponseJson | ConvertFrom-Json
-            
-            if ($null -ne $pokemonsResponse -and $pokemonsResponse.Count -gt $iterationIndex) {
-                $pokemon = $pokemonsResponse[$iterationIndex]
-                Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
-                Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -UseBasicParsing -ErrorAction SilentlyContinue
+                $pokemonsResponse = Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/locations/$location" -UseBasicParsing -ErrorAction SilentlyContinue
+                if ($pokemonsResponse -and $pokemonsResponse.StatusCode -eq 200) {
+                    $pokemons = $pokemonsResponse.Content | ConvertFrom-Json
+                    if ($null -ne $pokemons -and $pokemons.Count -gt $iterationIndex) {
+                        $pokemon = $pokemons[$iterationIndex]
+                        Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
+                        Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -UseBasicParsing -ErrorAction SilentlyContinue
+                    } else {
+                         Write-Warning "BACKGROUND JOB: Could not get a valid pokemon from location: $location"
+                    }
+                }
             } else {
-                Write-Warning "BACKGROUND JOB: Could not get a valid pokemon from location: $location"
+                Write-Warning "BACKGROUND JOB: Could not get a valid location from the locations API."
             }
-        } else {
-            Write-Warning "BACKGROUND JOB: Could not get a valid location from the locations API."
         }
 
-        # This endpoint returns text/plain, so Invoke-WebRequest is required
+        # This endpoint returns text/plain, so Invoke-WebRequest is required.
         Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/greet' -UseBasicParsing -ErrorAction SilentlyContinue
         
         Write-Host "BACKGROUND JOB: All requests sent."
@@ -131,7 +135,7 @@ $scriptBlock = {
       Write-Error "BACKGROUND JOB: Exception occurred: $_"
     }
     finally {
-      # Make sure Keploy is stopped to unblock the main script
+      # This block will always run, ensuring the main process is unblocked.
       Write-Host "BACKGROUND JOB: Final cleanup - stopping Keploy..."
       Stop-Keploy
     }
