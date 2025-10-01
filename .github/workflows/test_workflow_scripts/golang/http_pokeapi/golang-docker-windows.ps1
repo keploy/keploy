@@ -1,6 +1,6 @@
 <# 
   PowerShell test runner for Keploy (Windows) - http-pokeapi Docker example.
-  This script uses the robust, simplified patterns from the working echo-sql sample.
+  This script uses the robust patterns established in the working echo-sql sample.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -28,21 +28,17 @@ Write-Host "Generating Keploy config..."
 
 # --- SCRIPT BLOCK FOR BACKGROUND TRAFFIC GENERATION ---
 $scriptBlock = {
-    # --- This is the proven, robust function from echo-sql to stop the Keploy process ---
+    # --- FIX: A precise Stop-Keploy function that ONLY targets keploy-record.exe ---
     function Stop-Keploy {
       try {
-        $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-          $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record' -or 
-          $_.Path -like '*keploy*.exe' -or $_.CommandLine -like '*keploy*'
-        } | Sort-Object StartTime -Descending
-        
-        if ($procs.Count -eq 0) {
-          Write-Host "BACKGROUND JOB: No Keploy process found to kill."
+        # This is the only process that needs to be stopped to unblock the main script.
+        $proc = Get-Process -Name "keploy-record" -ErrorAction SilentlyContinue
+        if ($proc) {
+            Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id)..."
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            Write-Host "BACKGROUND JOB: Keploy process stopped successfully."
         } else {
-          foreach ($proc in $procs) {
-            Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id) ($($proc.ProcessName))"
-            try { Stop-Process -Id $proc.Id -Force } catch { Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_" }
-          }
+            Write-Warning "BACKGROUND JOB: Keploy record process not found."
         }
       } catch {
         Write-Warning "BACKGROUND JOB: Failed to stop keploy: $_"
