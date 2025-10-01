@@ -5,12 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
-	"syscall"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
@@ -28,53 +25,6 @@ func IPv4ToUint32(ipStr string) (uint32, error) {
 		return 0, errors.New("not a valid IPv4 address")
 	}
 	return 0, errors.New("failed to parse IP address")
-}
-
-func GetSelfInodeNumber() (uint64, error) {
-	p := filepath.Join("/proc", "self", "ns", "pid")
-
-	f, err := os.Stat(p)
-	if err != nil {
-		return 0, errors.New("failed to get inode of the keploy process")
-	}
-	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
-	Ino := (f.Sys().(*syscall.Stat_t)).Ino
-	if Ino != 0 {
-		return Ino, nil
-	}
-	return 0, nil
-}
-
-func getSelfInodeNumber() (uint64, error) {
-	p := filepath.Join("/proc", "self", "ns", "pid")
-
-	f, err := os.Stat(p)
-	if err != nil {
-		return 0, errors.New("failed to get inode of the keploy process")
-	}
-	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
-	Ino := (f.Sys().(*syscall.Stat_t)).Ino
-	if Ino != 0 {
-		return Ino, nil
-	}
-	return 0, nil
-}
-
-func GetInodeForPID(pid int) (uint64, error) {
-	// Construct the path using the specific PID
-	p := filepath.Join("/proc", fmt.Sprint(pid), "ns", "pid")
-
-	f, err := os.Stat(p)
-	if err != nil {
-		return 0, fmt.Errorf("failed to stat %s: %w", p, err)
-	}
-
-	stat, ok := f.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, fmt.Errorf("failed to cast to syscall.Stat_t for %s", p)
-	}
-
-	return stat.Ino, nil
 }
 
 // ToIPv4MappedIPv6 converts an IPv4 address to an IPv4-mapped IPv6 address.

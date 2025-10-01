@@ -402,7 +402,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 	// agentInfo.KeployAgentNsPid = uint32(opts.KeployContainerPID)
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
 	// agentInfo.KeployAgentInode, err = GetInodeForPID(opts.KeployContainerPID)
-	agentInfo.KeployAgentInode, err = agent.GetSelfInodeNumber()
+	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
 	agentInfo.IsDocker = 0
 	if opts.IsDocker {
 		agentInfo.IsDocker = 1

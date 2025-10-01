@@ -1,5 +1,3 @@
-//go:build !windows
-
 // Package http contains the client side code to communicate with the agent server
 package http
 
@@ -29,11 +27,11 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/agent/hooks"
 	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
+	agentUtils "go.keploy.io/server/v2/pkg/platform/http/utils"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -561,48 +559,42 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		return err
 	}
 
-	// Build command WITHOUT CommandContext: we'll handle ctx cancellation ourselves.
+	// Build args (binary is passed separately to utils)
 	args := []string{
-		keployBin, "agent",
+		"agent",
 		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
 		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
 		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
 		"--debug",
 	}
-
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")
 	}
-
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
 
-	cmd := exec.Command("sudo", args...)
-
-	// New process group so we can signal sudo + keploy children together via -pgid.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
+	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
+	cmd := agentUtils.NewAgentCommand(keployBin, args)
 	// Redirect output to log
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
 	// Keep a reference for other methods
-	a.mu.Lock() 
+	a.mu.Lock()
 	a.agentCmd = cmd
 	a.mu.Unlock()
 	fmt.Println(cmd)
-	if err := cmd.Start(); err != nil {
+	// Start (OS-specific tweaks happen inside utils.StartCommand)
+	if err := agentUtils.StartCommand(cmd); err != nil {
 		_ = logFile.Close()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
 	}
 
 	pid := cmd.Process.Pid
-	// In Linux, pgid == leader's pid when Setpgid:true at start.
-	pgid := pid
-	a.logger.Info("keploy agent started", zap.Int("pid", pid), zap.Int("pgid", pgid))
+	a.logger.Info("keploy agent started", zap.Int("pid", pid))
 
 	// 1) Reaper: wait for process exit and close the log
 	grp.Go(func() error {
@@ -610,7 +602,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		defer logFile.Close()
 
 		err := cmd.Wait()
-		// If ctx was cancelled, treat agent exit as expected.
+		// If ctx wasn't cancelled, bubble up unexpected exits
 		if err != nil && ctx.Err() == nil {
 			a.logger.Error("agent process exited with error", zap.Error(err))
 			return err
@@ -619,23 +611,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		return nil
 	})
 
-	// 2) Cancellation watcher: on ctx cancel, signal the WHOLE GROUP (sudo + keploy)
+	// 2) Cancellation watcher: on ctx cancel, terminate the agent (and children, per-OS)
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-
-		// Graceful: SIGTERM the group
-		err = syscall.Kill(-pgid, syscall.SIGTERM)
-		if err != nil {
-			a.logger.Error("failed to send SIGTERM to agent process group", zap.Error(err))
-			// If we failed to send SIGTERM, force kill the group
-			if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-				a.logger.Debug("Process might already been killed")
-			} else {
-				a.logger.Info("keploy agent process group killed")
-			}
+		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
+			utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
 		}
-
 		return nil
 	})
 
@@ -645,7 +627,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 // stopAgent stops the agent process gracefully
 func (a *AgentClient) stopAgent() {
 	a.mu.Lock()
-	defer a.mu.Unlock() 
+	defer a.mu.Unlock()
 	if a.agentCancel != nil {
 		a.agentCancel()
 		a.agentCancel = nil
@@ -660,7 +642,7 @@ func (a *AgentClient) stopAgent() {
 			a.logger.Info("Keploy agent process killed successfully")
 		}
 		a.agentCmd = nil
-	} 
+	}
 }
 
 // monitorAgent monitors the agent process and handles cleanup
@@ -850,13 +832,16 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	// keploy agent would have already runnning,
 	var inode uint64
 	var err error
-	if runtime.GOOS == "linux" {
-		// send the network info to the kernel
-		inode, err = hooks.GetSelfInodeNumber()
-		if err != nil {
-			a.logger.Error("failed to get inode number")
-		}
-	}
+
+	// This is commented out becuase now we do not require the inode at the client side
+
+	// if runtime.GOOS == "linux" {
+	// 	// send the network info to the kernel
+	// 	inode, err = linuxHooks.GetSelfInodeNumber()
+	// 	if err != nil {
+	// 		a.logger.Error("failed to get inode number")
+	// 	}
+	// }
 
 	// Register the client with the server
 	requestBody := models.RegisterReq{
@@ -996,33 +981,33 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 	// This preserves the pass-through functionality from your original RunInDocker.
 	// programArgs = append(programArgs, os.Args[1:]...)
 
-	var cmd *exec.Cmd
+	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
 
-	// Step 3: Create the command, handling Windows vs. Unix-like systems.
-	// We execute the program directly to avoid the problematic 'sh -c' wrapper.
-	if runtime.GOOS == "windows" {
-		var args []string
-		args = append(args, "/C")
-		args = append(args, strings.Split(keployAlias, " ")...)
-		args = append(args, os.Args[1:]...)
-		// Use cmd.exe /C for Windows
-		cmd = exec.CommandContext(
-			ctx,
-			"cmd.exe",
-			args...,
-		)
-	} else {
-		// Use sh -c for Unix-like systems
-		cmd = exec.CommandContext(
-			ctx,
-			"sh",
-			"-c",
-			keployAlias,
-		)
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true,
-		}
-	}
+	// // Step 3: Create the command, handling Windows vs. Unix-like systems.
+	// // We execute the program directly to avoid the problematic 'sh -c' wrapper.
+	// if runtime.GOOS == "windows" {
+	// 	var args []string
+	// 	args = append(args, "/C")
+	// 	args = append(args, strings.Split(keployAlias, " ")...)
+	// 	args = append(args, os.Args[1:]...)
+	// 	// Use cmd.exe /C for Windows
+	// 	cmd = exec.CommandContext(
+	// 		ctx,
+	// 		"cmd.exe",
+	// 		args...,
+	// 	)
+	// } else {
+	// 	// Use sh -c for Unix-like systems
+	// 	cmd = exec.CommandContext(
+	// 		ctx,
+	// 		"sh",
+	// 		"-c",
+	// 		keployAlias,
+	// 	)
+	// 	cmd.SysProcAttr = &syscall.SysProcAttr{
+	// 		Setsid: true,
+	// 	}
+	// }
 
 	// Step 4: Define the cancellation behavior for graceful shutdown.
 	cmd.Cancel = func() error {
@@ -1048,7 +1033,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		// Finally, forcefully kill the original `sh` process to ensure cleanup.
 		// The container is already stopping gracefully via the command above.
 		if cmd.Process != nil {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return utils.SendSignal(logger, cmd.Process.Pid, syscall.SIGKILL)
 		}
 		return nil
 	}
@@ -1058,9 +1043,9 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 	cmd.Stderr = os.Stderr
 
 	// 👈 Step 6: This is the critical fix. Store the command so stopAgent can find it.
-	a.mu.Lock() 
+	a.mu.Lock()
 	a.agentCmd = cmd
-	a.mu.Unlock() 
+	a.mu.Unlock()
 
 	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))
 
