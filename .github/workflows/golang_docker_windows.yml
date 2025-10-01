@@ -9,12 +9,12 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          # - name: echo-sql
-          #   path: echo-sql
-          #   script_dir: echo_sql
-          - name: http-pokeapi
-            path: http-pokeapi
-            script_dir: http_pokeapi
+          - name: echo-sql
+            path: echo-sql
+            script_dir: echo_sql
+          # - name: http-pokeapi
+          #   path: http-pokeapi
+          #   script_dir: http_pokeapi
         config:
           - job: record_build_replay_build
             record_src: build
