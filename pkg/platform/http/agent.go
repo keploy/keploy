@@ -552,8 +552,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 
 	keployBin, err := utils.GetCurrentBinaryPath()
 	if err != nil {
-		_ = logFile.Close()
-		utils.LogError(a.logger, err, "failed to get current keploy binary path")
+		if logFile != nil {
+			_ = logFile.Close()
+			utils.LogError(a.logger, err, "failed to get current keploy binary path")
+		}
 		return err
 	}
 
@@ -592,8 +594,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	fmt.Println(cmd)
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
-		_ = logFile.Close()
-		utils.LogError(a.logger, err, "failed to start keploy agent")
+		if logFile != nil {
+			_ = logFile.Close()
+			utils.LogError(a.logger, err, "failed to start keploy agent")
+		}
 		return err
 	}
 
@@ -998,11 +1002,11 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 	defer func() {
 		// This is where you would close log files and delete temp files.
 		// This code will run when the application exits gracefully.
-		if utils.LogFile != nil {
-			utils.LogFile.Close()
-		}
-		_ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
-		_ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
+		// if utils.LogFile != nil {
+		// 	utils.LogFile.Close()
+		// }
+		// _ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
+		// _ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
 	}()
 
 	// Step 2: Append any additional arguments passed to the main CLI.

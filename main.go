@@ -63,10 +63,10 @@ func start(ctx context.Context) {
 		inDocker := os.Getenv("KEPLOY_INDOCKER")
 		if inDocker != "true" {
 			if utils.LogFile != nil {
-				// err := utils.LogFile.Close()
-				// if err != nil {
-				// 	utils.LogError(logger, err, "Failed to close Keploy Logs")
-				// }
+				err := utils.LogFile.Close()
+				if err != nil {
+					utils.LogError(logger, err, "Failed to close Keploy Logs")
+				}
 			}
 			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
 				return
