@@ -42,9 +42,47 @@ Write-Host "Using APP_POST_URL = $env:APP_POST_URL"
 Write-Host "Building Docker image(s) with docker compose..."
 docker compose build
 
-# --- Clean previous keploy outputs ---
-Write-Host "Cleaning .\keploy\ directory (if exists)..."
-Remove-Item -LiteralPath ".\keploy" -Recurse -Force -ErrorAction SilentlyContinue
+# --- Clean previous keploy outputs (robust; multi-location) ---
+function Remove-KeployDirs {
+  param([string[]]$Candidates)
+
+  # Stop any leftover keploy processes so files aren't locked
+  try {
+    Get-Process -ErrorAction SilentlyContinue |
+      Where-Object {
+        $_.ProcessName -in @('keploy','keploy-record','keploy-replay') -or
+        $_.Path -like '*\keploy*.exe' -or
+        $_.CommandLine -like '*keploy*'
+      } |
+      Sort-Object StartTime -Descending |
+      ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+  } catch {}
+
+  foreach ($p in $Candidates) {
+    if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
+    Write-Host "Cleaning keploy directory: $p"
+    try {
+      # Clear pesky read-only/hidden attributes first
+      cmd /c "attrib -R -S -H `"$p\*`" /S /D" 2>$null | Out-Null
+      Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+    } catch {
+      Write-Warning "Remove-Item failed for $p, using rmdir fallback: $_"
+      cmd /c "rmdir /S /Q `"$p`"" 2>$null | Out-Null
+    }
+  }
+}
+
+# Build candidate paths to clean
+$candidates = @(".\keploy")
+if ($env:GITHUB_WORKSPACE) { $candidates += (Join-Path $env:GITHUB_WORKSPACE 'keploy') }
+for ($i = 0; $i -le 10; $i++) {
+  $candidates += "C:\actions-runners\runner-$i\_work\keploy\keploy\samples-go\echo-sql\keploy"
+}
+
+# Also remove any old keploy.yml alongside the directory
+Remove-KeployDirs -Candidates $candidates
+Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
+Write-Host "Pre-clean complete."
 
 # --- Generate keploy.yml ---
 Write-Host "Generating keploy config..."
@@ -84,7 +122,7 @@ function Get-RunnerWorkPath {
 
 
 # --- Record once ---
-$containerName = "echoApp"   # adjust per sample if needed
+$containerName = "go-app"   # adjust per sample if needed
 $logPath = "$containerName.record.txt"
 $expectedTestSetIndex = 0
 
@@ -434,7 +472,7 @@ Start-Sleep -Seconds 5
 
 
 # --- Test (replay) ---
-$testContainer = "echoApp"
+$testContainer = "go-app"
 $testLog = "$testContainer.test.txt"
 
 # Configure Docker image for replay
