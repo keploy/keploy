@@ -1,5 +1,6 @@
 <# 
   PowerShell test runner for Keploy (Windows) - http-pokeapi Docker example.
+  This script uses the robust patterns established in the working echo-sql sample.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -23,7 +24,7 @@ docker compose build
 # --- Generate Keploy config ---
 Write-Host "Generating Keploy config..."
 & $env:RECORD_BIN config --generate
-# No noise config needed for this app, but the file must exist.
+# No special noise configuration is needed for this application.
 
 # --- SCRIPT BLOCK FOR BACKGROUND TRAFFIC GENERATION ---
 $scriptBlock = {
@@ -31,7 +32,7 @@ $scriptBlock = {
       [int]$iterationIndex
     )
     
-    # This is the robust function that correctly stops the Keploy process
+    # --- This is the proven, robust function from echo-sql to stop the Keploy process ---
     function Stop-Keploy {
       try {
         $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
@@ -81,7 +82,6 @@ $scriptBlock = {
         $elapsed = 0
         while (-not $appStarted -and $elapsed -lt $maxWait) {
             try {
-                # Use the correct health check endpoint for this app
                 Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations' -TimeoutSec 2
                 $appStarted = $true
                 Write-Host "BACKGROUND JOB: App is responding!"
@@ -96,25 +96,24 @@ $scriptBlock = {
             throw "Application did not start within the timeout period."
         }
         
-        # --- Send API Requests specific to http-pokeapi ---
-        # The health check already confirmed this endpoint works, so no error action is needed here.
-        $locationsResponse = Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations'
+        # --- Send API Requests with proper error handling to prevent the job from crashing ---
+        $locationsResponse = Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations' -ErrorAction SilentlyContinue
         
-        # Select a different location for each test set to create unique tests
-        $location = $locationsResponse.location[$iterationIndex]
-        Write-Host "BACKGROUND JOB: Selected location: $location"
+        if ($null -ne $locationsResponse -and $locationsResponse.location.Count -gt $iterationIndex) {
+            $location = $locationsResponse.location[$iterationIndex]
+            Write-Host "BACKGROUND JOB: Selected location: $location"
 
-        # --- FIX: Add -ErrorAction SilentlyContinue to all subsequent calls to prevent crashes on 404 ---
-        $pokemonsResponse = Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/locations/$location" -ErrorAction SilentlyContinue
-        
-        # Ensure we got a valid response before proceeding
-        if ($null -ne $pokemonsResponse) {
-            # Select a different pokemon for each test set
-            $pokemon = $pokemonsResponse[$iterationIndex]
-            Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
-            Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -ErrorAction SilentlyContinue
+            $pokemonsResponse = Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/locations/$location" -ErrorAction SilentlyContinue
+            
+            if ($null -ne $pokemonsResponse -and $pokemonsResponse.Count -gt $iterationIndex) {
+                $pokemon = $pokemonsResponse[$iterationIndex]
+                Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
+                Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -ErrorAction SilentlyContinue
+            } else {
+                Write-Warning "BACKGROUND JOB: Could not get a valid pokemon from location: $location"
+            }
         } else {
-            Write-Warning "BACKGROUND JOB: Could not get pokemon list for location: $location. Skipping pokemon-specific call."
+            Write-Warning "BACKGROUND JOB: Could not get a valid location from the locations API."
         }
 
         Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet' -ErrorAction SilentlyContinue
