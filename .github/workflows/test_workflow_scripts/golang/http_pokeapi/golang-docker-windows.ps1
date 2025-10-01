@@ -28,17 +28,21 @@ Write-Host "Generating Keploy config..."
 
 # --- SCRIPT BLOCK FOR BACKGROUND TRAFFIC GENERATION ---
 $scriptBlock = {
-    # --- FIX: A precise Stop-Keploy function that ONLY targets keploy-record.exe ---
+    # --- FIX: Using the proven, robust Stop-Keploy function from the working echo-sql script ---
     function Stop-Keploy {
       try {
-        # This is the only process that needs to be stopped to unblock the main script.
-        $proc = Get-Process -Name "keploy-record" -ErrorAction SilentlyContinue
-        if ($proc) {
-            Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id)..."
-            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-            Write-Host "BACKGROUND JOB: Keploy process stopped successfully."
+        $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+          $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record' -or 
+          $_.Path -like '*keploy*.exe' -or $_.CommandLine -like '*keploy*'
+        } | Sort-Object StartTime -Descending
+        
+        if ($procs.Count -eq 0) {
+          Write-Host "BACKGROUND JOB: No Keploy process found to kill."
         } else {
-            Write-Warning "BACKGROUND JOB: Keploy record process not found."
+          foreach ($proc in $procs) {
+            Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id) ($($proc.ProcessName))"
+            try { Stop-Process -Id $proc.Id -Force } catch { Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_" }
+          }
         }
       } catch {
         Write-Warning "BACKGROUND JOB: Failed to stop keploy: $_"
