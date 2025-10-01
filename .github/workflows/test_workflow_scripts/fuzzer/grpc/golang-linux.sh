@@ -207,7 +207,7 @@ elif [ "$MODE" = "outgoing" ]; then
  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" &> test_outgoing.txt
  check_for_errors test_outgoing.txt
  ensure_success_phrase test_outgoing.txt
- echo "✅ Outgoing mode passed."
+ echo "✅ Outgoing mode passed. "
 
 else
  echo "❌ Invalid mode specified: $MODE"
