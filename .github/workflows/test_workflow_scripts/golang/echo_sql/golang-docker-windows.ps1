@@ -236,7 +236,7 @@ if (Test-Path $report) {
   $line = Select-String -Path $report -Pattern 'status:' | Select-Object -First 1
   if ($line) {
     $status = ($line.ToString() -replace '.*status:\s*', '').Trim()
-    Write-Host "Test status for test-set-$expectedTestSetIndex: $status"
+    Write-Host "Test status for test-set-${expectedTestSetIndex}: $status"
   }
 }
 
