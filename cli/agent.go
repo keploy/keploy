@@ -59,6 +59,57 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			}
 			pkg.ClientPid = clientPid
 
+			clientNsPid, err := cmd.Flags().GetUint32("client-nspid")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get client-nspid flag")
+				return nil
+			}
+
+			agentIP, err := cmd.Flags().GetString("agent-ip")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get agent-ip flag")
+				return nil
+			}
+
+			mode, err := cmd.Flags().GetString("mode")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get mode flag")
+				return nil
+			}
+
+			appInode, err := cmd.Flags().GetUint64("app-inode")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get app-inode flag")
+				return nil
+			}
+
+			dockerNetwork, err := cmd.Flags().GetString("docker-network")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get client-nspid flag")
+				return nil
+			}
+
+			proxyPort, err := cmd.Flags().GetUint32("proxy-port")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get proxyPort flag")
+				return nil
+			}
+
+			setupOpts := models.SetupOptions{
+				DockerNetwork: dockerNetwork,
+				AppInode:      appInode,
+				IsDocker:      isdocker,
+				EnableTesting: enableTesting,
+				Mode:          models.Mode(mode),
+				AgentIP:       agentIP,
+				ClientNsPid:   clientNsPid,
+				ClientPID:     clientPid,
+				ProxyPort:     proxyPort,
+			}
+
+			if enableTesting {
+				setupOpts.Mode = models.MODE_TEST
+			}
 			if port == 0 {
 				port = 8086
 			}
@@ -76,15 +127,6 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 
 			routes.New(router, a, logger)
 
-			opts := models.SetupOptions{
-				IsDocker:      isdocker,
-				EnableTesting: enableTesting,
-			}
-
-			if enableTesting {
-				opts.Mode = models.MODE_TEST
-			}
-
 			go func() {
 				select {
 				case <-ctx.Done():
@@ -101,7 +143,7 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				}
 			}()
 
-			err = a.Setup(ctx, opts, startCh)
+			err = a.Setup(ctx, setupOpts, startCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
 				return nil

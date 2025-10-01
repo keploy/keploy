@@ -54,6 +54,7 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
+	ClientPID         uint32
 	Container         string
 	KeployContainer   string
 	DockerNetwork     string

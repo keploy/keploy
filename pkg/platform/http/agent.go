@@ -24,9 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
 	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
@@ -562,12 +560,18 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	// Build args (binary is passed separately to utils)
 	args := []string{
 		"agent",
-		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
-		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
-		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
+		"--port", strconv.Itoa(int(agentPort)),
+		"--proxy-port", strconv.Itoa(int(proxyPort)),
+		"--dns-port", strconv.Itoa(int(dnsPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
+		"--client-nspid", strconv.Itoa(int(opts.ClientNsPid)),
+		"--docker-network", opts.DockerNetwork,
+		"--agent-ip", opts.AgentIP,
+		"--mode", string(opts.Mode),
+		"--app-inode", strconv.FormatUint(opts.AppInode, 10),
 		"--debug",
 	}
+
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")
 	}
@@ -720,8 +724,32 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			cmd = networkRegex.ReplaceAllString(cmd, "")
 		}
 		fmt.Println("COMMAND AFTER REMOVING PORTS:", cmd)
-	}
 
+		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
+		// inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+		// if err != nil {
+		// 	utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+		// 	return 0, err
+		// }
+		// var keployIPv4 string
+		// keployIPv4 = inspect.NetworkSettings.IPAddress
+
+		// // Check if the Networks map is not empty
+		// if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+		// 	// Iterate over the map to get the first available IP
+		// 	for _, network := range inspect.NetworkSettings.Networks {
+		// 		keployIPv4 = network.IPAddress
+		// 		if keployIPv4 != "" {
+		// 			break // Exit the loop once we've found an IP
+		// 		}
+		// 	}
+		// }
+
+		// pkg.AgentIP = keployIPv4
+		// fmt.Println("here is the agent's IP address in client :", keployIPv4)
+		// opts.AgentIP = keployIPv4
+	}
+	opts.ClientID = clientID
 	// Start the agent process
 	err := a.startAgent(ctx, clientID, isDockerCmd, opts)
 	if err != nil {
@@ -760,38 +788,38 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, err
 	}
 
-	if isDockerCmd {
-		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
-		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
-		if err != nil {
-			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-			return 0, err
-		}
-		var keployIPv4 string
-		keployIPv4 = inspect.NetworkSettings.IPAddress
+	// if isDockerCmd {
+	// 	fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
+	// 	inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+	// 		return 0, err
+	// 	}
+	// 	var keployIPv4 string
+	// 	keployIPv4 = inspect.NetworkSettings.IPAddress
 
-		// Check if the Networks map is not empty
-		if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
-			// Iterate over the map to get the first available IP
-			for _, network := range inspect.NetworkSettings.Networks {
-				keployIPv4 = network.IPAddress
-				if keployIPv4 != "" {
-					break // Exit the loop once we've found an IP
-				}
-			}
-		}
+	// 	// Check if the Networks map is not empty
+	// 	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+	// 		// Iterate over the map to get the first available IP
+	// 		for _, network := range inspect.NetworkSettings.Networks {
+	// 			keployIPv4 = network.IPAddress
+	// 			if keployIPv4 != "" {
+	// 				break // Exit the loop once we've found an IP
+	// 			}
+	// 		}
+	// 	}
 
-		pkg.AgentIP = keployIPv4
-		fmt.Println("here is the agent's IP address in client :", keployIPv4)
-		opts.AgentIP = keployIPv4
-	}
+	// 	pkg.AgentIP = keployIPv4
+	// 	fmt.Println("here is the agent's IP address in client :", keployIPv4)
+	// 	opts.AgentIP = keployIPv4
+	// }
 
-	opts.ClientID = clientID
-	spew.Dump(opts)
-	if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
-		utils.LogError(a.logger, registerErr, "failed to register client")
-		return 0, registerErr
-	}
+	// opts.ClientID = clientID
+	// spew.Dump(opts)
+	// if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
+	// 	utils.LogError(a.logger, registerErr, "failed to register client")
+	// 	return 0, registerErr
+	// }
 
 	// Final verification that agent is still running
 	if !a.isAgentRunning(ctx) {
