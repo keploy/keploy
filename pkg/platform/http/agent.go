@@ -665,7 +665,7 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 	select {
 	case <-clientCtx.Done():
 		// Client context cancelled, stop the agent
-		a.logger.Info("Client context cancelled, stopping agent", zap.Error(clientCtx.Err()))
+		a.logger.Info("Client context cancelled, stopping agent")
 		a.stopAgent()
 	case <-agentCtx.Done():
 		// Agent context cancelled or agent stopped

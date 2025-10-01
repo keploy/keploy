@@ -1,7 +1,7 @@
 //go:build linux
 
 // Package hooks provides functionality for managing hooks.
-package hooks
+package linux
 
 import (
 	"context"
@@ -23,6 +23,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 
 	"go.keploy.io/server/v2/pkg/agent"
+	"go.keploy.io/server/v2/pkg/agent/hooks/common"
 	"go.keploy.io/server/v2/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
@@ -31,32 +32,14 @@ import (
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
-		logger:       logger,
-		sess:         agent.NewSessions(),
-		m:            sync.Mutex{},
+		BaseHooks:    common.NewBaseHooks(logger, cfg),
 		objectsMutex: sync.RWMutex{},
-		proxyIP4:     "127.0.0.1",
-		proxyIP6:     [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort:    cfg.ProxyPort,
-		dnsPort:      cfg.DNSPort,
-		conf:         cfg,
-		unloadDone:   make(chan struct{}),
 	}
 }
 
 type Hooks struct {
-	logger       *zap.Logger
-	sess         *agent.Sessions
-	proxyIP4     string
-	proxyIP6     [4]uint32
-	proxyPort    uint32
-	dnsPort      uint32
-	m            sync.Mutex
+	*common.BaseHooks
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
-	conf         *config.Config
-	// Channel to signal when unload is complete
-	unloadDone      chan struct{}
-	unloadDoneMutex sync.Mutex // Protects unloadDone channel operations
 	// eBPF C shared maps
 	clientRegistrationMap    *ebpf.Map
 	agentRegistartionMap     *ebpf.Map
@@ -112,19 +95,19 @@ type Hooks struct {
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
 
-	h.sess.Set(id, &agent.Session{
+	h.Sess.Set(id, &agent.Session{
 		ID: id,
 	})
 
 	// Set the app ID for this session with proper synchronization
-	h.m.Lock()
+	h.M.Lock()
 	h.appID = id
-	h.m.Unlock()
+	h.M.Unlock()
 
 	// Reset the unload done channel for this new load
-	h.unloadDoneMutex.Lock()
-	h.unloadDone = make(chan struct{})
-	h.unloadDoneMutex.Unlock()
+	h.UnloadDoneMutex.Lock()
+	h.UnloadDone = make(chan struct{})
+	h.UnloadDoneMutex.Unlock()
 
 	err := h.load(ctx, opts)
 	if err != nil {
@@ -137,17 +120,17 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
 	}
 
 	g.Go(func() error {
-		defer utils.Recover(h.logger)
+		defer utils.Recover(h.Logger)
 		<-ctx.Done()
 		h.unLoad(ctx, opts)
 
 		//deleting in order to free the memory in case of rerecord.
-		h.sess.Delete(id)
+		h.Sess.Delete(id)
 
 		// Signal that unload is complete
-		h.unloadDoneMutex.Lock()
-		close(h.unloadDone)
-		h.unloadDoneMutex.Unlock()
+		h.UnloadDoneMutex.Lock()
+		close(h.UnloadDone)
+		h.UnloadDoneMutex.Unlock()
 		return nil
 	})
 
@@ -156,15 +139,15 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
 
 // GetUnloadDone returns a channel that will be closed when the hooks are completely unloaded
 func (h *Hooks) GetUnloadDone() <-chan struct{} {
-	h.unloadDoneMutex.Lock()
-	defer h.unloadDoneMutex.Unlock()
-	return h.unloadDone
+	h.UnloadDoneMutex.Lock()
+	defer h.UnloadDoneMutex.Unlock()
+	return h.UnloadDone
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
-		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
+		utils.LogError(h.Logger, err, "failed to lock memory for eBPF resources")
 		return err
 	}
 
@@ -174,9 +157,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			errString := strings.Join(ve.Log, "\n")
-			h.logger.Debug("verifier log: ", zap.String("err", errString))
+			h.Logger.Debug("verifier log: ", zap.String("err", errString))
 		}
-		utils.LogError(h.logger, err, "failed to load eBPF objects")
+		utils.LogError(h.Logger, err, "failed to load eBPF objects")
 		return err
 	}
 
@@ -193,7 +176,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 	// ----- used in case of wsl -----
 	socket, err := link.Kprobe("sys_socket", objs.SyscallProbeEntrySocket, nil)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_socket")
+		utils.LogError(h.Logger, err, "failed to attach the kprobe hook on sys_socket")
 		return err
 	}
 	h.socket = socket
@@ -205,7 +188,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		// ------------ For Egress -------------
 		udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the kprobe hook on udp_pre_connect")
+			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on udp_pre_connect")
 			return err
 		}
 		h.udpp4 = udppC4
@@ -213,21 +196,21 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		// FOR IPV4
 		tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
+			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
 			return err
 		}
 		h.tcppv4 = tcppC4
 
 		tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_connect")
+			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v4_connect")
 			return err
 		}
 		h.tcpv4 = tcpC4
 
 		tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{})
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
+			utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
 			return err
 		}
 		h.tcpv4Ret = tcpRC4
@@ -237,9 +220,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		//////////////////////////////////////////////////////////////////////////////
 
 		// Get the first-mounted cgroupv2 path.
-		cGroupPath, err := detectCgroupPath(h.logger)
+		cGroupPath, err := agent.DetectCgroupPath(h.Logger)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to detect the cgroup path")
+			utils.LogError(h.Logger, err, "failed to detect the cgroup path")
 			return err
 		}
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
@@ -249,20 +232,20 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 				// Attach the kprobe for bind syscall entry on x86
 				h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
 				if err != nil {
-					utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
+					utils.LogError(h.Logger, err, "failed to attach kprobe to __x64_sys_bind")
 					return err
 				}
 			case "arm64":
 				// Attach the kprobe for bind syscall entry on arm64
 				h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
 				if err != nil {
-					utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
+					utils.LogError(h.Logger, err, "failed to attach kprobe to __arm64_sys_bind")
 					return err
 				}
 
 			default:
 				err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-				utils.LogError(h.logger, err, "failed to attach bind hooks")
+				utils.LogError(h.Logger, err, "failed to attach bind hooks")
 				return err
 			}
 
@@ -273,7 +256,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 				Program: objs.K_bind4,
 			})
 			if err != nil {
-				utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
+				utils.LogError(h.Logger, err, "failed to attach the bind4 cgroup hook")
 				return err
 			}
 			h.cgBind4 = cg4
@@ -284,11 +267,11 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 				Program: objs.K_bind6,
 			})
 			if err != nil {
-				utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
+				utils.LogError(h.Logger, err, "failed to attach the bind6 cgroup hook")
 				return err
 			}
 			h.cgBind6 = cg6
-			h.logger.Info("Attached ingress redirection hooks.")
+			h.Logger.Info("Attached ingress redirection hooks.")
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -301,7 +284,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		})
 
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the connect4 cgroup hook")
+			utils.LogError(h.Logger, err, "failed to attach the connect4 cgroup hook")
 			return err
 		}
 		h.connect4 = c4
@@ -313,7 +296,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		})
 
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the GetPeername4 cgroup hook")
+			utils.LogError(h.Logger, err, "failed to attach the GetPeername4 cgroup hook")
 			return err
 		}
 		h.gp4 = gp4
@@ -322,21 +305,21 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 		tcpPreC6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
+			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
 			return err
 		}
 		h.tcppv6 = tcpPreC6
 
 		tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
+			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
 			return err
 		}
 		h.tcpv6 = tcpC6
 
 		tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{})
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
+			utils.LogError(h.Logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
 			return err
 		}
 		h.tcpv6Ret = tcpRC6
@@ -348,7 +331,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		})
 
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the connect6 cgroup hook")
+			utils.LogError(h.Logger, err, "failed to attach the connect6 cgroup hook")
 			return err
 		}
 		h.connect6 = c6
@@ -360,13 +343,13 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		})
 
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the GetPeername6 cgroup hook")
+			utils.LogError(h.Logger, err, "failed to attach the GetPeername6 cgroup hook")
 			return err
 		}
 		h.gp6 = gp6
 	}
 
-	h.logger.Info("keploy initialized and probes added to the kernel.")
+	h.Logger.Info("keploy initialized and probes added to the kernel.")
 
 	var clientInfo = structs.ClientInfo{}
 
@@ -381,56 +364,56 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 	clientInfo.KeployClientNsPid = uint32(os.Getpid())
 	if opts.E2E {
-		pid, err := utils.GetPIDFromPort(ctx, h.logger, int(opts.Port))
+		pid, err := utils.GetPIDFromPort(ctx, h.Logger, int(opts.Port))
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to get the keploy pid from the port in case of e2e")
+			utils.LogError(h.Logger, err, "failed to get the keploy pid from the port in case of e2e")
 			return err
 		}
 		err = h.SendE2EInfo(pid)
 		if err != nil {
-			h.logger.Error("failed to send e2e info to the ebpf program", zap.Error(err))
+			h.Logger.Error("failed to send e2e info to the ebpf program", zap.Error(err))
 		}
 	}
 
 	clientInfo.IsKeployClientRegistered = uint32(0)
 
 	if opts.IsDocker {
-		h.proxyIP4 = opts.KeployIPV4
-		ipv6, err := ToIPv4MappedIPv6(opts.KeployIPV4)
+		h.ProxyIP4 = opts.KeployIPV4
+		ipv6, err := agent.ToIPv4MappedIPv6(opts.KeployIPV4)
 		if err != nil {
 			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", opts.KeployIPV4, err)
 		}
-		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.proxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-		h.proxyIP6 = ipv6
+		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.ProxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+		h.ProxyIP6 = ipv6
 	}
 
-	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+	h.Logger.Debug("proxy ips", zap.String("ipv4", h.ProxyIP4), zap.Any("ipv6", h.ProxyIP6))
 
-	// proxyIP, err := IPv4ToUint32(h.proxyIP4)
+	// proxyIP, err := IPv4ToUint32(h.ProxyIP4)
 	// if err != nil {
 	// 	return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
 	// }
 
 	// // 3. Get the container's main process ID from the inspection result
 	// containerPID := inspect.State.Pid
-	// h.logger.Info("Successfully inspected agent container", zap.Int("pid", containerPID))
+	// h.Logger.Info("Successfully inspected agent container", zap.Int("pid", containerPID))
 
 	var agentInfo = structs.AgentInfo{}
 	// agentInfo.KeployAgentNsPid = uint32(opts.KeployContainerPID)
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
 	// agentInfo.KeployAgentInode, err = GetInodeForPID(opts.KeployContainerPID)
-	agentInfo.KeployAgentInode, err = getSelfInodeNumber()
+	agentInfo.KeployAgentInode, err = agent.GetSelfInodeNumber()
 	agentInfo.IsDocker = 0
 	if opts.IsDocker {
 		agentInfo.IsDocker = 1
 	}
 	fmt.Println("here is clients pid : ", uint32(os.Getpid()))
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
+		utils.LogError(h.Logger, err, "failed to get inode of the keploy process")
 		// return err
 	}
-	
-	agentInfo.DNSPort = int32(h.dnsPort)
+
+	agentInfo.DNSPort = int32(h.DNSPort)
 
 	if opts.IsDocker {
 		clientInfo.IsDockerApp = uint32(1)
@@ -438,7 +421,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 		clientInfo.IsDockerApp = uint32(0)
 	}
 
-	ports := GetPortToSendToKernel(ctx, opts.Rules)
+	ports := agent.GetPortToSendToKernel(ctx, opts.Rules)
 	for i := 0; i < 10; i++ {
 		if len(ports) <= i {
 			clientInfo.PassThroughPorts[i] = -1
@@ -449,14 +432,14 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 	err = h.SendClientInfo(clientInfo)
 	if err != nil {
-		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 		return err
 	}
 	fmt.Println("Sending agent information :")
 	spew.Dump(agentInfo)
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
-		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
+		h.Logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
 	}
 
@@ -467,7 +450,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	return conn.ListenSocket(ctx, h.Logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
 // For keploy test bench
@@ -483,29 +466,29 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 // 	return nil
 // }
 
-func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
-	err := h.DeleteClientInfo(id)
-	if err != nil {
-		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-		return err
-	}
-	return nil
-}
+// func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
+// 	err := h.DeleteClientInfo(id)
+// 	if err != nil {
+// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+// 		return err
+// 	}
+// 	return nil
+// }
 
-func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
-	err := h.SendProxyInfo(clientID, proxyInfo)
-	if err != nil {
-		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-		return err
-	}
-	return nil
-}
+// func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
+// 	err := h.SendProxyInfo(clientID, proxyInfo)
+// 	if err != nil {
+// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+// 		return err
+// 	}
+// 	return nil
+// }
 
 // func (h *Hooks) SendKtInfo(_ context.Context, tb structs.TestBenchInfo) error {
 
 // 	err := h.SendKeployPids(models.TestKey, tb)
 // 	if err != nil {
-// 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 // 		return err
 // 	}
 // 	return nil
@@ -515,7 +498,7 @@ func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
 
 	err := h.SendClientInfo(clientInfo)
 	if err != nil {
-		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 		return err
 	}
 
@@ -526,143 +509,143 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
 	if err := h.socket.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the socket")
+		utils.LogError(h.Logger, err, "failed to close the socket")
 	}
 
 	// Reset the app ID with proper synchronization
-	h.m.Lock()
+	h.M.Lock()
 	h.appID = 0
-	h.m.Unlock()
+	h.M.Unlock()
 
 	if !opts.E2E {
 		if err := h.udpp4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the udpp4")
+			utils.LogError(h.Logger, err, "failed to close the udpp4")
 		}
 
 		if err := h.connect4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the connect4")
+			utils.LogError(h.Logger, err, "failed to close the connect4")
 		}
 
 		if err := h.gp4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the gp4")
+			utils.LogError(h.Logger, err, "failed to close the gp4")
 		}
 
 		if err := h.tcppv4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcppv4")
+			utils.LogError(h.Logger, err, "failed to close the tcppv4")
 		}
 
 		if err := h.tcpv4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv4")
+			utils.LogError(h.Logger, err, "failed to close the tcpv4")
 		}
 
 		if err := h.tcpv4Ret.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
+			utils.LogError(h.Logger, err, "failed to close the tcpv4Ret")
 		}
 
 		if err := h.connect6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the connect6")
+			utils.LogError(h.Logger, err, "failed to close the connect6")
 		}
 		if err := h.gp6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the gp6")
+			utils.LogError(h.Logger, err, "failed to close the gp6")
 		}
 		if err := h.tcppv6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcppv6")
+			utils.LogError(h.Logger, err, "failed to close the tcppv6")
 		}
 		if err := h.tcpv6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv6")
+			utils.LogError(h.Logger, err, "failed to close the tcpv6")
 		}
 		if err := h.tcpv6Ret.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+			utils.LogError(h.Logger, err, "failed to close the tcpv6Ret")
 		}
 	}
 	if err := h.accept.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the accept")
+		utils.LogError(h.Logger, err, "failed to close the accept")
 	}
 	if err := h.acceptRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the acceptRet")
+		utils.LogError(h.Logger, err, "failed to close the acceptRet")
 	}
 	if err := h.accept4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the accept4")
+		utils.LogError(h.Logger, err, "failed to close the accept4")
 	}
 	if err := h.accept4Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the accept4Ret")
+		utils.LogError(h.Logger, err, "failed to close the accept4Ret")
 	}
 	if err := h.read.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the read")
+		utils.LogError(h.Logger, err, "failed to close the read")
 	}
 	if err := h.readRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the readRet")
+		utils.LogError(h.Logger, err, "failed to close the readRet")
 	}
 	if err := h.write.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the write")
+		utils.LogError(h.Logger, err, "failed to close the write")
 	}
 	if err := h.writeRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the writeRet")
+		utils.LogError(h.Logger, err, "failed to close the writeRet")
 	}
 	if err := h.writev.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the writev")
+		utils.LogError(h.Logger, err, "failed to close the writev")
 	}
 	if err := h.writevRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the writevRet")
+		utils.LogError(h.Logger, err, "failed to close the writevRet")
 	}
 
 	if err := h.readv.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the readv")
+		utils.LogError(h.Logger, err, "failed to close the readv")
 	}
 	if err := h.readvRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the readvRet")
+		utils.LogError(h.Logger, err, "failed to close the readvRet")
 	}
 
 	if err := h.close.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the close")
+		utils.LogError(h.Logger, err, "failed to close the close")
 	}
 	if err := h.closeRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the closeRet")
+		utils.LogError(h.Logger, err, "failed to close the closeRet")
 	}
 	if err := h.sendto.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the sendto")
+		utils.LogError(h.Logger, err, "failed to close the sendto")
 	}
 	if err := h.sendtoRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the sendtoRet")
+		utils.LogError(h.Logger, err, "failed to close the sendtoRet")
 	}
 	if err := h.recvfrom.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the recvfrom")
+		utils.LogError(h.Logger, err, "failed to close the recvfrom")
 	}
 	if err := h.recvfromRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the recvfromRet")
+		utils.LogError(h.Logger, err, "failed to close the recvfromRet")
 	}
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
 	if err := h.objects.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the objects")
+		utils.LogError(h.Logger, err, "failed to close the objects")
 	}
 	h.objectsMutex.Unlock()
 
 	if err := h.connect.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect")
+		utils.LogError(h.Logger, err, "failed to close the connect")
 	}
 
 	if err := h.connectRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connectRet")
+		utils.LogError(h.Logger, err, "failed to close the connectRet")
 	}
 
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		if h.cgBind4 != nil {
 			if err := h.cgBind4.Close(); err != nil {
-				utils.LogError(h.logger, err, "failed to close the cgBind4")
+				utils.LogError(h.Logger, err, "failed to close the cgBind4")
 			}
 		}
 		if h.cgBind6 != nil {
 			if err := h.cgBind6.Close(); err != nil {
-				utils.LogError(h.logger, err, "failed to close the cgBind6")
+				utils.LogError(h.Logger, err, "failed to close the cgBind6")
 			}
 		}
 		if h.bindEnter != nil {
 			if err := h.bindEnter.Close(); err != nil {
-				utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
+				utils.LogError(h.Logger, err, "failed to close the bind enter kprobe")
 			}
 		}
 	}
-	h.logger.Info("eBPF resources released successfully...")
+	h.Logger.Info("eBPF resources released successfully...")
 }
