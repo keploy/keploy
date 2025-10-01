@@ -151,7 +151,7 @@ $recArgs = @(
   '--generate-github-actions=false'
 )
 Write-Host "Starting 'keploy record'..."
-$rec = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $recArgs -RedirectStandardOutput $recordLog -RedirectStandardError $recordLog -PassThru -NoNewWindow
+$rec = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $recArgs -RedirectStandardOutput $recordLog -PassThru -NoNewWindow
 
 # wait until tests appear, then stop keploy gracefully
 $start = Get-Date
