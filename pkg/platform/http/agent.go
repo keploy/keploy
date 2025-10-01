@@ -161,7 +161,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 	if err != nil {
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
-	
+
 	mockChan := make(chan *models.Mock)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -707,13 +707,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		// Remove the port arguments from the original command string
 		cmd = portRegex.ReplaceAllString(cmd, "")
 
-		networkRegex := regexp.MustCompile(`\s+--network\s+([^\s]+)`)
+		networkRegex := regexp.MustCompile(`(--network|--net)\s+([^\s]+)`)
 
 		// Find the first match and its submatches (the captured group).
 		networkMatches := networkRegex.FindStringSubmatch(cmd)
 
-		if len(networkMatches) > 1 {
-			opts.AppNetwork = networkMatches[1] // Store the extracted network name
+		if len(networkMatches) > 2 {
+			opts.AppNetwork = networkMatches[2] // Store the extracted network name (the 2nd capture group)
 			fmt.Println("FOUND APP NETWORK:", opts.AppNetwork)
 
 			// Remove the network argument from the original command string
