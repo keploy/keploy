@@ -178,7 +178,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	default:
 	}
 
-	
 	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
 		DNSIPv4Addr: "172.18.0.2",
 		//DnsIPv6Addr: ""

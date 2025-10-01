@@ -583,7 +583,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	cmd := exec.Command("sudo", args...)
 
 	// New process group so we can signal sudo + keploy children together via -pgid.
-	cmd.SysProcAttr = &syscall.SysProcAttr{}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Redirect output to log
 	cmd.Stdout = logFile
@@ -629,7 +629,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 			a.logger.Error("failed to send SIGTERM to agent process group", zap.Error(err))
 			// If we failed to send SIGTERM, force kill the group
 			if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-				utils.LogError(a.logger, err, "failed to force-kill keploy agent process group")
+				a.logger.Debug("Process might already been killed")
 			} else {
 				a.logger.Info("keploy agent process group killed")
 			}

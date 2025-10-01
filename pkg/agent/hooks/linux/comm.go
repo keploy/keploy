@@ -97,7 +97,7 @@ func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
 		return err
 	}
 
-	var retrievedInfo structs.ClientInfo 
+	var retrievedInfo structs.ClientInfo
 
 	// 2. Look up the key and pass a pointer to your variable.
 	err = h.clientRegistrationMap.Lookup(uint64(0), &retrievedInfo)

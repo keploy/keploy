@@ -220,28 +220,27 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		envs = envs + " "
 	}
 	appPortsStr := ""
-    if len(opts.AppPorts) > 0 {
-        appPortsStr = " " + strings.Join(opts.AppPorts, " ")
-    }
+	if len(opts.AppPorts) > 0 {
+		appPortsStr = " " + strings.Join(opts.AppPorts, " ")
+	}
 	appNetworkStr := ""
-    if opts.AppNetwork != "" {
-        appNetworkStr = " --network " + opts.AppNetwork
-    }
+	if opts.AppNetwork != "" {
+		appNetworkStr = " --network " + opts.AppNetwork
+	}
 
 	switch osName {
 	case "linux":
-		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " + 
-		fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) + 
-		" -p " + fmt.Sprintf("%d", opts.ProxyPort)+ ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-		" --privileged" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + 
-		" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + 
-		"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-		
-		
+		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
+			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
+			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
+			" --privileged" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
+			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
+			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+
 		if opts.EnableTesting {
 			alias += " --enable-testing"
 		}
-		alias += " --port " + fmt.Sprintf("%d" , opts.AgentPort)
+		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 
 		return alias, nil

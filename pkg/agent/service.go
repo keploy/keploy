@@ -26,15 +26,15 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	ClientID           uint64
-	Pid                uint32
-	IsDocker           bool
-	KeployIPV4         string
-	Mode               models.Mode
-	Rules              []config.BypassRule
-	E2E                bool
-	Port               uint32
-	BigPayload         bool
+	ClientID   uint64
+	Pid        uint32
+	IsDocker   bool
+	KeployIPV4 string
+	Mode       models.Mode
+	Rules      []config.BypassRule
+	E2E        bool
+	Port       uint32
+	BigPayload bool
 }
 
 // TODO: should not be in the agent package
