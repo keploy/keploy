@@ -22,14 +22,14 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
-    pid=$(pgrep -n keploy)
+    pid=$(pgrep -f "keploy record")
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
 }
 
 send_request(){
-    sleep 10
+    sleep 30
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8080/CJBKJd92; then
