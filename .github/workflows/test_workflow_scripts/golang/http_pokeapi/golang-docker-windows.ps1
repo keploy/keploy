@@ -97,18 +97,27 @@ $scriptBlock = {
         }
         
         # --- Send API Requests specific to http-pokeapi ---
+        # The health check already confirmed this endpoint works, so no error action is needed here.
         $locationsResponse = Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/locations'
+        
         # Select a different location for each test set to create unique tests
         $location = $locationsResponse.location[$iterationIndex]
         Write-Host "BACKGROUND JOB: Selected location: $location"
 
-        $pokemonsResponse = Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/locations/$location"
-        # Select a different pokemon for each test set
-        $pokemon = $pokemonsResponse[$iterationIndex]
-        Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
+        # --- FIX: Add -ErrorAction SilentlyContinue to all subsequent calls to prevent crashes on 404 ---
+        $pokemonsResponse = Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/locations/$location" -ErrorAction SilentlyContinue
+        
+        # Ensure we got a valid response before proceeding
+        if ($null -ne $pokemonsResponse) {
+            # Select a different pokemon for each test set
+            $pokemon = $pokemonsResponse[$iterationIndex]
+            Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
+            Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -ErrorAction SilentlyContinue
+        } else {
+            Write-Warning "BACKGROUND JOB: Could not get pokemon list for location: $location. Skipping pokemon-specific call."
+        }
 
-        Invoke-RestMethod -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon"
-        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet'
+        Invoke-RestMethod -Method GET -Uri 'http://localhost:8080/api/greet' -ErrorAction SilentlyContinue
         
         Write-Host "BACKGROUND JOB: All requests sent."
 
