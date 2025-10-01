@@ -82,6 +82,19 @@ function Get-RunnerWorkPath {
   return (Get-Location).Path
 }
 
+# CHANGE: graceful stop helper (idempotent)
+function Stop-KeployGracefully {
+  $id = docker ps --filter "name=^/keploy-v2$" --format "{{.ID}}"
+  if (-not $id) { return }
+  Write-Host "Gracefully stopping keploy-v2..."
+  docker stop --time=25 keploy-v2 2>$null | Out-Null
+  Start-Sleep -Seconds 2
+  $still = docker ps --filter "name=^/keploy-v2$" --format "{{.ID}}"
+  if ($still) {
+    docker exec keploy-v2 /bin/sh -lc "kill -INT 1" 2>$null | Out-Null
+    docker wait keploy-v2 2>$null | Out-Null
+  }
+}
 
 # --- Record once ---
 $containerName = "echoApp"   # adjust per sample if needed
@@ -98,47 +111,25 @@ $expectedTestSetIndex = 0
       [int]$testSetIndex
     )
     
-    # This function stops the Keploy process
+    # CHANGE: Stop-Keploy now stops the *container* cleanly (no process-name killing)
     function Stop-Keploy {
       try {
-        # Find all keploy processes
-        $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-          $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record' -or 
-          $_.Path -like '*keploy*.exe' -or $_.CommandLine -like '*keploy*'
-        } | Sort-Object StartTime -Descending
-        
-        if ($procs.Count -eq 0) {
-          Write-Host "BACKGROUND JOB: No Keploy process found to kill."
-          return $false
-        }
-        
-        foreach ($proc in $procs) {
-          Write-Host "BACKGROUND JOB: Stopping Keploy PID $($proc.Id) ($($proc.ProcessName))"
-          try {
-            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-            Write-Host "BACKGROUND JOB: Keploy process $($proc.Id) stopped successfully"
-          } catch {
-            Write-Warning "BACKGROUND JOB: Failed to stop process $($proc.Id): $_"
-          }
-        }
-        
-        # Wait a moment for processes to fully terminate
-        Start-Sleep -Seconds 2
-        
-        # Verify all processes are stopped
-        $remainingProcs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-          $_.ProcessName -eq 'keploy' -or $_.ProcessName -eq 'keploy-record'
-        }
-        
-        if ($remainingProcs.Count -eq 0) {
-          Write-Host "BACKGROUND JOB: All Keploy processes stopped successfully"
+        $id = docker ps --filter "name=^/keploy-v2$" --format "{{.ID}}"
+        if (-not $id) {
+          Write-Host "BACKGROUND JOB: keploy-v2 not running."
           return $true
-        } else {
-          Write-Warning "BACKGROUND JOB: Some Keploy processes may still be running"
-          return $false
         }
+        Write-Host "BACKGROUND JOB: Gracefully stopping keploy-v2..."
+        docker stop --time=25 keploy-v2 2>$null | Out-Null
+        Start-Sleep -Seconds 2
+        $still = docker ps --filter "name=^/keploy-v2$" --format "{{.ID}}"
+        if ($still) {
+          docker exec keploy-v2 /bin/sh -lc "kill -INT 1" 2>$null | Out-Null
+          docker wait keploy-v2 2>$null | Out-Null
+        }
+        return $true
       } catch {
-        Write-Warning "BACKGROUND JOB: Failed to stop keploy: $_"
+        Write-Warning "BACKGROUND JOB: Failed to stop keploy-v2 gracefully: $_"
         return $false
       }
     }
@@ -153,13 +144,10 @@ $expectedTestSetIndex = 0
       
       # Check both possible locations
       $testPaths = @(
-        # Local keploy directory
-        Join-Path $workDir "keploy\test-set-$testSetIndex\tests"
-        # Also check without workDir prefix in case we're already in the right directory
+        Join-Path $workDir "keploy\test-set-$testSetIndex\tests",
         ".\keploy\test-set-$testSetIndex\tests"
       )
       
-      # Also check GitHub runner paths if different
       for ($runner = 0; $runner -le 10; $runner++) {
         $runnerTestPath = "C:\actions-runners\runner-$runner\_work\keploy\keploy\samples-go\echo-sql\keploy\test-set-$testSetIndex\tests"
         if (Test-Path (Split-Path $runnerTestPath -Parent)) {
@@ -169,23 +157,14 @@ $expectedTestSetIndex = 0
       
       foreach ($testPath in $testPaths) {
         Write-Host "BACKGROUND JOB: Checking for test files in: $testPath"
-        
         if (Test-Path $testPath) {
           $testFiles = Get-ChildItem -Path $testPath -Filter "test-*.yaml" -ErrorAction SilentlyContinue
           $fileCount = ($testFiles | Measure-Object).Count
-          
           if ($fileCount -ge $minTestFiles) {
-            Write-Host "BACKGROUND JOB: Found $fileCount test file(s) in $testPath"
-            
-            # Verify files have content (not empty)
             $validFiles = 0
             foreach ($file in $testFiles) {
-              if ((Get-Item $file.FullName).Length -gt 100) {  # Assuming valid test files are > 100 bytes
-                $validFiles++
-                Write-Host "BACKGROUND JOB: Valid test file: $($file.Name) ($(Get-Item $file.FullName).Length bytes)"
-              }
+              if ((Get-Item $file.FullName).Length -gt 100) { $validFiles++ }
             }
-            
             if ($validFiles -ge $minTestFiles) {
               Write-Host "BACKGROUND JOB: Recording complete! Found $validFiles valid test files."
               return $true
@@ -193,11 +172,9 @@ $expectedTestSetIndex = 0
           }
         }
       }
-      
       return $false
     }
 
-    # Main execution
     function Send-RequestAndMonitor {
       param(
         [string]$healthUrl,
@@ -206,126 +183,73 @@ $expectedTestSetIndex = 0
         [int]$testSetIndex
       )
       
-      # Initial wait for Docker and Keploy to start
       Write-Host "BACKGROUND JOB: Initial wait for services to start..."
       Start-Sleep -Seconds 10
       
       $appStarted = $false
       $requestsSent = $false
-      $maxWaitTime = 300  # 5 minutes total
+      $maxWaitTime = 300
       $checkInterval = 3
       $elapsedTime = 0
       
       Write-Host "BACKGROUND JOB: Starting monitoring loop..."
-      
       while ($elapsedTime -lt $maxWaitTime) {
-        # First, try to reach the app using a simple GET request to root
         if (-not $appStarted) {
           try {
-            # Use a simple GET request to test if app is running
-            $response = Invoke-WebRequest -Method GET -Uri 'http://localhost:8082/test' -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-            if ($response.StatusCode -eq 404) {
-              # 404 is expected for /test endpoint, means app is running
-              $appStarted = $true
-              Write-Host "BACKGROUND JOB: App is responding!"
-            }
+            $resp = Invoke-WebRequest -Method GET -Uri 'http://localhost:8082/test' -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+            if ($resp.StatusCode -eq 404) { $appStarted = $true }
           } catch {
-            if ($_.Exception.Response.StatusCode -eq 404) {
-              # 404 is expected for /test endpoint, means app is running
-              $appStarted = $true
-              Write-Host "BACKGROUND JOB: App is responding!"
-            } else {
-              Write-Host "BACKGROUND JOB: App not ready yet. Waiting..."
-            }
+            if ($_.Exception.Response.StatusCode -eq 404) { $appStarted = $true } else { Write-Host "BACKGROUND JOB: App not ready yet." }
           }
         }
         
-        # If app is ready and we haven't sent requests yet, send them
         if ($appStarted -and -not $requestsSent) {
           Write-Host "BACKGROUND JOB: Sending test requests..."
-          
           $successCount = 0
           foreach ($u in @('https://google.com', 'https://facebook.com')) {
             try {
               $body = @{ url = $u } | ConvertTo-Json -Compress
-              Write-Host "BACKGROUND JOB: Sending POST request with URL: $u"
-              
-              $postResponse = Invoke-RestMethod -Method POST -Uri $postUrl `
-                -ContentType "application/json" -Body $body -TimeoutSec 10 -ErrorAction Stop
-              
+              Invoke-RestMethod -Method POST -Uri $postUrl -ContentType "application/json" -Body $body -TimeoutSec 10 -ErrorAction Stop | Out-Null
               $successCount++
-              Write-Host "BACKGROUND JOB: Successfully sent request for $u"
-              
-              # Small delay between requests
               Start-Sleep -Milliseconds 500
-            } catch {
-              Write-Warning "BACKGROUND JOB: Failed to send request for $u : $_"
-            }
+            } catch { Write-Warning "BACKGROUND JOB: Failed to send request for $u : $_" }
           }
-          
           if ($successCount -gt 0) {
             $requestsSent = $true
-            Write-Host "BACKGROUND JOB: Sent $successCount request(s) successfully"
-            
-            # Give Keploy time to write the test files
-            Write-Host "BACKGROUND JOB: Waiting for Keploy to write test files..."
+            Write-Host "BACKGROUND JOB: Sent $successCount request(s); waiting for test files..."
             Start-Sleep -Seconds 5
           }
         }
         
-        # Check if recording is complete (test files exist)
         if ($requestsSent) {
           if (Test-RecordingComplete -workDir $workDir -testSetIndex $testSetIndex -minTestFiles 1) {
-            Write-Host "BACKGROUND JOB: Test files detected! Recording is complete."
-            
-            # Wait a bit more to ensure everything is flushed to disk
-            Start-Sleep -Seconds 3
-            
-            # Stop Keploy
-            Write-Host "BACKGROUND JOB: Stopping Keploy..."
-            Stop-Keploy
+            Write-Host "BACKGROUND JOB: Test files detected; stopping keploy..."
+            Stop-Keploy | Out-Null
             return $true
           } else {
-            Write-Host "BACKGROUND JOB: Test files not found yet. Continuing to wait..."
+            Write-Host "BACKGROUND JOB: Test files not found yet. Continuing..."
           }
         }
         
         Start-Sleep -Seconds $checkInterval
         $elapsedTime += $checkInterval
-        
-        # Periodic status update
-        if ($elapsedTime % 15 -eq 0) {
-          Write-Host "BACKGROUND JOB: Still monitoring... (elapsed: ${elapsedTime}s)"
-        }
+        if ($elapsedTime % 15 -eq 0) { Write-Host "BACKGROUND JOB: Still monitoring... (elapsed: ${elapsedTime}s)" }
       }
-      
       Write-Warning "BACKGROUND JOB: Timeout reached. Stopping Keploy..."
-      Stop-Keploy
+      Stop-Keploy | Out-Null
       return $false
     }
 
-    # --- EXECUTION LOGIC FOR THE JOB ---
     try {
-      Write-Host "BACKGROUND JOB: Starting for iteration $iteration (test-set-$testSetIndex)"
-      Write-Host "BACKGROUND JOB: Health URL = $healthUrl"
-      Write-Host "BACKGROUND JOB: POST URL = $postUrl"
-      Write-Host "BACKGROUND JOB: Work Dir = $workDir"
-      
+      Write-Host "BACKGROUND JOB: Starting (test-set-$testSetIndex)"
       $result = Send-RequestAndMonitor -healthUrl $healthUrl -postUrl $postUrl -workDir $workDir -testSetIndex $testSetIndex
-      
-      if ($result) {
-        Write-Host "BACKGROUND JOB: Recording completed successfully!"
-      } else {
-        Write-Warning "BACKGROUND JOB: Recording may be incomplete."
-      }
+      if ($result) { Write-Host "BACKGROUND JOB: Recording completed successfully!" }
+      else { Write-Warning "BACKGROUND JOB: Recording may be incomplete." }
     }
-    catch {
-      Write-Error "BACKGROUND JOB: Exception occurred: $_"
-    }
+    catch { Write-Error "BACKGROUND JOB: Exception occurred: $_" }
     finally {
-      # Make sure Keploy is stopped
       Write-Host "BACKGROUND JOB: Final cleanup - ensuring Keploy is stopped..."
-      Stop-Keploy
+      Stop-Keploy | Out-Null
     }
   }
   # --- END OF SCRIPT BLOCK ---
@@ -357,41 +281,39 @@ $recArgs = @(
   '--generate-github-actions=false'
 )
 
-# This command blocks until the background job kills it.
-# We expect it to be terminated, so we wrap it in a try...catch
-# to prevent its non-zero exit code from halting the script.
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
-try {
-    & $env:RECORD_BIN @recArgs 2>&1 | Tee-Object -FilePath $logPath
-} catch {
-    # The process was terminated by the background job, which is the expected behavior.
-    # We log this and allow the script to continue.
-    Write-Host "Keploy record process was terminated as expected by the background job."
+& $env:RECORD_BIN @recArgs 2>&1 | Tee-Object -FilePath $logPath
+
+# CHANGE: normalize the Windows/Docker abnormal exit (0xffffffff/255) to success
+$rc = $LASTEXITCODE
+if ($rc -eq 255 -or $rc -eq -1 -or $rc -eq 4294967295) {
+  Write-Warning "Keploy record exited with $rc (likely due to graceful external stop). Treating as success."
+  $rc = 0
 }
+if ($rc -ne 0) { throw "keploy record failed with exit code $rc" }
 
 # Wait for job to complete
 Write-Host "Keploy stopped. Checking background job status..."
-
 try {
   $jobResult = Wait-Job -Name $jobName -Timeout 30
   if ($jobResult) {
     Write-Host "Background job completed. Status: $($jobResult.State)"
   }
-  
-  # Get job output
   Write-Host "=== Background Job Output ==="
   Receive-Job -Name $jobName
   Write-Host "=== End Background Job Output ==="
 } catch {
   Write-Warning "Job timeout or error: $_"
   Receive-Job -Name $jobName -ErrorAction SilentlyContinue
-}
-finally {
+} finally {
   if (Get-Job -Name $jobName -ErrorAction SilentlyContinue) { 
     Stop-Job -Name $jobName -ErrorAction SilentlyContinue
     Remove-Job -Name $jobName -Force -ErrorAction SilentlyContinue | Out-Null 
   }
 }
+
+# EXTRA safety: ensure keploy container is down (idempotent)
+Stop-KeployGracefully
 
 # Verify recording was successful by checking for test files
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
@@ -399,23 +321,17 @@ if (Test-Path $testSetPath) {
   $testFiles = Get-ChildItem -Path $testSetPath -Filter "test-*.yaml" -ErrorAction SilentlyContinue
   $testCount = ($testFiles | Measure-Object).Count
   Write-Host "Found $testCount test file(s) for test-set-$expectedTestSetIndex"
-  
-  if ($testCount -eq 0) {
-    Write-Error "No test files were created"
-    exit 1
-  }
+  if ($testCount -eq 0) { Write-Error "No test files were created"; exit 1 }
 } else {
   Write-Warning "Test directory not found at $testSetPath"
 }
 
-# Check for errors in log
+# Check for errors in log (unchanged)
 if (Select-String -Path $logPath -Pattern 'WARNING:\s*DATA\s*RACE' -SimpleMatch) {
   Write-Host "Race condition detected in recording."
   Get-Content $logPath
   exit 1
 }
-
-# Be more selective about errors - some ERROR messages might be benign
 $criticalErrors = Select-String -Path $logPath -Pattern 'FATAL|PANIC|Failed to record' -SimpleMatch
 if ($criticalErrors) {
   Write-Host "Critical error found in recording."
@@ -431,7 +347,6 @@ Write-Host "Shutting down docker compose services before test mode (preserving v
 docker compose down
 Write-Host "Waiting for 5 seconds to ensure all resources are released..."
 Start-Sleep -Seconds 5
-
 
 # --- Test (replay) ---
 $testContainer = "echoApp"
