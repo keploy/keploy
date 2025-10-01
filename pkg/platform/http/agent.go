@@ -163,9 +163,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 	if err != nil {
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
-	fmt.Println("Here is the response for getting outgoing :")
-	spew.Dump(res)
-
+	
 	mockChan := make(chan *models.Mock)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
