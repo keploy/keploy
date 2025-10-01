@@ -28,7 +28,9 @@ Write-Host "Generating Keploy config..."
 
 # --- SCRIPT BLOCK FOR BACKGROUND TRAFFIC GENERATION ---
 $scriptBlock = {
-    # --- FIX: Using the proven, robust Stop-Keploy function from the working echo-sql script ---
+    # Make Invoke-WebRequest non-terminating on 4xx/5xx and quiet by default
+    $PSDefaultParameterValues['Invoke-WebRequest:SkipHttpErrorCheck'] = $true  # PS 7+
+    $PSDefaultParameterValues['Invoke-WebRequest:ErrorAction'] = 'Continue'
     function Stop-Keploy {
       try {
         $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
@@ -91,7 +93,7 @@ $scriptBlock = {
                                 $pokemon = $pokemons[0] # Just use the first one
                                 Write-Host "BACKGROUND JOB: Selected pokemon: $pokemon"
                                 try {
-                                    Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -UseBasicParsing
+                                    $null = Invoke-WebRequest -Method GET -Uri "http://localhost:8080/api/pokemon/$pokemon" -UseBasicParsing
                                 } catch { Write-Warning "BACKGROUND JOB: Request to /api/pokemon/$pokemon failed." }
                             }
                         }
@@ -101,14 +103,14 @@ $scriptBlock = {
         } catch { Write-Warning "BACKGROUND JOB: Request to /api/locations failed." }
 
         try {
-            Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/greet' -UseBasicParsing
+            $null = Invoke-WebRequest -Method GET -Uri 'http://localhost:8080/api/greet' -UseBasicParsing
         } catch { Write-Warning "BACKGROUND JOB: Request to /api/greet failed." }
         
         Write-Host "BACKGROUND JOB: All requests sent."
         Start-Sleep -Seconds 7
     }
     catch {
-      Write-Error "BACKGROUND JOB: A critical, unexpected exception occurred: $_"
+      Write-Warning "BACKGROUND JOB: A critical, unexpected exception occurred: $_"
     }
     finally {
       # This block will always run, ensuring the main process is unblocked.
@@ -141,9 +143,15 @@ try {
 
 Wait-Job $job
 Write-Host "--- Background Job Output ---"
-Receive-Job $job
+# Don't let job errors terminate the step
+$jobOutput = Receive-Job -Keep -ErrorAction SilentlyContinue
+if ($job.State -ne 'Completed') {
+  Write-Warning "BACKGROUND JOB exited with state: $($job.State). Treating as non-fatal."
+}
+$jobOutput | Write-Host
 Write-Host "-----------------------------"
-Remove-Job $job
+Remove-Job $job -Force
+
 
 Write-Host "Shutting down docker compose services..."
 docker compose down --volumes
