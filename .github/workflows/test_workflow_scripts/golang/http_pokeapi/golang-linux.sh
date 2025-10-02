@@ -105,6 +105,7 @@ for i in {1..2}; do
       print_keploy_agent_logs
       exit 1 
     fi
+    cat "${app_name}.txt"
     sleep 5
     wait
     echo "Recorded test case and mocks for iteration ${i}"
