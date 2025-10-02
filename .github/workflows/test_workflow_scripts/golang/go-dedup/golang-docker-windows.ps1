@@ -169,7 +169,9 @@ $expectedTestSetIndex = 0
       param(
         [string]$workDir,
         [int]$testSetIndex,
-        [int]$minTestFiles = 5 # Expecting more tests from the varied traffic
+        # --- MODIFIED ---
+        # The script sends 7 distinct API calls, so we should wait for at least 7 test files.
+        [int]$minTestFiles = 7 
       )
       
       $testPaths = @(
@@ -204,6 +206,7 @@ $expectedTestSetIndex = 0
       
       return $false
     }
+
 
     # Main execution to send traffic
     function Send-RequestAndMonitor {
