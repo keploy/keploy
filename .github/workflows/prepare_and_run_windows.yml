@@ -102,9 +102,9 @@ jobs:
           path: keploy-image-pr.tar
 
   run_golang_docker_windows:
-    needs: [build-and-upload, docker-image-build, upload-latest]
+    needs: [build-and-upload, docker-image-build]
     uses: ./.github/workflows/golang_docker_windows.yml
 
   run_python_docker_windows:
-    needs: [build-and-upload, docker-image-build, upload-latest]
+    needs: [build-and-upload, docker-image-build]
     uses: ./.github/workflows/python_docker_windows.yml
