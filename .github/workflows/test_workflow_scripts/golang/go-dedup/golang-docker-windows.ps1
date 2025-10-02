@@ -134,6 +134,7 @@ function Kill-Tree {
 # =========================
 $containerName = "dedup-go"
 $logPath = "$containerName.record.txt"
+$errLogPath = "$containerName.record.err.txt"
 $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
 $base = $env:APP_BASE_URL
@@ -157,7 +158,7 @@ $proc = Start-Process -FilePath $env:RECORD_BIN `
                       -PassThru `
                       -NoNewWindow `
                       -RedirectStandardOutput $logPath `
-                      -RedirectStandardError  $logPath
+                      -RedirectStandardError  $errLogPath
 
 # Wait for app readiness
 Write-Host "Waiting for app to respond on $base/timestamp …"
