@@ -7,6 +7,27 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, Windows, X64]
     steps:
+      - name: Aggressive Cleanup (Workspace + Keploy procs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        run: |
+          # Kill any lingering Keploy processes
+          $procs = 'keploy.exe','keploy-record.exe','keploy-replay.exe','keploy-record','keploy-replay'
+          foreach ($p in $procs) { cmd /c "taskkill /F /IM $p /T" 2>$null | Out-Null }
+
+          # Clean workspace artifacts that could affect the build
+          $paths = @('.\bin','.\\keploy.exe','.\\keploy','.\\keploy.yml','.\\record-bin','.\\replay-bin')
+          foreach ($p in $paths) {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          # Optional: clean Go caches to avoid stale behavior
+          go version 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            go clean -cache -modcache -testcache -fuzzcache 2>$null
+          }
+
       - name: Clean up git config (ensure HTTPS for checkout)
         if: always()
         continue-on-error: true
@@ -28,11 +49,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-
-      # - name: Set up Go
-      #   uses: actions/setup-go@v5
-      #   with:
-      #     go-version: ">=1.23"
+          clean: true
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: powershell
@@ -69,7 +86,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build a single-platform linux/amd64 image and export to a local tarball
       - name: Build PR Docker image (linux/amd64) -> tar
         uses: docker/build-push-action@v6
         with:
@@ -85,48 +101,6 @@ jobs:
           name: docker-build
           path: keploy-image-pr.tar
 
-  # upload-latest:
-  #   runs-on: [self-hosted, Windows, X64]
-  #   steps:
-  #     - name: Download latest release (Windows)
-  #       shell: powershell
-  #       run: |
-  #         # Get latest release tag
-  #         $response = Invoke-RestMethod -Uri "https://api.github.com/repos/keploy/keploy/releases/latest"
-  #         $latest = $response.tag_name
-  #         Write-Host "Latest version: $latest"
-          
-  #         # Download Windows tar.gz
-  #         $url = "https://github.com/keploy/keploy/releases/download/$latest/keploy_windows_amd64.tar.gz"
-  #         Write-Host "Downloading from: $url"
-          
-  #         Invoke-WebRequest -Uri $url -OutFile "keploy.tar.gz"
-          
-  #         tar -xzf keploy.tar.gz
-  #         if (Test-Path "keploy") { Move-Item "keploy" "keploy.exe" }
-
-  #     - name: Upload latest artifact (Windows CLI)
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: latest
-  #         path: keploy.exe
-
-  #     - name: Download & save latest Docker image
-  #       shell: pwsh
-  #       run: |
-  #         $response = Invoke-RestMethod -Uri "https://api.github.com/repos/keploy/keploy/releases/latest"
-  #         $latest = $response.tag_name
-  #         Write-Host "Pulling ghcr.io/keploy/keploy:$latest"
-  #         docker pull ghcr.io/keploy/keploy:$latest
-  #         docker save ghcr.io/keploy/keploy:$latest -o keploy-image-latest.tar
-
-  #     - name: Upload latest Docker image artifact
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: docker-latest
-  #         path: keploy-image-latest.tar
-
   run_golang_docker_windows:
-    # needs: [build-and-upload, docker-image-build, upload-latest]
     needs: [build-and-upload, docker-image-build]
     uses: ./.github/workflows/golang_docker_windows.yml
