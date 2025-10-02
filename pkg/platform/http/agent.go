@@ -593,6 +593,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 			a.logger.Error("agent process exited with error", zap.Error(err))
 			return err
 		}
+		a.mu.Lock()
+		a.agentCmd = nil
+		a.mu.Unlock()
 		a.logger.Info("agent process stopped")
 		return nil
 	})
@@ -963,7 +966,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
 		return err
 	}
-	
+
 	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
 	// Step 4: Define the cancellation behavior for graceful shutdown.
 	cmd.Cancel = func() error {
@@ -1011,6 +1014,9 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		if ctx.Err() == context.Canceled {
 			cmd.Process.Kill()
 			logger.Info("Docker agent run cancelled gracefully.")
+			a.mu.Lock()
+			a.agentCmd = nil
+			a.mu.Unlock()
 			return nil
 		}
 		utils.LogError(logger, err, "failed to run keploy agent in docker")
