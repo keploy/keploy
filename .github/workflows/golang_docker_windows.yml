@@ -20,12 +20,12 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-          - job: record_build_replay_latest
-            record_src: build
-            replay_src: latest
-          - job: record_latest_replay_build
-            record_src: latest
-            replay_src: build
+          # - job: record_build_replay_latest
+          #   record_src: build
+          #   replay_src: latest
+          # - job: record_latest_replay_build
+          #   record_src: latest
+          #   replay_src: build
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
