@@ -141,7 +141,7 @@ $expectedTestSetIndex = 0
             taskkill /PID $pid /T /F | Out-Null -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             Write-Host "BACKGROUND JOB: Keploy process tree for PID $pid stopped."
           } catch {
-            Write-Warning "BACKGROUND JOB: Failed to stop process tree for PID $pid: $_"
+            Write-Warning "BACKGROUND JOB: Failed to stop process tree for PID $pid`: $_"
           }
         }
         
