@@ -164,11 +164,11 @@ jobs:
           docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:replay ghcr.io/keploy/keploy:v2-dev"
           echo "image=keploy:replay" >> $env:GITHUB_OUTPUT
 
-      - name: Checkout the samples-go repository
+      - name: Checkout the samples-python repository
         uses: actions/checkout@v4
         with:
-          repository: keploy/samples-go
-          path: samples-go
+          repository: keploy/samples-python
+          path: samples-python
           clean: true
 
       - name: Docker works?
