@@ -11,25 +11,32 @@ import (
 	"go.uber.org/zap"
 )
 
-func findComposeFile(cmd string) string {
+func findComposeFile(cmd string) []string {
 
 	cmdArgs := strings.Fields(cmd)
+	composePaths := []string{}
+	haveMultipleComposeFiles := false
 
 	for i := 0; i < len(cmdArgs); i++ {
 		if cmdArgs[i] == "-f" && i+1 < len(cmdArgs) {
-			return cmdArgs[i+1]
+			composePaths = append(composePaths, cmdArgs[i+1])
+			haveMultipleComposeFiles = true
 		}
+	}
+
+	if haveMultipleComposeFiles {
+		return composePaths
 	}
 
 	filenames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
 	for _, filename := range filenames {
 		if _, err := os.Stat(filename); !os.IsNotExist(err) {
-			return filename
+			return []string{filename}
 		}
 	}
 
-	return ""
+	return []string{}
 }
 
 func modifyDockerComposeCommand(appCmd, newComposeFile string) string {

@@ -71,9 +71,9 @@ func start(ctx context.Context) {
 			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
 				return
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-				return
-			}
+			// if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+			// 	return
+			// }
 		}
 	}()
 	defer utils.Recover(logger)

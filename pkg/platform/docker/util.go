@@ -26,7 +26,7 @@ type DockerConfigStruct struct {
 }
 
 var DockerConfig = DockerConfigStruct{
-	DockerImage: "ghcr.io/keploy/keploy",
+	DockerImage: "keploy-oss",
 }
 
 func GenerateDockerEnvs(config DockerConfigStruct) string {
@@ -81,9 +81,9 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config,
 		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
 			return nil
 		}
-		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-			return nil
-		}
+		// if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+		// 	return nil
+		// }
 	}
 
 	// os.Exit(0)

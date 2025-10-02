@@ -5,10 +5,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -714,4 +718,895 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 
 	idc.logger.Debug("volume created", zap.String("volume", volumeName))
 	return nil
+}
+
+// ServiceConfig represents a service configuration in docker-compose for container searching
+type ServiceConfig struct {
+	ContainerName string      `yaml:"container_name,omitempty"`
+	Networks      interface{} `yaml:"networks,omitempty"`
+	Ports         interface{} `yaml:"ports,omitempty"`
+}
+
+// FindContainerInComposeFiles searches through multiple Docker Compose files to find a specific container
+// and returns the compose file path along with the networks of that service.
+// It searches for containers by both explicit container_name and service name.
+// This function integrates with the existing Compose structure and reuses existing parsing logic.
+func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerName string) (*ComposeServiceInfo, error) {
+	for _, composePath := range composePaths {
+		// Use the existing ReadComposeFile method
+		compose, err := idc.ReadComposeFile(composePath)
+		if err != nil {
+			idc.logger.Debug("failed to read compose file, skipping", zap.String("path", composePath), zap.Error(err))
+			continue // Skip files that can't be read
+		}
+
+		// Search through services using the existing Compose structure
+		networks, ports, found := idc.findContainerInServices(compose, containerName)
+		if found {
+			return &ComposeServiceInfo{
+				ComposePath: composePath,
+				Networks:    networks,
+				Ports:       ports,
+				Compose:     compose,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("container '%s' not found in any of the provided docker-compose files", containerName)
+}
+
+// findContainerInServices searches for a container within the services of a compose file
+// This reuses the same iteration pattern as existing functions like SetPidContainer
+func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, bool) {
+	if compose.Services.Content == nil {
+		return nil, nil, false
+	}
+
+	// Use the same iteration pattern as existing compose functions (services are key-value pairs)
+	for i := 0; i < len(compose.Services.Content); i += 2 {
+		if i+1 >= len(compose.Services.Content) {
+			break
+		}
+
+		serviceNameNode := compose.Services.Content[i]
+		serviceContentNode := compose.Services.Content[i+1]
+		serviceName := serviceNameNode.Value
+
+		// Check for explicit container_name using the same pattern as existing functions
+		var containerNameMatch bool
+		for j := 0; j < len(serviceContentNode.Content)-1; j++ {
+			if serviceContentNode.Content[j].Kind == yaml.ScalarNode && serviceContentNode.Content[j].Value == "container_name" &&
+				serviceContentNode.Content[j+1].Kind == yaml.ScalarNode && serviceContentNode.Content[j+1].Value == containerName {
+				containerNameMatch = true
+				break
+			}
+		}
+
+		// If explicit container_name matches or service name matches, extract networks and ports
+		if containerNameMatch || serviceName == containerName {
+			networks := idc.extractServiceNetworks(serviceContentNode, serviceName)
+			ports := idc.extractServicePorts(serviceContentNode)
+			return networks, ports, true
+		}
+	}
+
+	return nil, nil, false
+}
+
+// extractServiceNetworks extracts network names from a service's network configuration
+func (idc *Impl) extractServiceNetworks(serviceNode *yaml.Node, serviceName string) []string {
+	if serviceNode.Content == nil {
+		return []string{"default"}
+	}
+
+	// Find the networks property using the same pattern as existing functions
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if i+1 >= len(serviceNode.Content) {
+			break
+		}
+
+		keyNode := serviceNode.Content[i]
+		valueNode := serviceNode.Content[i+1]
+
+		if keyNode.Value == "networks" {
+			return idc.parseNetworksNode(valueNode)
+		}
+	}
+
+	// If no networks are specified, the service joins the default network
+	return []string{"default"}
+}
+
+// extractServicePorts extracts port mappings from a service's port configuration
+func (idc *Impl) extractServicePorts(serviceNode *yaml.Node) []string {
+	if serviceNode.Content == nil {
+		return []string{}
+	}
+
+	// Find the ports property using the same pattern as existing functions
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if i+1 >= len(serviceNode.Content) {
+			break
+		}
+
+		keyNode := serviceNode.Content[i]
+		valueNode := serviceNode.Content[i+1]
+
+		if keyNode.Value == "ports" {
+			return idc.parsePortsNode(valueNode)
+		}
+	}
+
+	// If no ports are specified, return empty slice
+	return []string{}
+}
+
+// parseNetworksNode parses different network configuration formats from yaml.Node
+func (idc *Impl) parseNetworksNode(networksNode *yaml.Node) []string {
+	var networks []string
+
+	switch networksNode.Kind {
+	case yaml.SequenceNode:
+		// Array format: networks: [network1, network2]
+		for _, networkNode := range networksNode.Content {
+			if networkNode.Kind == yaml.ScalarNode {
+				networks = append(networks, networkNode.Value)
+			}
+		}
+	case yaml.MappingNode:
+		// Extended format: networks: { network1: {}, network2: {} }
+		for i := 0; i < len(networksNode.Content); i += 2 {
+			keyNode := networksNode.Content[i]
+			if keyNode.Kind == yaml.ScalarNode {
+				networks = append(networks, keyNode.Value)
+			}
+		}
+	case yaml.ScalarNode:
+		// Single network as string
+		networks = []string{networksNode.Value}
+	}
+
+	// If no networks are specified, use default
+	if len(networks) == 0 {
+		networks = []string{"default"}
+	}
+
+	return networks
+}
+
+// parsePortsNode parses different port configuration formats from yaml.Node
+func (idc *Impl) parsePortsNode(portsNode *yaml.Node) []string {
+	var ports []string
+
+	switch portsNode.Kind {
+	case yaml.SequenceNode:
+		// Array format: ports: ["80:80", "443:443"] or ports: [8080, "9000:9000"]
+		for _, portNode := range portsNode.Content {
+			if portNode.Kind == yaml.ScalarNode {
+				ports = append(ports, portNode.Value)
+			} else if portNode.Kind == yaml.MappingNode {
+				// Extended format within array: ports: [{ target: 80, published: 8080 }]
+				portMapping := idc.parseExtendedPortMapping(portNode)
+				if portMapping != "" {
+					ports = append(ports, portMapping)
+				}
+			}
+		}
+	case yaml.MappingNode:
+		// Extended format: ports: { target: 80, published: 8080 }
+		portMapping := idc.parseExtendedPortMapping(portsNode)
+		if portMapping != "" {
+			ports = []string{portMapping}
+		}
+	case yaml.ScalarNode:
+		// Single port as string: ports: "80:80"
+		ports = []string{portsNode.Value}
+	}
+
+	return ports
+}
+
+// parseExtendedPortMapping parses extended port mapping format { target: 80, published: 8080, protocol: tcp }
+func (idc *Impl) parseExtendedPortMapping(portNode *yaml.Node) string {
+	var target, published, protocol string
+
+	for i := 0; i < len(portNode.Content); i += 2 {
+		if i+1 >= len(portNode.Content) {
+			break
+		}
+
+		keyNode := portNode.Content[i]
+		valueNode := portNode.Content[i+1]
+
+		if keyNode.Kind == yaml.ScalarNode && valueNode.Kind == yaml.ScalarNode {
+			switch keyNode.Value {
+			case "target":
+				target = valueNode.Value
+			case "published":
+				published = valueNode.Value
+			case "protocol":
+				protocol = valueNode.Value
+			}
+		}
+	}
+
+	// Build the port mapping string
+	if target != "" && published != "" {
+		mapping := fmt.Sprintf("%s:%s", published, target)
+		if protocol != "" && protocol != "tcp" {
+			mapping = fmt.Sprintf("%s/%s", mapping, protocol)
+		}
+		return mapping
+	} else if target != "" {
+		// Only target specified (internal port)
+		return target
+	}
+
+	return ""
+}
+
+// FindContainerInComposeCommand is a convenience function that extracts compose file paths from a docker-compose command
+// and then searches for a container within those files. This integrates with existing findComposeFile logic.
+// Example usage: FindContainerInComposeCommand("docker-compose -f custom.yml up", "my-app")
+func (idc *Impl) FindContainerInComposeCommand(dockerComposeCmd, containerName string) (*ComposeServiceInfo, error) {
+	composePaths := idc.extractComposeFilesFromCommand(dockerComposeCmd)
+	if len(composePaths) == 0 {
+		return nil, fmt.Errorf("no docker-compose files found in command: %s", dockerComposeCmd)
+	}
+
+	return idc.FindContainerInComposeFiles(composePaths, containerName)
+}
+
+// extractComposeFilesFromCommand extracts docker-compose file paths from a docker-compose command
+// This integrates with the existing findComposeFile logic from util.go
+func (idc *Impl) extractComposeFilesFromCommand(cmd string) []string {
+	cmdArgs := strings.Fields(cmd)
+	composePaths := []string{}
+	haveMultipleComposeFiles := false
+
+	// Look for -f flags in the command
+	for i := 0; i < len(cmdArgs); i++ {
+		if cmdArgs[i] == "-f" && i+1 < len(cmdArgs) {
+			composePaths = append(composePaths, cmdArgs[i+1])
+			haveMultipleComposeFiles = true
+		}
+	}
+
+	if haveMultipleComposeFiles {
+		return composePaths
+	}
+
+	// If no -f flags found, look for default compose files
+	filenames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
+
+	for _, filename := range filenames {
+		if _, err := os.Stat(filename); !os.IsNotExist(err) {
+			return []string{filename}
+		}
+	}
+
+	return []string{}
+}
+
+// generateKeployVolumes creates the standard volume mappings for Keploy containers
+// This function extracts the common volume logic used by both getAlias and Docker Compose generation
+func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
+	osName := runtime.GOOS
+	volumes := []string{}
+
+	// Working directory mount
+	volumes = append(volumes, fmt.Sprintf("%s:%s", workingDir, workingDir))
+
+	switch osName {
+	case "linux":
+		// Standard Linux volumes
+		volumes = append(volumes,
+			"/sys/fs/cgroup:/sys/fs/cgroup",
+			"/sys/kernel/debug:/sys/kernel/debug",
+			"/sys/fs/bpf:/sys/fs/bpf",
+			"/var/run/docker.sock:/var/run/docker.sock",
+		)
+	case "darwin":
+		// macOS volumes
+		volumes = append(volumes,
+			"/sys/fs/cgroup:/sys/fs/cgroup",
+			"/sys/kernel/debug:/sys/kernel/debug",
+			"/sys/fs/bpf:/sys/fs/bpf",
+			"/var/run/docker.sock:/var/run/docker.sock",
+		)
+	case "windows":
+		// Windows volumes - check if using default context or colima
+		cmd := exec.Command("docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
+		out, err := cmd.Output()
+		if err == nil {
+			dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+			if dockerContext != "colima" {
+				// Default Docker context on Windows
+				volumes = append(volumes,
+					"/sys/fs/cgroup:/sys/fs/cgroup",
+					"debugfs:/sys/kernel/debug:rw",
+					"/sys/fs/bpf:/sys/fs/bpf",
+					"/var/run/docker.sock:/var/run/docker.sock",
+				)
+			} else {
+				// Colima context
+				volumes = append(volumes,
+					"/sys/fs/cgroup:/sys/fs/cgroup",
+					"/sys/kernel/debug:/sys/kernel/debug",
+					"/sys/fs/bpf:/sys/fs/bpf",
+					"/var/run/docker.sock:/var/run/docker.sock",
+				)
+			}
+		}
+	}
+
+	// Keploy config and data directories
+	volumes = append(volumes,
+		fmt.Sprintf("%s/.keploy-config:/root/.keploy-config", homeDir),
+		fmt.Sprintf("%s/.keploy:/root/.keploy", homeDir),
+	)
+
+	return volumes
+}
+
+// GenerateKeployAgentService creates a Docker Compose service configuration for keploy-agent
+// based on the SetupOptions and returns it as a yaml.Node that can be appended to a compose file
+func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error) {
+	osName := runtime.GOOS
+
+	// Get working directory and home directory
+	workingDir := os.Getenv("PWD")
+	if workingDir == "" {
+		var err error
+		workingDir, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get working directory: %w", err)
+		}
+	}
+
+	homeDir := os.Getenv("HOME")
+	if osName == "windows" {
+		homeDir = os.Getenv("USERPROFILE")
+		if homeDir != "" {
+			homeDir = strings.ReplaceAll(homeDir, "\\", "/")
+		}
+		// Convert working directory for Windows
+		workingDir = convertPathToUnixStyleForCompose(workingDir)
+	}
+
+	// Build the Docker image name
+	img := DockerConfig.DockerImage + ":v" + utils.Version
+
+	// Generate environment variables
+	envVars := []string{
+		"BINARY_TO_DOCKER=true",
+	}
+
+	// Add installation ID if available
+	if installationID := os.Getenv("INSTALLATION_ID"); installationID != "" {
+		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
+	}
+
+	// Generate ports
+	ports := []string{
+		fmt.Sprintf("%d:%d", opts.AgentPort, opts.AgentPort),
+		fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort),
+	}
+
+	ports = append(ports, opts.AppPorts...)
+
+	// Generate volumes using the extracted function
+	volumes := idc.generateKeployVolumes(workingDir, homeDir)
+
+	// Build command arguments
+	command := []string{
+		"--port", fmt.Sprintf("%d", opts.AgentPort),
+		"--proxy-port", fmt.Sprintf("%d", opts.ProxyPort),
+	}
+
+	if opts.EnableTesting {
+		command = append(command, "--enable-testing")
+	}
+
+	// Create the service YAML node structure
+	serviceNode := &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			// image
+			{Kind: yaml.ScalarNode, Value: "image"},
+			{Kind: yaml.ScalarNode, Value: img},
+
+			// container_name
+			{Kind: yaml.ScalarNode, Value: "container_name"},
+			{Kind: yaml.ScalarNode, Value: opts.KeployContainer},
+
+			// privileged
+			{Kind: yaml.ScalarNode, Value: "privileged"},
+			{Kind: yaml.ScalarNode, Value: "true"},
+
+			// working_dir
+			{Kind: yaml.ScalarNode, Value: "working_dir"},
+			{Kind: yaml.ScalarNode, Value: workingDir},
+		},
+	}
+
+	// Add environment variables
+	if len(envVars) > 0 {
+		envNode := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, env := range envVars {
+			envNode.Content = append(envNode.Content, &yaml.Node{
+				Kind: yaml.ScalarNode, Value: env,
+			})
+		}
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
+			envNode,
+		)
+	}
+
+	// Add ports
+	if len(ports) > 0 {
+		portsNode := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, port := range ports {
+			portsNode.Content = append(portsNode.Content, &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Value: port,
+				Style: yaml.DoubleQuotedStyle, // Force double quotes for port strings
+			})
+		}
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "ports"},
+			portsNode,
+		)
+	}
+
+	// Add networks if specified
+	if len(opts.AppNetworks) > 0 {
+		networksNode := &yaml.Node{
+			Kind: yaml.SequenceNode,
+		}
+		for _, appNetwork := range opts.AppNetworks {
+			networksNode.Content = append(networksNode.Content, &yaml.Node{
+				Kind: yaml.ScalarNode, Value: appNetwork,
+			})
+		}
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "networks"},
+			networksNode,
+		)
+	}
+
+	// Add volumes
+	if len(volumes) > 0 {
+		volumesNode := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, volume := range volumes {
+			volumesNode.Content = append(volumesNode.Content, &yaml.Node{
+				Kind: yaml.ScalarNode, Value: volume,
+			})
+		}
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "volumes"},
+			volumesNode,
+		)
+	}
+
+	// Add command
+	if len(command) > 0 {
+		commandNode := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, cmd := range command {
+			commandNode.Content = append(commandNode.Content, &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Value: cmd,
+				Tag:   "!!str", // Explicitly mark as string
+			})
+		}
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "command"},
+			commandNode,
+		)
+	}
+
+	// Add healthcheck
+	healthcheckNode := &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			// test
+			{Kind: yaml.ScalarNode, Value: "test"},
+			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "CMD"},
+				{Kind: yaml.ScalarNode, Value: "curl"},
+				{Kind: yaml.ScalarNode, Value: "-f"},
+				{Kind: yaml.ScalarNode, Value: fmt.Sprintf("http://localhost:%d/agent/health", opts.AgentPort)},
+			}},
+
+			// interval
+			{Kind: yaml.ScalarNode, Value: "interval"},
+			{Kind: yaml.ScalarNode, Value: "10s"},
+
+			// timeout
+			{Kind: yaml.ScalarNode, Value: "timeout"},
+			{Kind: yaml.ScalarNode, Value: "5s"},
+
+			// retries
+			{Kind: yaml.ScalarNode, Value: "retries"},
+			{Kind: yaml.ScalarNode, Value: "5"},
+
+			// start_period
+			{Kind: yaml.ScalarNode, Value: "start_period"},
+			{Kind: yaml.ScalarNode, Value: "10s"},
+		},
+	}
+
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "healthcheck"},
+		healthcheckNode,
+	)
+
+	return serviceNode, nil
+}
+
+// convertPathToUnixStyleForCompose converts Windows paths to Unix style for Docker Compose
+func convertPathToUnixStyleForCompose(path string) string {
+	// Replace backslashes with forward slashes
+	unixPath := strings.ReplaceAll(path, "\\", "/")
+	// Remove 'C:' and similar drive letters
+	if len(unixPath) > 1 && unixPath[1] == ':' {
+		unixPath = unixPath[2:]
+	}
+	return unixPath
+}
+
+// AddKeployAgentToCompose adds the keploy-agent service to an existing Docker Compose file
+// This is a convenience function that shows how to use GenerateKeployAgentService
+func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error {
+	// Generate the keploy-agent service configuration
+	keployServiceNode, err := idc.GenerateKeployAgentService(opts)
+	if err != nil {
+		return fmt.Errorf("failed to generate keploy-agent service: %w", err)
+	}
+
+	// Ensure services section exists
+	if compose.Services.Content == nil {
+		compose.Services.Kind = yaml.MappingNode
+		compose.Services.Content = make([]*yaml.Node, 0)
+	}
+
+	// Add the keploy-agent service to the compose file
+	compose.Services.Content = append(compose.Services.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-agent"},
+		keployServiceNode,
+	)
+
+	return nil
+}
+
+// CreateKeployComposeFile creates a complete Docker Compose file with keploy-agent service
+// This demonstrates how to create a new compose file from scratch with the keploy-agent
+func (idc *Impl) CreateKeployComposeFile(opts models.SetupOptions, version string) (*Compose, error) {
+	if version == "" {
+		version = "3.9" // Default version
+	}
+
+	// Create a new compose structure
+	compose := &Compose{
+		Version:  version,
+		Services: yaml.Node{Kind: yaml.MappingNode, Content: make([]*yaml.Node, 0)},
+	}
+
+	// Add keploy-agent service
+	err := idc.AddKeployAgentToCompose(compose, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// If a network is specified, create the networks section
+	if opts.AppNetwork != "" {
+		compose.Networks = yaml.Node{
+			Kind: yaml.MappingNode,
+			Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: opts.AppNetwork},
+				{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "external"},
+					{Kind: yaml.ScalarNode, Value: "false"},
+				}},
+			},
+		}
+	}
+
+	return compose, nil
+}
+
+// ModifyComposeForKeployIntegration modifies an existing Docker Compose file to integrate with Keploy agent
+// It adds the keploy-agent service and modifies the specified app container to depend on it
+func (idc *Impl) ModifyComposeForKeployIntegration(compose *Compose, opts models.SetupOptions, appContainerName string) error {
+	// First, add the keploy-agent service
+	err := idc.AddKeployAgentToCompose(compose, opts)
+	if err != nil {
+		return fmt.Errorf("failed to add keploy-agent service: %w", err)
+	}
+
+	// Now modify the app container to integrate with keploy-agent
+	err = idc.modifyAppServiceForKeploy(compose, appContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to modify app service: %w", err)
+	}
+
+	// Extract the app's original ports and add them to keploy-agent
+	// err = idc.moveAppPortsToKeployAgent(compose, appContainerName, opts.KeployContainer)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to move app ports to keploy-agent: %w", err)
+	// }
+
+	return nil
+}
+
+// modifyAppServiceForKeploy modifies the app service to depend on keploy-agent and share namespaces
+func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName string) error {
+	if compose.Services.Content == nil {
+		return fmt.Errorf("no services found in compose file")
+	}
+
+	// Find the app service by container name or service name
+	for i := 0; i < len(compose.Services.Content); i += 2 {
+		if i+1 >= len(compose.Services.Content) {
+			break
+		}
+
+		serviceNameNode := compose.Services.Content[i]
+		serviceContentNode := compose.Services.Content[i+1]
+		serviceName := serviceNameNode.Value
+
+		// Check if this is the target app service
+		var isTargetService bool
+		for j := 0; j < len(serviceContentNode.Content)-1; j++ {
+			if serviceContentNode.Content[j].Kind == yaml.ScalarNode &&
+				serviceContentNode.Content[j].Value == "container_name" &&
+				serviceContentNode.Content[j+1].Kind == yaml.ScalarNode &&
+				serviceContentNode.Content[j+1].Value == appContainerName {
+				isTargetService = true
+				break
+			}
+		}
+
+		// If no explicit container_name, check service name
+		if !isTargetService && serviceName == appContainerName {
+			isTargetService = true
+		}
+
+		if isTargetService {
+			// Remove networks and ports from the app service
+			idc.removeServiceProperty(serviceContentNode, "networks")
+			idc.removeServiceProperty(serviceContentNode, "ports")
+
+			// Add or modify depends_on
+			idc.addOrUpdateDependsOn(serviceContentNode)
+
+			// Add PID namespace sharing
+			idc.addServiceProperty(serviceContentNode, "pid", fmt.Sprintf("service:%s", "keploy-agent"))
+
+			// Add network mode sharing
+			idc.addServiceProperty(serviceContentNode, "network_mode", fmt.Sprintf("service:%s", "keploy-agent"))
+
+			break
+		}
+	}
+
+	return nil
+}
+
+// moveAppPortsToKeployAgent extracts ports from app service and adds them to keploy-agent
+func (idc *Impl) moveAppPortsToKeployAgent(compose *Compose, appContainerName, keployContainerName string) error {
+	var appPorts []string
+
+	// First, extract ports from the app service
+	for i := 0; i < len(compose.Services.Content); i += 2 {
+		if i+1 >= len(compose.Services.Content) {
+			break
+		}
+
+		serviceNameNode := compose.Services.Content[i]
+		serviceContentNode := compose.Services.Content[i+1]
+		serviceName := serviceNameNode.Value
+
+		// Check if this is the target app service
+		var isTargetService bool
+		for j := 0; j < len(serviceContentNode.Content)-1; j++ {
+			if serviceContentNode.Content[j].Kind == yaml.ScalarNode &&
+				serviceContentNode.Content[j].Value == "container_name" &&
+				serviceContentNode.Content[j+1].Kind == yaml.ScalarNode &&
+				serviceContentNode.Content[j+1].Value == appContainerName {
+				isTargetService = true
+				break
+			}
+		}
+
+		if !isTargetService && serviceName == appContainerName {
+			isTargetService = true
+		}
+
+		if isTargetService {
+			// Extract ports from this service
+			appPorts = idc.extractServicePorts(serviceContentNode)
+			break
+		}
+	}
+
+	// Now add these ports to keploy-agent service
+	if len(appPorts) > 0 {
+		for i := 0; i < len(compose.Services.Content); i += 2 {
+			if i+1 >= len(compose.Services.Content) {
+				break
+			}
+
+			serviceNameNode := compose.Services.Content[i]
+			serviceContentNode := compose.Services.Content[i+1]
+
+			if serviceNameNode.Value == "keploy-agent" {
+				idc.addPortsToService(serviceContentNode, appPorts)
+				break
+			}
+		}
+	}
+
+	return nil
+}
+
+// removeServiceProperty removes a property from a service node
+func (idc *Impl) removeServiceProperty(serviceNode *yaml.Node, propertyName string) {
+	if serviceNode.Content == nil {
+		return
+	}
+
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if i+1 >= len(serviceNode.Content) {
+			break
+		}
+
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == propertyName {
+			// Remove both key and value nodes
+			serviceNode.Content = append(serviceNode.Content[:i], serviceNode.Content[i+2:]...)
+			break
+		}
+	}
+}
+
+// addServiceProperty adds or updates a property in a service node
+func (idc *Impl) addServiceProperty(serviceNode *yaml.Node, key, value string) {
+	if serviceNode.Content == nil {
+		serviceNode.Content = make([]*yaml.Node, 0)
+	}
+
+	// Check if property already exists
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if i+1 >= len(serviceNode.Content) {
+			break
+		}
+
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == key {
+			// Update existing property
+			serviceNode.Content[i+1].Value = value
+			return
+		}
+	}
+
+	// Add new property
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Value: value},
+	)
+}
+
+// addOrUpdateDependsOn adds or updates the depends_on configuration
+func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
+	if serviceNode.Content == nil {
+		serviceNode.Content = make([]*yaml.Node, 0)
+	}
+
+	// Check if depends_on already exists
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if i+1 >= len(serviceNode.Content) {
+			break
+		}
+
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == "depends_on" {
+			// Update existing depends_on
+			dependsOnNode := serviceNode.Content[i+1]
+
+			// Check if it's a simple array or extended format
+			if dependsOnNode.Kind == yaml.SequenceNode {
+				// Store existing dependencies first
+				existingDeps := make([]string, 0)
+				for _, dep := range dependsOnNode.Content {
+					if dep.Kind == yaml.ScalarNode && dep.Value != "keploy-agent" {
+						existingDeps = append(existingDeps, dep.Value)
+					}
+				}
+
+				// Convert to extended format (MappingNode)
+				dependsOnNode.Kind = yaml.MappingNode
+				dependsOnNode.Tag = ""  // Clear the !!seq tag
+				dependsOnNode.Style = 0 // Reset style
+				dependsOnNode.Content = []*yaml.Node{}
+
+				// Add keploy-agent first
+				dependsOnNode.Content = append(dependsOnNode.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-agent"},
+					&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+						{Kind: yaml.ScalarNode, Value: "condition"},
+						{Kind: yaml.ScalarNode, Value: "service_healthy"},
+					}},
+				)
+
+				// Add existing dependencies with service_started condition
+				for _, depName := range existingDeps {
+					dependsOnNode.Content = append(dependsOnNode.Content,
+						&yaml.Node{Kind: yaml.ScalarNode, Value: depName},
+						&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+							{Kind: yaml.ScalarNode, Value: "condition"},
+							{Kind: yaml.ScalarNode, Value: "service_started"},
+						}},
+					)
+				}
+			} else if dependsOnNode.Kind == yaml.MappingNode {
+				// Add keploy-agent to existing mapping
+				keployExists := false
+				for j := 0; j < len(dependsOnNode.Content); j += 2 {
+					if j < len(dependsOnNode.Content) && dependsOnNode.Content[j].Kind == yaml.ScalarNode && dependsOnNode.Content[j].Value == "keploy-agent" {
+						keployExists = true
+						break
+					}
+				}
+
+				if !keployExists {
+					dependsOnNode.Content = append([]*yaml.Node{
+						{Kind: yaml.ScalarNode, Value: "keploy-agent"},
+						{Kind: yaml.MappingNode, Content: []*yaml.Node{
+							{Kind: yaml.ScalarNode, Value: "condition"},
+							{Kind: yaml.ScalarNode, Value: "service_healthy"},
+						}},
+					}, dependsOnNode.Content...)
+				}
+			}
+			return
+		}
+	}
+
+	// Add new depends_on
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "depends_on"},
+		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "keploy-agent"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "condition"},
+				{Kind: yaml.ScalarNode, Value: "service_healthy"},
+			}},
+		}},
+	)
+}
+
+// addPortsToService adds ports to an existing service's ports array
+func (idc *Impl) addPortsToService(serviceNode *yaml.Node, ports []string) {
+	if serviceNode.Content == nil || len(ports) == 0 {
+		return
+	}
+
+	// Find the ports property
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if i+1 >= len(serviceNode.Content) {
+			break
+		}
+
+		if serviceNode.Content[i].Kind == yaml.ScalarNode && serviceNode.Content[i].Value == "ports" {
+			portsNode := serviceNode.Content[i+1]
+			if portsNode.Kind == yaml.SequenceNode {
+				// Add new ports to existing ports array
+				for _, port := range ports {
+					portsNode.Content = append(portsNode.Content, &yaml.Node{
+						Kind: yaml.ScalarNode, Value: port,
+					})
+				}
+			}
+			return
+		}
+	}
 }

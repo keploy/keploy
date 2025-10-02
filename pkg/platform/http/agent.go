@@ -24,9 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
 	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
@@ -514,29 +512,6 @@ func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerC
 
 // startNativeAgent starts the keploy agent as a native process
 func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opts models.SetupOptions) error {
-	// Find an available port for the agent
-	agentPort, err := utils.GetAvailablePort()
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to find available port for agent")
-		return err
-	}
-
-	// Check and allocate available ports for proxy and DNS
-	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
-		return err
-	}
-
-	// Update the ports in the configuration
-	a.conf.Agent.Port = agentPort
-	a.conf.ProxyPort = proxyPort
-	a.conf.DNSPort = dnsPort
-
-	a.logger.Info("Using available ports",
-		zap.Uint32("agent-port", agentPort),
-		zap.Uint32("proxy-port", proxyPort),
-		zap.Uint32("dns-port", dnsPort))
 
 	// Get the errgroup from context
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -675,6 +650,32 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, fmt.Errorf("operating system not supported for this feature")
 	}
 
+	agentPort, err := utils.GetAvailablePort()
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to find available port for agent")
+		return 0, err
+	}
+
+	// Check and allocate available ports for proxy and DNS
+	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
+		return 0, err
+	}
+
+	opts.AgentPort = agentPort
+	opts.ProxyPort = proxyPort
+
+	// Update the ports in the configuration
+	a.conf.Agent.Port = agentPort
+	a.conf.ProxyPort = proxyPort
+	a.conf.DNSPort = dnsPort
+
+	a.logger.Info("Using available ports",
+		zap.Uint32("agent-port", agentPort),
+		zap.Uint32("proxy-port", proxyPort),
+		zap.Uint32("dns-port", dnsPort))
+
 	if isDockerCmd {
 		fmt.Println("HERE IS THE DOCKER COMMAND :", cmd)
 		randomBytes := make([]byte, 2)
@@ -722,22 +723,19 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		fmt.Println("COMMAND AFTER REMOVING PORTS:", cmd)
 	}
 
-	// Start the agent process
-	err := a.startAgent(ctx, clientID, isDockerCmd, opts)
-	if err != nil {
-		return 0, fmt.Errorf("failed to start agent: %w", err)
-	}
-	time.Sleep(10 * time.Second)
+	if opts.CommandType != "docker-compose" {
+		// Start the agent process
+		err = a.startAgent(ctx, clientID, isDockerCmd, opts)
+		if err != nil {
+			return 0, fmt.Errorf("failed to start agent: %w", err)
+		}
 
-	a.logger.Info("Agent is now running, proceeding with setup")
+		a.logger.Info("Agent is now running, proceeding with setup")
+	}
+	// time.Sleep(10 * time.Second)
 
 	// Continue with app setup and registration as per normal flow
-	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
-		DockerNetwork:   opts.DockerNetwork,
-		KeployContainer: opts.KeployContainer,
-		Container:       opts.Container,
-		DockerDelay:     opts.DockerDelay,
-	})
+	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, opts)
 	a.apps.Store(clientID, usrApp)
 
 	// Set up cleanup on failure
@@ -760,43 +758,42 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, err
 	}
 
-	if isDockerCmd {
-		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
-		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
-		if err != nil {
-			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-			return 0, err
-		}
-		var keployIPv4 string
-		keployIPv4 = inspect.NetworkSettings.IPAddress
+	// if isDockerCmd {
+	// 	fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
+	// 	inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+	// 		return 0, err
+	// 	}
+	// 	var keployIPv4 string
+	// 	keployIPv4 = inspect.NetworkSettings.IPAddress
 
-		// Check if the Networks map is not empty
-		if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
-			// Iterate over the map to get the first available IP
-			for _, network := range inspect.NetworkSettings.Networks {
-				keployIPv4 = network.IPAddress
-				if keployIPv4 != "" {
-					break // Exit the loop once we've found an IP
-				}
-			}
-		}
+	// 	// Check if the Networks map is not empty
+	// 	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+	// 		// Iterate over the map to get the first available IP
+	// 		for _, network := range inspect.NetworkSettings.Networks {
+	// 			keployIPv4 = network.IPAddress
+	// 			if keployIPv4 != "" {
+	// 				break // Exit the loop once we've found an IP
+	// 			}
+	// 		}
+	// 	}
 
-		pkg.AgentIP = keployIPv4
-		fmt.Println("here is the agent's IP address in client :", keployIPv4)
-		opts.AgentIP = keployIPv4
-	}
+	// 	pkg.AgentIP = keployIPv4
+	// 	fmt.Println("here is the agent's IP address in client :", keployIPv4)
+	// 	opts.AgentIP = keployIPv4
+	// }
 
 	opts.ClientID = clientID
-	spew.Dump(opts)
-	if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
-		utils.LogError(a.logger, registerErr, "failed to register client")
-		return 0, registerErr
-	}
+	// if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
+	// 	utils.LogError(a.logger, registerErr, "failed to register client")
+	// 	return 0, registerErr
+	// }
 
-	// Final verification that agent is still running
-	if !a.isAgentRunning(ctx) {
-		return 0, fmt.Errorf("keploy agent is not running after setup")
-	}
+	// // Final verification that agent is still running
+	// if !a.isAgentRunning(ctx) {
+	// 	return 0, fmt.Errorf("keploy agent is not running after setup")
+	// }
 
 	a.logger.Info("Client setup completed successfully", zap.Uint64("clientID", clientID))
 	return clientID, nil
@@ -930,32 +927,6 @@ func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.Unre
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
 
-	agentPort, err := utils.GetAvailablePort()
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to find available port for agent")
-		return err
-	}
-
-	// Check and allocate available ports for proxy and DNS
-	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
-		return err
-	}
-
-	opts.AgentPort = agentPort
-	opts.ProxyPort = proxyPort
-
-	// Update the ports in the configuration
-	a.conf.Agent.Port = agentPort
-	a.conf.ProxyPort = proxyPort
-	a.conf.DNSPort = dnsPort
-
-	a.logger.Info("Using available ports",
-		zap.Uint32("agent-port", agentPort),
-		zap.Uint32("proxy-port", proxyPort),
-		zap.Uint32("dns-port", dnsPort))
-
 	fmt.Println("Starting the keploy agent in docker container....")
 
 	// Step 1: Prepare the Docker environment and get the command components.
@@ -974,7 +945,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 			utils.LogFile.Close()
 		}
 		_ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
-		_ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
+		// _ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
 	}()
 
 	// Step 2: Append any additional arguments passed to the main CLI.

@@ -19,13 +19,14 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
+func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts models.SetupOptions) *App {
 	app := &App{
 		logger:           logger,
 		id:               id,
 		cmd:              cmd,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
+		opts:             opts,
 		keployContainer:  opts.KeployContainer,
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
@@ -40,6 +41,7 @@ type App struct {
 	id               uint64
 	cmd              string
 	kind             utils.CmdType
+	opts             models.SetupOptions
 	containerDelay   uint64
 	container        string
 	containerNetwork string
@@ -171,47 +173,70 @@ func (a *App) SetupCompose() error {
 	// or by asking the user to provide the path
 	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
 
-	path := findComposeFile(a.cmd)
-	if path == "" {
+	paths := findComposeFile(a.cmd)
+	if len(paths) == 0 {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
 
-	a.logger.Info(fmt.Sprintf("Found docker compose file path: %s", path))
+	a.logger.Info(fmt.Sprintf("Found docker compose file paths: %v", paths))
 
 	newPath := "docker-compose-tmp.yaml"
 
-	compose, err := a.docker.ReadComposeFile(path)
+	serviceInfo, err := a.docker.FindContainerInComposeFiles(paths, a.container)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to read the compose file")
+		utils.LogError(a.logger, err, "failed to find container in compose files")
 		return err
 	}
-	composeChanged := false
 
-	// hook: allow compose mutation before further processing
-	if HookImpl != nil {
-		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
-		if err != nil {
-			utils.LogError(a.logger, err, "hook failed during compose mutation")
-			return err
-		}
-		if changed {
-			composeChanged = true
-		}
+	if serviceInfo == nil {
+		utils.LogError(a.logger, nil, "container not found in any of the compose files", zap.Strings("composePaths", paths), zap.String("container", a.container))
+		return fmt.Errorf("container:%v not found in any of the compose files", a.container)
 	}
 
-	// Check if docker compose file uses relative file names for bind mounts
-	ok := a.docker.HasRelativePath(compose)
-	if ok {
-		err = a.docker.ForceAbsolutePath(compose, path)
-		if err != nil {
-			utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
-			return err
-		}
-		composeChanged = true
+	a.opts.AppPorts = serviceInfo.Ports
+	a.opts.AppNetworks = serviceInfo.Networks
+	compose := serviceInfo.Compose
+
+	err = a.docker.ModifyComposeForKeployIntegration(compose, a.opts, a.container)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
+		return err
 	}
+
+	composeChanged := true
+
+	// compose, err := a.docker.ReadComposeFile(paths[0])
+	// if err != nil {
+	// 	utils.LogError(a.logger, err, "failed to read the compose file")
+	// 	return err
+	// }
+	// composeChanged := false
+
+	// // hook: allow compose mutation before further processing
+	// if HookImpl != nil {
+	// 	changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, err, "hook failed during compose mutation")
+	// 		return err
+	// 	}
+	// 	if changed {
+	// 		composeChanged = true
+	// 	}
+	// }
+
+	// // Check if docker compose file uses relative file names for bind mounts
+	// ok := a.docker.HasRelativePath(compose)
+	// if ok {
+	// 	err = a.docker.ForceAbsolutePath(compose, paths[0])
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
+	// 		return err
+	// 	}
+	// 	composeChanged = true
+	// }
 
 	// Checking info about the network and whether its external:true
-	info := a.docker.GetNetworkInfo(compose)
+	// info := a.docker.GetNetworkInfo(compose)
 
 	// if info == nil {
 	// 	info, err = a.docker.SetKeployNetwork(compose)
@@ -222,14 +247,14 @@ func (a *App) SetupCompose() error {
 	// 	composeChanged = true
 	// }
 
-	if !info.External {
-		err = a.docker.MakeNetworkExternal(compose)
-		if err != nil {
-			utils.LogError(a.logger, nil, "failed to make the network external in the compose file", zap.String("network", info.Name))
-			return fmt.Errorf("error while updating network to external: %v", err)
-		}
-		composeChanged = true
-	}
+	// if !info.External {
+	// 	err = a.docker.MakeNetworkExternal(compose)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, nil, "failed to make the network external in the compose file", zap.String("network", info.Name))
+	// 		return fmt.Errorf("error while updating network to external: %v", err)
+	// 	}
+	// 	composeChanged = true
+	// }
 
 	// a.KeployNetwork = info.Name
 	// ok, err = a.docker.NetworkExists(a.KeployNetwork)
@@ -263,11 +288,11 @@ func (a *App) SetupCompose() error {
 	// }
 	// composeChanged = true
 
-	err = a.docker.SetAgentNamespacesInCompose(compose, a.container, a.keployContainer)
-	if err != nil {
-		utils.LogError(a.logger, nil, "failed to set agent's namespaces in the compose file")
-		return err
-	}
+	// err = a.docker.SetAgentNamespacesInCompose(compose, a.container, a.keployContainer)
+	// if err != nil {
+	// 	utils.LogError(a.logger, nil, "failed to set agent's namespaces in the compose file")
+	// 	return err
+	// }
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {
@@ -278,14 +303,16 @@ func (a *App) SetupCompose() error {
 		a.cmd = modifyDockerComposeCommand(a.cmd, newPath)
 	}
 
+	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
+
 	if a.containerNetwork == "" {
 		a.containerNetwork = a.KeployNetwork
 	}
-	err = a.injectNetwork(a.containerNetwork)
-	if err != nil {
-		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
-		return err
-	}
+	// err = a.injectNetwork(a.containerNetwork)
+	// if err != nil {
+	// 	utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
+	// 	return err
+	// }
 	return nil
 }
 

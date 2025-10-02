@@ -73,6 +73,7 @@ type SetupOptions struct {
 	AgentPort         uint32
 	AppPorts          []string
 	AppNetwork        string
+	AppNetworks       []string
 }
 
 type RunOptions struct {
