@@ -17,7 +17,7 @@ type Hooks interface {
 	// AppInfo
 	DestInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg, setupOpts models.SetupOptions) error
-	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+	// Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	SendKeployClientInfo(clientInfo structs.ClientInfo) error
 	DeleteKeployClientInfo(clientID uint64) error
 	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error

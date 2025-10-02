@@ -27,7 +27,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks/common"
-	"go.keploy.io/server/v2/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -44,56 +43,57 @@ type Hooks struct {
 	*common.BaseHooks
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	// eBPF C shared maps
-	clientRegistrationMap    *ebpf.Map
-	agentRegistartionMap     *ebpf.Map
-	dockerAppRegistrationMap *ebpf.Map
-	redirectProxyMap         *ebpf.Map
-	proxyInfoMap             *ebpf.Map
-	e2eAppRegistrationMap    *ebpf.Map
+	clientRegistrationMap *ebpf.Map
+	agentRegistartionMap  *ebpf.Map
+	// dockerAppRegistrationMap *ebpf.Map
+	redirectProxyMap      *ebpf.Map
+	proxyInfoMap          *ebpf.Map
+	e2eAppRegistrationMap *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
-	socket   link.Link
-	connect4 link.Link
-	gp4      link.Link
-	udpp4    link.Link
-	tcppv4   link.Link
-	tcpv4    link.Link
-	tcpv4Ret link.Link
-	connect6 link.Link
-	gp6      link.Link
-	tcppv6   link.Link
-	tcpv6    link.Link
-	tcpv6Ret link.Link
+	socket           link.Link
+	connect4         link.Link
+	gp4              link.Link
+	udpp4            link.Link
+	tcppv4           link.Link
+	tcpv4            link.Link
+	tcpv4Ret         link.Link
+	connect6         link.Link
+	gp6              link.Link
+	tcppv6           link.Link
+	tcpv6            link.Link
+	tcpv6Ret         link.Link
+	kprobefilter     link.Link
+	kprobefilterexit link.Link
+	// connect    link.Link
+	// connectRet link.Link
 
-	connect    link.Link
-	connectRet link.Link
-
-	accept      link.Link
-	acceptRet   link.Link
-	accept4     link.Link
-	accept4Ret  link.Link
-	read        link.Link
-	readRet     link.Link
-	write       link.Link
-	writeRet    link.Link
-	close       link.Link
-	closeRet    link.Link
-	sendto      link.Link
-	sendtoRet   link.Link
-	recvfrom    link.Link
-	recvfromRet link.Link
-	objects     bpfObjects
-	writev      link.Link
-	writevRet   link.Link
-	readv       link.Link
-	readvRet    link.Link
-	appID       uint64
-	cgBind4     link.Link
-	cgBind6     link.Link
-	bindEnter   link.Link
-	BindEvents  *ebpf.Map
+	// accept      link.Link
+	// acceptRet   link.Link
+	// accept4     link.Link
+	// accept4Ret  link.Link
+	// read        link.Link
+	// readRet     link.Link
+	// write       link.Link
+	// writeRet    link.Link
+	// close       link.Link
+	// closeRet    link.Link
+	// sendto      link.Link
+	// sendtoRet   link.Link
+	// recvfrom    link.Link
+	// recvfromRet link.Link
+	objects bpfObjects
+	// writev      link.Link
+	// writevRet   link.Link
+	// readv       link.Link
+	// readvRet    link.Link
+	appID      uint64
+	cgBind4    link.Link
+	cgBind6    link.Link
+	bindEnter  link.Link
+	BindEvents *ebpf.Map
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg, setupOpts models.SetupOptions) error {
@@ -170,7 +170,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	h.objectsMutex.Lock()
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
-	h.e2eAppRegistrationMap = objs.E2eInfoMap
+	// h.e2eAppRegistrationMap = objs.E2eInfoMap
 	// h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
@@ -183,6 +183,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		return err
 	}
 	h.socket = socket
+
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
 		h.proxyInfoMap = objs.KeployProxyInfo
@@ -197,12 +198,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		h.udpp4 = udppC4
 
 		// FOR IPV4
-		tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
-			return err
-		}
-		h.tcppv4 = tcppC4
+		// tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
+		// if err != nil {
+		// 	utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
+		// 	return err
+		// }
+		// h.tcppv4 = tcppC4
 
 		tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
 		if err != nil {
@@ -306,12 +307,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 
 		// FOR IPV6
 
-		tcpPreC6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
-			return err
-		}
-		h.tcppv6 = tcpPreC6
+		// tcpPreC6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
+		// if err != nil {
+		// 	utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
+		// 	return err
+		// }
+		// h.tcppv6 = tcpPreC6
 
 		tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
 		if err != nil {
@@ -436,13 +437,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	}
 
 	return nil
-}
-
-func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	// TODO use the session to get the app id
-	// and then use the app id to get the test cases chan
-	// and pass that to eBPF consumers/listeners
-	return conn.ListenSocket(ctx, h.Logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
 func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
@@ -749,7 +743,6 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 
 	return result, nil
 }
-
 
 func GetContainerIP() (string, error) {
 	// Get all network interfaces

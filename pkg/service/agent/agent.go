@@ -77,9 +77,9 @@ func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh cha
 
 }
 
-func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	return a.Hooks.Record(ctx, id, opts)
-}
+// func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) error {
+// 	return nil
+// }
 
 func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
 	tc := a.IncomingProxy.Start(ctx, opts)
