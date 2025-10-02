@@ -1099,17 +1099,20 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate volumes using the extracted function
 	volumes := idc.generateKeployVolumes(workingDir, homeDir)
 
+	clientPid := int(os.Getpid())
+	fmt.Println("SENDING THIS CLIENT ID : ", clientPid)
 	// Build command arguments
 	command := []string{
 		"--port", fmt.Sprintf("%d", opts.AgentPort),
 		"--proxy-port", fmt.Sprintf("%d", opts.ProxyPort),
 		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
-		"--client-pid", strconv.Itoa(int(os.Getpid())),
+		"--client-pid", strconv.Itoa(clientPid),
 		"--client-nspid", strconv.Itoa(int(opts.ClientNsPid)),
 		"--docker-network", opts.DockerNetwork,
 		"--agent-ip", opts.AgentIP,
 		"--mode", string(opts.Mode),
 		"--app-inode", strconv.FormatUint(opts.AppInode, 10),
+		"--is-docker",
 	}
 
 	if opts.EnableTesting {
@@ -1237,7 +1240,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// retries
 			{Kind: yaml.ScalarNode, Value: "retries"},
-			{Kind: yaml.ScalarNode, Value: "5"},
+			{Kind: yaml.ScalarNode, Value: "50"},
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},

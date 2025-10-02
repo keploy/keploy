@@ -785,6 +785,65 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	// var userIP string
 
+	if r.instrument && cmdType == utils.DockerCompose {
+		if !serveTest {
+			runTestSetErrGrp.Go(func() error {
+				defer utils.Recover(r.logger)
+				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+					AppCommand: conf.AppCommand,
+				})
+				if appErr.AppErrorType == models.ErrCtxCanceled {
+					return nil
+				}
+				appErrChan <- appErr
+				return nil
+			})
+		}
+
+		// Checking for errors in the mocking and application
+		runTestSetErrGrp.Go(func() error {
+			defer utils.Recover(r.logger)
+			select {
+			case err := <-appErrChan:
+				switch err.AppErrorType {
+				case models.ErrCommandError:
+					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
+				case models.ErrUnExpected:
+					testSetStatusByErrChan = models.TestSetStatusAppHalted
+				case models.ErrAppStopped:
+					testSetStatusByErrChan = models.TestSetStatusAppHalted
+				case models.ErrCtxCanceled:
+					return nil
+				case models.ErrInternal:
+					testSetStatusByErrChan = models.TestSetStatusInternalErr
+				default:
+					testSetStatusByErrChan = models.TestSetStatusAppHalted
+				}
+				utils.LogError(r.logger, err, "application failed to run")
+			case <-runTestSetCtx.Done():
+				testSetStatusByErrChan = models.TestSetStatusUserAbort
+			}
+			exitLoopChan <- true
+			runTestSetCtxCancel()
+			return nil
+		})
+
+		// Delay for user application to run
+		select {
+		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+		case <-runTestSetCtx.Done():
+			return models.TestSetStatusUserAbort, context.Canceled
+		}
+
+		containerIP, err := r.instrumentation.GetContainerIP(ctx, r.config.ClientID)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get container IP")
+			return models.TestSetStatusFailed, err
+		}
+		r.logger.Info("Obtained container IP", zap.String("containerIP", containerIP))
+		pkg.AgentIP = containerIP
+	}
+
 	// Get all mocks for mapping-based filtering
 	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
@@ -857,7 +916,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	if r.instrument {
+	if r.instrument && cmdType != utils.DockerCompose {
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)

@@ -17,7 +17,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/utils"
 
 	"github.com/cilium/ebpf"
@@ -511,7 +510,7 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		clientInfo.IsDockerApp = 1
 		clientInfo.KeployClientNsPid = ppid
 	}
-	clientInfo.ClientPID = pkg.ClientPid
+	// clientInfo.ClientPID = pkg.ClientPid
 	ports := agent.GetPortToSendToKernel(ctx, rules)
 	for i := 0; i < 10; i++ {
 		if len(ports) <= i {
@@ -520,7 +519,7 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		}
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
-	fmt.Println("here is the client pid whic we have sent :", pkg.ClientPid)
+	fmt.Println("here is the client pid whic we have sent :", opts.ClientPID)
 	spew.Dump(clientInfo)
 	clientInfo.IsKeployClientRegistered = uint32(0)
 	return h.SendKeployClientInfo(clientInfo)

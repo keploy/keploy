@@ -701,6 +701,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		// Append the random string.
 		opts.KeployContainer = "keploy-v2-" + uuidSuffix
+		a.conf.KeployContainer = opts.KeployContainer
 
 		fmt.Println("ORIGINAL DOCKER COMMAND:", cmd)
 
@@ -769,7 +770,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		a.logger.Info("Agent is now running, proceeding with setup")
 
 	}
-	time.Sleep(10 * time.Second)
+
+	if utils.CmdType(opts.CommandType) == utils.DockerCompose {
+		time.Sleep(10 * time.Second)
+	}
+
 	// a.waitForAgent(ctx, 3000)
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, opts)
@@ -795,7 +800,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, err
 	}
 
-	if isDockerCmd {
+	if isDockerCmd && opts.CommandType != "docker-compose" {
 		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
 		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
 		if err != nil {
@@ -963,7 +968,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
 		return err
 	}
-	
+
 	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
 	// Step 4: Define the cancellation behavior for graceful shutdown.
 	cmd.Cancel = func() error {
@@ -1022,6 +1027,8 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 
 func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 	fmt.Println("chekcing on port :", a.conf.Agent.Port)
+	clientPID := int32(os.Getpid())
+	fmt.Println("SECOND CHECK ON CLIENT PID :", clientPID)
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send request to the agent server")

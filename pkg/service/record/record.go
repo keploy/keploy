@@ -175,6 +175,23 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.config.ClientID = clientID
 	fmt.Println("Client ID from instrumentation setup is :", clientID)
+
+	if r.config.CommandType == "docker-compose" {
+
+		runAppErrGrp.Go(func() error {
+			fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
+			runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
+			if runAppError.AppErrorType == models.ErrCtxCanceled {
+				return nil
+			}
+			appErrChan <- runAppError
+			return nil
+		})
+
+		// Have to check for agent here
+		time.Sleep(20 * time.Second)
+	}
+
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx, clientID)
 	if err != nil {
@@ -242,17 +259,17 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
 
-	// if !r.config.E2E {
-	runAppErrGrp.Go(func() error {
-		fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
-		runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
-		if runAppError.AppErrorType == models.ErrCtxCanceled {
+	if r.config.CommandType != "docker-compose" {
+		runAppErrGrp.Go(func() error {
+			fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
+			runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
+			if runAppError.AppErrorType == models.ErrCtxCanceled {
+				return nil
+			}
+			appErrChan <- runAppError
 			return nil
-		}
-		appErrChan <- runAppError
-		return nil
-	})
-	// }
+		})
+	}
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
