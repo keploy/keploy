@@ -53,42 +53,19 @@ type Hooks struct {
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
-	socket           link.Link
-	connect4         link.Link
-	gp4              link.Link
-	udpp4            link.Link
-	tcppv4           link.Link
-	tcpv4            link.Link
-	tcpv4Ret         link.Link
-	connect6         link.Link
-	gp6              link.Link
-	tcppv6           link.Link
-	tcpv6            link.Link
-	tcpv6Ret         link.Link
-	kprobefilter     link.Link
-	kprobefilterexit link.Link
-	// connect    link.Link
-	// connectRet link.Link
-
-	// accept      link.Link
-	// acceptRet   link.Link
-	// accept4     link.Link
-	// accept4Ret  link.Link
-	// read        link.Link
-	// readRet     link.Link
-	// write       link.Link
-	// writeRet    link.Link
-	// close       link.Link
-	// closeRet    link.Link
-	// sendto      link.Link
-	// sendtoRet   link.Link
-	// recvfrom    link.Link
-	// recvfromRet link.Link
-	objects bpfObjects
-	// writev      link.Link
-	// writevRet   link.Link
-	// readv       link.Link
-	// readvRet    link.Link
+	socket     link.Link
+	connect4   link.Link
+	gp4        link.Link
+	udpp4      link.Link
+	tcppv4     link.Link
+	tcpv4      link.Link
+	tcpv4Ret   link.Link
+	connect6   link.Link
+	gp6        link.Link
+	tcppv6     link.Link
+	tcpv6      link.Link
+	tcpv6Ret   link.Link
+	objects    bpfObjects
 	appID      uint64
 	cgBind4    link.Link
 	cgBind6    link.Link
@@ -381,15 +358,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 
 	h.Logger.Debug("proxy ips", zap.String("ipv4", h.ProxyIP4), zap.Any("ipv6", h.ProxyIP6))
 
-	// proxyIP, err := IPv4ToUint32(h.ProxyIP4)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
-	// }
-
-	// // 3. Get the container's main process ID from the inspection result
-	// containerPID := inspect.State.Pid
-	// h.Logger.Info("Successfully inspected agent container", zap.Int("pid", containerPID))
-
 	var agentInfo = structs.AgentInfo{}
 	// agentInfo.KeployAgentNsPid = uint32(opts.KeployContainerPID)
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
@@ -407,27 +375,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 
 	agentInfo.DNSPort = int32(h.DNSPort)
 
-	// if opts.IsDocker {
-	// 	clientInfo.IsDockerApp = uint32(1)
-	// } else {
-	// 	clientInfo.IsDockerApp = uint32(0)
-	// }
-
-	// ports := agent.GetPortToSendToKernel(ctx, opts.Rules)
-	// for i := 0; i < 10; i++ {
-	// 	if len(ports) <= i {
-	// 		clientInfo.PassThroughPorts[i] = -1
-	// 		continue
-	// 	}
-	// 	clientInfo.PassThroughPorts[i] = int32(ports[i])
-	// }
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
-
-	// err = h.SendClientInfo(clientInfo)
-	// if err != nil {
-	// 	h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-	// 	return err
-	// }
+	if err != nil {
+		h.Logger.Debug("Failed to register Client")
+	}
 	fmt.Println("Sending agent information :")
 	spew.Dump(agentInfo)
 	err = h.SendAgentInfo(agentInfo)
@@ -457,7 +408,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		utils.LogError(h.Logger, err, "failed to close the socket")
 	}
 
-	// Reset the app ID with proper synchronization
 	h.M.Lock()
 	h.appID = 0
 	h.M.Unlock()
@@ -503,62 +453,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 			utils.LogError(h.Logger, err, "failed to close the tcpv6Ret")
 		}
 	}
-	// if err := h.accept.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the accept")
-	// }
-	// if err := h.acceptRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the acceptRet")
-	// }
-	// if err := h.accept4.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the accept4")
-	// }
-	// if err := h.accept4Ret.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the accept4Ret")
-	// }
-	// if err := h.read.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the read")
-	// }
-	// if err := h.readRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the readRet")
-	// }
-	// if err := h.write.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the write")
-	// }
-	// if err := h.writeRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the writeRet")
-	// }
-	// if err := h.writev.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the writev")
-	// }
-	// if err := h.writevRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the writevRet")
-	// }
-
-	// if err := h.readv.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the readv")
-	// }
-	// if err := h.readvRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the readvRet")
-	// }
-
-	// if err := h.close.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the close")
-	// }
-	// if err := h.closeRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the closeRet")
-	// }
-	// if err := h.sendto.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the sendto")
-	// }
-	// if err := h.sendtoRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the sendtoRet")
-	// }
-	// if err := h.recvfrom.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the recvfrom")
-	// }
-	// if err := h.recvfromRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the recvfromRet")
-	// }
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
@@ -566,14 +460,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		utils.LogError(h.Logger, err, "failed to close the objects")
 	}
 	h.objectsMutex.Unlock()
-
-	// if err := h.connect.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the connect")
-	// }
-
-	// if err := h.connectRet.Close(); err != nil {
-	// 	utils.LogError(h.Logger, err, "failed to close the connectRet")
-	// }
 
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		if h.cgBind4 != nil {

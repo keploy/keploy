@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	ptls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/pkg/models"
@@ -768,6 +769,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		a.logger.Info("Agent is now running, proceeding with setup")
 
 	}
+	time.Sleep(10 * time.Second)
+	// a.waitForAgent(ctx, 3000)
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, opts)
 	a.apps.Store(clientID, usrApp)
@@ -792,67 +795,31 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, err
 	}
 
-	// if isDockerCmd {
-	// 	fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
-	// 	inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-	// 		return 0, err
-	// 	}
-	// 	var keployIPv4 string
-	// 	keployIPv4 = inspect.NetworkSettings.IPAddress
-	// if isDockerCmd {
-	// 	fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
-	// 	inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-	// 		return 0, err
-	// 	}
-	// 	var keployIPv4 string
-	// 	keployIPv4 = inspect.NetworkSettings.IPAddress
+	if isDockerCmd {
+		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
+		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+		if err != nil {
+			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+			return 0, err
+		}
+		var keployIPv4 string
+		keployIPv4 = inspect.NetworkSettings.IPAddress
 
-	// 	// Check if the Networks map is not empty
-	// 	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
-	// 		// Iterate over the map to get the first available IP
-	// 		for _, network := range inspect.NetworkSettings.Networks {
-	// 			keployIPv4 = network.IPAddress
-	// 			if keployIPv4 != "" {
-	// 				break // Exit the loop once we've found an IP
-	// 			}
-	// 		}
-	// 	}
-	// 	// Check if the Networks map is not empty
-	// 	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
-	// 		// Iterate over the map to get the first available IP
-	// 		for _, network := range inspect.NetworkSettings.Networks {
-	// 			keployIPv4 = network.IPAddress
-	// 			if keployIPv4 != "" {
-	// 				break // Exit the loop once we've found an IP
-	// 			}
-	// 		}
-	// 	}
+		// Check if the Networks map is not empty
+		if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+			// Iterate over the map to get the first available IP
+			for _, network := range inspect.NetworkSettings.Networks {
+				keployIPv4 = network.IPAddress
+				if keployIPv4 != "" {
+					break // Exit the loop once we've found an IP
+				}
+			}
+		}
 
-	// 	pkg.AgentIP = keployIPv4
-	// 	fmt.Println("here is the agent's IP address in client :", keployIPv4)
-	// 	opts.AgentIP = keployIPv4
-	// }
-	// 	pkg.AgentIP = keployIPv4
-	// 	fmt.Println("here is the agent's IP address in client :", keployIPv4)
-	// 	opts.AgentIP = keployIPv4
-	// }
-
-	// opts.ClientID = clientID
-	// spew.Dump(opts)
-	// if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
-	// 	utils.LogError(a.logger, registerErr, "failed to register client")
-	// 	return 0, registerErr
-	// }
-
-	// // Final verification that agent is still running
-	// if !a.isAgentRunning(ctx) {
-	// 	return 0, fmt.Errorf("keploy agent is not running after setup")
-	// }
-
+		pkg.AgentIP = keployIPv4
+		fmt.Println("here is the agent's IP address in client :", keployIPv4)
+		opts.AgentIP = keployIPv4
+	}
 	a.logger.Info("Client setup completed successfully", zap.Uint64("clientID", clientID))
 	return clientID, nil
 }
@@ -996,48 +963,8 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
 		return err
 	}
-	defer func() {
-		// This is where you would close log files and delete temp files.
-		// This code will run when the application exits gracefully.
-		// if utils.LogFile != nil {
-		// 	utils.LogFile.Close()
-		// }
-		// _ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
-		// _ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
-	}()
-
-	// Step 2: Append any additional arguments passed to the main CLI.
-	// This preserves the pass-through functionality from your original RunInDocker.
-	// programArgs = append(programArgs, os.Args[1:]...)
-
+	
 	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
-
-	// // Step 3: Create the command, handling Windows vs. Unix-like systems.
-	// // We execute the program directly to avoid the problematic 'sh -c' wrapper.
-	// if runtime.GOOS == "windows" {
-	// 	var args []string
-	// 	args = append(args, "/C")
-	// 	args = append(args, strings.Split(keployAlias, " ")...)
-	// 	args = append(args, os.Args[1:]...)
-	// 	// Use cmd.exe /C for Windows
-	// 	cmd = exec.CommandContext(
-	// 		ctx,
-	// 		"cmd.exe",
-	// 		args...,
-	// 	)
-	// } else {
-	// 	// Use sh -c for Unix-like systems
-	// 	cmd = exec.CommandContext(
-	// 		ctx,
-	// 		"sh",
-	// 		"-c",
-	// 		keployAlias,
-	// 	)
-	// 	cmd.SysProcAttr = &syscall.SysProcAttr{
-	// 		Setsid: true,
-	// 	}
-	// }
-
 	// Step 4: Define the cancellation behavior for graceful shutdown.
 	cmd.Cancel = func() error {
 		logger.Info("Context cancelled. Explicitly stopping the 'keploy-v2' Docker container.")
