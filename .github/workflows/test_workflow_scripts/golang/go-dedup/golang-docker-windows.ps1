@@ -120,12 +120,12 @@ function Test-RecordingComplete {
 }
 
 function Kill-Tree {
-  param([int]$Pid)
+  param([int]$ProcessId)
   try {
-    Write-Host "Stopping Keploy process tree (root PID $Pid)…"
-    cmd /c "taskkill /PID $Pid /T /F" | Out-Null
+    Write-Host "Stopping Keploy process tree (root PID $ProcessId)…"
+    cmd /c "taskkill /PID $ProcessId /T /F" | Out-Null
   } catch {
-    Write-Warning "taskkill failed for $Pid : $_"
+    Write-Warning "taskkill failed for $ProcessId : $_"
   }
 }
 
@@ -134,7 +134,6 @@ function Kill-Tree {
 # =========================
 $containerName = "dedup-go"
 $logPath = "$containerName.record.txt"
-$errLogPath = "$containerName.record.err.txt"
 $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
 $base = $env:APP_BASE_URL
@@ -142,23 +141,28 @@ $base = $env:APP_BASE_URL
 # Configure image for recording (optional override via DOCKER_IMAGE_RECORD)
 $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
 
+# 1. Correctly quote the docker command for Keploy
+$dockerCmd = '"docker compose up"'
 $recArgs = @(
   'record',
-  '-c', 'docker compose up',
+  '-c', $dockerCmd,
   '--container-name', $containerName,
   '--generate-github-actions=false'
 )
 
-Write-Host "Starting keploy record (expecting test-set-$expectedTestSetIndex)…"
+Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
-# Start Keploy (keep handle to PID)
+# 2. Start Keploy in the background, redirecting output to a log file
 $proc = Start-Process -FilePath $env:RECORD_BIN `
                       -ArgumentList $recArgs `
                       -PassThru `
                       -NoNewWindow `
-                      -RedirectStandardOutput $logPath `
-                      -RedirectStandardError  $errLogPath
+                      -RedirectStandardOutput $logPath
+
+# 3. Start a background job to stream the log file to the console in real-time
+$logJob = Start-Job { Get-Content -Path $using:logPath -Wait -Tail 10 }
+Write-Host "Tailing Keploy logs from $logPath ..."
 
 # Wait for app readiness
 Write-Host "Waiting for app to respond on $base/timestamp …"
@@ -191,7 +195,8 @@ do {
 } while ((Get-Date) -lt $pollUntil)
 
 # Stop Keploy (and docker compose) deterministically
-Kill-Tree -Pid $proc.Id
+Kill-Tree -ProcessId $proc.Id
+Stop-Job $logJob
 # In case the root process already died, just continue
 try { Wait-Process -Id $proc.Id -Timeout 15 -ErrorAction SilentlyContinue } catch {}
 

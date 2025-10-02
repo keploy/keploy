@@ -86,50 +86,91 @@ jobs:
           clean: true
 
       # --- CLI binaries (same as before) ---
-      # - name: Download Record Binary (${{ matrix.config.record_src }})
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: ${{ matrix.config.record_src }}
-      #     path: record-bin
+      - name: Download Record Binary (${{ matrix.config.record_src }})
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.config.record_src }}
+          path: record-bin
 
-      # - name: Install Record Binary
-      #   id: setup_record
-      #   shell: pwsh
-      #   run: |
-      #     New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
-      #     Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
-      #     echo "$env:GITHUB_WORKSPACE/bin" >> $env:GITHUB_PATH
-      #     echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
-
-      # - name: Download Replay Binary (${{ matrix.config.replay_src }})
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: ${{ matrix.config.replay_src }}
-      #     path: replay-bin
-
-      # - name: Install Replay Binary
-      #   id: setup_replay
-      #   shell: pwsh
-      #   run: |
-      #     New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
-      #     Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
-      #     echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
-
-      - name: Use local Keploy image for both record & replay
-        id: use_local_img
+      - name: Install Record Binary
+        id: setup_record
         shell: pwsh
         run: |
-          # find any ghcr.io/keploy/keploy:* image you preloaded (docker load -i keploy_docker.tar)
-          $img = (docker images --format "{{.Repository}}:{{.Tag}}" |
-                  Select-String "ghcr.io/keploy/keploy:" |
-                  Select-Object -First 1).ToString()
-          if (-not $img) {
-            throw "Local Keploy image not found. Run 'docker load -i keploy_docker.tar' on this VM first."
+          New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
+          Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
+          echo "$env:GITHUB_WORKSPACE/bin" >> $env:GITHUB_PATH
+          echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Download Replay Binary (${{ matrix.config.replay_src }})
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.config.replay_src }}
+          path: replay-bin
+
+      - name: Install Replay Binary
+        id: setup_replay
+        shell: pwsh
+        run: |
+          New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
+          Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
+          echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
+
+      # --- Docker images ---
+      - name: Download Record Docker image (${{ matrix.config.record_src }})
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-${{ matrix.config.record_src }}
+          path: record-image
+
+      - name: Load & Tag Record Docker image
+        id: record_img
+        shell: pwsh
+        run: |
+          $tar = Get-ChildItem .\record-image\*.tar | Select-Object -First 1
+          if (-not $tar) { throw "Record image tar not found." }
+          docker load -i $tar.FullName | Write-Output
+
+          $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
+                    | Select-String "pr-" -SimpleMatch | Select-Object -First 1
+          if ($cand) {
+            docker tag $cand keploy:record
+          } else {
+            $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
+                      | Select-Object -First 1)
+            if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (record)." }
+            docker tag $first keploy:record
           }
-          docker tag $img keploy:record
-          docker tag $img keploy:replay
-          docker tag $img ghcr.io/keploy/keploy:v2-dev
+          docker tag keploy:record ghcr.io/keploy/keploy:v2-dev
+          docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:record ghcr.io/keploy/keploy:v2-dev"
           echo "image=keploy:record" >> $env:GITHUB_OUTPUT
+
+      - name: Download Replay Docker image (${{ matrix.config.replay_src }})
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-${{ matrix.config.replay_src }}
+          path: replay-image
+
+      - name: Load & Tag Replay Docker image
+        id: replay_img
+        shell: pwsh
+        run: |
+          $tar = Get-ChildItem .\replay-image\*.tar | Select-Object -First 1
+          if (-not $tar) { throw "Replay image tar not found." }
+          docker load -i $tar.FullName | Write-Output
+
+          $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
+                    | Select-String "pr-" -SimpleMatch | Select-Object -First 1
+          if ($cand) {
+            docker tag $cand keploy:replay
+          } else {
+            $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
+                      | Select-Object -First 1)
+            if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (replay)." }
+            docker tag $first keploy:replay
+          }
+          docker tag keploy:replay ghcr.io/keploy/keploy:v2-dev
+          docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:replay ghcr.io/keploy/keploy:v2-dev"
+          echo "image=keploy:replay" >> $env:GITHUB_OUTPUT
 
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
