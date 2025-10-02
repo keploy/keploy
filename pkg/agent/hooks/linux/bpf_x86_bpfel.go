@@ -82,6 +82,7 @@ type bpfMapSpecs struct {
 	E2eInfoMap                  *ebpf.MapSpec `ebpf:"e2e_info_map"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
+	KeployAgentTaskMap          *ebpf.MapSpec `ebpf:"keploy_agent_task_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
 	KeployProxyInfo             *ebpf.MapSpec `ebpf:"keploy_proxy_info"`
 	OutgoingConnCheckMap        *ebpf.MapSpec `ebpf:"outgoing_conn_check_map"`
@@ -126,6 +127,7 @@ type bpfMaps struct {
 	E2eInfoMap                  *ebpf.Map `ebpf:"e2e_info_map"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
+	KeployAgentTaskMap          *ebpf.Map `ebpf:"keploy_agent_task_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
 	KeployProxyInfo             *ebpf.Map `ebpf:"keploy_proxy_info"`
 	OutgoingConnCheckMap        *ebpf.Map `ebpf:"outgoing_conn_check_map"`
@@ -146,6 +148,7 @@ func (m *bpfMaps) Close() error {
 		m.E2eInfoMap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
+		m.KeployAgentTaskMap,
 		m.KeployClientRegistrationMap,
 		m.KeployProxyInfo,
 		m.OutgoingConnCheckMap,
