@@ -6,47 +6,48 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
 )
 
 type Config struct {
-	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
-	ClientID              uint64       `json:"clientID" yaml:"clientID" mapstructure:"clientID"`
-	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
-	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
-	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
-	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
-	E2E                   bool         `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
-	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
-	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DisableTele           bool         `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
-	InDocker              bool         `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
-	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
-	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
-	Report                Report       `json:"report" yaml:"report" mapstructure:"report"`
-	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
-	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
-	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
-	DisableMapping        bool         `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
-	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
-	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	EnableTesting         bool         `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
-	GenerateGithubActions bool         `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
-	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
-	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
-	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
-	Agent                 Agent        `json:"agent" yaml:"agent" mapstructure:"agent"`
-	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-	InstallationID        string       `json:"-" yaml:"-" mapstructure:"-"`
-	ServerPort            uint32       `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
-	Version               string       `json:"-" yaml:"-" mapstructure:"-"`
-	APIServerURL          string       `json:"-" yaml:"-" mapstructure:"-"`
-	GitHubClientID        string       `json:"-" yaml:"-" mapstructure:"-"`
+	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
+	ClientID              uint64              `json:"clientID" yaml:"clientID" mapstructure:"clientID"`
+	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
+	Command               string              `json:"command" yaml:"command" mapstructure:"command"`
+	Templatize            Templatize          `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
+	Port                  uint32              `json:"port" yaml:"port" mapstructure:"port"`
+	E2E                   bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
+	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
+	ContainerName         string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	NetworkName           string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay            uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test                  Test                `json:"test" yaml:"test" mapstructure:"test"`
+	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
+	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
+	Gen                   UtGen               `json:"gen" yaml:"-" mapstructure:"gen"`
+	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
+	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
+	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
+	BypassRules           []BypassRule        `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
+	GenerateGithubActions bool                `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
+	KeployContainer       string              `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork         string              `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	CommandType           string              `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	Contract              Contract            `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Agent                 Agent               `json:"agent" yaml:"agent" mapstructure:"agent"`
+	InCi                  bool                `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID        string              `json:"-" yaml:"-" mapstructure:"-"`
+	ServerPort            uint32              `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
+	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type Agent struct {

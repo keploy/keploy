@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1102,6 +1103,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	command := []string{
 		"--port", fmt.Sprintf("%d", opts.AgentPort),
 		"--proxy-port", fmt.Sprintf("%d", opts.ProxyPort),
+		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
+		"--client-pid", strconv.Itoa(int(os.Getpid())),
+		"--client-nspid", strconv.Itoa(int(opts.ClientNsPid)),
+		"--docker-network", opts.DockerNetwork,
+		"--agent-ip", opts.AgentIP,
+		"--mode", string(opts.Mode),
+		"--app-inode", strconv.FormatUint(opts.AppInode, 10),
 	}
 
 	if opts.EnableTesting {

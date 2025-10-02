@@ -54,6 +54,7 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
+	ClientPID         uint32
 	Container         string
 	KeployContainer   string
 	DockerNetwork     string
@@ -65,6 +66,7 @@ type SetupOptions struct {
 	CommandType       string
 	EnableTesting     bool
 	ProxyPort         uint32
+	DnsPort           uint32
 	Mode              Mode
 	ClientNsPid       uint32
 	ClientID          uint64

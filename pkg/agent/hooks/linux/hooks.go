@@ -5,8 +5,10 @@ package linux
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/utils"
 
 	"github.com/cilium/ebpf"
@@ -93,7 +96,7 @@ type Hooks struct {
 	BindEvents  *ebpf.Map
 }
 
-func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
+func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg, setupOpts models.SetupOptions) error {
 
 	h.Sess.Set(id, &agent.Session{
 		ID: id,
@@ -109,7 +112,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
 	h.UnloadDone = make(chan struct{})
 	h.UnloadDoneMutex.Unlock()
 
-	err := h.load(ctx, opts)
+	err := h.load(ctx, opts, setupOpts)
 	if err != nil {
 		return err
 	}
@@ -144,7 +147,7 @@ func (h *Hooks) GetUnloadDone() <-chan struct{} {
 	return h.UnloadDone
 }
 
-func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
+func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.SetupOptions) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.Logger, err, "failed to lock memory for eBPF resources")
@@ -351,18 +354,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 	h.Logger.Info("keploy initialized and probes added to the kernel.")
 
-	var clientInfo = structs.ClientInfo{}
+	// var clientInfo = structs.ClientInfo{}
 
-	switch opts.Mode {
-	case models.MODE_RECORD:
-		clientInfo.Mode = uint32(1)
-	case models.MODE_TEST:
-		clientInfo.Mode = uint32(2)
-	default:
-		clientInfo.Mode = uint32(0)
-	}
-
-	clientInfo.KeployClientNsPid = uint32(os.Getpid())
 	if opts.E2E {
 		pid, err := utils.GetPIDFromPort(ctx, h.Logger, int(opts.Port))
 		if err != nil {
@@ -374,8 +367,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 			h.Logger.Error("failed to send e2e info to the ebpf program", zap.Error(err))
 		}
 	}
-
-	clientInfo.IsKeployClientRegistered = uint32(0)
 
 	if opts.IsDocker {
 		h.ProxyIP4 = opts.KeployIPV4
@@ -415,26 +406,27 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg) error {
 
 	agentInfo.DNSPort = int32(h.DNSPort)
 
-	if opts.IsDocker {
-		clientInfo.IsDockerApp = uint32(1)
-	} else {
-		clientInfo.IsDockerApp = uint32(0)
-	}
+	// if opts.IsDocker {
+	// 	clientInfo.IsDockerApp = uint32(1)
+	// } else {
+	// 	clientInfo.IsDockerApp = uint32(0)
+	// }
 
-	ports := agent.GetPortToSendToKernel(ctx, opts.Rules)
-	for i := 0; i < 10; i++ {
-		if len(ports) <= i {
-			clientInfo.PassThroughPorts[i] = -1
-			continue
-		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
-	}
+	// ports := agent.GetPortToSendToKernel(ctx, opts.Rules)
+	// for i := 0; i < 10; i++ {
+	// 	if len(ports) <= i {
+	// 		clientInfo.PassThroughPorts[i] = -1
+	// 		continue
+	// 	}
+	// 	clientInfo.PassThroughPorts[i] = int32(ports[i])
+	// }
+	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 
-	err = h.SendClientInfo(clientInfo)
-	if err != nil {
-		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-		return err
-	}
+	// err = h.SendClientInfo(clientInfo)
+	// if err != nil {
+	// 	h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+	// 	return err
+	// }
 	fmt.Println("Sending agent information :")
 	spew.Dump(agentInfo)
 	err = h.SendAgentInfo(agentInfo)
@@ -452,47 +444,6 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.Logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
-
-// For keploy test bench
-// The below function is used to send the keploy record binary server port to the ebpf so that the flow first reaches to the keploy record proxy and then keploy test proxy
-
-// SendKeployPorts is used to send keploy recordServer(key-0) or testServer(key-1) Port to the ebpf program
-// func (h *Hooks) SendKeployPorts(key models.ModeKey, port uint32) error {
-
-// 	err := h.tbenchFilterPort.Update(key, &port, ebpf.UpdateAny)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
-
-// func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
-// 	err := h.DeleteClientInfo(id)
-// 	if err != nil {
-// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-// 		return err
-// 	}
-// 	return nil
-// }
-
-// func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
-// 	err := h.SendProxyInfo(clientID, proxyInfo)
-// 	if err != nil {
-// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-// 		return err
-// 	}
-// 	return nil
-// }
-
-// func (h *Hooks) SendKtInfo(_ context.Context, tb structs.TestBenchInfo) error {
-
-// 	err := h.SendKeployPids(models.TestKey, tb)
-// 	if err != nil {
-// 		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-// 		return err
-// 	}
-// 	return nil
-// }
 
 func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
 
@@ -648,4 +599,195 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		}
 	}
 	h.Logger.Info("eBPF resources released successfully...")
+}
+
+func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, rules []config.BypassRule) error {
+	h.Logger.Info("Registering the client with the keploy server")
+	// Register the client and start processing
+
+	// send the network info to the kernel
+	err := h.SendNetworkInfo(ctx, opts)
+	if err != nil {
+		h.Logger.Error("failed to send network info to the kernel", zap.Error(err))
+		return err
+	}
+	ppid := uint32(os.Getppid())
+	clientInfo := structs.ClientInfo{
+		KeployClientNsPid: opts.ClientNsPid,
+		IsDockerApp:       0,
+		AppInode:          opts.AppInode,
+	}
+
+	switch opts.Mode {
+	case models.MODE_RECORD:
+		clientInfo.Mode = uint32(1)
+	case models.MODE_TEST:
+		clientInfo.Mode = uint32(2)
+	default:
+		clientInfo.Mode = uint32(0)
+	}
+
+	if opts.IsDocker {
+		clientInfo.IsDockerApp = 1
+		clientInfo.KeployClientNsPid = ppid
+	}
+	clientInfo.ClientPID = pkg.ClientPid
+	ports := agent.GetPortToSendToKernel(ctx, rules)
+	for i := 0; i < 10; i++ {
+		if len(ports) <= i {
+			clientInfo.PassThroughPorts[i] = -1
+			continue
+		}
+		clientInfo.PassThroughPorts[i] = int32(ports[i])
+	}
+	fmt.Println("here is the client pid whic we have sent :", pkg.ClientPid)
+	spew.Dump(clientInfo)
+	clientInfo.IsKeployClientRegistered = uint32(0)
+	return h.SendKeployClientInfo(clientInfo)
+}
+
+func (h *Hooks) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) error {
+	if !opts.IsDocker {
+		proxyIP, err := IPv4ToUint32("127.0.0.1")
+		if err != nil {
+			return err
+		}
+		proxyInfo := structs.ProxyInfo{
+			IP4:  proxyIP,
+			IP6:  [4]uint32{0, 0, 0, 0},
+			Port: opts.ProxyPort,
+		}
+		fmt.Println("MAJOR BIG DUMP")
+		spew.Dump(opts)
+		spew.Dump(proxyInfo)
+		err = h.SendClientProxyInfo(uint64(0), proxyInfo)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	opts.AgentIP, _ = GetContainerIP()
+	fmt.Println("here is the agent ip address :", opts.AgentIP)
+
+	ipv4, err := IPv4ToUint32(opts.AgentIP)
+	if err != nil {
+		return err
+	}
+
+	var ipv6 [4]uint32
+	if opts.IsDocker {
+		ipv6, err := ToIPv4MappedIPv6(opts.AgentIP)
+		if err != nil {
+			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
+		}
+		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", opts.AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+
+	}
+
+	proxyInfo := structs.ProxyInfo{
+		IP4:  ipv4,
+		IP6:  ipv6,
+		Port: opts.ProxyPort,
+	}
+
+	err = h.SendClientProxyInfo(opts.ClientID, proxyInfo)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// IPv4ToUint32 converts a string representation of an IPv4 address to a 32-bit integer.
+func IPv4ToUint32(ipStr string) (uint32, error) {
+	ipAddr := net.ParseIP(ipStr)
+	if ipAddr != nil {
+		ipAddr = ipAddr.To4()
+		if ipAddr != nil {
+			return binary.BigEndian.Uint32(ipAddr), nil
+		}
+		return 0, errors.New("not a valid IPv4 address")
+	}
+	return 0, errors.New("failed to parse IP address")
+}
+
+// ToIPv4MappedIPv6 converts an IPv4 address to an IPv4-mapped IPv6 address.
+func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
+	var result [4]uint32
+
+	// Parse the input IPv4 address
+	ip := net.ParseIP(ipv4)
+	if ip == nil {
+		return result, errors.New("invalid IPv4 address")
+	}
+
+	// Check if the input is an IPv4 address
+	ip = ip.To4()
+	if ip == nil {
+		return result, errors.New("not a valid IPv4 address")
+	}
+
+	// Convert IPv4 address to IPv4-mapped IPv6 address
+	// IPv4-mapped IPv6 address is ::ffff:a.b.c.d
+	ipv6 := "::ffff:" + ipv4
+
+	// Parse the resulting IPv6 address
+	ip6 := net.ParseIP(ipv6)
+	if ip6 == nil {
+		return result, errors.New("failed to parse IPv4-mapped IPv6 address")
+	}
+
+	// Convert the IPv6 address to a 16-byte representation
+	ip6Bytes := ip6.To16()
+	if ip6Bytes == nil {
+		return result, errors.New("failed to convert IPv6 address to bytes")
+	}
+
+	// Populate the result array
+	for i := 0; i < 4; i++ {
+		result[i] = uint32(ip6Bytes[i*4])<<24 | uint32(ip6Bytes[i*4+1])<<16 | uint32(ip6Bytes[i*4+2])<<8 | uint32(ip6Bytes[i*4+3])
+	}
+
+	return result, nil
+}
+
+
+func GetContainerIP() (string, error) {
+	// Get all network interfaces
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	// Iterate over the interfaces
+	for _, i := range interfaces {
+		// Skip down or loopback interfaces
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		// Get the addresses for the current interface
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+
+		// Iterate over the addresses
+		for _, addr := range addrs {
+			var ip net.IP
+			// The address can be of type *net.IPNet or *net.IPAddr
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				// Check if it's an IPv4 address
+				if ipnet.IP.To4() != nil {
+					ip = ipnet.IP
+				}
+			}
+
+			if ip != nil {
+				// Found a valid IPv4 address, return it
+				return ip.String(), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not find a non-loopback IP for the container")
 }

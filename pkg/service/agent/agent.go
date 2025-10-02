@@ -8,14 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/agent"
-	"go.keploy.io/server/v2/pkg/agent/hooks"
-	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -57,7 +53,8 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.T
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh chan struct{}) error {
 	a.logger.Info("Starting the agent in ", zap.String("mode", string(opts.Mode)))
-
+	a.logger.Info("here is docker env check :")
+	fmt.Println(opts.IsDocker)
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
@@ -65,7 +62,7 @@ func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh cha
 		Mode:          opts.Mode,
 		IsDocker:      opts.IsDocker,
 		EnableTesting: opts.EnableTesting,
-	})
+	}, opts)
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 		return err
@@ -112,7 +109,7 @@ func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.Outgoin
 	return nil
 }
 
-func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
+func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions, setupOpts models.SetupOptions) error {
 	hookErr := errors.New("failed to hook into the app")
 
 	parentErrGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -160,7 +157,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 		KeployIPV4: "172.18.0.2",
 		Mode:       opts.Mode,
 		BigPayload: true,
-	})
+	}, setupOpts)
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
@@ -237,98 +234,48 @@ func (a *Agent) DeRegisterClient(ctx context.Context, unregister models.Unregist
 func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
 
 	a.logger.Info("Registering the client with the keploy server")
-	// ctx, cancel := context.WithCancel(ctx)
-	// a.activeClients.Store(opts.ClientID, cancel)
-	// Register the client and start processing
+	// // ctx, cancel := context.WithCancel(ctx)
+	// // a.activeClients.Store(opts.ClientID, cancel)
+	// // Register the client and start processing
 
-	// send the network info to the kernel
-	err := a.SendNetworkInfo(ctx, opts)
-	if err != nil {
-		a.logger.Error("failed to send network info to the kernel", zap.Error(err))
-		return err
-	}
-	ppid := uint32(os.Getppid())
-	clientInfo := structs.ClientInfo{
-		KeployClientNsPid: opts.ClientNsPid,
-		IsDockerApp:       0,
-		AppInode:          opts.AppInode,
-	}
-
-	switch opts.Mode {
-	case models.MODE_RECORD:
-		clientInfo.Mode = uint32(1)
-	case models.MODE_TEST:
-		clientInfo.Mode = uint32(2)
-	default:
-		clientInfo.Mode = uint32(0)
-	}
-
-	if opts.IsDocker {
-		clientInfo.IsDockerApp = 1
-		clientInfo.KeployClientNsPid = ppid
-	}
-	clientInfo.ClientPID = pkg.ClientPid
-	// ports := GetPortToSendToKernel(ctx, agent.HookCfg.Rules)
-	// for i := 0; i < 10; i++ {
-	// 	if len(ports) <= i {
-	// 		clientInfo.PassThroughPorts[i] = -1
-	// 		continue
-	// 	}
-	// 	clientInfo.PassThroughPorts[i] = int32(ports[i])
+	// // send the network info to the kernel
+	// // err := a.SendNetworkInfo(ctx, opts)
+	// // if err != nil {
+	// // 	a.logger.Error("failed to send network info to the kernel", zap.Error(err))
+	// // 	return err
+	// // }
+	// ppid := uint32(os.Getppid())
+	// clientInfo := structs.ClientInfo{
+	// 	KeployClientNsPid: opts.ClientNsPid,
+	// 	IsDockerApp:       0,
+	// 	AppInode:          opts.AppInode,
 	// }
-	fmt.Println("here is the client pid whic we have sent :", pkg.ClientPid)
-	spew.Dump(clientInfo)
-	return a.Hooks.SendKeployClientInfo(clientInfo)
-}
 
-func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) error {
-	if !opts.IsDocker {
-		proxyIP, err := hooks.IPv4ToUint32("127.0.0.1")
-		if err != nil {
-			return err
-		}
-		proxyInfo := structs.ProxyInfo{
-			IP4:  proxyIP,
-			IP6:  [4]uint32{0, 0, 0, 0},
-			Port: opts.ProxyPort,
-		}
-		fmt.Println("MAJOR BIG DUMP")
-		spew.Dump(opts)
-		spew.Dump(proxyInfo)
-		err = a.Hooks.SendClientProxyInfo(uint64(0), proxyInfo)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
+	// switch opts.Mode {
+	// case models.MODE_RECORD:
+	// 	clientInfo.Mode = uint32(1)
+	// case models.MODE_TEST:
+	// 	clientInfo.Mode = uint32(2)
+	// default:
+	// 	clientInfo.Mode = uint32(0)
+	// }
 
-	fmt.Println("here is the agent ip address :", opts.AgentIP)
-
-	ipv4, err := hooks.IPv4ToUint32(opts.AgentIP)
-	if err != nil {
-		return err
-	}
-
-	var ipv6 [4]uint32
-	if opts.IsDocker {
-		ipv6, err := hooks.ToIPv4MappedIPv6(opts.AgentIP)
-		if err != nil {
-			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
-		}
-		a.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", opts.AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-
-	}
-
-	proxyInfo := structs.ProxyInfo{
-		IP4:  ipv4,
-		IP6:  ipv6,
-		Port: opts.ProxyPort,
-	}
-
-	err = a.Hooks.SendClientProxyInfo(opts.ClientID, proxyInfo)
-	if err != nil {
-		return err
-	}
+	// if opts.IsDocker {
+	// 	clientInfo.IsDockerApp = 1
+	// 	clientInfo.KeployClientNsPid = ppid
+	// }
+	// clientInfo.ClientPID = pkg.ClientPid
+	// // ports := GetPortToSendToKernel(ctx, agent.HookCfg.Rules)
+	// // for i := 0; i < 10; i++ {
+	// // 	if len(ports) <= i {
+	// // 		clientInfo.PassThroughPorts[i] = -1
+	// // 		continue
+	// // 	}
+	// // 	clientInfo.PassThroughPorts[i] = int32(ports[i])
+	// // }
+	// fmt.Println("here is the client pid whic we have sent :", pkg.ClientPid)
+	// spew.Dump(clientInfo)
+	// return a.Hooks.SendKeployClientInfo(clientInfo)
 	return nil
 }
 

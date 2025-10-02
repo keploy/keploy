@@ -106,7 +106,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 	token, err := h.auth.GetToken(ctx)
 	if err != nil {
-		h.logger.Warn("Failed to Authenticate user, continuing with local mock if present", zap.Error(err))
+		h.logger.Warn("Failed to Authenticate user, continuing with local mock if present", zap.String("reason", err.Error()))
 		return nil
 	}
 	h.mock.setToken(token)

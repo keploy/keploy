@@ -529,20 +529,28 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 
 	keployBin, err := utils.GetCurrentBinaryPath()
 	if err != nil {
-		_ = logFile.Close()
-		utils.LogError(a.logger, err, "failed to get current keploy binary path")
+		if logFile != nil {
+			_ = logFile.Close()
+			utils.LogError(a.logger, err, "failed to get current keploy binary path")
+		}
 		return err
 	}
 
 	// Build args (binary is passed separately to utils)
 	args := []string{
 		"agent",
-		"--port", strconv.Itoa(int(a.conf.Agent.Port)),
-		"--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)),
-		"--dns-port", strconv.Itoa(int(a.conf.DNSPort)),
+		"--port", strconv.Itoa(int(opts.AgentPort)),
+		"--proxy-port", strconv.Itoa(int(opts.ProxyPort)),
+		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
+		"--client-nspid", strconv.Itoa(int(opts.ClientNsPid)),
+		"--docker-network", opts.DockerNetwork,
+		"--agent-ip", opts.AgentIP,
+		"--mode", string(opts.Mode),
+		"--app-inode", strconv.FormatUint(opts.AppInode, 10),
 		"--debug",
 	}
+
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")
 	}
@@ -563,8 +571,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	fmt.Println(cmd)
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
-		_ = logFile.Close()
-		utils.LogError(a.logger, err, "failed to start keploy agent")
+		if logFile != nil {
+			_ = logFile.Close()
+			utils.LogError(a.logger, err, "failed to start keploy agent")
+		}
 		return err
 	}
 
@@ -665,6 +675,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	opts.AgentPort = agentPort
 	opts.ProxyPort = proxyPort
+	opts.DnsPort = dnsPort
 
 	// Update the ports in the configuration
 	a.conf.Agent.Port = agentPort
@@ -721,8 +732,32 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			cmd = networkRegex.ReplaceAllString(cmd, "")
 		}
 		fmt.Println("COMMAND AFTER REMOVING PORTS:", cmd)
-	}
 
+		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
+		// inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+		// if err != nil {
+		// 	utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+		// 	return 0, err
+		// }
+		// var keployIPv4 string
+		// keployIPv4 = inspect.NetworkSettings.IPAddress
+
+		// // Check if the Networks map is not empty
+		// if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+		// 	// Iterate over the map to get the first available IP
+		// 	for _, network := range inspect.NetworkSettings.Networks {
+		// 		keployIPv4 = network.IPAddress
+		// 		if keployIPv4 != "" {
+		// 			break // Exit the loop once we've found an IP
+		// 		}
+		// 	}
+		// }
+
+		// pkg.AgentIP = keployIPv4
+		// fmt.Println("here is the agent's IP address in client :", keployIPv4)
+		// opts.AgentIP = keployIPv4
+	}
+	opts.ClientID = clientID
 	if opts.CommandType != "docker-compose" {
 		// Start the agent process
 		err = a.startAgent(ctx, clientID, isDockerCmd, opts)
@@ -731,9 +766,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		a.logger.Info("Agent is now running, proceeding with setup")
-	}
-	// time.Sleep(10 * time.Second)
 
+	}
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, opts)
 	a.apps.Store(clientID, usrApp)
@@ -767,7 +801,26 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// 	}
 	// 	var keployIPv4 string
 	// 	keployIPv4 = inspect.NetworkSettings.IPAddress
+	// if isDockerCmd {
+	// 	fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
+	// 	inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
+	// 	if err != nil {
+	// 		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+	// 		return 0, err
+	// 	}
+	// 	var keployIPv4 string
+	// 	keployIPv4 = inspect.NetworkSettings.IPAddress
 
+	// 	// Check if the Networks map is not empty
+	// 	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+	// 		// Iterate over the map to get the first available IP
+	// 		for _, network := range inspect.NetworkSettings.Networks {
+	// 			keployIPv4 = network.IPAddress
+	// 			if keployIPv4 != "" {
+	// 				break // Exit the loop once we've found an IP
+	// 			}
+	// 		}
+	// 	}
 	// 	// Check if the Networks map is not empty
 	// 	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
 	// 		// Iterate over the map to get the first available IP
@@ -783,8 +836,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// 	fmt.Println("here is the agent's IP address in client :", keployIPv4)
 	// 	opts.AgentIP = keployIPv4
 	// }
+	// 	pkg.AgentIP = keployIPv4
+	// 	fmt.Println("here is the agent's IP address in client :", keployIPv4)
+	// 	opts.AgentIP = keployIPv4
+	// }
 
-	opts.ClientID = clientID
+	// opts.ClientID = clientID
+	// spew.Dump(opts)
 	// if registerErr := a.RegisterClient(ctx, opts); registerErr != nil {
 	// 	utils.LogError(a.logger, registerErr, "failed to register client")
 	// 	return 0, registerErr
@@ -941,10 +999,10 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 	defer func() {
 		// This is where you would close log files and delete temp files.
 		// This code will run when the application exits gracefully.
-		if utils.LogFile != nil {
-			utils.LogFile.Close()
-		}
-		_ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
+		// if utils.LogFile != nil {
+		// 	utils.LogFile.Close()
+		// }
+		// _ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
 		// _ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
 	}()
 

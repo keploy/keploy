@@ -13,14 +13,15 @@ sudo rm -rf keploy/
 docker build -t node-app:1.0 .
 
 container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
+    pid=$(pgrep -f "keploy record")
+    echo "$pid Keploy record PID" 
+    echo "Killing keploy record"
     sudo kill $pid
 }
 
+
 send_request(){
-    sleep 10
+    sleep 30
    # Wait for the application to start.
     app_started=false
     while [ "$app_started" = false ]; do
@@ -84,7 +85,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start keploy in test mode.
 test_container="nodeApp_test"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"

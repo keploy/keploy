@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 
@@ -88,18 +87,18 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			}
 		}
 
-		unregister := models.UnregisterReq{
-			ClientID: clientID,
-			Mode:     models.MODE_RECORD,
-		}
+		// unregister := models.UnregisterReq{
+		// 	ClientID: clientID,
+		// 	Mode:     models.MODE_RECORD,
+		// }
 
 		// Dont call the Unregister if there is an error in the running application
-		if runAppError.AppErrorType == "" {
-			err := r.instrumentation.UnregisterClient(ctx, unregister)
-			if err != nil && err != io.EOF {
-				utils.LogError(r.logger, err, "failed to unregister client")
-			}
-		}
+		// if runAppError.AppErrorType == "" {
+		// 	// err := r.instrumentation.UnregisterClient(ctx, unregister)
+		// 	// if err != nil && err != io.EOF {
+		// 	// 	utils.LogError(r.logger, err, "failed to unregister client")
+		// 	// }
+		// }
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()

@@ -73,18 +73,15 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config,
 	// gracefully exit the current process
 	logger.Info("exiting the current process as the command is moved to docker")
 
-	if utils.LogFile != nil {
-		err := utils.LogFile.Close()
-		if err != nil {
-			utils.LogError(logger, err, "Failed to close Keploy Logs")
-		}
-		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
-			return nil
-		}
-		// if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-		// 	return nil
-		// }
-	}
+	// if utils.LogFile != nil {
+	// 	_ = utils.LogFile.Close()
+	// 	if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+	// 		return nil
+	// 	}
+	// 	if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+	// 		return nil
+	// 	}
+	// }
 
 	// os.Exit(0)
 	return nil
@@ -208,13 +205,15 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 			" --privileged" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
-			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientPID) + " --client-nspid " + fmt.Sprintf("%d", opts.ClientNsPid) +
+			" --docker-network " + opts.DockerNetwork + " --agent-ip " + opts.AgentIP + " --mode " + string(opts.Mode) +
+			" --app-inode " + fmt.Sprintf("%d", opts.AppInode)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
-		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		// alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 
 		return alias, nil
 	case "windows":

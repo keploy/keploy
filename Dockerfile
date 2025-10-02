@@ -54,4 +54,4 @@ RUN sed -i 's/\r$//' /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent","--is-docker", "--debug"]
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent","--is-docker"]

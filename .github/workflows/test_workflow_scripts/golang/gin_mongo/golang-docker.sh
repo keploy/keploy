@@ -22,14 +22,14 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
-    pid=$(pgrep -n keploy)
+    pid=$(pgrep -f "keploy record")
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
 }
 
 send_request(){
-    sleep 10
+    sleep 30
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8080/CJBKJd92; then
@@ -64,7 +64,7 @@ send_request(){
 for i in {1..2}; do
     container_name="ginApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p 8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -89,7 +89,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
