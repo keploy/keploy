@@ -392,7 +392,7 @@ func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
 
 	err := h.SendClientInfo(clientInfo)
 	if err != nil {
-		h.Logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		h.Logger.Error("failed to send client info to the ebpf program", zap.Error(err))
 		return err
 	}
 
@@ -489,12 +489,12 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		h.Logger.Error("failed to send network info to the kernel", zap.Error(err))
 		return err
 	}
-	ppid := uint32(os.Getppid())
 	clientInfo := structs.ClientInfo{
-		KeployClientNsPid: opts.ClientNsPid,
-		IsDockerApp:       0,
-		AppInode:          opts.AppInode,
+		// KeployClientNsPid: opts.ClientNsPid,
+		// IsDockerApp:       0,
+		// AppInode:          opts.AppInode,
 	}
+
 
 	switch opts.Mode {
 	case models.MODE_RECORD:
@@ -505,10 +505,7 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		clientInfo.Mode = uint32(0)
 	}
 
-	if opts.IsDocker {
-		clientInfo.IsDockerApp = 1
-		clientInfo.KeployClientNsPid = ppid
-	}
+
 	// clientInfo.ClientPID = pkg.ClientPid
 	ports := agent.GetPortToSendToKernel(ctx, rules)
 	for i := 0; i < 10; i++ {
@@ -518,10 +515,9 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		}
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
-	clientInfo.ClientPID = opts.ClientPID
-	fmt.Println("here is the client pid whic we have sent :", opts.ClientPID)
+	clientInfo.ClientNSPID = opts.ClientNSPID
+	fmt.Println("here is the client pid whic we have sent :", opts.ClientNSPID)
 	spew.Dump(clientInfo)
-	clientInfo.IsKeployClientRegistered = uint32(0)
 	return h.SendKeployClientInfo(clientInfo)
 }
 
@@ -569,7 +565,7 @@ func (h *Hooks) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		Port: opts.ProxyPort,
 	}
 
-	err = h.SendClientProxyInfo(opts.ClientID, proxyInfo)
+	err = h.SendClientProxyInfo(uint64(0), proxyInfo)
 	if err != nil {
 		return err
 	}
