@@ -58,6 +58,10 @@ for i in 1 2; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+# Sanitize the testcases
+sudo -E env PATH="$PATH" $RECORD_BIN sanitize
+sleep 5
+
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
 send_request "astro" &
@@ -89,10 +93,6 @@ else
     echo "Could not locate the newly created test-set directory for astro."
     exit 1
 fi
-
-# Sanitize the testcases
-sudo -E env PATH="$PATH" $RECORD_BIN sanitize
-sleep 5
 
 # Testing phase
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 &> test_logs.txt
