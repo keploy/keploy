@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -166,12 +165,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		// h.tbenchFilterPid = objs.TestbenchInfoMap
 		h.objects = objs
 		// ------------ For Egress -------------
-		udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on udp_pre_connect")
-			return err
-		}
-		h.udpp4 = udppC4
+		// udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
+		// if err != nil {
+		// 	utils.LogError(h.Logger, err, "failed to attach the kprobe hook on udp_pre_connect")
+		// 	return err
+		// }
+		// h.udpp4 = udppC4
 
 		// FOR IPV4
 		// tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
@@ -207,27 +206,27 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		}
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
 
-			switch runtime.GOARCH {
-			case "amd64":
-				// Attach the kprobe for bind syscall entry on x86
-				h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to attach kprobe to __x64_sys_bind")
-					return err
-				}
-			case "arm64":
-				// Attach the kprobe for bind syscall entry on arm64
-				h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to attach kprobe to __arm64_sys_bind")
-					return err
-				}
+			// switch runtime.GOARCH {
+			// case "amd64":
+			// 	// Attach the kprobe for bind syscall entry on x86
+			// 	h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
+			// 	if err != nil {
+			// 		utils.LogError(h.Logger, err, "failed to attach kprobe to __x64_sys_bind")
+			// 		return err
+			// 	}
+			// case "arm64":
+			// 	// Attach the kprobe for bind syscall entry on arm64
+			// 	h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
+			// 	if err != nil {
+			// 		utils.LogError(h.Logger, err, "failed to attach kprobe to __arm64_sys_bind")
+			// 		return err
+			// 	}
 
-			default:
-				err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-				utils.LogError(h.Logger, err, "failed to attach bind hooks")
-				return err
-			}
+			// default:
+			// 	err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+			// 	utils.LogError(h.Logger, err, "failed to attach bind hooks")
+			// 	return err
+			// }
 
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{

@@ -899,16 +899,6 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	var inode uint64
 	var err error
 
-	// This is commented out becuase now we do not require the inode at the client side
-
-	// if runtime.GOOS == "linux" {
-	// 	// send the network info to the kernel
-	// 	inode, err = linuxHooks.GetSelfInodeNumber()
-	// 	if err != nil {
-	// 		a.logger.Error("failed to get inode number")
-	// 	}
-	// }
-
 	// Register the client with the server
 	requestBody := models.RegisterReq{
 		SetupOptions: models.SetupOptions{
@@ -1042,11 +1032,6 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// 👈 Step 6: This is the critical fix. Store the command so stopAgent can find it.
-	a.mu.Lock()
-	a.agentCmd = cmd
-	a.mu.Unlock()
-
 	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))
 
 	// Step 7: Run the command. This blocks until the command exits or is cancelled.
@@ -1055,9 +1040,6 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		if ctx.Err() == context.Canceled {
 			cmd.Process.Kill()
 			logger.Info("Docker agent run cancelled gracefully.")
-			a.mu.Lock()
-			a.agentCmd = nil
-			a.mu.Unlock()
 			return nil
 		}
 		utils.LogError(logger, err, "failed to run keploy agent in docker")

@@ -49,38 +49,38 @@ jobs:
         run: |
           docker push ttl.sh/keploy/keploy:1h
 
-  # run_golang_linux:
-  #   needs: [build-and-upload, upload-latest]
-  #   uses: ./.github/workflows/golang_linux.yml
+  run_golang_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/golang_linux.yml
   run_golang_wsl:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_wsl.yml
-  # run_java_linux:
-  #   needs: [build-and-upload, upload-latest]
-  #   uses: ./.github/workflows/java_linux.yml
-  # run_node_linux:
-  #   needs: [build-and-upload, upload-latest]
-  #   uses: ./.github/workflows/node_linux.yml  
+  run_java_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/java_linux.yml
+  run_node_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/node_linux.yml  
   run_node_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/node_docker.yml
   run_python_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/python_docker.yml
-  # run_python_linux:
-  #   needs: [build-and-upload, upload-latest]
-  #   uses: ./.github/workflows/python_linux.yml
+  run_python_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/python_linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest,build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
-  # run_fuzzer_linux:
-  #   needs: [build-and-upload, upload-latest]
-  #   uses: ./.github/workflows/fuzzer_linux.yml
-  #   secrets:
-  #     AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  # run_node_mapping:
-  #   needs: [build-and-upload, upload-latest]
-  #   uses: ./.github/workflows/node_mapping.yml
-  # run_grpc_linux:
-  #   needs: [build-and-upload, upload-latest]
-  #   uses: ./.github/workflows/grpc_linux.yml
+  run_fuzzer_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/fuzzer_linux.yml
+    secrets:
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  run_node_mapping:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/node_mapping.yml
+  run_grpc_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/grpc_linux.yml
