@@ -6,27 +6,6 @@ echo "$REPLAY_BIN"
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 echo "iid.sh executed"
 
-# Function to print all keploy-agent log files
-print_keploy_agent_logs() {
-    echo "=== Printing all keploy-agent log files ==="
-    
-    # Find all files starting with "keploy-agent"
-    agent_log_files=$(find . -maxdepth 2 -name "keploy-agent*" -type f 2>/dev/null)
-    
-    if [ -z "$agent_log_files" ]; then
-        echo "No keploy-agent log files found."
-        return
-    fi
-    
-    # Print each log file
-    for log_file in $agent_log_files; do
-        echo "=== Contents of $log_file ==="
-        cat "$log_file"
-        echo "=== End of $log_file ==="
-        echo ""
-    done
-}
-
 # Checkout a different branch
 git fetch origin
 #git checkout native-linux
@@ -52,7 +31,7 @@ sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
 send_request() {
     local index=$1  
 
-    sleep 50
+    sleep 6
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8080/api/locations; then
@@ -96,37 +75,32 @@ for i in {1..2}; do
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
-        print_keploy_agent_logs
-        exit 1 
+        exit 1
     fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then
       echo "Race condition detected in recording, stopping pipeline..."
       cat "${app_name}.txt"
-      print_keploy_agent_logs
-      exit 1 
+      exit 1
     fi
-    cat "${app_name}.txt"
     sleep 5
     wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Start the go-http app in test mode.
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false &> "test_logs.txt"
-cat "test_logs.txt"
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false &> test_logs.txt
+
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs.txt"
-    print_keploy_agent_logs
-    exit 1 
+    exit 1
 fi
 
 if grep "WARNING: DATA RACE" "test_logs.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs.txt"
-    print_keploy_agent_logs
-    exit 1 
+    exit 1
 fi
 
 all_passed=true
@@ -147,17 +121,15 @@ do
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
         echo "Test-set-$i did not pass."
-        break # Exit t he loop early as all tests need to pass
+        break # Exit the loop early as all tests need to pass
     fi
 done
 
-# Check the overall test status and exit a ccordingly
+# Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
-    print_keploy_agent_logs
-    exit 0 
+    exit 0
 else
     cat "test_logs.txt"
-    print_keploy_agent_logs
-    exit 1 
+    exit 1
 fi
