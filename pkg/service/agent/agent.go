@@ -335,7 +335,8 @@ func (a *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mo
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
 
-	// Get stored mocks for the client
+	// Get stored mocks for the 
+	fmt.Println("FLOW AARA HAI YAHA PE")
 	storageInterface, exists := a.clientMocks.Load(id)
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID %d", id)

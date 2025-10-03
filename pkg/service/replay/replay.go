@@ -290,15 +290,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", inst.ClientID))
 		}
 
-		err := HookImpl.BeforeTestSetRun(ctx, testSet)
-		if err != nil {
-			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
-			utils.LogError(r.logger, err, stopReason)
-			if ctx.Err() == context.Canceled {
-				return err
-			}
-			return fmt.Errorf("%s", stopReason)
-		}
+		// err := HookImpl.BeforeTestSetRun(ctx, testSet)
+		// if err != nil {
+		// 	stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
+		// 	utils.LogError(r.logger, err, stopReason)
+		// 	if ctx.Err() == context.Canceled {
+		// 		return err
+		// 	}
+		// 	return fmt.Errorf("%s", stopReason)
+		// }
 
 		if !r.config.Test.SkipCoverage {
 			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
@@ -1188,12 +1188,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Handle Docker environment IP replacement
-		if utils.IsDockerCmd(cmdType) {
-			err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
-			if err != nil {
-				break
-			}
-		}
+		// if utils.IsDockerCmd(cmdType) {
+		// 	err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
+		// 	if err != nil {
+		// 		break
+		// 	}
+		// }
 
 		// Handle user-provided host replacement
 		if r.config.Test.Host != "" {
