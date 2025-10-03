@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# Exit immediately if a command exits with a non-zero status.
+set -e
+# Treat unset variables as an error.
+set -u
+# The return value of a pipeline is the status of the last command to exit with a non-zero status,
+# or zero if no command exited with a non-zero status.
+set -o pipefail
+
+echo "$RECORD_BIN"
+echo "$REPLAY_BIN"
+
+source ${GITHUB_WORKSPACE}/.github/workflows/test_workflow_scripts/test-iid.sh
+echo "iid.sh executed"
+
+git fetch origin
+
+# Check if there is a keploy-config file, if there is, delete it.
+if [ -f "./keploy.yml" ]; then
+    rm ./keploy.yml
+fi
+
+rm -rf keploy/
+
+echo "Waiting for mongo to start"
+docker compose up mongo -d
+sleep 5
+
+# Pre-download Go modules to avoid HTTPS interception issues during recording
+echo "Pre-downloading Go modules..."
+go mod download
+go mod tidy
+
+# Generate the keploy-config file.
+echo "Generating Keploy config..."
+sudo "$RECORD_BIN" config --generate
+
+# Update the global noise to updated_at.
+config_file="./keploy.yml"
+echo "Updating global noise in config..."
+sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
+
+# # Add bypass rules to ignore external HTTPS traffic (Go module proxy, etc.)
+# echo "Adding bypass rules for external HTTPS traffic..."
+# sed -i '/bypassRules: \[\]/c\
+# bypassRules:\
+#   - host: "proxy.golang.org"\
+#   - host: "sum.golang.org"\
+#   - host: "goproxy.io"\
+#   - host: "*.googleapis.com"\
+#   - host: "*.googleusercontent.com"\
+#   - port: 443' "$config_file"
+
+send_request() {
+    local index=$1  
+
+    sleep 5
+
+    echo "Sending request for iteration ${index}..."
+    go run ./client
+
+    sleep 5
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID"
+    echo "Killing Keploy"
+    sudo kill $pid
+}
+
+for i in {1..2}; do
+    app_name="grpc-mongo_${i}"
+    echo "--- Starting Recording for iteration ${i} ---"
+    send_request $i &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "go run main.go" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
+    
+    if grep "ERROR" "${app_name}.txt"; then
+        echo "Error found in pipeline..."
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+      echo "Race condition detected in recording, stopping pipeline..."
+      exit 1
+    fi
+    sleep 5
+    echo "--- Recorded test case and mocks for iteration ${i} ---"
+done
+
+echo "shutting down mongo during test mode"
+docker stop mongo
+docker rm mongo
+sleep 3
+
+echo "--- Starting Keploy Test Mode ---"
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "go run main.go" --delay 7 --generateGithubActions=false 2>&1 | tee "test_logs.txt"
+
+# Error checking remains the same.
+if grep "ERROR" "test_logs.txt"; then
+    echo "Error found in pipeline during test execution..."
+    exit 1
+fi
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    exit 1
+fi
+
+echo "--- Test execution finished. Verifying results... ---"
+all_passed=true
+
+# Get the test results from the testReport file.
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+
+    if [ ! -f "$report_file" ]; then
+        echo "Error: Report file not found at $report_file"
+        all_passed=false
+        break
+    fi
+
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+    fi
+done
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "✅ All tests passed"
+    exit 0
+else
+    echo "❌ One or more tests failed. See logs above for details."
+    echo "--- Full Test Log ---"
+    cat "test_logs.txt"
+    exit 1
+fi
