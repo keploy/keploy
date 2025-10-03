@@ -169,7 +169,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		p.logger.Debug(fmt.Sprintf("Answers[After appending to msg]:\n%v\n", msg.Answer))
 	}
 
-	p.logger.Debug(fmt.Sprintf("dns msg sending back:\n%v\n", msg))
+	// p.logger.Debug(fmt.Sprintf("dns msg sending back:\n%v\n", msg))
 	p.logger.Debug(fmt.Sprintf("dns msg RCODE sending back:\n%v\n", msg.Rcode))
 	p.logger.Debug("Writing dns info back to the client...")
 	err := w.WriteMsg(msg)

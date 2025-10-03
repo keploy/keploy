@@ -828,11 +828,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
-		// Delay for user application to run
+		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		agentReadyCh := make(chan bool, 1)
+		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.Port), agentReadyCh, 1*time.Second)
+
 		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
-			return models.TestSetStatusUserAbort, context.Canceled
+		case <-agentCtx.Done():
+			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
+		case <-agentReadyCh:
 		}
 
 		containerIP, err := r.instrumentation.GetContainerIP4(ctx, r.config.ClientID)
@@ -854,6 +859,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
 			return models.TestSetStatusFailed, err
+		}
+
+		// Delay for user application to run
+		select {
+		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+		case <-runTestSetCtx.Done():
+			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
 
