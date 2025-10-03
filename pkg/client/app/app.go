@@ -683,3 +683,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 //	a.docker.SetContainerID(e.ID)
 //
 //	a.logger.Debug("container created for desired app", zap.Any("ID", e.ID))
+
+func (a *App) GetKeployContainer() string {
+	return a.keployContainer
+}

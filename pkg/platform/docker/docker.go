@@ -1113,6 +1113,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		"--mode", string(opts.Mode),
 		"--app-inode", strconv.FormatUint(opts.AppInode, 10),
 		"--is-docker",
+		"--debug",
 	}
 
 	if opts.EnableTesting {
@@ -1224,15 +1225,19 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			// test
 			{Kind: yaml.ScalarNode, Value: "test"},
 			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "CMD"},
-				{Kind: yaml.ScalarNode, Value: "curl"},
-				{Kind: yaml.ScalarNode, Value: "-f"},
-				{Kind: yaml.ScalarNode, Value: fmt.Sprintf("http://localhost:%d/agent/health", opts.AgentPort)},
+				// {Kind: yaml.ScalarNode, Value: "CMD"},
+				// {Kind: yaml.ScalarNode, Value: "curl"},
+				// {Kind: yaml.ScalarNode, Value: "-f"},
+				// {Kind: yaml.ScalarNode, Value: fmt.Sprintf("http://localhost:%d/agent/health", opts.AgentPort)},
+				// {Kind: yaml.ScalarNode, Value: "CMD-SHELL"},
+				// {Kind: yaml.ScalarNode, Value: "exit 0"},
+				{Kind: yaml.ScalarNode, Value: "CMD-SHELL"},
+				{Kind: yaml.ScalarNode, Value: fmt.Sprintf("ss -tuln | grep :%d || exit 1", opts.AgentPort)},
 			}},
 
 			// interval
 			{Kind: yaml.ScalarNode, Value: "interval"},
-			{Kind: yaml.ScalarNode, Value: "10s"},
+			{Kind: yaml.ScalarNode, Value: "5s"},
 
 			// timeout
 			{Kind: yaml.ScalarNode, Value: "timeout"},
@@ -1240,11 +1245,11 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// retries
 			{Kind: yaml.ScalarNode, Value: "retries"},
-			{Kind: yaml.ScalarNode, Value: "50"},
+			{Kind: yaml.ScalarNode, Value: "6"},
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},
-			{Kind: yaml.ScalarNode, Value: "10s"},
+			{Kind: yaml.ScalarNode, Value: "15s"},
 		},
 	}
 

@@ -189,7 +189,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		})
 
 		// Have to check for agent here
-		time.Sleep(20 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 
 	// fetching test cases and mocks from the application and inserting them into the database

@@ -208,6 +208,9 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 }
 
 func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
+
+	fmt.Println("Inside MockOutgoing of agent client")
+
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
@@ -430,6 +433,39 @@ func (a *AgentClient) GetContainerIP(_ context.Context, clientID uint64) (string
 	}
 
 	return ip, nil
+}
+
+// Creating a duplicate function to avoid breaking changes
+func (a *AgentClient) GetContainerIP4(ctx context.Context, clientID uint64) (string, error) {
+
+	app, err := a.getApp(clientID)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to get app")
+		return "", err
+	}
+
+	a.logger.Info("Keploy container name", zap.String("container", app.GetKeployContainer()))
+
+	inspect, err := a.dockerClient.ContainerInspect(ctx, app.GetKeployContainer())
+	if err != nil {
+		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+		return "", err
+	}
+	var keployIPv4 string
+	keployIPv4 = inspect.NetworkSettings.IPAddress
+
+	// Check if the Networks map is not empty
+	if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
+		// Iterate over the map to get the first available IP
+		for _, network := range inspect.NetworkSettings.Networks {
+			keployIPv4 = network.IPAddress
+			if keployIPv4 != "" {
+				break // Exit the loop once we've found an IP
+			}
+		}
+	}
+
+	return keployIPv4, nil
 }
 
 func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOptions) models.AppError {
@@ -774,7 +810,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	}
 
-	if utils.CmdType(opts.CommandType) == utils.DockerCompose {
+	if utils.CmdType(opts.CommandType) != utils.DockerCompose {
 		time.Sleep(10 * time.Second)
 	}
 

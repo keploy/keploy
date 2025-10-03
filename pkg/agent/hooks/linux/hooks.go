@@ -519,6 +519,7 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		}
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
+	clientInfo.ClientPID = opts.ClientPID
 	fmt.Println("here is the client pid whic we have sent :", opts.ClientPID)
 	spew.Dump(clientInfo)
 	clientInfo.IsKeployClientRegistered = uint32(0)

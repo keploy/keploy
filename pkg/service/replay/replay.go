@@ -835,13 +835,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		containerIP, err := r.instrumentation.GetContainerIP(ctx, r.config.ClientID)
+		containerIP, err := r.instrumentation.GetContainerIP4(ctx, r.config.ClientID)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to get container IP")
 			return models.TestSetStatusFailed, err
 		}
 		r.logger.Info("Obtained container IP", zap.String("containerIP", containerIP))
 		pkg.AgentIP = containerIP
+
+		err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+			Rules:          r.config.BypassRules,
+			MongoPassword:  r.config.Test.MongoPassword,
+			SQLDelay:       time.Duration(r.config.Test.Delay),
+			FallBackOnMiss: r.config.Test.FallBackOnMiss,
+			Mocking:        r.config.Test.Mocking,
+			Backdate:       testCases[0].HTTPReq.Timestamp,
+		})
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to mock outgoing")
+			return models.TestSetStatusFailed, err
+		}
 	}
 
 	// Get all mocks for mapping-based filtering
@@ -897,17 +910,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
-	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
-		MongoPassword:  r.config.Test.MongoPassword,
-		SQLDelay:       time.Duration(r.config.Test.Delay),
-		FallBackOnMiss: r.config.Test.FallBackOnMiss,
-		Mocking:        r.config.Test.Mocking,
-		Backdate:       testCases[0].HTTPReq.Timestamp,
-	})
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to mock outgoing")
-		return models.TestSetStatusFailed, err
+	if cmdType != utils.DockerCompose {
+		err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+			Rules:          r.config.BypassRules,
+			MongoPassword:  r.config.Test.MongoPassword,
+			SQLDelay:       time.Duration(r.config.Test.Delay),
+			FallBackOnMiss: r.config.Test.FallBackOnMiss,
+			Mocking:        r.config.Test.Mocking,
+			Backdate:       testCases[0].HTTPReq.Timestamp,
+		})
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to mock outgoing")
+			return models.TestSetStatusFailed, err
+		}
 	}
 
 	// Send initial filtering parameters to set up mocks for test set
@@ -1021,6 +1036,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	for _, m := range consumedMocks {
 		totalConsumedMocks[m.Name] = m
+	}
+
+	if cmdType == utils.DockerCompose {
+		time.Sleep(10 * time.Second)
 	}
 
 	for idx, testCase := range testCases {

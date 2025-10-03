@@ -26,6 +26,7 @@ type Instrumentation interface {
 	GetErrorChannel() <-chan error
 
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
+	GetContainerIP4(ctx context.Context, clientID uint64) (string, error)
 	UnregisterClient(ctx context.Context, opts models.UnregisterReq) error
 
 	// New methods for improved mock management
