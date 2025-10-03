@@ -83,6 +83,7 @@ type bpfMapSpecs struct {
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployAgentTaskMap          *ebpf.MapSpec `ebpf:"keploy_agent_task_map"`
+	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
 	KeployProxyInfo             *ebpf.MapSpec `ebpf:"keploy_proxy_info"`
 	OutgoingConnCheckMap        *ebpf.MapSpec `ebpf:"outgoing_conn_check_map"`
@@ -128,6 +129,7 @@ type bpfMaps struct {
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployAgentTaskMap          *ebpf.Map `ebpf:"keploy_agent_task_map"`
+	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
 	KeployProxyInfo             *ebpf.Map `ebpf:"keploy_proxy_info"`
 	OutgoingConnCheckMap        *ebpf.Map `ebpf:"outgoing_conn_check_map"`
@@ -149,6 +151,7 @@ func (m *bpfMaps) Close() error {
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployAgentTaskMap,
+		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
 		m.KeployProxyInfo,
 		m.OutgoingConnCheckMap,
