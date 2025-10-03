@@ -16,10 +16,10 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID"
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    sudo kill $pid
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 send_request(){
@@ -82,7 +82,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 5 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

@@ -424,9 +424,9 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 			utils.LogError(h.Logger, err, "failed to close the gp4")
 		}
 
-		if err := h.tcppv4.Close(); err != nil {
-			utils.LogError(h.Logger, err, "failed to close the tcppv4")
-		}
+		// if err := h.tcppv4.Close(); err != nil {
+		// 	utils.LogError(h.Logger, err, "failed to close the tcppv4")
+		// }
 
 		if err := h.tcpv4.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the tcpv4")
@@ -442,9 +442,9 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		if err := h.gp6.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the gp6")
 		}
-		if err := h.tcppv6.Close(); err != nil {
-			utils.LogError(h.Logger, err, "failed to close the tcppv6")
-		}
+		// if err := h.tcppv6.Close(); err != nil {
+		// 	utils.LogError(h.Logger, err, "failed to close the tcppv6")
+		// }
 		if err := h.tcpv6.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the tcpv6")
 		}
