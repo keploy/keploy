@@ -1,240 +1,208 @@
 <#
-  PowerShell test runner for Keploy (Windows) - go-dedup sample
+  PowerShell test runner for Keploy (Windows) - Flask-MySQL sample
 
-  - Synchronous (PID-controlled) record phase; no background jobs
-  - Cleans keploy dirs/files up-front
-  - Generates keploy.yml and adds noise filter for current_time
-  - Sends a fixed set of HTTP calls to generate tests
-  - Kills entire process tree (keploy + docker compose) to avoid hangs
-  - Runs replay and validates the report
+  - Cleans up previous Docker containers, networks, and Keploy files.
+  - Sets up the Docker network and starts the database.
+  - Builds the application's Docker image.
+  - Runs the record phase, automatically making all API calls to generate tests.
+  - Kills the record process cleanly.
+  - Runs the replay phase and validates the test report.
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# --- Resolve Keploy binaries (defaults for local dev) ---
-$defaultKeploy = 'C:\Users\offic\Downloads\keploy_win\keploy.exe'
-if (-not $env:RECORD_BIN) { $env:RECORD_BIN = $defaultKeploy }
-if (-not $env:REPLAY_BIN) { $env:REPLAY_BIN = $defaultKeploy }
+# --- Resolve Keploy binaries (or use a default path) ---
+if (-not $env:RECORD_BIN) { Write-Warning "RECORD_BIN not set. Using default."; $env:RECORD_BIN = "keploy" }
+if (-not $env:REPLAY_BIN) { Write-Warning "REPLAY_BIN not set. Using default."; $env:REPLAY_BIN = "keploy" }
 
-# Ensure USERPROFILE (needed for docker volume mounts inside keploy)
-if (-not $env:USERPROFILE -or $env:USERPROFILE -eq '') {
-  $candidate = "$env:HOMEDRIVE$env:HOMEPATH"
-  if ($candidate -and $candidate -ne '') { $env:USERPROFILE = $candidate }
-}
-
-# Create Keploy config/home so docker doesn’t fall back to NetworkService
-try {
-  if ($env:USERPROFILE -and $env:USERPROFILE -ne '') {
-    $keployCfg = Join-Path $env:USERPROFILE ".keploy-config"
-    $keployHome = Join-Path $env:USERPROFILE ".keploy"
-    New-Item -ItemType Directory -Path $keployCfg -Force -ErrorAction SilentlyContinue | Out-Null
-    New-Item -ItemType Directory -Path $keployHome -Force -ErrorAction SilentlyContinue | Out-Null
-  }
-} catch {}
-
-# Parameterize the application's base URL
-$env:APP_BASE_URL = if ($env:APP_BASE_URL) { $env:APP_BASE_URL } else { 'http://localhost:8080' }
+# --- App-specific configuration ---
+$appName = "flask-mysql-app"
+$appImage = "flask-mysql-app:1.0"
+$appNetwork = "keploy-network"
+$appBaseUrl = "http://localhost:5000"
 
 Write-Host "Using RECORD_BIN = $env:RECORD_BIN"
 Write-Host "Using REPLAY_BIN = $env:REPLAY_BIN"
-Write-Host "Using APP_BASE_URL = $env:APP_BASE_URL"
-
-# --- Helper: runner work path ---
-function Get-RunnerWorkPath {
-  if ($env:GITHUB_WORKSPACE) { return $env:GITHUB_WORKSPACE }
-  return (Get-Location).Path
-}
+Write-Host "Using APP_BASE_URL = $appBaseUrl"
 
 # --- Helper: remove keploy dirs robustly ---
 function Remove-KeployDirs {
-  param([string[]]$Candidates)
-
-  # Stop any leftover keploy processes so files aren't locked
-  try {
-    Get-Process -ErrorAction SilentlyContinue |
-      Where-Object {
-        $_.ProcessName -in @('keploy','keploy-record','keploy-replay') -or
-        $_.Path -like '*\keploy*.exe' -or
-        $_.CommandLine -like '*keploy*'
-      } |
-      Sort-Object StartTime -Descending |
-      ForEach-Object {
-        taskkill /PID $_.Id /T /F | Out-Null 2>$null
-      }
-  } catch {}
-
-  foreach ($p in $Candidates) {
-    if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
-    Write-Host "Cleaning keploy directory: $p"
-    try {
-      cmd /c "attrib -R -S -H `"$p\*`" /S /D" 2>$null | Out-Null
-      Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
-    } catch {
-      Write-Warning "Remove-Item failed for $p, using rmdir fallback: $_"
-      cmd /c "rmdir /S /Q `"$p`"" 2>$null | Out-Null
+    param([string[]]$Candidates)
+    foreach ($p in $Candidates) {
+        if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
+        Write-Host "Cleaning keploy directory: $p"
+        try {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "Remove-Item failed for $p, using rmdir fallback: $_"
+            cmd /c "rmdir /S /Q `"$p`"" 2>$null | Out-Null
+        }
     }
-  }
 }
 
-# --- Build docker images from compose ---
-Write-Host "Building Docker image(s) with docker compose..."
-docker compose build
-
-# --- Clean previous keploy outputs ---
-$candidates = @(".\keploy")
-if ($env:GITHUB_WORKSPACE) { $candidates += (Join-Path $env:GITHUB_WORKSPACE 'keploy') }
-Remove-KeployDirs -Candidates $candidates
-Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
-Write-Host "Pre-clean complete."
-
-# --- Generate keploy.yml and add noise for timestamp endpoint ---
-Write-Host "Generating keploy config..."
-& $env:RECORD_BIN config --generate
-
-$configFile = ".\keploy.yml"
-if (-not (Test-Path $configFile)) { throw "Config file '$configFile' not found after generation." }
-
-# Add noise to ignore current_time in body (go-dedup /timestamp endpoint)
-(Get-Content $configFile -Raw) -replace 'global:\s*\{\s*\}', 'global: {"body": {"current_time":[]}}' |
-  Set-Content -Path $configFile -Encoding UTF8
-Write-Host "Updated global noise in keploy.yml to ignore 'current_time'."
-
-# --- Helpers for record flow ---
-function Test-RecordingComplete {
-  param(
-    [string]$root,
-    [int]$idx,
-    [int]$minFiles = 7,
-    [int]$minBytes = 100
-  )
-  $p1 = Join-Path $root "keploy\test-set-$idx\tests"
-  $p2 = ".\keploy\test-set-$idx\tests"
-  foreach ($p in @($p1,$p2)) {
-    if (-not (Test-Path $p)) { continue }
-    $files = Get-ChildItem -Path $p -Filter "test-*.yaml" -ErrorAction SilentlyContinue
-    if (-not $files) { continue }
-    $valid = ($files | Where-Object { $_.Length -ge $minBytes }).Count
-    if ($valid -ge $minFiles) { return $true }
-  }
-  return $false
-}
-
+# --- Helper: Kill a process tree by root PID ---
 function Kill-Tree {
-  param([int]$ProcessId)
-  try {
-    Write-Host "Stopping Keploy process tree (root PID $ProcessId)…"
-    cmd /c "taskkill /PID $ProcessId /T /F" | Out-Null
-  } catch {
-    Write-Warning "taskkill failed for $ProcessId : $_"
-  }
+    param([int]$ProcessId)
+    try {
+        Write-Host "Stopping Keploy process tree (root PID $ProcessId)…"
+        cmd /c "taskkill /PID $ProcessId /T /F" | Out-Null
+    } catch {
+        Write-Warning "taskkill failed for $ProcessId : $_"
+    }
 }
+
+# =========================
+# ========== SETUP ========
+# =========================
+
+# Clean up previous runs to ensure a fresh start
+Write-Host "Performing cleanup of Docker environment..."
+try { docker compose down 2>$null | Out-Null } catch {}
+try { docker rm -f $appName 2>$null | Out-Null } catch {}
+try { docker network rm $appNetwork 2>$null | Out-Null } catch {}
+# Forcefully remove the debugfs volume that can get stuck
+try { docker volume rm -f debugfs 2>$null | Out-Null } catch {}
+Remove-KeployDirs -Candidates @(".\keploy")
+Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
+Write-Host "Cleanup complete."
+
+# Set up the environment
+Write-Host "Creating Docker network: $appNetwork"
+try { docker network create $appNetwork 2>$null | Out-Null } catch {}
+
+Write-Host "Starting MySQL database..."
+docker compose up -d db
+
+Write-Host "Building Docker image: $appImage"
+docker build -t $appImage .
 
 # =========================
 # ========== RECORD =======
 # =========================
-$containerName = "simple-demo-db"
-$logPath = "$containerName.record.txt"
+$logPath = "$appName.record.txt"
 $expectedTestSetIndex = 0
-$workDir = Get-RunnerWorkPath
-$base = $env:APP_BASE_URL
 
-# Configure image for recording (optional override via DOCKER_IMAGE_RECORD)
-$env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
+$dockerRunCommand = "docker run -p 5000:5000 --name $appName --network $appNetwork -e DB_HOST=db $appImage"
 
-# 1. Correctly quote the docker command for Keploy
-$dockerCmd = '"docker compose up"'
-$recArgs = @(
-  'record',
-  '-c', $dockerCmd,
-  '--container-name', $containerName,
-  '--generate-github-actions=false'
-)
+# Build the entire argument list as a single string, using backticks `` to embed the quotes
+# This ensures Keploy receives -c "<command>" as it expects.
+$recArgs = "record -c `"$dockerRunCommand`" --container-name $appName"
 
-Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
+Write-Host "Starting keploy record (expecting test-set-$expectedTestSetIndex)…"
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
-# 2. Start Keploy in the background, redirecting output to a log file
-$proc = Start-Process -FilePath $env:RECORD_BIN `
-                      -ArgumentList $recArgs `
-                      -PassThru `
-                      -NoNewWindow `
-                      -RedirectStandardOutput $logPath
-
-# 3. Start a background job to stream the log file to the console in real-time
+# Start Keploy in the background and stream its logs
+$proc = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $recArgs -PassThru -NoNewWindow -RedirectStandardOutput $logPath
 $logJob = Start-Job { Get-Content -Path $using:logPath -Wait -Tail 10 }
 Write-Host "Tailing Keploy logs from $logPath ..."
 
 # Wait for app readiness
-Write-Host "Waiting for app to respond on $base/timestamp …"
-$deadline = (Get-Date).AddMinutes(5)
+Write-Host "Waiting for app to respond on $appBaseUrl/health …"
+$deadline = (Get-Date).AddMinutes(2)
 do {
   try {
-    $r = Invoke-WebRequest -Method GET -Uri "$base/timestamp" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    $r = Invoke-WebRequest -Method GET -Uri "$appBaseUrl/health" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     if ($r.StatusCode -eq 200) { break }
   } catch { Start-Sleep 3 }
 } while ((Get-Date) -lt $deadline)
+if ((Get-Date) -ge $deadline) { throw "App failed to start in time." }
 
 # Send traffic to generate tests
 Write-Host "Sending HTTP requests to generate tests…"
 $sent = 0
 try {
-  Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy";                                                           $sent++
-  Invoke-RestMethod -Method POST   -Uri "$base/user"           -Body (@{name="John Doe";email="john@keploy.io"} | ConvertTo-Json) -ContentType "application/json"; $sent++
-  Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
-  Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/timestamp";                                                                   $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
+    # 1. Login to get JWT
+    Write-Host "Logging in to get JWT token..."
+    $loginResponse = Invoke-RestMethod -Method Post -Uri "$appBaseUrl/login" -ContentType "application/json" -Body '{"username": "admin", "password": "admin123"}'
+    $JWT_TOKEN = $loginResponse.access_token
+    $headers = @{ "Authorization" = "Bearer $JWT_TOKEN" }
+    $sent++
+
+    # 2. Health check
+    Invoke-RestMethod -Uri "$appBaseUrl/health"; $sent++
+
+    # 3. Create data
+    Invoke-RestMethod -Method Post -Uri "$appBaseUrl/data" -Headers $headers -ContentType "application/json" -Body '{"message": "First data log"}'; $sent++
+
+    # 4. Get data
+    Invoke-RestMethod -Uri "$appBaseUrl/data" -Headers $headers; $sent++
+
+    # 5. Complex queries
+    Invoke-RestMethod -Uri "$appBaseUrl/generate-complex-queries" -Headers $headers; $sent++
+
+    # 6. System status
+    Invoke-RestMethod -Uri "$appBaseUrl/system/status" -Headers $headers; $sent++
+
+    # 7. Migrations
+    Invoke-RestMethod -Uri "$appBaseUrl/system/migrations" -Headers $headers; $sent++
+
+    # 8. Check blacklisted token
+    Invoke-RestMethod -Uri "$appBaseUrl/auth/check-token/9522d59c56404995af98d4c30bde72b3" -Headers $headers; $sent++
+
+    # 9. Create log entry
+    Invoke-RestMethod -Method Post -Uri "$appBaseUrl/logs" -Headers $headers -ContentType "application/json" -Body '{"event": "user_action", "details": "testing log endpoint"}'; $sent++
+
+    # 10. Client summary
+    Invoke-RestMethod -Uri "$appBaseUrl/reports/client-summary" -Headers $headers; $sent++
+
+    # 11. Financial summary
+    Invoke-RestMethod -Uri "$appBaseUrl/reports/full-financial-summary" -Headers $headers; $sent++
+
+    # 12. Search clients
+    Invoke-RestMethod -Uri "$appBaseUrl/search/clients?q=Global" -Headers $headers; $sent++
+    Invoke-RestMethod -Uri "$appBaseUrl/search/clients?q=F12345" -Headers $headers; $sent++
+
+    # 13. Fund transfer
+    Invoke-RestMethod -Method Post -Uri "$appBaseUrl/transactions/transfer" -Headers $headers -ContentType "application/json" -Body '{"from_account_id": 1, "to_account_id": 2, "amount": "100.00"}'; $sent++
 } catch { Write-Warning "A request failed: $_" }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
-$pollUntil = (Get-Date).AddSeconds(60)
-do {
-  if (Test-RecordingComplete -root $workDir -idx $expectedTestSetIndex -minFiles 7) { break }
-  Start-Sleep 3
-} while ((Get-Date) -lt $pollUntil)
+Start-Sleep -Seconds 10 # Give Keploy time to write files
 
-# Stop Keploy (and docker compose) deterministically
+# Stop Keploy and the application
 Kill-Tree -ProcessId $proc.Id
 Stop-Job $logJob
-# In case the root process already died, just continue
-try { Wait-Process -Id $proc.Id -Timeout 15 -ErrorAction SilentlyContinue } catch {}
+
+# Clean up the containers from the record session
+Write-Host "Cleaning up record session containers..."
+try { docker rm -f $appName 2>$null | Out-Null } catch {}
+# Forcefully remove the Keploy agent container to release the debugfs volume lock
+try { docker rm -f keploy-v2 2>$null | Out-Null } catch {}
+
 
 # Verify recording
-$testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
+$testSetPath = ".\keploy\test-set-$expectedTestSetIndex"
 if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; exit 1 }
-$testCount = (Get-ChildItem -Path $testSetPath -Filter "test-*.yaml").Count
-if ($testCount -eq 0) { Write-Error "No test files were created"; Get-Content $logPath -ErrorAction SilentlyContinue | Select-Object -Last 200; exit 1 }
+$testCount = (Get-ChildItem -Path "$testSetPath\tests" -Filter "test-*.yaml").Count
+if ($testCount -lt 12) { Write-Error "Expected at least 12 test files, but found $testCount."; exit 1 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
+
+Write-Host "Intentionally removing test-2.yaml before replay..."
+$testToRemove = Join-Path $testSetPath "tests\test-2.yaml"
+if (Test-Path $testToRemove) {
+    Remove-Item -Path $testToRemove -Force
+    Write-Host "Successfully removed $testToRemove."
+} else {
+    Write-Warning "Could not find $testToRemove to remove it. Continuing anyway."
+}
 
 # =========================
 # ========== REPLAY =======
 # =========================
 
-# Bring down services before test mode (preserve volumes)
-Write-Host "Shutting down docker compose services before test mode (preserving volumes)…"
+Write-Host "Shutting down database for test mode..."
 docker compose down
-Start-Sleep -Seconds 5
 
-$testContainer = "dedup-go"
-$testLog = "$testContainer.test.txt"
-
-# Configure image for replay (optional override via DOCKER_IMAGE_REPLAY)
-$env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_REPLAY) { $env:DOCKER_IMAGE_REPLAY } else { 'keploy:replay' }
-
-$testArgs = @(
-  'test',
-  '-c', 'docker compose up',
-  '--container-name', $testContainer,
-  '--api-timeout', '60',
-  '--delay', '20',
-  '--generate-github-actions=false'
-)
+$testLog = "$appName.test.txt"
+$testCommand = "$($env:REPLAY_BIN) test -c `"$dockerRunCommand`" --delay 10 --container-name $appName"
 
 Write-Host "Starting keploy replay…"
-Write-Host "Executing: $env:REPLAY_BIN $($testArgs -join ' ')"
-& $env:REPLAY_BIN @testArgs 2>&1 | Tee-Object -FilePath $testLog
+Write-Host "Executing: $testCommand"
+
+# Use Invoke-Expression to run the command string, which correctly handles piping to Tee-Object
+Invoke-Expression $testCommand 2>&1 | Tee-Object -FilePath $testLog
+
 
 # Validate replay report
 $report = ".\keploy\reports\test-run-0\test-set-0-report.yaml"
@@ -249,8 +217,7 @@ $status = ($line.ToString() -replace '.*status:\s*', '').Trim()
 Write-Host "Test status for test-set-0: $status"
 
 if ($status -ne 'PASSED') {
-  Write-Error "Replay failed (status: $status). See logs below:"
-  Get-Content $testLog -ErrorAction SilentlyContinue | Select-Object -Last 200
+  Write-Error "Replay failed (status: $status). See logs in $testLog"
   exit 1
 }
 
