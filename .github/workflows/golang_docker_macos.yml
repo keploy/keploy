@@ -36,7 +36,7 @@ jobs:
         run: |
           security unlock-keychain -p $KEYCHAIN_PASSWORD
         env:
-          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+          KEYCHAIN_PASSWORD: "keploy@123"
 
       - name: Checkout repository
         uses: actions/checkout@v4
