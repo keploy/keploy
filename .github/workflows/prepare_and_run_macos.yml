@@ -63,7 +63,7 @@ jobs:
 
   # Build docker image once on Linux and let macOS jobs pull via download-image
   build-docker-image:
-    runs-on: [self-hosted, macOS, native]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -71,17 +71,11 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-      
-      - name: Unlock keychain
-        if: runner.os == 'macOS'
-        run: |
-          security unlock-keychain -p $KEYCHAIN_PASSWORD
-        env:
-          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
       - name: Build image
         run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+          docker build -t ttl.sh/keploy/keploy:1h .
+          
       - name: Push image
         run: |
           docker push ttl.sh/keploy/keploy:1h
@@ -92,12 +86,21 @@ jobs:
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
+  # Pull docker image on macOS native runners
+  pull-docker-image:
+    runs-on: [self-hosted, macOS, native]
+    needs: build-docker-image
+    steps:
+      - name: Pull image
+        run: |
+          docker pull ttl.sh/keploy/keploy:1h
+
   run_python_docker_macos:
-    needs: [build-and-upload, build-docker-image]
+    needs: [build-and-upload, pull-docker-image]
     # needs: [upload-latest]
     uses: ./.github/workflows/python_docker_macos.yml
 
   run_golang_docker_macos:
-    needs: [build-and-upload, build-docker-image]
+    needs: [build-and-upload, pull-docker-image]
     # needs: [upload-latest]
     uses: ./.github/workflows/golang_docker_macos.yml
