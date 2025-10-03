@@ -117,7 +117,7 @@ func (a *App) SetupDocker() error {
 		newCmd, err := HookImpl.BeforeDockerSetup(context.Background(), a.cmd)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during docker setup")
-			return err 
+			return err
 		}
 		a.cmd = newCmd
 	}
