@@ -28,7 +28,7 @@ ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
 RUN apt-get update
-RUN apt-get install -y ca-certificates curl sudo && \
+RUN apt-get install -y ca-certificates curl sudo iproute2 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -54,4 +54,4 @@ RUN sed -i 's/\r$//' /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy"]
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent","--is-docker"]

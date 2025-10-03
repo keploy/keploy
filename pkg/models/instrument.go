@@ -18,6 +18,9 @@ type HookOptions struct {
 	E2E           bool
 	Port          uint32 // used for e2e filtering
 	BigPayload    bool
+	IsDocker      bool
+	ProxyPort     uint32
+	ServerPort    uint32
 }
 
 type IngressEvent struct {
@@ -51,9 +54,28 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	Container     string
-	DockerNetwork string
-	DockerDelay   uint64
+	ClientNSPID         uint32
+	Container         string
+	KeployContainer   string
+	DockerNetwork     string
+	DockerDelay       uint64
+	// ClientInode       uint64
+	// AppInode          uint64
+	Cmd               string
+	IsDocker          bool
+	CommandType       string
+	EnableTesting     bool
+	ProxyPort         uint32
+	DnsPort           uint32
+	Mode              Mode
+	// ClientNsPid       uint32
+	// ClientID          uint64
+	AgentIP           string
+	GlobalPassthrough bool
+	AgentPort         uint32
+	AppPorts          []string
+	AppNetwork        string
+	AppNetworks       []string
 }
 
 type RunOptions struct {

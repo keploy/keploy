@@ -5,6 +5,8 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"go.keploy.io/server/v2/pkg/models"
+	"gopkg.in/yaml.v3"
 )
 
 type Client interface {
@@ -27,12 +29,32 @@ type Client interface {
 	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
-
+	SetInitPid(c *Compose, containerName string) error
+	SetPidContainer(c *Compose, appContainerName string, agentContainerName string) error
+	SetAgentNamespacesInCompose(c *Compose, appContainerName string, agentContainerName string) error
 	IsContainerRunning(containerName string) (bool, error)
 	CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error
+
+	// New functions for finding containers in compose files
+	FindContainerInComposeFiles(composePaths []string, containerName string) (*ComposeServiceInfo, error)
+	FindContainerInComposeCommand(dockerComposeCmd, containerName string) (*ComposeServiceInfo, error)
+
+	// Function for generating keploy-agent service configuration
+	GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error)
+	AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error
+	CreateKeployComposeFile(opts models.SetupOptions, version string) (*Compose, error)
+	ModifyComposeForKeployIntegration(compose *Compose, opts models.SetupOptions, appContainerName string) error
 }
 
 type NetworkInfo struct {
 	External bool
 	Name     string
+}
+
+// ComposeServiceInfo represents information about a service found in a Docker Compose file
+type ComposeServiceInfo struct {
+	ComposePath string   // Path to the docker-compose file
+	Networks    []string // Networks that the service is connected to
+	Ports       []string // Port mappings for the service
+	Compose     *Compose // The entire Compose structure for further modifications if needed
 }
