@@ -570,6 +570,12 @@ func ToInt(value interface{}) int {
 	switch v := value.(type) {
 	case int:
 		return v
+	case int64:
+		return int(v)
+	case int32:
+		return int(v)
+	case float32:
+		return int(v)
 	case string:
 		i, err := strconv.Atoi(v)
 		if err != nil {
@@ -579,6 +585,14 @@ func ToInt(value interface{}) int {
 		return i
 	case float64:
 		return int(v)
+	case json.Number:
+		// Try int64 first
+		if i, err := v.Int64(); err == nil {
+			return int(i)
+		}
+		if f, err := v.Float64(); err == nil {
+			return int(f)
+		}
 
 	}
 	return 0
@@ -1286,3 +1300,88 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 // 	}
 // 	return string(xmlBytes), nil
 // }
+
+func ParseGRPCPath(p string) (serviceFull, method string, err error) {
+	// Trim whitespace and validate input
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", "", fmt.Errorf("gRPC path cannot be empty")
+	}
+
+	// Store original path for error messages
+	originalPath := p
+	p = strings.TrimPrefix(p, "/")
+
+	// Split path into components
+	parts := strings.Split(p, "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid gRPC path %q: expected format '/package.Service/Method', got %d path segments", originalPath, len(parts))
+	}
+
+	serviceFull = strings.TrimSpace(parts[0])
+	method = strings.TrimSpace(parts[1])
+
+	// Validate service name is not empty
+	if serviceFull == "" {
+		return "", "", fmt.Errorf("invalid gRPC path %q: service name cannot be empty", originalPath)
+	}
+
+	// Validate method name is not empty
+	if method == "" {
+		return "", "", fmt.Errorf("invalid gRPC path %q: method name cannot be empty", originalPath)
+	}
+
+	// Validate service name format (should contain at least package.Service)
+	if !strings.Contains(serviceFull, ".") {
+		return "", "", fmt.Errorf("invalid service name %q in path %q: expected format 'package.Service'", serviceFull, originalPath)
+	}
+
+	// Validate service name doesn't start or end with dots
+	if strings.HasPrefix(serviceFull, ".") || strings.HasSuffix(serviceFull, ".") {
+		return "", "", fmt.Errorf("invalid service name %q in path %q: cannot start or end with '.'", serviceFull, originalPath)
+	}
+
+	// Validate service name doesn't contain consecutive dots
+	if strings.Contains(serviceFull, "..") {
+		return "", "", fmt.Errorf("invalid service name %q in path %q: cannot contain consecutive dots", serviceFull, originalPath)
+	}
+
+	// Validate method name format (basic identifier validation)
+	if !isValidGRPCIdentifier(method) {
+		return "", "", fmt.Errorf("invalid method name %q in path %q: must be a valid identifier", method, originalPath)
+	}
+
+	// Validate service parts are valid identifiers
+	serviceParts := strings.Split(serviceFull, ".")
+	for i, part := range serviceParts {
+		if !isValidGRPCIdentifier(part) {
+			return "", "", fmt.Errorf("invalid service name component %q at position %d in path %q: must be a valid identifier", part, i, originalPath)
+		}
+	}
+
+	return serviceFull, method, nil
+}
+
+// isValidGRPCIdentifier validates if a string is a valid gRPC identifier
+// gRPC identifiers must start with a letter and contain only letters, digits, and underscores
+func isValidGRPCIdentifier(name string) bool {
+	if len(name) == 0 {
+		return false
+	}
+
+	// First character must be a letter or underscore
+	first := name[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+		return false
+	}
+
+	// Remaining characters must be letters, digits, or underscores
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+
+	return true
+}

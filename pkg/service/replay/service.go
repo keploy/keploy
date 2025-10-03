@@ -22,6 +22,8 @@ type Instrumentation interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
+	GetErrorChannel() <-chan error
 
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
@@ -35,6 +37,11 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
+	// UpdateTestSetTemplate persists the (possibly updated) template map for a test-set.
+	// Used during re-record to dynamically refresh values like JWTs/IDs as soon as
+	// their producing API responses are observed, so subsequent test cases use the
+	// latest values rather than stale ones from the previous run.
+	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
@@ -44,6 +51,13 @@ type Service interface {
 
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context) error
+
+	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+
+	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
+	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result)
+	// CompareGRPCResp compares gRPC responses and returns match result with detailed diffs
+	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result)
 }
 
 type TestDB interface {
@@ -100,4 +114,9 @@ type InstrumentState struct {
 	AppID      uint64
 	HookCancel context.CancelFunc
 	UnloadDone <-chan struct{} // Channel that will be closed when hooks are completely unloaded
+}
+
+type MappingDB interface {
+	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
 }

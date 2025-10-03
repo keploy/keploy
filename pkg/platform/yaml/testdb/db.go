@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
@@ -36,6 +38,7 @@ type tcsInfo struct {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
+	tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
@@ -122,9 +125,28 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 		tcs = append(tcs, tc)
 	}
+
+	// Sort test cases by their actual timestamp, whether HTTP or gRPC
 	sort.SliceStable(tcs, func(i, j int) bool {
-		return tcs[i].HTTPReq.Timestamp.Before(tcs[j].HTTPReq.Timestamp)
+		var timeI, timeJ time.Time
+
+		// Determine which timestamp to use for test case i based on its Kind
+		if tcs[i].Kind == models.HTTP {
+			timeI = tcs[i].HTTPReq.Timestamp
+		} else if tcs[i].Kind == models.GRPC_EXPORT {
+			timeI = tcs[i].GrpcReq.Timestamp
+		}
+
+		// Determine which timestamp to use for test case j based on its Kind
+		if tcs[j].Kind == models.HTTP {
+			timeJ = tcs[j].HTTPReq.Timestamp
+		} else if tcs[j].Kind == models.GRPC_EXPORT {
+			timeJ = tcs[j].GrpcReq.Timestamp
+		}
+
+		return timeI.Before(timeJ)
 	})
+
 	return tcs, nil
 }
 

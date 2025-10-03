@@ -1,6 +1,7 @@
 package report
 
 import (
+	"bufio"
 	"fmt"
 	"strings"
 	"time"
@@ -32,41 +33,57 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%.2f s", secs)
 }
 
-// printSingleSummary prints a compact summary for a single report source
-func printSingleSummary(name string, total, pass, fail int, dur time.Duration, failedCases []string) {
-	fmt.Println("<=========================================>")
-	fmt.Println(" COMPLETE TESTRUN SUMMARY.")
-	fmt.Printf("\tTotal tests: %d\n", total)
-	fmt.Printf("\tTotal test passed: %d\n", pass)
-	fmt.Printf("\tTotal test failed: %d\n", fail)
+// printSingleSummaryTo is the buffered variant used internally.
+func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, dur time.Duration, failedCases []string) {
+	fmt.Fprintln(w, "<=========================================>")
+	fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
+	fmt.Fprintf(w, "\tTotal tests: %d\n", total)
+	fmt.Fprintf(w, "\tTotal test passed: %d\n", pass)
+	fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
 	if dur > 0 {
-		fmt.Printf("\tTotal time taken: %q\n", fmtDuration(dur))
+		fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
 	} else {
-		fmt.Printf("\tTotal time taken: %q\n", "N/A")
+		fmt.Fprintf(w, "\tTotal time taken: %q\n", "N/A")
 	}
-	fmt.Println("\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
+	fmt.Fprintln(w, "\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
 	tt := "N/A"
 	if dur > 0 {
 		tt = fmtDuration(dur)
 	}
-	fmt.Printf("\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
+	fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
 
-	fmt.Println("\nFAILED TEST CASES:")
+	fmt.Fprintln(w, "\nFAILED TEST CASES:")
 	if fail == 0 || len(failedCases) == 0 {
-		fmt.Println("\t(none)")
+		fmt.Fprintln(w, "\t(none)")
 	} else {
 		for _, fc := range failedCases {
-			fmt.Printf("\t- %s\n", fc)
+			fmt.Fprintf(w, "\t- %s\n", fc)
 		}
 	}
-	fmt.Println("<=========================================>")
+	fmt.Fprintln(w, "<=========================================>")
 }
 
 // applyCliColorsToDiff adds ANSI colors to values in the JSON diff block.
 // - Value after "Path:" is yellow
-// - Value after "Old:" is red
-// - Value after "New:" is green
+// - Value after "Expected:" is red
+// - Value after "Actual:" is green
 func applyCliColorsToDiff(diff string) string {
+	if diff == "" {
+		return diff
+	}
+
+	mustProcess := false
+	for _, prefix := range []string{"Path: ", "  Expected: ", "  Actual: "} {
+		if strings.Contains(diff, prefix) {
+			mustProcess = true
+			break
+		}
+	}
+
+	if !mustProcess {
+		return diff
+	}
+
 	const (
 		ansiReset  = "\x1b[0m"
 		ansiYellow = "\x1b[33m"
@@ -77,21 +94,18 @@ func applyCliColorsToDiff(diff string) string {
 	lines := strings.Split(diff, "\n")
 	for i, line := range lines {
 		if strings.HasPrefix(line, "Path: ") {
-			// Color only the value after "Path: " in yellow
 			value := strings.TrimPrefix(line, "Path: ")
 			lines[i] = "Path: " + ansiYellow + value + ansiReset
 			continue
 		}
-		if strings.HasPrefix(line, "  Old: ") {
-			// Color only the value after "  Old: " in red
-			value := strings.TrimPrefix(line, "  Old: ")
-			lines[i] = "  Old: " + ansiRed + value + ansiReset
+		if strings.HasPrefix(line, "  Expected: ") {
+			value := strings.TrimPrefix(line, "  Expected: ")
+			lines[i] = "  Expected: " + ansiRed + value + ansiReset
 			continue
 		}
-		if strings.HasPrefix(line, "  New: ") {
-			// Color only the value after "  New: " in green
-			value := strings.TrimPrefix(line, "  New: ")
-			lines[i] = "  New: " + ansiGreen + value + ansiReset
+		if strings.HasPrefix(line, "  Actual: ") {
+			value := strings.TrimPrefix(line, "  Actual: ")
+			lines[i] = "  Actual: " + ansiGreen + value + ansiReset
 			continue
 		}
 	}
@@ -110,8 +124,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 	if !test.Result.StatusCode.Normal {
 		hasDiff = true
 		sb.WriteString("Path: status_code\n")
-		sb.WriteString(fmt.Sprintf("  Old: %d\n", test.Result.StatusCode.Expected))
-		sb.WriteString(fmt.Sprintf("  New: %d\n\n", test.Result.StatusCode.Actual))
+		sb.WriteString(fmt.Sprintf("  Expected: %d\n", test.Result.StatusCode.Expected))
+		sb.WriteString(fmt.Sprintf("  Actual: %d\n\n", test.Result.StatusCode.Actual))
 	}
 
 	// Headers
@@ -123,8 +137,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 		expected := strings.Join(hr.Expected.Value, ", ")
 		actual := strings.Join(hr.Actual.Value, ", ")
 		sb.WriteString(fmt.Sprintf("Path: header.%s\n", hr.Actual.Key))
-		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
-		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
+		sb.WriteString(fmt.Sprintf("  Expected: %s\n", expected))
+		sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", actual))
 	}
 
 	// Trailer headers
@@ -136,8 +150,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 		expected := strings.Join(tr.Expected.Value, ", ")
 		actual := strings.Join(tr.Actual.Value, ", ")
 		sb.WriteString(fmt.Sprintf("Path: trailer.%s\n", tr.Actual.Key))
-		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
-		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
+		sb.WriteString(fmt.Sprintf("  Expected: %s\n", expected))
+		sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", actual))
 	}
 
 	// Synthetic content length if body differs and content-length header wasn't already reported
@@ -158,8 +172,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 			if expLen != actLen {
 				hasDiff = true
 				sb.WriteString("Path: content_length\n")
-				sb.WriteString(fmt.Sprintf("  Old: %d\n", expLen))
-				sb.WriteString(fmt.Sprintf("  New: %d\n\n", actLen))
+				sb.WriteString(fmt.Sprintf("  Expected: %d\n", expLen))
+				sb.WriteString(fmt.Sprintf("  Actual: %d\n\n", actLen))
 				break
 			}
 		}

@@ -6,160 +6,105 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
 
-	"github.com/7sDream/geko"
+	"github.com/invopop/yaml"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func (t *Tools) Templatize(ctx context.Context) error {
+// --- V2 Data Structures for Optimized Templatization ---
 
-	testSets := t.config.Templatize.TestSets
-	if len(testSets) == 0 {
-		all, err := t.testDB.GetAllTestSetIDs(ctx)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to get all test sets")
-			return err
-		}
-		testSets = all
-	}
+type PartType int
 
-	if len(testSets) == 0 {
-		t.logger.Warn("No test sets found to templatize")
-		return nil
-	}
+const (
+	RequestHeader PartType = iota
+	RequestURL
+	RequestBody
+	ResponseHeader
+	ResponseBody
+)
 
-	for _, testSetID := range testSets {
-
-		testSet, err := t.testSetConf.Read(ctx, testSetID)
-		if err == nil && (testSet != nil && testSet.Template != nil) {
-			utils.TemplatizedValues = testSet.Template
-		} else {
-			utils.TemplatizedValues = make(map[string]interface{})
-		}
-
-		if err == nil && (testSet != nil && testSet.Secret != nil) {
-			utils.SecretValues = testSet.Secret
-		} else {
-			utils.SecretValues = make(map[string]interface{})
-		}
-
-		// Get test cases from the database
-		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to get test cases")
-			return err
-		}
-
-		if len(tcs) == 0 {
-			t.logger.Warn("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
-			continue
-		}
-
-		err = t.ProcessTestCases(ctx, tcs, testSetID)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to process test cases")
-			return err
-		}
-	}
-	return nil
+func (pt PartType) String() string {
+	return [...]string{"Request Header", "Request URL", "Request Body", "Response Header", "Response Body"}[pt]
 }
 
-func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
+type ValueLocation struct {
+	TestCaseIndex int
+	Part          PartType
+	Path          string
+	Pointer       interface{}
+	OriginalType  string
+}
 
-	// In test cases, we often use placeholders like {{float .id}} for templatized variables. Ideally, we should wrap
-	// them in double quotes, i.e., "{{float .id}}", to prevent errors during JSON unmarshaling. However, we avoid doing
-	// this to prevent user confusion. If a user sees "{{float .id}}", they might wonder whether it's a string or a float.
-	//
-	// To maintain clarity, we remove these placeholders during marshalling and reintroduce them during unmarshalling.
-	//
-	// Note: This conversion is applied only to `reqBody` and `respBody` because all other fields are strings, and
-	// templatized variables in those cases are simply concatenated.
-	//
-	// Example:
-	//
-	// Request:
-	//   method: GET
-	//   url: http://localhost:8080/api/employees/{{string .id}}
-	//
-	// Response:
-	//   status_code: 200
-	//   header:
-	//     Content-Type: application/json
-	//     Date: Fri, 19 Jan 2024 06:06:03 GMT
-	//   body: '{"id":{{float .id}},"firstName":"0","lastName":"0","email":"0"}'
-	//
-	// Notice that even if we omit quotes in the URL, marshalling does not fail. However, when unmarshalling `respBody`,
-	// it will throw an error if placeholders like `{{float .id}}` are not properly handled.
+type TemplateChain struct {
+	TemplateKey string
+	Value       string
+	Producer    *ValueLocation
+	Consumers   []*ValueLocation
+}
+
+// --- Canonical Structs for Assertion ---
+
+type CanonicalChain struct {
+	VariableName string              `yaml:"variable_name"`
+	Value        string              `yaml:"value"`
+	Producer     CanonicalProducer   `yaml:"producer"`
+	Consumers    []CanonicalConsumer `yaml:"consumers"`
+}
+
+type CanonicalProducer struct {
+	RequestID string `yaml:"request_id"`
+	Part      string `yaml:"part"`
+	Path      string `yaml:"path"`
+}
+
+type CanonicalConsumer struct {
+	RequestID string `yaml:"request_id"`
+	Part      string `yaml:"part"`
+	Path      string `yaml:"path"`
+}
+
+// --- V2 Optimized Templatization Logic ---
+func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
 	}
 
-	// Process test cases for different scenarios and update the tcs and utils.TemplatizedValues
-	// Case 1: Response Body of one test case to Request Headers of other test cases
-	// (use case: Authorization token)
-	t.processRespBodyToReqHeader(ctx, tcs)
+	reqBodies := make([]interface{}, len(tcs))
+	respBodies := make([]interface{}, len(tcs))
+	for i, tc := range tcs {
+		decoderReq := json.NewDecoder(strings.NewReader(tc.HTTPReq.Body))
+		decoderReq.UseNumber()
+		_ = decoderReq.Decode(&reqBodies[i])
+		decoderResp := json.NewDecoder(strings.NewReader(tc.HTTPResp.Body))
+		decoderResp.UseNumber()
+		_ = decoderResp.Decode(&respBodies[i])
+	}
 
-	// Case 2: Request Headers of one test case to Request Headers of other test cases
-	// (use case: Authorization token if Login API is not present in the test set)
-	t.processReqHeadersToReqHeader(ctx, tcs)
+	valueIndex := t.buildValueIndexV2(ctx, tcs, reqBodies, respBodies)
+	chains := t.applyTemplatesFromIndexV2(ctx, valueIndex, utils.TemplatizedValues)
 
-	// Case 3: Response Body of one test case to Response Headers of other
-	// (use case: POST - GET scenario)
-	t.processRespBodyToReqURL(ctx, tcs)
-
-	// Case 4: Compare the req and resp body of one to other.
-	// (use case: POST - PUT scenario)
-	t.processRespBodyToReqBody(ctx, tcs)
-
-	// Case 5: Compare the req and resp for same test case for any common fields.
-	// (use case: POST) request and response both have same fields.
-	t.processBody(ctx, tcs)
-
-	// Case 6: Compare the req url with the response body of same test for any common fields.
-	// (use case: GET) URL might container same fields as response body.
-	t.processReqURLToRespBodySameTest(ctx, tcs)
-
-	// case 7: Compare the resp body of one test with the response body of other tests for any common fields.
-	// (use case: POST - GET scenario)
-	t.processRespBodyToRespBody(ctx, tcs)
-
-	// case 7: Compare the req body of one test with the response body of other tests for any common fields.
-	// (use case: POST - GET scenario)
-	t.processReqBodyToRespBody(ctx, tcs)
-
-	// case 8: Compare the req body of one test with the req URL of other tests for any common fields.
-	// (use case: POST - GET scenario)
-	t.processReqBodyToReqURL(ctx, tcs)
-
-	// case 9: Compare the req body of one test with the req body of other tests for any common fields.
-	// (use case: POST - PUT scenario)
-	t.processReqBodyToReqBody(ctx, tcs)
-
-	// case 10: Compare the req URL of one test with the req body of other tests for any common fields.
-	// (use case: GET - PUT scenario)
-	t.processReqURLToReqBody(ctx, tcs)
-
-	// case 11: Compare the req URL of one test with the req URL of other tests for any common fields
-	// (use case: GET - PUT scenario)
-	t.processReqURLToReqURL(ctx, tcs)
-
-	// case 12: Compare the req URL of one test with the resp Body of other tests for any common fields
-	// (use case: GET - PUT scenario)
-	t.processReqURLToRespBody(ctx, tcs)
-
-	for _, tc := range tcs {
+	for i, tc := range tcs {
+		if reqBodies[i] != nil {
+			newBody, _ := json.Marshal(reqBodies[i])
+			tc.HTTPReq.Body = string(newBody)
+		}
+		if respBodies[i] != nil {
+			newBody, _ := json.Marshal(respBodies[i])
+			tc.HTTPResp.Body = string(newBody)
+		}
 		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
-		err := t.testDB.UpdateTestCase(ctx, tc, testSetID, false)
-		if err != nil {
+		if err := t.testDB.UpdateTestCase(ctx, tc, testSetID, false); err != nil {
 			utils.LogError(t.logger, err, "failed to update test case")
 			return err
 		}
@@ -191,297 +136,657 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 		}
 	}
 
+	t.logAPIChains(chains, tcs)
+
+	if fuzzerYamlPath := os.Getenv("ASSERT_CHAINS_WITH"); fuzzerYamlPath != "" {
+		fmt.Println("Asserting chains with fuzzer YAML:", fuzzerYamlPath)
+		t.AssertChains(chains, tcs, fuzzerYamlPath)
+	}
 	return nil
 }
 
-func (t *Tools) processRespBodyToReqHeader(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-		if err != nil {
-			t.logger.Error("failed to parse response body, skipping RespBodyToReqHeader Template processing", zap.String("testcase", tcs[i].Name), zap.Error(err))
+func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCase) {
+	if len(chains) == 0 {
+		return
+	}
+	fmt.Println("\n✨ API Chain Analysis ✨")
+	fmt.Println("========================")
+	for i, chain := range chains {
+		if i > 0 {
+			fmt.Println("--------------------")
+		}
+		truncatedValue := chain.Value
+		if len(truncatedValue) > 50 {
+			truncatedValue = truncatedValue[:47] + "..."
+		}
+		fmt.Printf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue)
+		fmt.Printf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases))
+		for j, consumer := range chain.Consumers {
+			branch := "├─>"
+			if j == len(chain.Consumers)-1 {
+				branch = "    └─>"
+			}
+			fmt.Printf("    %s [CONSUMER] %s\n", branch, formatLocation(consumer, testCases))
+		}
+	}
+	fmt.Println("========================")
+}
+
+func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
+	if loc == nil || loc.TestCaseIndex >= len(testCases) {
+		return "unknown location"
+	}
+	testCaseName := testCases[loc.TestCaseIndex].Name
+	switch loc.Part {
+	case RequestHeader:
+		return fmt.Sprintf("%s (%s '%s')", testCaseName, loc.Part, loc.Path)
+	case ResponseBody, RequestBody:
+		return fmt.Sprintf("%s (%s at '%s')", testCaseName, loc.Part, loc.Path)
+	case RequestURL:
+		return fmt.Sprintf("%s (%s)", testCaseName, loc.Part)
+	default:
+		return fmt.Sprintf("%s (%s)", testCaseName, loc.Part)
+	}
+}
+
+func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, reqBodies, respBodies []interface{}) map[string][]*ValueLocation {
+	valueIndex := make(map[string][]*ValueLocation)
+	for i := range tcs {
+		for k, val := range tcs[i].HTTPReq.Header {
+			loc := &ValueLocation{TestCaseIndex: i, Part: RequestHeader, Path: k, Pointer: &tcs[i].HTTPReq.Header, OriginalType: "string"}
+			if k == "Authorization" && strings.HasPrefix(val, "Bearer ") {
+				token := strings.TrimPrefix(val, "Bearer ")
+				valueIndex[token] = append(valueIndex[token], loc)
+			} else {
+				valueIndex[val] = append(valueIndex[val], loc)
+			}
+		}
+		parsedURL, err := url.Parse(tcs[i].HTTPReq.URL)
+		if err == nil {
+			pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+			for j, segment := range pathSegments {
+				if segment != "" {
+					path := fmt.Sprintf("path.%d", j)
+					loc := &ValueLocation{TestCaseIndex: i, Part: RequestURL, Path: path, Pointer: &tcs[i].HTTPReq.URL, OriginalType: "string"}
+					valueIndex[segment] = append(valueIndex[segment], loc)
+				}
+			}
+		}
+		if reqBodies[i] != nil {
+			findValuesInInterface(reqBodies[i], []string{}, valueIndex, i, RequestBody, &reqBodies[i])
+		}
+		if respBodies[i] != nil {
+			findValuesInInterface(respBodies[i], []string{}, valueIndex, i, ResponseBody, &respBodies[i])
+		}
+	}
+	return valueIndex
+}
+
+func findValuesInInterface(data interface{}, path []string, index map[string][]*ValueLocation, tcIndex int, part PartType, containerPtr interface{}) {
+	if data == nil {
+		return
+	}
+	if m, ok := data.(map[string]interface{}); ok {
+		for k, v := range m {
+			newPath := append(path, k)
+			findValuesInInterface(v, newPath, index, tcIndex, part, containerPtr)
+		}
+		return
+	}
+	if s, ok := data.([]interface{}); ok {
+		for i, v := range s {
+			newPath := append(path, strconv.Itoa(i))
+			findValuesInInterface(v, newPath, index, tcIndex, part, containerPtr)
+		}
+		return
+	}
+	currentPath := strings.Join(path, ".")
+	switch v := data.(type) {
+	case string:
+		loc := &ValueLocation{TestCaseIndex: tcIndex, Part: part, Path: currentPath, Pointer: containerPtr, OriginalType: "string"}
+		index[v] = append(index[v], loc)
+	case json.Number:
+		loc := &ValueLocation{TestCaseIndex: tcIndex, Part: part, Path: currentPath, Pointer: containerPtr}
+		if strings.Contains(v.String(), ".") {
+			loc.OriginalType = "float"
+		} else {
+			loc.OriginalType = "int"
+		}
+		index[v.String()] = append(index[v.String()], loc)
+	}
+}
+
+func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
+	// We need deterministic variable naming so that earlier producer test cases
+	// receive the base key without suffix and later ones get incremental suffixes.
+	// Strategy:
+	// 1. Build candidate chains first (without assigning template keys).
+	// 2. Group candidates by their derived base key.
+	// 3. Sort each group by producer test index (ascending).
+	// 4. Assign template keys deterministically (base, base1, base2 ...) within each group.
+	// 5. Apply the template substitutions using the assigned keys.
+
+	type candidate struct {
+		value        string
+		locations    []*ValueLocation
+		producer     *ValueLocation
+		consumers    []*ValueLocation
+		occurrences  []*ValueLocation // all producer+consumer occurrences to templatize
+		baseKey      string
+		producerType string
+	}
+
+	var candidates []*candidate
+
+	// Step 1: collect candidates.
+	for value, locations := range index {
+
+		switch strings.ToLower(value) {
+		case "true", "false", "null", "nil":
+			continue // Do not templatize booleans, null, or nil.
+		}
+
+		if floatVal, err := strconv.ParseFloat(value, 64); err == nil && floatVal == 0 {
+			continue // Do not templatize zero.
+		}
+
+		if len(locations) < 2 { // need at least producer + consumer
 			continue
 		}
-		if jsonResponse == nil {
-			t.logger.Debug("Skipping RespBodyToReqHeader Template processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
+
+		sort.Slice(locations, func(i, j int) bool { return locations[i].TestCaseIndex < locations[j].TestCaseIndex })
+
+		var producer *ValueLocation
+		for _, loc := range locations {
+			if loc.Part == ResponseBody || loc.Part == ResponseHeader { // allow response headers future
+				producer = loc
+				break
+			}
+		}
+		if producer == nil { // can't form a chain without a producer
 			continue
 		}
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			addTemplates(t.logger, tcs[j].HTTPReq.Header, jsonResponse)
-		}
-		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
-	}
-}
 
-func (t *Tools) processReqHeadersToReqHeader(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+		var subsequentConsumers []*ValueLocation
+		for _, loc := range locations {
+			if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex {
+				subsequentConsumers = append(subsequentConsumers, loc)
 			}
-			compareReqHeaders(t.logger, tcs[j].HTTPReq.Header, tcs[i].HTTPReq.Header)
 		}
-	}
-}
-
-func (t *Tools) processRespBodyToReqURL(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to URL processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
+		if len(subsequentConsumers) == 0 { // no data flow
 			continue
 		}
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			addTemplates(t.logger, &tcs[j].HTTPReq.URL, jsonResponse)
-		}
-		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
-	}
-}
 
-func (t *Tools) processRespBodyToReqBody(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+		// Determine all occurrences (producers + valid consumers at/after producer index)
+		var occurrences []*ValueLocation
+		for _, loc := range locations {
+			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
+			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
+			if isProducer || isConsumer {
+				occurrences = append(occurrences, loc)
 			}
-			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
-			if err != nil || jsonRequest == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
-				continue
-			}
-			addTemplates(t.logger, jsonRequest, jsonResponse)
-			tcs[j].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
 		}
-		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
-	}
-}
 
-func (t *Tools) processBody(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs); i++ {
-		select {
-		case <-ctx.Done():
-			return
-		default:
+		// Derive base key (replicating previous logic for stability)
+		var baseKey string
+		if producer.Part == RequestURL {
+			baseKey = value
+		} else {
+			baseKey = producer.Path
+			parts := strings.Split(baseKey, ".")
+			if len(parts) > 0 {
+				baseKey = parts[len(parts)-1]
+			}
+			if _, err := strconv.Atoi(baseKey); err == nil { // numeric leaf => use parent context
+				partsFull := strings.Split(producer.Path, ".")
+				parent := "arr"
+				if len(partsFull) >= 2 {
+					parent = partsFull[len(partsFull)-2]
+					for i := len(partsFull) - 2; i >= 0; i-- { // find first non-numeric ancestor
+						if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
+							parent = partsFull[i]
+							break
+						}
+					}
+				}
+				baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
+			}
 		}
-		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
-		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		addTemplates(t.logger, jsonResponse, jsonRequest)
-		tcs[i].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
-		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
-	}
-}
 
-func (t *Tools) processReqURLToRespBodySameTest(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs); i++ {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to URL processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		addTemplates(t.logger, &tcs[i].HTTPReq.URL, jsonResponse)
-		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
+		candidates = append(candidates, &candidate{
+			value:        value,
+			locations:    locations,
+			producer:     producer,
+			consumers:    subsequentConsumers,
+			occurrences:  occurrences,
+			baseKey:      baseKey,
+			producerType: producer.OriginalType,
+		})
 	}
-}
 
-func (t *Tools) processRespBodyToRespBody(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			jsonResponse2, err := parseIntoJSON(tcs[j].HTTPResp.Body)
-			if err != nil || jsonResponse == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
-				continue
-			}
-			addTemplates(t.logger, jsonResponse2, jsonResponse)
-			tcs[j].HTTPResp.Body = marshalJSON(jsonResponse2, t.logger)
-		}
-		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
+	// Step 2: group by baseKey
+	groups := make(map[string][]*candidate)
+	for _, c := range candidates {
+		groups[c.baseKey] = append(groups[c.baseKey], c)
 	}
-}
 
-func (t *Tools) processReqBodyToRespBody(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
-		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
-			if err != nil || jsonResponse == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
-				continue
-			}
-			addTemplates(t.logger, jsonResponse, jsonRequest)
-			tcs[j].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
-		}
-		tcs[i].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
+	// To keep overall deterministic ordering across different base keys, create sorted list of base keys.
+	baseKeys := make([]string, 0, len(groups))
+	for k := range groups {
+		baseKeys = append(baseKeys, k)
 	}
-}
+	sort.Strings(baseKeys)
 
-func (t *Tools) processReqBodyToReqURL(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
-		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping response to URL processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			addTemplates(t.logger, &tcs[j].HTTPReq.URL, jsonRequest)
-		}
-		tcs[i].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
-	}
-}
+	var resultChains []*TemplateChain
 
-func (t *Tools) processReqBodyToReqBody(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
-		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
-			continue
-		}
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			jsonRequest2, err := parseIntoJSON(tcs[j].HTTPReq.Body)
-			if err != nil || jsonRequest2 == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
-				continue
-			}
-			addTemplates(t.logger, jsonRequest2, jsonRequest)
-			tcs[j].HTTPReq.Body = marshalJSON(jsonRequest2, t.logger)
-		}
-		tcs[i].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
-	}
-}
+	for _, bk := range baseKeys {
+		cs := groups[bk]
+		// Step 3: sort candidates in this group by producer test index (ascending)
+		sort.Slice(cs, func(i, j int) bool { return cs[i].producer.TestCaseIndex < cs[j].producer.TestCaseIndex })
 
-func (t *Tools) processReqURLToReqBody(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+		// Maintain a counter for suffix assignment within this base key group.
+		occurrenceIdx := 0
+		for _, cand := range cs {
+			// Determine deterministic key: first gets baseKey, subsequent get baseKey + number (skipping existing collisions with different value)
+			var desiredKey string
+			if occurrenceIdx == 0 {
+				desiredKey = bk
+			} else {
+				desiredKey = fmt.Sprintf("%s%d", bk, occurrenceIdx)
 			}
-			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
-			if err != nil || jsonRequest == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
-				continue
-			}
-			addTemplates(t.logger, jsonRequest, &tcs[i].HTTPReq.URL)
-			tcs[j].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
-		}
-	}
-}
+			occurrenceIdx++
 
-func (t *Tools) processReqURLToRespBody(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		for j := 0; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+			// Ensure uniqueness versus existing templateConfig but deterministic for this ordering.
+			// If the key already exists with same value -> reuse. If exists different value -> find next free suffix.
+			finalKey := desiredKey
+			if existingVal, exists := templateConfig[finalKey]; exists && existingVal != cand.value {
+				// find next available with incrementing suffix while preserving ordering.
+				suffix := 1
+				for {
+					try := fmt.Sprintf("%s%d", bk, suffix)
+					if existingVal2, exists2 := templateConfig[try]; !exists2 || existingVal2 == cand.value {
+						finalKey = try
+						break
+					}
+					suffix++
+				}
 			}
-			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
-			if err != nil || jsonResponse == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
-				continue
+			// Record in templateConfig if not present
+			if existingVal, exists := templateConfig[finalKey]; !exists {
+				templateConfig[finalKey] = cand.value
+			} else if existingVal != cand.value {
+				// Extremely unlikely due to above handling; fallback to insertUnique just in case.
+				finalKey = insertUnique(bk, cand.value, templateConfig)
 			}
-			addTemplates(t.logger, jsonResponse, &tcs[i].HTTPReq.URL)
-			tcs[j].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
-		}
-	}
-}
 
-func (t *Tools) processReqURLToReqURL(ctx context.Context, tcs []*models.TestCase) {
-	for i := 0; i < len(tcs)-1; i++ {
-		for j := i + 1; j < len(tcs); j++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+			// Build chain and apply substitutions
+			chain := &TemplateChain{
+				TemplateKey: finalKey,
+				Value:       cand.value,
+				Producer:    cand.producer,
+				Consumers:   cand.consumers,
 			}
-			addTemplates(t.logger, &tcs[j].HTTPReq.URL, &tcs[i].HTTPReq.URL)
+			resultChains = append(resultChains, chain)
+
+			templateString := fmt.Sprintf("{{%s .%s}}", cand.producerType, finalKey)
+			for _, loc := range cand.occurrences {
+				if loc.Part == RequestHeader {
+					if headerMap, ok := loc.Pointer.(*map[string]string); ok {
+						originalHeaderValue := (*headerMap)[loc.Path]
+						if loc.Path == "Authorization" && strings.HasPrefix(originalHeaderValue, "Bearer ") {
+							(*headerMap)[loc.Path] = "Bearer " + templateString
+						} else {
+							(*headerMap)[loc.Path] = templateString
+						}
+					}
+				} else if loc.Part == RequestURL {
+					if urlPtr, ok := loc.Pointer.(*string); ok {
+						reconstructURL(urlPtr, loc.Path, templateString)
+					}
+				} else {
+					setValueByPath(loc.Pointer, loc.Path, templateString)
+				}
+			}
 		}
 	}
+
+	return resultChains
 }
 
 // Utility function to safely marshal JSON and log errors
 var jsonMarshal987 = json.Marshal
 
-// Utility function to safely marshal JSON and log errors
-func marshalJSON(data interface{}, logger *zap.Logger) string {
-	jsonData, err := jsonMarshal987(data)
+func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.TestCase, fuzzerYamlPath string) {
+	fmt.Println("\n🔎 Chain Assertion against Fuzzer Output")
+	fmt.Println("==========================================")
+
+	// 1. Load fuzzer's baseline chains from the YAML file.
+	yamlFile, err := os.ReadFile(fuzzerYamlPath)
 	if err != nil {
-		utils.LogError(logger, err, "failed to marshal JSON data")
-		return ""
+		fmt.Printf("🔴 ERROR: Could not read fuzzer's chain file at %s: %v\n", fuzzerYamlPath, err)
+		return
 	}
-	return string(jsonData)
+
+	// Use a generic map to bypass struct tag parsing issues.
+	var genericFuzzerData map[string]interface{}
+	if err := yaml.Unmarshal(yamlFile, &genericFuzzerData); err != nil {
+		fmt.Printf("🔴 ERROR: Could not parse fuzzer's YAML file into a generic map: %v\n", err)
+		return
+	}
+
+	// Manually build the canonical chains from the generic map. This is the FIX.
+	fuzzerChains, err := buildCanonicalChainsFromMap(genericFuzzerData)
+	if err != nil {
+		fmt.Printf("🔴 ERROR: Could not process the parsed fuzzer data: %v\n", err)
+		return
+	}
+	fmt.Printf("✅ Loaded %d chains from fuzzer baseline file.\n", len(fuzzerChains))
+
+	// 2. Convert and Normalize Keploy's detected chains.
+	canonicalKeployChains := t.convertToCanonical(keployChains, testCases)
+	normalizeCanonicalChains(canonicalKeployChains)
+	fmt.Printf("✅ Converted and Normalized %d detected Keploy chains for comparison.\n", len(canonicalKeployChains))
+
+	// 3. Perform the comparison.
+	passed, report := t.compareChainSets(fuzzerChains, canonicalKeployChains)
+
+	// 4. Print the result.
+	fmt.Println("\n--- Comparison Report ---")
+	fmt.Print(report)
+	if passed {
+		fmt.Println("\n✅ PASSED: Keploy's detected chains match the fuzzer's baseline.")
+	} else {
+		fmt.Println("\n❌ FAILED: Keploy's detected chains DO NOT match the fuzzer's baseline.")
+	}
+	fmt.Println("==========================================")
 }
 
-func parseIntoJSON(response string) (interface{}, error) {
-	if response == "" {
-		return nil, nil
+// buildCanonicalChainsFromMap manually constructs the chain structs from a generic map,
+// avoiding any reliance on struct tags which were failing.
+func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain, error) {
+	var chains []CanonicalChain
+
+	chainsData, ok := data["chains"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("could not find 'chains' array in fuzzer YAML")
 	}
-	// geko lib will maintain the order of the keys in the json.
-	result, err := geko.JSONUnmarshal([]byte(response))
+
+	for _, chainInterface := range chainsData {
+		chainMap, ok := chainInterface.(map[string]interface{})
+		if !ok {
+			continue // Skip malformed entries
+		}
+
+		var canonicalChain CanonicalChain
+		if val, ok := chainMap["variable_name"].(string); ok {
+			canonicalChain.VariableName = val
+		}
+		if val, ok := chainMap["value"].(string); ok {
+			canonicalChain.Value = val
+		}
+
+		// Manually parse the producer
+		if prodInterface, ok := chainMap["producer"].(map[string]interface{}); ok {
+			if val, ok := prodInterface["request_id"].(string); ok {
+				canonicalChain.Producer.RequestID = val
+			}
+			if val, ok := prodInterface["part"].(string); ok {
+				canonicalChain.Producer.Part = val
+			}
+			if val, ok := prodInterface["path"].(string); ok {
+				canonicalChain.Producer.Path = val
+			}
+		}
+
+		// Manually parse consumers
+		if consumersInterface, ok := chainMap["consumers"].([]interface{}); ok {
+			for _, consInterface := range consumersInterface {
+				consMap, ok := consInterface.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				var consumer CanonicalConsumer
+				if val, ok := consMap["request_id"].(string); ok {
+					consumer.RequestID = val
+				}
+				if val, ok := consMap["part"].(string); ok {
+					consumer.Part = val
+				}
+				if val, ok := consMap["path"].(string); ok {
+					consumer.Path = val
+				}
+				canonicalChain.Consumers = append(canonicalChain.Consumers, consumer)
+			}
+		}
+		chains = append(chains, canonicalChain)
+	}
+
+	return chains, nil
+}
+
+// convertToCanonical transforms Keploy's internal chain representation to the common format.
+func (t *Tools) convertToCanonical(chains []*TemplateChain, tcs []*models.TestCase) []CanonicalChain {
+	var canonicalChains []CanonicalChain
+	for _, chain := range chains {
+		producerReqID := fmt.Sprintf("test-%d", chain.Producer.TestCaseIndex+1)
+		producer := CanonicalProducer{
+			RequestID: producerReqID,
+			Part:      chain.Producer.Part.String(),
+			Path:      chain.Producer.Path,
+		}
+		var consumers []CanonicalConsumer
+		for _, c := range chain.Consumers {
+			consumerReqID := fmt.Sprintf("test-%d", c.TestCaseIndex+1)
+			consumers = append(consumers, CanonicalConsumer{
+				RequestID: consumerReqID,
+				Part:      c.Part.String(),
+				Path:      c.Path,
+			})
+		}
+		canonicalChains = append(canonicalChains, CanonicalChain{
+			VariableName: "{{" + chain.TemplateKey + "}}",
+			Value:        chain.Value,
+			Producer:     producer,
+			Consumers:    consumers,
+		})
+	}
+	return canonicalChains
+}
+
+// normalizeCanonicalChains standardizes the representation of chains in-place.
+func normalizeCanonicalChains(chains []CanonicalChain) {
+	for i := range chains {
+		// Normalize producer
+		chains[i].Producer.Part = strings.ReplaceAll(chains[i].Producer.Part, " ", "")
+
+		// Normalize consumers
+		for j := range chains[i].Consumers {
+			chains[i].Consumers[j].Part = strings.ReplaceAll(chains[i].Consumers[j].Part, " ", "")
+			if chains[i].Consumers[j].Part == "RequestURL" {
+				// Standardize all specific URL paths (e.g., path.1) to a generic one.
+				chains[i].Consumers[j].Path = "URL_PATH"
+			}
+		}
+	}
+}
+
+func (t *Tools) compareChainSets(fuzzerChains, keployChains []CanonicalChain) (bool, string) {
+	var report strings.Builder
+	passed := true
+
+	fuzzerChains = filterInsignificantChains(fuzzerChains)
+	keployChains = filterInsignificantChains(keployChains)
+
+	fuzzerMap := make(map[string]CanonicalChain)
+	for _, c := range fuzzerChains {
+		fuzzerMap[c.Value] = c
+	}
+	keployMap := make(map[string]CanonicalChain)
+	for _, c := range keployChains {
+		keployMap[c.Value] = c
+	}
+
+	normalizeConsumer := func(c CanonicalConsumer) string {
+		part := strings.ReplaceAll(c.Part, " ", "")
+		path := c.Path
+		if part == "RequestURL" {
+			path = "URL_PATH"
+		}
+		return fmt.Sprintf("%s|%s|%s", c.RequestID, part, path)
+	}
+
+	// Check 1: Does Keploy find every chain the fuzzer found?
+	for value, fChain := range fuzzerMap {
+		kChain, exists := keployMap[value]
+		if !exists {
+			report.WriteString(fmt.Sprintf("❌ MISSING CHAIN: Fuzzer found chain for value '%s', but Keploy did not.\n", value))
+			passed = false
+			continue
+		}
+
+		// --- NEW, MORE ROBUST PRODUCER COMPARISON ---
+		producersMatch := false
+		// Normalize part names for comparison
+		fProducerPart := strings.ReplaceAll(fChain.Producer.Part, " ", "")
+		kProducerPart := strings.ReplaceAll(kChain.Producer.Part, " ", "")
+
+		if fChain.Producer.RequestID == kChain.Producer.RequestID && fProducerPart == kProducerPart {
+			// Paths are identical, this is a clear match.
+			if fChain.Producer.Path == kChain.Producer.Path {
+				producersMatch = true
+			} else {
+				// Handle cases like "id" vs "data.id". If one path is a suffix of the other,
+				// consider it a match because they refer to the same value semantically.
+				if strings.HasSuffix(fChain.Producer.Path, "."+kChain.Producer.Path) || strings.HasSuffix(kChain.Producer.Path, "."+fChain.Producer.Path) {
+					producersMatch = true
+				}
+			}
+		}
+
+		if !producersMatch {
+			report.WriteString(fmt.Sprintf("❌ PRODUCER MISMATCH for value '%s':\n", value))
+			report.WriteString(fmt.Sprintf("  - Expected (Fuzzer): %+v\n", fChain.Producer))
+			report.WriteString(fmt.Sprintf("  - Actual (Keploy):   %+v\n", kChain.Producer))
+			passed = false
+		}
+		// --- END OF NEW PRODUCER COMPARISON ---
+
+		fConsumerSet := make(map[string]bool)
+		for _, c := range fChain.Consumers {
+			fConsumerSet[normalizeConsumer(c)] = true
+		}
+		kConsumerSet := make(map[string]bool)
+		for _, c := range kChain.Consumers {
+			kConsumerSet[normalizeConsumer(c)] = true
+		}
+
+		if !reflect.DeepEqual(fConsumerSet, kConsumerSet) {
+			report.WriteString(fmt.Sprintf("❌ CONSUMER MISMATCH for value '%s':\n", value))
+			for cKey := range fConsumerSet {
+				if !kConsumerSet[cKey] {
+					report.WriteString(fmt.Sprintf("  - Keploy MISSED consumer: %s\n", cKey))
+				}
+			}
+			for cKey := range kConsumerSet {
+				if !fConsumerSet[cKey] {
+					report.WriteString(fmt.Sprintf("  - Keploy found EXTRA consumer: %s\n", cKey))
+				}
+			}
+			passed = false
+		}
+	}
+
+	// Check 2: Did Keploy find any extra chains the fuzzer didn't?
+	for value, kChain := range keployMap {
+		if _, exists := fuzzerMap[value]; !exists {
+			report.WriteString(fmt.Sprintf("❌ EXTRA CHAIN: Keploy found chain for value '%s' (var: %s), but fuzzer did not.\n", value, kChain.VariableName))
+			passed = false
+		}
+	}
+
+	if passed {
+		report.WriteString("All checks passed.\n")
+	}
+	return passed, report.String()
+}
+
+// filterInsignificantChains removes chains based on short, numeric values that are likely coincidental.
+func filterInsignificantChains(chains []CanonicalChain) []CanonicalChain {
+	var significantChains []CanonicalChain
+	for _, chain := range chains {
+		// Keep the chain if the value is long, or if it's not a simple number.
+		if len(chain.Value) >= 4 {
+			significantChains = append(significantChains, chain)
+			continue
+		}
+		if _, err := strconv.ParseFloat(chain.Value, 64); err != nil {
+			// It's not a number, so it's significant (e.g., "true", "v1")
+			significantChains = append(significantChains, chain)
+		}
+	}
+	return significantChains
+}
+
+// helper to ensure parent segment forms a valid key (reuses existing conventions)
+func sanitizeKey(k string) string {
+	k = strings.ToLower(k)
+	k = strings.ReplaceAll(k, "-", "")
+	k = strings.ReplaceAll(k, "_", "")
+	return k
+}
+
+func reconstructURL(urlPtr *string, segmentPath string, template string) {
+	parsedURL, err := url.Parse(*urlPtr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal the response: %v", err)
+		return
 	}
-	return result, nil
+	var segmentIndex int
+	if _, err := fmt.Sscanf(segmentPath, "path.%d", &segmentIndex); err != nil {
+		return
+	}
+	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+	if segmentIndex < len(pathSegments) {
+		pathSegments[segmentIndex] = template
+	}
+	newPath := "/" + strings.Join(pathSegments, "/")
+	reconstructed := fmt.Sprintf("%s://%s%s", parsedURL.Scheme, parsedURL.Host, newPath)
+	if parsedURL.RawQuery != "" {
+		reconstructed += "?" + parsedURL.RawQuery
+	}
+	*urlPtr = reconstructed
+}
+
+func setValueByPath(root interface{}, path string, value interface{}) {
+	parts := strings.Split(path, ".")
+	var current interface{} = root
+	for i := 0; i < len(parts)-1; i++ {
+		key := parts[i]
+		if reflect.ValueOf(current).Kind() == reflect.Ptr {
+			current = reflect.ValueOf(current).Elem().Interface()
+		}
+		if m, ok := current.(map[string]interface{}); ok {
+			current = m[key]
+		} else if s, ok := current.([]interface{}); ok {
+			if idx, err := strconv.Atoi(key); err == nil && idx < len(s) {
+				current = s[idx]
+			} else {
+				return
+			}
+		} else {
+			return
+		}
+	}
+	lastKey := parts[len(parts)-1]
+	if reflect.ValueOf(current).Kind() == reflect.Ptr {
+		current = reflect.ValueOf(current).Elem().Interface()
+	}
+	if m, ok := current.(map[string]interface{}); ok {
+		m[lastKey] = value
+	} else if s, ok := current.([]interface{}); ok {
+		if idx, err := strconv.Atoi(lastKey); err == nil && idx < len(s) {
+			s[idx] = value
+		}
+	}
 }
 
 func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
@@ -489,440 +794,68 @@ func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	if !ok {
 		return false, val, nil
 	}
-
-	// Check if the value is a template.
-	// Applied this nolint to ignore the staticcheck error here because of readability
-	// nolint:staticcheck
 	if !(strings.Contains(stringVal, "{{") && strings.Contains(stringVal, "}}")) {
 		return false, val, nil
 	}
-
-	// Attempt to get the value from the template.
-	renderedVal, err := render(stringVal)
+	val, err := render(stringVal)
 	if err != nil {
-		// This captures execution errors from the render function.
 		return false, val, err
 	}
-
-	// If render() failed to parse the template, it returns the original string.
-	// We check if the value has actually changed to determine if it was a real template.
-	if reflect.DeepEqual(renderedVal, val) {
-		return false, val, nil
-	}
-
-	return true, renderedVal, nil
+	return true, val, nil
 }
 
-func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interface{}) bool {
-	switch v := interface1.(type) {
-	case geko.ObjectItems:
-		keys := v.Keys()
-		vals := v.Values()
-		for i := range keys {
-			var err error
-			var isTemplatized bool
-			original := vals[i]
-			isTemplatized, vals[i], err = RenderIfTemplatized(vals[i])
-			if err != nil {
-				return false
-			}
-			switch vals[i].(type) {
-			case string:
-				x := vals[i].(string)
-				addTemplates(logger, &x, interface2)
-				vals[i] = x
-			case float32, float64, int, int64:
-				x := interface{}(vals[i])
-				addTemplates(logger, &x, interface2)
-				vals[i] = x
-			default:
-				addTemplates(logger, vals[i], interface2)
-			}
-			if isTemplatized {
-				v.SetValueByIndex(i, original)
-			} else {
-				v.SetValueByIndex(i, vals[i])
-			}
-		}
-	case geko.Array:
-		for i, val := range v.List {
-			var err error
-			var isTemplatized bool
-			original := val
-			isTemplatized, val, err = RenderIfTemplatized(val)
-			if err != nil {
-				return false
-			}
-			switch x := val.(type) {
-			case string:
-				addTemplates(logger, &x, interface2)
-				v.List[i] = x
-			case float32, float64, int, int64:
-				x = interface{}(x)
-				addTemplates(logger, &x, interface2)
-				v.List[i] = x
-			default:
-				addTemplates(logger, v.List[i], interface2)
-			}
-			if isTemplatized {
-				v.Set(i, original)
-			} else {
-				v.Set(i, v.List[i])
-			}
-		}
-	case map[string]string:
-		for key, val := range v {
-			var isTemplatized bool
-			original := val
-			isTemplatized, val1, err := RenderIfTemplatized(val)
-			if err != nil {
-				utils.LogError(logger, err, "failed to render for template")
-				return false
-			}
-			// just a type assertion check though it should always be string.
-			val, ok := (val1).(string)
-			if !ok {
-				continue
-			}
-			// Saving the auth type to add it to the template latet.
-			authType := ""
-			if key == "Authorization" && len(strings.Split(val, " ")) > 1 {
-				authType = strings.Split(val, " ")[0]
-				val = strings.Split(val, " ")[1]
-			}
-			ok = addTemplates1(logger, &val, interface2)
-			if !ok {
-				continue
-			}
-			if key == "Authorization" && len(strings.Split(val, " ")) > 1 {
-				val = authType + " " + val
-			}
-
-			if isTemplatized {
-				v[key] = original
-			} else {
-				v[key] = val
-			}
-		}
-	case *string:
-		original := *v
-		isTemplatized, tempVal, err := RenderIfTemplatized(*v)
-		if err != nil {
-			utils.LogError(logger, err, "failed to render for template")
-			return false
-		}
-		var ok bool
-		// just a type assertion check though it should always be string.
-		*v, ok = (tempVal).(string)
-		if !ok {
-			return false
-		}
-
-		// passing this v as reference so that it can be changed in the addTemplates1 function if required.
-		ok = addTemplates1(logger, v, interface2)
-		if ok {
-			return true
-		}
-
-		originalURL, err := url.Parse(original)
-		if err != nil {
-			return false
-		}
-
-		url, err := url.Parse(*v)
-		if err != nil || url.Scheme == "" || url.Host == "" {
-			return false
-		}
-
-		// Checking the special case of the URL for path and query parameters.
-		urlParts := strings.Split(url.Path, "/")
-		originalURLParts := strings.Split(originalURL.Path, "/")
-		// checking if the last part of the URL is a template.
-		ok = addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
-		if isTemplatized {
-			urlParts[len(urlParts)-1] = originalURLParts[len(originalURLParts)-1]
-		}
-
-		url.Path = strings.Join(urlParts, "/")
-
-		if url.RawQuery != "" {
-			// Safely parse and templatize query parameter values.
-			queryParamsStr := strings.Split(url.RawQuery, "&")
-			for i, paramStr := range queryParamsStr {
-				// Use SplitN to safely handle params with or without values.
-				parts := strings.SplitN(paramStr, "=", 2)
-				// Only process parameters that have a value.
-				if len(parts) == 2 {
-					key, val := parts[0], parts[1]
-					addTemplates1(logger, &val, interface2) // Attempt to templatize the value.
-					queryParamsStr[i] = key + "=" + val     // Reconstruct the parameter string.
-				}
-				// If len(parts) is 1, it's a key-only parameter (e.g., "?flag"), which we leave untouched.
-			}
-			// Reconstruct the raw query and update the URL.
-			url.RawQuery = strings.Join(queryParamsStr, "&")
-			*v = url.String()
-			return true
-		}
-		// reconstruct the URL with the templatized path.
-		*v = url.String()
-		return ok
-	case *interface{}:
-		switch w := (*v).(type) {
-		case float64, int64, int, float32:
-			var val string
-			switch x := w.(type) {
-			case float64:
-				val = utils.ToString(x)
-			case int64:
-				val = utils.ToString(x)
-			case int:
-				val = utils.ToString(x)
-			case float32:
-				val = utils.ToString(x)
-			}
-			addTemplates1(logger, &val, interface2)
-			parts := strings.Split(val, " ")
-			if len(parts) > 1 { // if the value is a template.
-				parts1 := strings.Split(parts[0], "{{")
-				if len(parts1) > 1 {
-					val = parts1[0] + "{{" + getType(w) + " " + parts[1] + "}}"
-				}
-				*v = val
-				return true
-			}
-		default:
-			logger.Error("unsupported type while templatizing", zap.Any("type", w))
-			return false
-		}
+func render(val string) (interface{}, error) {
+	funcMap := template.FuncMap{
+		"int":    utils.ToInt,
+		"string": utils.ToString,
+		"float":  utils.ToFloat,
 	}
-	return false
+	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
+	if err != nil {
+		// If parsing fails, it's likely not a valid template string, but a literal string
+		// that happens to contain "{{" and "}}". In this case, we should not treat it as an
+		// error but return the original value, as no substitution is possible.
+		return val, nil
+	}
+	data := make(map[string]interface{})
+	for k, v := range utils.TemplatizedValues {
+		data[k] = v
+	}
+	if len(utils.SecretValues) > 0 {
+		data["secret"] = utils.SecretValues
+	}
+	var output bytes.Buffer
+	err = tmpl.Execute(&output, data)
+	if err != nil {
+		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
+	}
+	if strings.Contains(val, "string") {
+		return output.String(), nil
+	}
+	outputString := strings.Trim(output.String(), `"`)
+	switch {
+	case strings.Contains(val, "int"):
+		return utils.ToInt(outputString), nil
+	case strings.Contains(val, "float"):
+		return utils.ToFloat(outputString), nil
+	}
+	return outputString, nil
 }
 
-// TODO: add better comment here and rename this function.
-// Here we simplify the second interface and finally add the templates.
-func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
-	switch b := body.(type) {
-	case geko.ObjectItems:
-		keys := b.Keys()
-		vals := b.Values()
-		for i, key := range keys {
-			var err error
-			var isTemplatized bool
-			original := vals[i]
-			isTemplatized, vals[i], err = RenderIfTemplatized(vals[i])
-			if err != nil {
-				utils.LogError(logger, err, "failed to render for template")
-				return false
-			}
-			var ok bool
-			switch vals[i].(type) {
-			case string:
-				x := vals[i].(string)
-				ok = addTemplates1(logger, val1, &x)
-				vals[i] = x
-			case float32:
-				x := vals[i].(float32)
-				ok = addTemplates1(logger, val1, &x)
-				vals[i] = x
-			case int:
-				x := vals[i].(int)
-				ok = addTemplates1(logger, val1, &x)
-				vals[i] = x
-			case int64:
-				x := vals[i].(int64)
-				ok = addTemplates1(logger, val1, &x)
-				vals[i] = x
-			case float64:
-				x := vals[i].(float64)
-				ok = addTemplates1(logger, val1, &x)
-				vals[i] = x
-			default:
-				ok = addTemplates1(logger, val1, vals[i])
-			}
-			// we can't change if the type of vals[i] is also object item.
-			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
-				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
-				vals[i] = fmt.Sprintf("{{%s .%v }}", getType(vals[i]), newKey)
-				// Now change the value of the key in the object.
-				b.SetValueByIndex(i, vals[i])
-				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
-				return true
-			}
-			if isTemplatized {
-				vals[i] = original
-			}
-
-		}
-	case geko.Array:
-		for i, v := range b.List {
-			switch x := v.(type) {
-			case string:
-				addTemplates1(logger, val1, &x)
-				b.List[i] = x
-			case float32:
-				addTemplates1(logger, val1, &x)
-				b.List[i] = x
-			case int:
-				addTemplates1(logger, val1, &x)
-				b.List[i] = x
-			case int64:
-				addTemplates1(logger, val1, &x)
-				b.List[i] = x
-			case float64:
-				addTemplates1(logger, val1, &x)
-				b.List[i] = x
-			default:
-				addTemplates1(logger, val1, b.List[i])
-			}
-			b.Set(i, b.List[i])
-		}
-	case map[string]string:
-		for key, val2 := range b {
-			var isTemplatized bool
-			original := val2
-			isTemplatized, tempVal, err := RenderIfTemplatized(val2)
-			if err != nil {
-				utils.LogError(logger, err, "failed to render for template")
-				return false
-			}
-			val2, ok := (tempVal).(string)
-			if !ok {
-				continue
-			}
-			if *val1 == val2 {
-				newKey := insertUnique(key, val2, utils.TemplatizedValues)
-				b[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
-				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
-				return true
-			}
-			if isTemplatized {
-				b[key] = original
-			}
-
-		}
-		return false
-	case *string:
-		_, tempVal, err := RenderIfTemplatized(b)
-		if err != nil {
-			utils.LogError(logger, err, "failed to render for template")
-			return false
-		}
-		b, ok := (tempVal).(*string)
-		if !ok {
-			return false
-		}
-		if *val1 == *b {
-			return true
-		}
-	case map[string]interface{}:
-		for key, val2 := range b {
-			var err error
-			var isTemplatized bool
-			original := val2
-			isTemplatized, val2, err = RenderIfTemplatized(val2)
-			if err != nil {
-				utils.LogError(logger, err, "failed to render for template")
-				return false
-			}
-			var ok bool
-			switch x := val2.(type) {
-			case string:
-				ok = addTemplates1(logger, val1, &x)
-			case float32:
-				ok = addTemplates1(logger, val1, &x)
-			case int:
-				ok = addTemplates1(logger, val1, &x)
-			case int64:
-				ok = addTemplates1(logger, val1, &x)
-			case float64:
-				ok = addTemplates1(logger, val1, &x)
-			default:
-				ok = addTemplates1(logger, val1, val2)
-			}
-
-			if ok {
-				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
-				if newKey == "" {
-					newKey = key
-				}
-				b[key] = fmt.Sprintf("{{%s .%v}}", getType(b[key]), newKey)
-				*val1 = fmt.Sprintf("{{%s .%v}}", getType(*val1), newKey)
-			} else {
-				if isTemplatized {
-					b[key] = original
-				}
-			}
-		}
-	case *float64, *int64, *int, *float32:
-		var val string
-		switch x := b.(type) {
-		case *float64:
-			val = utils.ToString(*x)
-		case *int64:
-			val = utils.ToString(*x)
-		case *int:
-			val = utils.ToString(*x)
-		case *float32:
-			val = utils.ToString(*x)
-		}
-		if *val1 == val {
-			return true
-		}
-	case []interface{}:
-		for i, val := range b {
-			switch x := val.(type) {
-			case string:
-				addTemplates1(logger, val1, &x)
-				b[i] = x
-			case float32:
-				addTemplates1(logger, val1, &x)
-				b[i] = x
-			case int:
-				addTemplates1(logger, val1, &x)
-				b[i] = x
-			case int64:
-				addTemplates1(logger, val1, &x)
-				b[i] = x
-			case float64:
-				addTemplates1(logger, val1, &x)
-				b[i] = x
-			default:
-				addTemplates1(logger, val1, b[i])
-			}
-			b[i] = val
-		}
-	}
-	return false
-}
-
-func getType(val interface{}) string {
-	switch val.(type) {
-	case string, *string:
-		return "string"
-	case int64, int, int32, *int64, *int, *int32:
-		return "int"
-	case float64, float32, *float64, *float32:
-		return "float"
-	}
-	//TODO: handle the default case properly, return some errot.
-	return ""
-}
-
-// This function returns a unique key for each value, for instance if id already exists, it will return id1.
 func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
-	// If the key has more than one word seperated by a delimiter, remove the delimiter and add the key to the map.
-	if strings.Contains(baseKey, "-") {
-		baseKey = strings.ReplaceAll(baseKey, "-", "")
-	}
+	baseKey = strings.ToLower(baseKey)
+	baseKey = strings.ReplaceAll(baseKey, "-", "")
+	baseKey = strings.ReplaceAll(baseKey, "_", "")
 	if myMap[baseKey] == value {
 		return baseKey
 	}
 	key := baseKey
 	i := 0
-	for myMap[key] != value {
-		if _, exists := myMap[key]; !exists {
+	for {
+		if existingVal, exists := myMap[key]; !exists {
 			myMap[key] = value
+			break
+		} else if existingVal == value {
 			break
 		}
 		i++
@@ -931,176 +864,25 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
-// TODO: Make this function generic for one value of string containing more than one template value.
-// Duplicate function is being used in Simulate function as well.
-
-// render function gives the value of the templatized field.
-func render(val string) (interface{}, error) {
-	// This is a map of helper functions that is used to convert the values to their appropriate types.
-	funcMap := template.FuncMap{
-		"int":    utils.ToInt,
-		"string": utils.ToString,
-		"float":  utils.ToFloat,
-	}
-
-	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
-	if err != nil {
-		// If parsing fails, it's likely not a valid template string, but a literal string
-		// that happens to contain "{{" and "}}". In this case, we should not treat it as an
-		// error but return the original value, as no substitution is possible.
-		return val, nil
-	}
-
-	data := make(map[string]interface{})
-
-	for k, v := range utils.TemplatizedValues {
-		data[k] = v
-	}
-
-	if len(utils.SecretValues) > 0 {
-		data["secret"] = utils.SecretValues
-	}
-
-	var output bytes.Buffer
-	err = tmpl.Execute(&output, data)
-	if err != nil {
-		// An execution error (e.g., missing key) is a genuine problem and should be propagated.
-		return val, fmt.Errorf("failed to execute the template: %v", err)
-	}
-
-	outputString := output.String()
-
-	// Convert the string output to the appropriate type based on the template function used.
-	switch {
-	case strings.Contains(val, "{{int"):
-		return utils.ToInt(outputString), nil
-	case strings.Contains(val, "{{float"):
-		return utils.ToFloat(outputString), nil
-	}
-
-	return outputString, nil
-}
-
-// Compare the headers of 2 utils.TemplatizedValues requests and add the templates.
-func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[string]string) {
-	for key, val1 := range req1 {
-		// Check if the value is already present in the templatized values.
-		var isTemplatized1 bool
-		original1 := val1
-		isTemplatized1, tempVal, err := RenderIfTemplatized(val1)
-		if err != nil {
-			utils.LogError(logger, err, "failed to render for template")
-			return
-		}
-		val, ok := (tempVal).(string)
-		if !ok {
-			continue
-		}
-		val1 = val
-		if val2, ok := req2[key]; ok {
-			var isTemplatized2 bool
-			original2 := val2
-			isTemplatized2, tempVal, err := RenderIfTemplatized(val2)
-			if err != nil {
-				utils.LogError(logger, err, "failed to render for template")
-				return
-			}
-			val, ok = (tempVal).(string)
-			if !ok {
-				continue
-			}
-			val2 = val
-			if val1 == val2 {
-				// Trim the extra space in the string.
-				val2 = strings.Trim(val2, " ")
-				newKey := insertUnique(key, val2, utils.TemplatizedValues)
-				if newKey == "" {
-					newKey = key
-				}
-				req2[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
-				req1[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
-			} else {
-				if isTemplatized2 {
-					req2[key] = original2
-				}
-				if isTemplatized1 {
-					req1[key] = original1
-				}
-			}
-		}
-	}
-}
-
-// removeQuotesInTemplates removes temporary quotes from non-string template placeholders before saving the test case.
-// For example, it converts `{"id":"{{int .id}}}"` back to `{"id":{{int .id}}}`.
-// String templates like `{"name":"{{string .name}}"}` are left untouched as they represent string literals.
 func removeQuotesInTemplates(jsonStr string) string {
-	// Regular expression to find any quoted template placeholder and capture the template itself.
-	re := regexp.MustCompile(`"(\{\{[^{}]*\}\})"`)
-
-	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
-		// If the template is explicitly a string type, keep the surrounding quotes.
+	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
+	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
 		if strings.Contains(match, "{{string") {
 			return match
 		}
-
-		// For all other templates (e.g., int, float, or implicit type), remove the quotes.
-		// The first capture group (submatches[1]) contains the template part, e.g., "{{.id}}".
-		submatches := re.FindStringSubmatch(match)
-		if len(submatches) >= 2 {
-			return submatches[1]
-		}
-
-		// Fallback to simply trimming quotes, though it should not be reached with the current regex.
 		return strings.Trim(match, `"`)
 	})
-
-	return result
 }
 
-// addQuotesInTemplates wraps template placeholders in quotes to ensure the JSON is valid for unmarshaling.
-// It carefully parses the string to only wrap templates that are outside of existing JSON string literals,
-// preventing corruption of JSON strings that contain "{{...}}" as part of their content.
 func addQuotesInTemplates(jsonStr string) string {
-	var result strings.Builder
-	inString := false
-	i := 0
-	for i < len(jsonStr) {
-		char := rune(jsonStr[i])
-
-		// Check for a double quote character.
-		if char == '"' {
-			// Count preceding backslashes to determine if the quote is escaped.
-			slashes := 0
-			for k := i - 1; k >= 0 && jsonStr[k] == '\\'; k-- {
-				slashes++
-			}
-			// If the number of preceding backslashes is even, this is a non-escaped quote.
-			if slashes%2 == 0 {
-				inString = !inString
-			}
-		}
-
-		// Check for the start of a template `{{` when not inside a string literal.
-		if !inString && char == '{' && i+1 < len(jsonStr) && jsonStr[i+1] == '{' {
-			// Find the corresponding end of the template `}}`.
-			// This simple search assumes "}}" does not appear inside a template expression.
-			endIndex := strings.Index(jsonStr[i:], "}}")
-			if endIndex != -1 {
-				endIndex += i + 2 // Adjust index to be relative to the start of jsonStr.
-				template := jsonStr[i:endIndex]
-
-				// Wrap the found template in quotes to make it a valid JSON string value for the parser.
-				result.WriteString(`"`)
-				result.WriteString(template)
-				result.WriteString(`"`)
-				i = endIndex
-				continue
-			}
-		}
-
-		result.WriteRune(char)
-		i++
+	if jsonStr == "" {
+		return ""
 	}
-	return result.String()
+	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+		if strings.Contains(match, "{{string") {
+			return match
+		}
+		return `"` + match + `"`
+	})
 }

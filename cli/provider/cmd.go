@@ -243,6 +243,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("bigPayload", false, "Enable the instrumentation hook to capture test cases and mocks.")
+		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -256,6 +258,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+		err := cmd.Flags().MarkHidden("bigPayload")
+		if err != nil {
+			errMsg := "failed to mark bigPayload as hidden flag"
+			utils.LogError(c.logger, err, errMsg)
+			return err
+		}
+
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
@@ -307,6 +316,14 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
+		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
+		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test and rerecord mode")
+		if cmd.Name() == "rerecord" {
+			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
+			cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
+		}
 		if cmd.Name() == "test" {
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
@@ -385,6 +402,9 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
+		"protoFile":             "proto-file",
+		"protoDir":              "proto-dir",
+		"protoInclude":          "proto-include",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -728,6 +748,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	case "record", "test", "rerecord":
 
+		if cmd.Name() == "rerecord" {
+			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
+			if err != nil {
+				errMsg := "failed to get the amend-testset flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.ReRecord.AmendTestSet = updateTestSet
+		}
+
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
@@ -907,6 +937,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
+				// optional flag to show response diffs during rerecord
+				showDiff, err := cmd.Flags().GetBool("show-diff")
+				if err != nil {
+					errMsg := "failed to get the show-diff flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.ShowDiff = showDiff
 				return nil
 			}
 
@@ -976,7 +1014,76 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
 			}
+
+			// parse and set proto related flags
+
+			protoFile, err := cmd.Flags().GetString("proto-file")
+			if err != nil {
+				errMsg := "failed to get the proto-file flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if protoFile != "" {
+				c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
+				if err != nil {
+					errMsg := "failed to get the absolute path of proto-file"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			protoDir, err := cmd.Flags().GetString("proto-dir")
+			if err != nil {
+				errMsg := "failed to get the proto-dir flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if protoDir != "" {
+				c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
+				if err != nil {
+					errMsg := "failed to get the absolute path of proto-dir"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			protoInclude, err := cmd.Flags().GetStringArray("proto-include")
+			if err != nil {
+				errMsg := "failed to get the proto-include flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if len(protoInclude) > 0 {
+				for _, dir := range protoInclude {
+					absDir, err := utils.GetAbsPath(dir)
+					if err != nil {
+						errMsg := "failed to get the absolute path of proto-include"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
+				}
+			}
 		}
+
+		bigPayload, err := cmd.Flags().GetBool("bigPayload")
+		if err != nil {
+			errMsg := "failed to read the big payload flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Record.BigPayload = bigPayload
+
+		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
+		if err != nil {
+			errMsg := "failed to read the global passthrough flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
