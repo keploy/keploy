@@ -83,16 +83,16 @@ send_request() {
 
     # Wait for 7 seconds for Keploy to record the tcs and mocks.
     sleep 7
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID"
-    echo "Killing Keploy"
-    sudo kill $pid
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
+    echo "Killing keploy"
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 for i in {1..2}; do
     app_name="http-pokeapi_${i}"
     send_request $i &
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./http-pokeapi" --generateGithubActions=false 
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./http-pokeapi" --generateGithubActions=false &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -112,7 +112,7 @@ for i in {1..2}; do
 done
 
 # Start the go-http app in test mode.
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false &> "test_logs.txt"
 cat "test_logs.txt"
 
 if grep "ERROR" "test_logs.txt"; then
