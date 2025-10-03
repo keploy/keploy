@@ -784,6 +784,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// var userIP string
+	// Check if mappings are present and decide filtering strategy
+	var expectedTestMockMappings map[string][]string
+	var useMappingBased bool
+	var isMappingEnabled bool
 
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
@@ -861,130 +865,61 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		// Delay for user application to run
-		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
-			return models.TestSetStatusUserAbort, context.Canceled
-		}
-	}
-
-	// Get all mocks for mapping-based filtering
-	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
-	if err != nil {
-		return models.TestSetStatusFailed, err
-	}
-
-	err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to store mocks on agent")
-		return models.TestSetStatusFailed, err
-	}
-
-	// Check if mappings are present and decide filtering strategy
-	var expectedTestMockMappings map[string][]string
-	var useMappingBased bool
-	isMappingEnabled := !r.config.DisableMapping
-
-	if !isMappingEnabled {
-		r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
-	}
-
-	if r.mappingDB != nil && isMappingEnabled {
-		// Get mappings and check if meaningful mappings are present
-		var hasMeaningfulMappings bool
-		expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
+		// Get all mocks for mapping-based filtering
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
 		if err != nil {
-			r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
-				zap.String("testSetID", testSetID),
-				zap.Error(err))
-			useMappingBased = false
-			expectedTestMockMappings = make(map[string][]string)
-		} else if hasMeaningfulMappings {
-			// Meaningful mappings are present, use mapping-based approach
-			r.logger.Info("Using mapping-based mock filtering strategy",
-				zap.String("testSetID", testSetID),
-				zap.Int("totalMappings", len(expectedTestMockMappings)))
-			useMappingBased = true
-		} else {
-			// No meaningful mappings present, use timestamp-based approach
-			r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
-				zap.String("testSetID", testSetID))
-			useMappingBased = false
-			expectedTestMockMappings = make(map[string][]string)
-		}
-	} else {
-		// No mapping DB available, use timestamp-based approach
-		r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
-		useMappingBased = false
-		expectedTestMockMappings = make(map[string][]string)
-	}
-
-	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
-
-	if cmdType != utils.DockerCompose {
-		err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			SQLDelay:       time.Duration(r.config.Test.Delay),
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-			Mocking:        r.config.Test.Mocking,
-			Backdate:       testCases[0].HTTPReq.Timestamp,
-		})
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to mock outgoing")
 			return models.TestSetStatusFailed, err
 		}
-	}
 
-	// Send initial filtering parameters to set up mocks for test set
-	err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
-	if err != nil {
-		return models.TestSetStatusFailed, err
-	}
-
-	if r.instrument && cmdType != utils.DockerCompose {
-		if !serveTest {
-			runTestSetErrGrp.Go(func() error {
-				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
-					AppCommand: conf.AppCommand,
-				})
-				if appErr.AppErrorType == models.ErrCtxCanceled {
-					return nil
-				}
-				appErrChan <- appErr
-				return nil
-			})
+		err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to store mocks on agent")
+			return models.TestSetStatusFailed, err
 		}
 
-		// Checking for errors in the mocking and application
-		runTestSetErrGrp.Go(func() error {
-			defer utils.Recover(r.logger)
-			select {
-			case err := <-appErrChan:
-				switch err.AppErrorType {
-				case models.ErrCommandError:
-					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
-				case models.ErrUnExpected:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrAppStopped:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrCtxCanceled:
-					return nil
-				case models.ErrInternal:
-					testSetStatusByErrChan = models.TestSetStatusInternalErr
-				default:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				}
-				utils.LogError(r.logger, err, "application failed to run")
-			case <-runTestSetCtx.Done():
-				testSetStatusByErrChan = models.TestSetStatusUserAbort
+		var expectedTestMockMappings map[string][]string
+		var useMappingBased bool
+		isMappingEnabled := !r.config.DisableMapping
+
+		if !isMappingEnabled {
+			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+		}
+
+		if r.mappingDB != nil && isMappingEnabled {
+			// Get mappings and check if meaningful mappings are present
+			var hasMeaningfulMappings bool
+			expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
+			if err != nil {
+				r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
+					zap.String("testSetID", testSetID),
+					zap.Error(err))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
+			} else if hasMeaningfulMappings {
+				// Meaningful mappings are present, use mapping-based approach
+				r.logger.Info("Using mapping-based mock filtering strategy",
+					zap.String("testSetID", testSetID),
+					zap.Int("totalMappings", len(expectedTestMockMappings)))
+				useMappingBased = true
+			} else {
+				// No meaningful mappings present, use timestamp-based approach
+				r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+					zap.String("testSetID", testSetID))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
 			}
-			exitLoopChan <- true
-			runTestSetCtxCancel()
-			return nil
-		})
+		} else {
+			// No mapping DB available, use timestamp-based approach
+			r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
+			useMappingBased = false
+			expectedTestMockMappings = make(map[string][]string)
+		}
+
+		// Send initial filtering parameters to set up mocks for test set
+		err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
 
 		// Delay for user application to run
 		select {
@@ -992,14 +927,138 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
+	}
 
-		// if utils.IsDockerCmd(cmdType) {
-		// 	// userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
-		// 	// userIP = pkg.AgentIP;
-		// 	// if err != nil {
-		// 	// 	return models.TestSetStatusFailed, err
-		// 	// }
-		// }
+	if cmdType != utils.DockerCompose {
+		// Get all mocks for mapping-based filtering
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+
+		err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to store mocks on agent")
+			return models.TestSetStatusFailed, err
+		}
+
+		isMappingEnabled := !r.config.DisableMapping
+
+		if !isMappingEnabled {
+			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+		}
+
+		if r.mappingDB != nil && isMappingEnabled {
+			// Get mappings and check if meaningful mappings are present
+			var hasMeaningfulMappings bool
+			expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
+			if err != nil {
+				r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
+					zap.String("testSetID", testSetID),
+					zap.Error(err))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
+			} else if hasMeaningfulMappings {
+				// Meaningful mappings are present, use mapping-based approach
+				r.logger.Info("Using mapping-based mock filtering strategy",
+					zap.String("testSetID", testSetID),
+					zap.Int("totalMappings", len(expectedTestMockMappings)))
+				useMappingBased = true
+			} else {
+				// No meaningful mappings present, use timestamp-based approach
+				r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+					zap.String("testSetID", testSetID))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
+			}
+		} else {
+			// No mapping DB available, use timestamp-based approach
+			r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
+			useMappingBased = false
+			expectedTestMockMappings = make(map[string][]string)
+		}
+
+		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
+
+		if cmdType != utils.DockerCompose {
+			err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+				Rules:          r.config.BypassRules,
+				MongoPassword:  r.config.Test.MongoPassword,
+				SQLDelay:       time.Duration(r.config.Test.Delay),
+				FallBackOnMiss: r.config.Test.FallBackOnMiss,
+				Mocking:        r.config.Test.Mocking,
+				Backdate:       testCases[0].HTTPReq.Timestamp,
+			})
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to mock outgoing")
+				return models.TestSetStatusFailed, err
+			}
+		}
+
+		// Send initial filtering parameters to set up mocks for test set
+		err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+
+		if r.instrument && cmdType != utils.DockerCompose {
+			if !serveTest {
+				runTestSetErrGrp.Go(func() error {
+					defer utils.Recover(r.logger)
+					appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+						AppCommand: conf.AppCommand,
+					})
+					if appErr.AppErrorType == models.ErrCtxCanceled {
+						return nil
+					}
+					appErrChan <- appErr
+					return nil
+				})
+			}
+
+			// Checking for errors in the mocking and application
+			runTestSetErrGrp.Go(func() error {
+				defer utils.Recover(r.logger)
+				select {
+				case err := <-appErrChan:
+					switch err.AppErrorType {
+					case models.ErrCommandError:
+						testSetStatusByErrChan = models.TestSetStatusFaultUserApp
+					case models.ErrUnExpected:
+						testSetStatusByErrChan = models.TestSetStatusAppHalted
+					case models.ErrAppStopped:
+						testSetStatusByErrChan = models.TestSetStatusAppHalted
+					case models.ErrCtxCanceled:
+						return nil
+					case models.ErrInternal:
+						testSetStatusByErrChan = models.TestSetStatusInternalErr
+					default:
+						testSetStatusByErrChan = models.TestSetStatusAppHalted
+					}
+					utils.LogError(r.logger, err, "application failed to run")
+				case <-runTestSetCtx.Done():
+					testSetStatusByErrChan = models.TestSetStatusUserAbort
+				}
+				exitLoopChan <- true
+				runTestSetCtxCancel()
+				return nil
+			})
+
+			// Delay for user application to run
+			select {
+			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			case <-runTestSetCtx.Done():
+				return models.TestSetStatusUserAbort, context.Canceled
+			}
+
+			// if utils.IsDockerCmd(cmdType) {
+			// 	// userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
+			// 	// userIP = pkg.AgentIP;
+			// 	// if err != nil {
+			// 	// 	return models.TestSetStatusFailed, err
+			// 	// }
+			// }
+		}
 	}
 
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
