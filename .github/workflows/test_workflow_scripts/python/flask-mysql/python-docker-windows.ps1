@@ -132,7 +132,7 @@ function Kill-Tree {
 # =========================
 # ========== RECORD =======
 # =========================
-$containerName = "dedup-go"
+$containerName = "simple-demo-db"
 $logPath = "$containerName.record.txt"
 $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
