@@ -8,7 +8,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/agent/routes"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/agent"
@@ -52,16 +51,9 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				return nil
 			}
 
-			clientPid, err := cmd.Flags().GetUint32("client-pid")
+			clientNSPid, err := cmd.Flags().GetUint32("client-pid")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get clientPID flag")
-				return nil
-			}
-			pkg.ClientPid = clientPid
-
-			clientNsPid, err := cmd.Flags().GetUint32("client-nspid")
-			if err != nil {
-				utils.LogError(logger, err, "failed to get client-nspid flag")
 				return nil
 			}
 
@@ -74,12 +66,6 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			mode, err := cmd.Flags().GetString("mode")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get mode flag")
-				return nil
-			}
-
-			appInode, err := cmd.Flags().GetUint64("app-inode")
-			if err != nil {
-				utils.LogError(logger, err, "failed to get app-inode flag")
 				return nil
 			}
 
@@ -97,13 +83,11 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 
 			setupOpts := models.SetupOptions{
 				DockerNetwork: dockerNetwork,
-				AppInode:      appInode,
 				IsDocker:      isdocker,
 				EnableTesting: enableTesting,
 				Mode:          models.Mode(mode),
 				AgentIP:       agentIP,
-				ClientNsPid:   clientNsPid,
-				ClientPID:     clientPid,
+				ClientNSPID:   clientNSPid,
 				ProxyPort:     proxyPort,
 			}
 

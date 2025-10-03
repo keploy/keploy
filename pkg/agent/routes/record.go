@@ -36,7 +36,6 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		r.Post("/storemocks", a.StoreMocks)
 		r.Post("/updatemockparams", a.UpdateMockParams)
 		// r.Post("/testbench", a.SendKtInfo)
-		// r.Post("/register", a.RegisterClients)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Post("/unregister", a.DeRegisterClients)
 	})
@@ -162,45 +161,6 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	var registerReq models.RegisterReq
-	err := json.NewDecoder(r.Body).Decode(&registerReq)
-
-	register := models.AgentResp{
-		ClientID: registerReq.SetupOptions.ClientID,
-		Error:    nil,
-	}
-	// agentIP := registerReq.SetupOptions.AgentIP
-
-	if err != nil {
-		register.Error = err
-		render.JSON(w, r, register)
-		render.Status(r, http.StatusBadRequest)
-		a.logger.Error("failed to decode register request", zap.Error(err))
-		return
-	}
-
-	if registerReq.SetupOptions.ClientNsPid == 0 {
-		register.Error = fmt.Errorf("Client pid is required")
-		render.JSON(w, r, register)
-		render.Status(r, http.StatusBadRequest)
-		return
-	}
-	fmt.Printf("Register Client req: %v\n", registerReq.SetupOptions)
-
-	err = a.agent.RegisterClient(r.Context(), registerReq.SetupOptions)
-	if err != nil {
-		register.Error = err
-		render.JSON(w, r, register)
-		render.Status(r, http.StatusInternalServerError)
-		return
-	}
-
-	render.JSON(w, r, register)
-	render.Status(r, http.StatusOK)
-}
 
 func (a *AgentRequest) DeRegisterClients(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")

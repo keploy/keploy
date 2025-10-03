@@ -580,11 +580,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 		"--proxy-port", strconv.Itoa(int(opts.ProxyPort)),
 		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
-		"--client-nspid", strconv.Itoa(int(opts.ClientNsPid)),
 		"--docker-network", opts.DockerNetwork,
 		"--agent-ip", opts.AgentIP,
 		"--mode", string(opts.Mode),
-		"--app-inode", strconv.FormatUint(opts.AppInode, 10),
 		"--debug",
 	}
 
@@ -798,7 +796,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		// fmt.Println("here is the agent's IP address in client :", keployIPv4)
 		// opts.AgentIP = keployIPv4
 	}
-	opts.ClientID = clientID
+	// opts.ClientID = clientID
 	if opts.CommandType != "docker-compose" {
 		// Start the agent process
 		err = a.startAgent(ctx, clientID, isDockerCmd, opts)
@@ -883,69 +881,6 @@ func (a *AgentClient) getApp(clientID uint64) (*app.App, error) {
 	return h, nil
 }
 
-// RegisterClient registers the client with the server
-func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
-
-	isAgent := a.isAgentRunning(ctx)
-	if !isAgent {
-		return fmt.Errorf("keploy agent is not running, please start the agent first")
-	}
-
-	// Register the client with the server
-	clientPid := uint32(os.Getpid())
-
-	// start the app container and get the inode number
-	// keploy agent would have already runnning,
-	var inode uint64
-	var err error
-
-	// Register the client with the server
-	requestBody := models.RegisterReq{
-		SetupOptions: models.SetupOptions{
-			DockerNetwork: opts.DockerNetwork,
-			AgentIP:       opts.AgentIP,
-			ClientNsPid:   clientPid,
-			Mode:          opts.Mode,
-			ClientID:      opts.ClientID,
-			ClientInode:   inode,
-			IsDocker:      a.conf.Agent.IsDocker,
-			AppInode:      opts.AppInode,
-			ProxyPort:     a.conf.ProxyPort,
-		},
-	}
-
-	requestJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to marshal request body for register client")
-		return fmt.Errorf("error marshaling request body for register client: %s", err.Error())
-	}
-
-	resp, err := a.client.Post(fmt.Sprintf("http://localhost:%d/agent/register", a.conf.Agent.Port), "application/json", bytes.NewBuffer(requestJSON))
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to send register client request")
-		return fmt.Errorf("error sending register client request: %s", err.Error())
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to register client: %s", resp.Status)
-	}
-
-	a.logger.Info("Client registered successfully with clientId", zap.Uint64("clientID", opts.ClientID))
-
-	// TODO: Read the response body in which we return the app id
-	var RegisterResp models.AgentResp
-	err = json.NewDecoder(resp.Body).Decode(&RegisterResp)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to decode response body for register client")
-		return fmt.Errorf("error decoding response body for register client: %s", err.Error())
-	}
-
-	if RegisterResp.Error != nil {
-		return RegisterResp.Error
-	}
-
-	return nil
-}
 
 func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.UnregisterReq) error {
 	// Unregister the client with the server

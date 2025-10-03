@@ -93,7 +93,7 @@ func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
 	fmt.Println("Sending client info to ebpf program", clientInfo)
 	err := h.clientRegistrationMap.Update(uint64(0), clientInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to send the app info to the ebpf program")
+		utils.LogError(h.Logger, err, "failed to send the client info to the ebpf program")
 		return err
 	}
 
