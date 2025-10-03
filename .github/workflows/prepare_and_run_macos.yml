@@ -67,6 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Clear docker images and cache
+        run: |
+          docker builder prune --all -f
+          docker volume prune -f
+
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
@@ -93,21 +98,10 @@ jobs:
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
-  # Pull docker image on macOS native runners
-  pull-docker-image:
-    runs-on: [self-hosted, macOS, native]
-    needs: build-docker-image
-    steps:
-      - name: Pull image
-        run: |
-          docker pull ttl.sh/keploy/keploy:1h
-
   run_python_docker_macos:
-    needs: [build-and-upload, pull-docker-image]
-    # needs: [upload-latest]
+    needs: [build-and-upload, build-docker-image]
     uses: ./.github/workflows/python_docker_macos.yml
 
   run_golang_docker_macos:
-    needs: [build-and-upload, pull-docker-image]
-    # needs: [upload-latest]
+    needs: [build-and-upload, build-docker-image]
     uses: ./.github/workflows/golang_docker_macos.yml
