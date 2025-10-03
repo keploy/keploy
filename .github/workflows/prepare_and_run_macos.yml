@@ -71,6 +71,14 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+      
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
       - name: Build image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
