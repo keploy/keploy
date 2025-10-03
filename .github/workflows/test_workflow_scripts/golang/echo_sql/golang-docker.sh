@@ -68,7 +68,7 @@ for i in {1..2}; do
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
-        cat "docker-compose-tmp.yml"
+        cat "docker-compose-tmp.yaml"
         exit 1
     fi
     sleep 5
@@ -88,7 +88,7 @@ sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
-    cat "docker-compose-tmp.yml"
+    cat "docker-compose-tmp.yaml"
     exit 1
 fi
 
