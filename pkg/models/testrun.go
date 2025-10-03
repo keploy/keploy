@@ -5,17 +5,20 @@ import (
 )
 
 type TestReport struct {
-	Version   Version      `json:"version" yaml:"version"`
-	Name      string       `json:"name" yaml:"name"`
-	Status    string       `json:"status" yaml:"status"`
-	Success   int          `json:"success" yaml:"success"`
-	Failure   int          `json:"failure" yaml:"failure"`
-	Ignored   int          `json:"ignored" yaml:"ignored"`
-	Total     int          `json:"total" yaml:"total"`
-	Tests     []TestResult `json:"tests" yaml:"tests,omitempty"`
-	TestSet   string       `json:"testSet" yaml:"test_set"`
-	CreatedAt int64        `json:"created_at" yaml:"created_at"`
-	TimeTaken string       `json:"time_taken" yaml:"time_taken"`
+	Version    Version      `json:"version" yaml:"version"`
+	Name       string       `json:"name" yaml:"name"`
+	Status     string       `json:"status" yaml:"status"`
+	Success    int          `json:"success" yaml:"success"`
+	Failure    int          `json:"failure" yaml:"failure"`
+	HighRisk   int          `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
+	MediumRisk int          `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
+	LowRisk    int          `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
+	Ignored    int          `json:"ignored" yaml:"ignored"`
+	Total      int          `json:"total" yaml:"total"`
+	Tests      []TestResult `json:"tests" yaml:"tests,omitempty"`
+	TestSet    string       `json:"testSet" yaml:"test_set"`
+	CreatedAt  int64        `json:"created_at" yaml:"created_at"`
+	TimeTaken  string       `json:"time_taken" yaml:"time_taken"`
 }
 
 type TestCoverage struct {
@@ -49,6 +52,7 @@ type TestResult struct {
 	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
 	Result       Result     `json:"result" yaml:"result"`
 	TimeTaken    string     `json:"time_taken" yaml:"time_taken"`
+	FailureRisk  RiskLevel  `json:"failure_risk,omitempty" yaml:"failure_risk,omitempty"`
 }
 
 func (tr *TestResult) GetKind() string {
@@ -94,8 +98,36 @@ func StringToTestSetStatus(s string) (TestSetStatus, error) {
 	}
 }
 
+type RiskLevel string
+
+const (
+	RiskNone   RiskLevel = "NONE"
+	RiskLow    RiskLevel = "LOW"
+	RiskMedium RiskLevel = "MEDIUM"
+	RiskHigh   RiskLevel = "HIGH"
+)
+
+type FailureCategory string
+
+const (
+	CatSchemaChange   FailureCategory = "SCHEMA_CHANGE"
+	CatSchemaSame     FailureCategory = "SCHEMA_SAME"
+	CatSchemaAddition FailureCategory = "SCHEMA_ADDITION"
+)
+
+type FailureAssessment struct {
+	Category      FailureCategory `json:"category,omitempty" yaml:"category,omitempty"`
+	Risk          RiskLevel       `json:"risk,omitempty" yaml:"risk,omitempty"`
+	AddedFields   []string        `json:"added_fields,omitempty" yaml:"added_fields,omitempty"`
+	RemovedFields []string        `json:"removed_fields,omitempty" yaml:"removed_fields,omitempty"`
+	TypeChanges   []string        `json:"type_changes,omitempty" yaml:"type_changes,omitempty"`
+	ValueChanges  []string        `json:"value_changes,omitempty" yaml:"value_changes,omitempty"`
+	Reasons       []string        `json:"reasons,omitempty" yaml:"reasons,omitempty"`
+}
+
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
+	FailureRisk   RiskLevel      `json:"-" yaml:"-"`
 	HeadersResult []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
 	BodyResult    []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	DepResult     []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
