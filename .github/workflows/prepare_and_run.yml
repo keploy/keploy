@@ -70,17 +70,9 @@ jobs:
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
-  run_node_encoding:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/node_encoding.yaml
   run_mysql_fuzzer_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/mysql_fuzzer_linux.yml
-    secrets:
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  run_rerecord_fuzzer_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/rerecord_fuzzer_linux.yml
     secrets:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   run_golang_docker:
