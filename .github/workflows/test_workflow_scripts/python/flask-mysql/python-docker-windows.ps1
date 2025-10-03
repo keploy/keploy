@@ -178,15 +178,6 @@ if ($testCount -lt 12) { Write-Error "Expected at least 12 test files, but found
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
 
-Write-Host "Intentionally removing test-2.yaml before replay..."
-$testToRemove = Join-Path $testSetPath "tests\test-2.yaml"
-if (Test-Path $testToRemove) {
-    Remove-Item -Path $testToRemove -Force
-    Write-Host "Successfully removed $testToRemove."
-} else {
-    Write-Warning "Could not find $testToRemove to remove it. Continuing anyway."
-}
-
 # =========================
 # ========== REPLAY =======
 # =========================
