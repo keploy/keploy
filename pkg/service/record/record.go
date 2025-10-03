@@ -188,8 +188,17 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			return nil
 		})
 
-		// Have to check for agent here
-		time.Sleep(5 * time.Second)
+		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		agentReadyCh := make(chan bool, 1)
+		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.Port), agentReadyCh, 1*time.Second)
+
+		select {
+		case <-agentCtx.Done():
+			return fmt.Errorf("keploy-agent did not become ready in time")
+		case <-agentReadyCh:
+		}
 	}
 
 	// fetching test cases and mocks from the application and inserting them into the database
