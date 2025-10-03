@@ -56,7 +56,7 @@ type Service interface {
 	DeleteTestSet(ctx context.Context, testSetID string) error
 
 	DownloadMocks(ctx context.Context) error
-	UploadMocks(ctx context.Context) error
+	UploadMocks(ctx context.Context, testSets []string) error
 
 	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
 

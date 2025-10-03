@@ -62,8 +62,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return testSets[i] < testSets[j]
 	})
 
-	var SelectedTests []string
-
+	var SelectedTests, ReRecordedTests []string
 	for _, testSet := range testSets {
 		if ctx.Err() != nil {
 			break
@@ -124,6 +123,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 				allRecorded, err := o.replayTests(recordCtx, testSet, mappingTestSet, isMappingEnabled)
 
 				if allRecorded && err == nil {
+					ReRecordedTests = append(ReRecordedTests, mappingTestSet)
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
 				}
 				if !allRecorded {
@@ -180,6 +180,13 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return nil
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
+
+	if !o.config.Test.DisableMockUpload {
+		o.replay.UploadMocks(ctx, ReRecordedTests)
+	} else {
+		o.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+	}
+
 	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)

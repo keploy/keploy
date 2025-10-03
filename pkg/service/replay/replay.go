@@ -2255,17 +2255,19 @@ func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	return nil
 }
 
-func (r *Replayer) UploadMocks(ctx context.Context) error {
+func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
 	// Authenticate the user for mock registry
 	err := r.authenticateUser(ctx)
 	if err != nil {
 		return err
 	}
 
-	testSets, err := r.GetSelectedTestSets(ctx)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to get selected test sets")
-		return fmt.Errorf("mocks uploading failed to due to error in getting selected test sets")
+	if len(testSets) == 0 {
+		testSets, err = r.GetSelectedTestSets(ctx)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get selected test sets")
+			return fmt.Errorf("mocks uploading failed to due to error in getting selected test sets")
+		}
 	}
 
 	for _, testSetID := range testSets {

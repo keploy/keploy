@@ -106,7 +106,6 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if len(answers) == 0 {
-
 				switch question.Qtype {
 				// If the resolution failed, return a default A record with Proxy IP
 				// or AAAA record with Proxy IP6
