@@ -1249,7 +1249,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},
-			{Kind: yaml.ScalarNode, Value: "15s"},
+			{Kind: yaml.ScalarNode, Value: "30s"},
 		},
 	}
 

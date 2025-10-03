@@ -55,37 +55,37 @@ send_request(){
     wait
 }
 
-get_container_health() {
-    while true; do
-        container_name="$(docker ps --filter "ancestor=ghcr.io/keploy/keploy:v2-dev" --format "{{.Names}}")"
+# get_container_health() {
+#     while true; do
+#         container_name="$(docker ps --filter "ancestor=ghcr.io/keploy/keploy:v2-dev" --format "{{.Names}}")"
 
-        if [ -z "$container_name" ]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - No running container found for the image ghcr.io/keploy/keploy:v2-dev"
-        else
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Found running container: $container_name"
+#         if [ -z "$container_name" ]; then
+#             echo "$(date '+%Y-%m-%d %H:%M:%S') - No running container found for the image ghcr.io/keploy/keploy:v2-dev"
+#         else
+#             echo "$(date '+%Y-%m-%d %H:%M:%S') - Found running container: $container_name"
             
-            # Get and print the health status
-            health_status=$(docker inspect "$container_name" | grep -A 10 Health)
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Health status for $container_name:"
-            echo "$health_status"
+#             # Get and print the health status
+#             health_status=$(docker inspect "$container_name" | grep -A 10 Health)
+#             echo "$(date '+%Y-%m-%d %H:%M:%S') - Health status for $container_name:"
+#             echo "$health_status"
             
-            if [[ "$health_status" == *"healthy"* ]]; then
-                echo "$(date '+%Y-%m-%d %H:%M:%S') - Container $container_name is healthy"
-            else
-                echo "$(date '+%Y-%m-%d %H:%M:%S') - Container $container_name is not healthy"
-            fi
-        fi
+#             if [[ "$health_status" == *"healthy"* ]]; then
+#                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Container $container_name is healthy"
+#             else
+#                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Container $container_name is not healthy"
+#             fi
+#         fi
         
-        # Wait before the next check
-        sleep 2
-    done
-}
+#         # Wait before the next check
+#         sleep 2
+#     done
+# }
 
 
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    get_container_health &
+    # get_container_health &
     sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
