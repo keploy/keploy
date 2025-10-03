@@ -13,21 +13,27 @@ jobs:
       fail-fast: false
       matrix:
         fuzzer:
-          - name: Go Rerecord Fuzzer
+          - name: Rerecord Fuzzer
+            type: rerecord
             script_dir: rerecord
+            s3_path: "releases/rerecord-fuzzer/latest/rerecord-fuzzer-linux-amd64.tar.gz"
+          - name: MySQL Fuzzer
+            type: mysql
+            script_dir: mysql
+            s3_path: "releases/mysql-fuzzer/latest/mysql-fuzzer-linux-amd64.tar.gz"
         config:
           - job: record_latest_rerecord_build
             record_src: latest
             rerecord_src: build
+            replay_src: build
           - job: record_build_rerecord_latest
             record_src: build
             rerecord_src: latest
+            replay_src: latest
           - job: record_build_rerecord_build
             record_src: build
             rerecord_src: build
-        fuzzer_version:
-          - job: test_latest_fuzzer
-            s3_path: "releases/rerecord-fuzzer/latest/rerecord-fuzzer-linux-amd64.tar.gz"
+            replay_src: build
 
     name: ${{ matrix.fuzzer.name }} (${{ matrix.config.job }})
     steps:
@@ -45,6 +51,12 @@ jobs:
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.config.rerecord_src }}
+      
+      - name: Download Keploy Binary (for Replay)
+        id: replay_keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -57,12 +69,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
           aws-region: ${{ vars.AWS_DEFAULT_REGION }}
-
+      
       - name: Download and Extract Rerecord Fuzzer
+        if: matrix.fuzzer.type == 'rerecord'
         id: rerecord_fuzzer
         run: |
           set -euo pipefail
-          KEY="${{ matrix.fuzzer_version.s3_path }}"
+          KEY="${{ matrix.fuzzer.s3_path }}"
           echo "Downloading fuzzer from s3://${{ vars.AWS_S3_BUCKET }}/${KEY}"
           aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
           tar -xzf rerecord-fuzzer-linux-amd64.tar.gz
@@ -70,10 +83,23 @@ jobs:
           echo "client=$(realpath ./rerecord-client)" >> $GITHUB_OUTPUT
           echo "server=$(realpath ./rerecord-server)" >> $GITHUB_OUTPUT
 
+      - name: Download and Extract MySQL Fuzzer
+        if: matrix.fuzzer.type == 'mysql'
+        id: mysql_fuzzer
+        run: |
+          set -e
+          KEY="${{ matrix.fuzzer.s3_path }}"
+          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          tar -xzf mysql-fuzzer-linux-amd64.tar.gz
+          chmod +x ./mysql-fuzzer
+          echo "path=$(realpath ./mysql-fuzzer)" >> $GITHUB_OUTPUT
+
       - name: Run Rerecord Fuzzer Test
         env:
           RECORD_KEPLOY_BIN:    ${{ steps.record_keploy.outputs.path }}
+          REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}
           RERECORD_KEPLOY_BIN:  ${{ steps.rerecord_keploy.outputs.path }}
+          MYSQL_FUZZER_BIN:     ${{ steps.mysql_fuzzer.outputs.path }}
           RERECORD_CLIENT_BIN:  ${{ steps.rerecord_fuzzer.outputs.client }}
           RERECORD_SERVER_BIN:  ${{ steps.rerecord_fuzzer.outputs.server }}
         run: |

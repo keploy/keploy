@@ -87,14 +87,14 @@ drive_traffic_and_stop_keploy() {
       "db_name": "fuzzdb",
       "drop_db_first": true,
       "seed": 42,
-      "total_ops": 50,
+      "total_ops": 4000,
       "timeout_sec": 1000,
       "mode": "record",
       "golden_path": "./golden/mysqlfuzz_golden.json"
     }'
 
-  echo "Letting fuzzer run for 40 seconds to generate traffic..."
-  sleep 40
+  echo "Letting fuzzer run for 230 seconds to generate traffic..."
+  sleep 230
 
   echo "$kp_pid Keploy PID"
   echo "Killing Keploy"
@@ -105,9 +105,9 @@ drive_traffic_and_stop_keploy() {
 
 # Initial setup and environment logging
 section "Initializing Environment"
-echo "FUZZER_BIN: $FUZZER_BIN"
-echo "RECORD_BIN: $RECORD_BIN"
-echo "REPLAY_BIN: $REPLAY_BIN"
+echo "MYSQL_FUZZER_BIN: $MYSQL_FUZZER_BIN"
+echo "RECORD_KEPLOY_BIN: $RECORD_KEPLOY_BIN"
+echo "REPLAY_KEPLOY _BIN: $REPLAY_KEPLOY_BIN"
 rm -rf keploy/ keploy.yml golden/ record.txt test.txt
 mkdir -p golden/
 endsec
@@ -121,13 +121,13 @@ docker run --name mysql-container \
 wait_for_mysql
 
 # Generate Keploy configuration and add noise parameter
-sudo "$RECORD_BIN" config --generate
+sudo "$RECORD_KEPLOY_BIN" config --generate
 sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
 echo "Keploy config generated and updated."
 
 # Start Keploy recording in the background
 echo "Starting Keploy in record mode..."
-sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_BIN" > record.txt 2>&1 &
+sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$MYSQL_FUZZER_BIN" > record.txt 2>&1 &
 KEPLOY_PID=$!
 
 # Trigger traffic and explicitly kill the Keploy process after a delay
@@ -166,7 +166,7 @@ endsec
 section "Replaying Tests with Keploy Mocks"
 # Start Keploy in test mode in the background
 echo "Starting Keploy in test mode..."
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_BIN" --delay 15 > test.txt 2>&1 &
+sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MYSQL_FUZZER_BIN" --delay 15 > test.txt 2>&1 &
 KEPLOY_PID=$!
 
 # Trigger traffic and explicitly kill the Keploy process after a delay

@@ -70,11 +70,6 @@ jobs:
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
-  run_mysql_fuzzer_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/mysql_fuzzer_linux.yml
-    secrets:
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   run_golang_docker:
     needs: [build-and-upload, upload-latest,build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
