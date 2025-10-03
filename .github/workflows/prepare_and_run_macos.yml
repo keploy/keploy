@@ -74,7 +74,7 @@ jobs:
 
       - name: Build image
         run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker.sh
+          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
           
       - name: Push image
         run: |
