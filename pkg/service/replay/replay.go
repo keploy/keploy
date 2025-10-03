@@ -1247,6 +1247,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
+			if testStatus == models.TestStatusFailed && testResult != nil && testResult.FailureRisk != models.RiskNone {
+				testCaseResult.FailureRisk = testResult.FailureRisk
+			}
+
 			if testCaseResult != nil {
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -1288,6 +1292,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	riskHigh, riskMed, riskLow := 0, 0, 0
+	for _, tr := range testCaseResults {
+		if tr.Status == models.TestStatusFailed && tr.Result.FailureRisk != models.RiskNone {
+			switch tr.Result.FailureRisk {
+			case models.RiskHigh:
+				riskHigh++
+			case models.RiskMedium:
+				riskMed++
+			case models.RiskLow:
+				riskLow++
+			}
+		}
+	}
+
 	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
@@ -1302,15 +1320,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testReport = &models.TestReport{
-		Version:   models.GetVersion(),
-		TestSet:   testSetID,
-		Status:    string(testSetStatus),
-		Total:     testCasesCount,
-		Success:   success,
-		Failure:   failure,
-		Ignored:   ignored,
-		Tests:     testCaseResults,
-		TimeTaken: timeTaken.String(),
+		Version:    models.GetVersion(),
+		TestSet:    testSetID,
+		Status:     string(testSetStatus),
+		Total:      testCasesCount,
+		Success:    success,
+		Failure:    failure,
+		Ignored:    ignored,
+		Tests:      testCaseResults,
+		TimeTaken:  timeTaken.String(),
+		HighRisk:   riskHigh,
+		MediumRisk: riskMed,
+		LowRisk:    riskLow,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1960,6 +1981,10 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 	if result != nil {
 		testCaseResult.Result = *result
+	}
+
+	if result != nil && result.FailureRisk != models.RiskNone {
+		testCaseResult.FailureRisk = result.FailureRisk
 	}
 
 	return testCaseResult

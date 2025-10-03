@@ -284,6 +284,18 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 
+		if !res.BodyResult[0].Normal {
+			// Prefer JSON assessment when the bodies are JSON
+			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
+				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
+					res.FailureRisk = assess.Risk
+				}
+			} else {
+				// Non-JSON: ignore categorization entirely
+				res.FailureRisk = models.RiskNone
+			}
+		}
+
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true
 			_, err := newLogger.Printf(logs)

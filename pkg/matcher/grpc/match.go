@@ -283,5 +283,17 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
+	if !decodedDataNormal {
+		// Prefer JSON classification if decoded payloads are JSON
+		if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
+			if assess, err := matcher.ComputeFailureAssessmentJSON(expectedDecodedData, actualDecodedData, bodyNoise, ignoreOrdering); err == nil && assess != nil {
+				result.FailureRisk = assess.Risk
+			}
+		} else {
+			// Non-JSON: ignore categorization entirely
+			result.FailureRisk = models.RiskNone
+		}
+	}
+
 	return matched, result
 }
