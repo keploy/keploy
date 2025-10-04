@@ -20,14 +20,16 @@ send_request(){
         sleep 3 # wait for 3 seconds before checking again.
     done
     echo "App started"
-    curl -s http://localhost:8000/secret1
+    for i in {1..10}; do
+        curl -s http://localhost:8000/secret1
 
-    curl -s http://localhost:8000/secret2
+        curl -s http://localhost:8000/secret2
 
-    curl -s http://localhost:8000/secret3
+        curl -s http://localhost:8000/secret3
+    done
 
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
-    sleep 10
+    # Wait for 13 seconds for keploy to record the tcs and mocks.
+    sleep 13
     pid=$(pgrep keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
@@ -75,23 +77,41 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
+sleep 5
+
+rm -rf config.yaml
+
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10    &> test_logs.txt
+
+if grep "ERROR" "test_logs.txt"; then
+        echo "Error found in pipeline..."
+        cat "test_logs.txt"
+        exit 1
+fi
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
+
 all_passed=true
 
 for i in {0..1}
+for j in {0..1}
 do
     # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+    report_file="./keploy/reports/test-run-$i/test-set-$j-report.yaml"
 
     # Extract the test status
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
     # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
+    echo "Test status for test-set-$j: $test_status"
 
     # Check if any test set did not pass
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
-        echo "Test-set-$i did not pass."
+        echo "Test-set-$j did not pass."
         break # Exit the loop early as all tests need to pass
     fi
 done
