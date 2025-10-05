@@ -43,11 +43,9 @@ type Hooks struct {
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
-	// dockerAppRegistrationMap *ebpf.Map
 	redirectProxyMap      *ebpf.Map
 	proxyInfoMap          *ebpf.Map
 	e2eAppRegistrationMap *ebpf.Map
-	//--------------
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
@@ -55,12 +53,10 @@ type Hooks struct {
 	connect4   link.Link
 	gp4        link.Link
 	udpp4      link.Link
-	tcppv4     link.Link
 	tcpv4      link.Link
 	tcpv4Ret   link.Link
 	connect6   link.Link
 	gp6        link.Link
-	tcppv6     link.Link
 	tcpv6      link.Link
 	tcpv6Ret   link.Link
 	objects    bpfObjects
@@ -145,8 +141,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	h.objectsMutex.Lock()
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
-	// h.e2eAppRegistrationMap = objs.E2eInfoMap
-	// h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -164,21 +158,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		h.proxyInfoMap = objs.KeployProxyInfo
 		// h.tbenchFilterPid = objs.TestbenchInfoMap
 		h.objects = objs
-		// ------------ For Egress -------------
-		// udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
-		// if err != nil {
-		// 	utils.LogError(h.Logger, err, "failed to attach the kprobe hook on udp_pre_connect")
-		// 	return err
-		// }
-		// h.udpp4 = udppC4
-
-		// FOR IPV4
-		// tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
-		// if err != nil {
-		// 	utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
-		// 	return err
-		// }
-		// h.tcppv4 = tcppC4
 
 		tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
 		if err != nil {
@@ -204,29 +183,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 			utils.LogError(h.Logger, err, "failed to detect the cgroup path")
 			return err
 		}
-		if opts.Mode != models.MODE_TEST && opts.BigPayload {
-
-			// switch runtime.GOARCH {
-			// case "amd64":
-			// 	// Attach the kprobe for bind syscall entry on x86
-			// 	h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
-			// 	if err != nil {
-			// 		utils.LogError(h.Logger, err, "failed to attach kprobe to __x64_sys_bind")
-			// 		return err
-			// 	}
-			// case "arm64":
-			// 	// Attach the kprobe for bind syscall entry on arm64
-			// 	h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
-			// 	if err != nil {
-			// 		utils.LogError(h.Logger, err, "failed to attach kprobe to __arm64_sys_bind")
-			// 		return err
-			// 	}
-
-			// default:
-			// 	err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-			// 	utils.LogError(h.Logger, err, "failed to attach bind hooks")
-			// 	return err
-			// }
+		if opts.Mode != models.MODE_TEST {
 
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
@@ -280,15 +237,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		}
 		h.gp4 = gp4
 
-		// FOR IPV6
-
-		// tcpPreC6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
-		// if err != nil {
-		// 	utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
-		// 	return err
-		// }
-		// h.tcppv6 = tcpPreC6
-
 		tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
@@ -330,8 +278,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 
 	h.Logger.Info("keploy initialized and probes added to the kernel.")
 
-	// var clientInfo = structs.ClientInfo{}
-
 	if opts.E2E {
 		pid, err := utils.GetPIDFromPort(ctx, h.Logger, int(opts.Port))
 		if err != nil {
@@ -357,28 +303,19 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	h.Logger.Debug("proxy ips", zap.String("ipv4", h.ProxyIP4), zap.Any("ipv6", h.ProxyIP6))
 
 	var agentInfo = structs.AgentInfo{}
-	// agentInfo.KeployAgentNsPid = uint32(opts.KeployContainerPID)
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
-	// agentInfo.KeployAgentInode, err = GetInodeForPID(opts.KeployContainerPID)
-	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	agentInfo.KeployAgentInode, _ = GetSelfInodeNumber()
 	agentInfo.IsDocker = 0
 	if opts.IsDocker {
 		agentInfo.IsDocker = 1
 	}
-	fmt.Println("here is clients pid : ", uint32(os.Getpid()))
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to get inode of the keploy process")
-		// return err
-	}
-
 	agentInfo.DNSPort = int32(h.DNSPort)
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {
 		h.Logger.Debug("Failed to register Client")
 	}
-	fmt.Println("Sending agent information :")
-	spew.Dump(agentInfo)
+
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.Logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
@@ -459,7 +396,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	}
 	h.objectsMutex.Unlock()
 
-	if opts.Mode != models.MODE_TEST && opts.BigPayload {
+	if opts.Mode != models.MODE_TEST {
 		if h.cgBind4 != nil {
 			if err := h.cgBind4.Close(); err != nil {
 				utils.LogError(h.Logger, err, "failed to close the cgBind4")
@@ -489,12 +426,7 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		h.Logger.Error("failed to send network info to the kernel", zap.Error(err))
 		return err
 	}
-	clientInfo := structs.ClientInfo{
-		// KeployClientNsPid: opts.ClientNsPid,
-		// IsDockerApp:       0,
-		// AppInode:          opts.AppInode,
-	}
-
+	clientInfo := structs.ClientInfo{}
 
 	switch opts.Mode {
 	case models.MODE_RECORD:
@@ -505,8 +437,6 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		clientInfo.Mode = uint32(0)
 	}
 
-
-	// clientInfo.ClientPID = pkg.ClientPid
 	ports := agent.GetPortToSendToKernel(ctx, rules)
 	for i := 0; i < 10; i++ {
 		if len(ports) <= i {

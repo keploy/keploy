@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 
 	"go.keploy.io/server/v2/pkg"
@@ -207,114 +206,6 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockS
 	return a.Proxy.GetConsumedMocks(ctx, id)
 }
 
-func (a *Agent) DeRegisterClient(ctx context.Context, unregister models.UnregisterReq) error {
-	// send the info of the mode if its test mode we dont need to send the last mock
-	fmt.Println("Making the client deregistered in the proxy....", unregister.Mode)
-	if unregister.Mode != models.MODE_TEST {
-		err := a.Proxy.MakeClientDeRegisterd(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	err := a.Hooks.DeleteKeployClientInfo(unregister.ClientID)
-	if err != nil {
-		return err
-	}
-
-	// Stop the client goroutine
-	// if cancel, ok := a.activeClients.Load(unregister.ClientID); ok {
-	// 	cancel.(context.CancelFunc)() // Stop the client goroutine
-	// 	fmt.Println("Client goroutine stopped ........")
-	// 	a.activeClients.Delete(unregister.ClientID)
-	// }
-
-	return nil
-}
-
-func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
-
-	a.logger.Info("Registering the client with the keploy server")
-	// // ctx, cancel := context.WithCancel(ctx)
-	// // a.activeClients.Store(opts.ClientID, cancel)
-	// // Register the client and start processing
-
-	// // send the network info to the kernel
-	// // err := a.SendNetworkInfo(ctx, opts)
-	// // if err != nil {
-	// // 	a.logger.Error("failed to send network info to the kernel", zap.Error(err))
-	// // 	return err
-	// // }
-	// ppid := uint32(os.Getppid())
-	// clientInfo := structs.ClientInfo{
-	// 	KeployClientNsPid: opts.ClientNsPid,
-	// 	IsDockerApp:       0,
-	// 	AppInode:          opts.AppInode,
-	// }
-
-	// switch opts.Mode {
-	// case models.MODE_RECORD:
-	// 	clientInfo.Mode = uint32(1)
-	// case models.MODE_TEST:
-	// 	clientInfo.Mode = uint32(2)
-	// default:
-	// 	clientInfo.Mode = uint32(0)
-	// }
-
-	// if opts.IsDocker {
-	// 	clientInfo.IsDockerApp = 1
-	// 	clientInfo.KeployClientNsPid = ppid
-	// }
-	// clientInfo.ClientPID = pkg.ClientPid
-	// // ports := GetPortToSendToKernel(ctx, agent.HookCfg.Rules)
-	// // for i := 0; i < 10; i++ {
-	// // 	if len(ports) <= i {
-	// // 		clientInfo.PassThroughPorts[i] = -1
-	// // 		continue
-	// // 	}
-	// // 	clientInfo.PassThroughPorts[i] = int32(ports[i])
-	// // }
-	// fmt.Println("here is the client pid whic we have sent :", pkg.ClientPid)
-	// spew.Dump(clientInfo)
-	// return a.Hooks.SendKeployClientInfo(clientInfo)
-	return nil
-}
-
-func getContainerIPv4() (string, error) {
-	// Get all network interfaces of the container.
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	// Loop through each interface.
-	for _, i := range interfaces {
-		// Get all addresses assigned to this interface.
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue // Try next interface on error.
-		}
-
-		// Loop through each address.
-		for _, addr := range addrs {
-			var ip net.IP
-			// Type-switch to see if we have an IP address.
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-
-			// Check if the IP is a valid, non-loopback IPv4 address.
-			if ip != nil && !ip.IsLoopback() && ip.To4() != nil {
-				return ip.String(), nil // Return the first one we find.
-			}
-		}
-	}
-
-	return "", fmt.Errorf("could not find a non-loopback IPv4 address")
-}
-
 // StoreMocks stores the filtered and unfiltered mocks for a client ID
 func (a *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	storage := &ClientMockStorage{
@@ -335,8 +226,7 @@ func (a *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mo
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
 
-	// Get stored mocks for the 
-	fmt.Println("FLOW AARA HAI YAHA PE")
+	// Get stored mocks for the
 	storageInterface, exists := a.clientMocks.Load(id)
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID %d", id)
@@ -399,10 +289,3 @@ func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[st
 	return filtered
 }
 
-// func (a *Agent) SendKtInfo(ctx context.Context, tb models.TestBenchReq) error {
-// 	tbInfo := structs.TestBenchInfo{
-// 		KTestClientPID: tb.KtPid,
-// 		KTestAgentPID:  tb.KaPid,
-// 	}
-// 	return a.Hooks.SendKtInfo(ctx, tbInfo)
-// }

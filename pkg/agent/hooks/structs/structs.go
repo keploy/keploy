@@ -68,6 +68,4 @@ type AgentInfo struct {
 	KeployAgentInode uint64
 	IsDocker         uint32
 	_                [4]byte
-	// KeployAgentNetNsID  uint32
-	// KeployAgentCgroupID uint64
 }

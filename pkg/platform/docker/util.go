@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"syscall"
 
 	"github.com/docker/docker/api/types"
 	"go.keploy.io/server/v2/config"
@@ -39,52 +38,6 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 		}
 	}
 	return strings.Join(envs, " ")
-}
-
-// StartInDocker will check if the docker command is provided as an input
-// then start the Keploy as a docker container and run the command
-// should also return a boolean if the execution is moved to docker
-func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) error {
-
-	if DockerConfig.Envs == nil {
-		DockerConfig.Envs = map[string]string{
-			"INSTALLATION_ID": conf.InstallationID,
-		}
-	} else {
-		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
-	}
-
-	//Check if app command starts with docker or docker-compose.
-	// If it does, then we would run the docker version of keploy and
-	// pass the command and control to it.
-	// TODO: Not workign correctly
-	// cmdType := utils.FindDockerCmd(conf.Command)
-	// if conf.InDocker || !(utils.IsDockerCmd(cmdType)) {
-	// 	fmt.Println("Keploy is running outside docker...")
-	// 	return nil
-	// }
-	fmt.Println("Keploy is running inside docker...")
-	// pass the all the commands and args to the docker version of Keploy
-	err := RunInDocker(ctx, logger, opts)
-	if err != nil {
-		utils.LogError(logger, err, "failed to run the command in docker")
-		return err
-	}
-	// gracefully exit the current process
-	logger.Info("exiting the current process as the command is moved to docker")
-
-	// if utils.LogFile != nil {
-	// 	_ = utils.LogFile.Close()
-	// 	if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
-	// 		return nil
-	// 	}
-	// 	if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-	// 		return nil
-	// 	}
-	// }
-
-	// os.Exit(0)
-	return nil
 }
 
 func GetDockerCommandAndSetup(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
@@ -126,57 +79,6 @@ func GetDockerCommandAndSetup(ctx context.Context, logger *zap.Logger, conf *con
 	// }
 
 	return keployalias, nil
-}
-
-func RunInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
-
-	//Get the correct keploy alias.
-	keployAlias, err := getAlias(ctx, logger, opts)
-	if err != nil {
-		return err
-	}
-	client, err := New(logger)
-	if err != nil {
-		utils.LogError(logger, err, "failed to initalise docker")
-		return err
-	}
-
-	// addKeployNetwork(ctx, logger, client)
-	err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
-		"type":   "debugfs",
-		"device": "debugfs",
-	})
-	if err != nil {
-		utils.LogError(logger, err, "failed to debugfs volume")
-		return err
-	}
-
-	cmd := PrepareDockerCommand(ctx, keployAlias)
-
-	cmd.Cancel = func() error {
-		err := utils.SendSignal(logger, -cmd.Process.Pid, syscall.SIGINT)
-		if err != nil {
-			utils.LogError(logger, err, "failed to start stop docker")
-			return err
-		}
-		return nil
-	}
-
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	logger.Info("running the following command in docker", zap.String("command", cmd.String()))
-
-	err = cmd.Run()
-	if err != nil {
-		if ctx.Err() == context.Canceled {
-			logger.Info("Docker agent run cancelled gracefully.")
-			return nil
-		}
-		utils.LogError(logger, err, "failed to start keploy in docker")
-		return err
-	}
-	return nil
 }
 
 func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) (string, error) {

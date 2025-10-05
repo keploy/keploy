@@ -773,30 +773,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		fmt.Println("COMMAND AFTER REMOVING PORTS:", cmd)
 
 		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
-		// inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
-		// if err != nil {
-		// 	utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-		// 	return 0, err
-		// }
-		// var keployIPv4 string
-		// keployIPv4 = inspect.NetworkSettings.IPAddress
-
-		// // Check if the Networks map is not empty
-		// if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
-		// 	// Iterate over the map to get the first available IP
-		// 	for _, network := range inspect.NetworkSettings.Networks {
-		// 		keployIPv4 = network.IPAddress
-		// 		if keployIPv4 != "" {
-		// 			break // Exit the loop once we've found an IP
-		// 		}
-		// 	}
-		// }
-
-		// pkg.AgentIP = keployIPv4
-		// fmt.Println("here is the agent's IP address in client :", keployIPv4)
-		// opts.AgentIP = keployIPv4
+		
 	}
-	// opts.ClientID = clientID
+
 	if opts.CommandType != "docker-compose" {
 		// Start the agent process
 		err = a.startAgent(ctx, clientID, isDockerCmd, opts)
@@ -880,44 +859,6 @@ func (a *AgentClient) getApp(clientID uint64) (*app.App, error) {
 
 	return h, nil
 }
-
-
-func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.UnregisterReq) error {
-	// Unregister the client with the server
-	isAgentRunning := a.isAgentRunning(context.Background())
-	if !isAgentRunning {
-		a.logger.Warn("keploy agent is not running, skipping unregister client")
-		return io.EOF
-	}
-
-	fmt.Println("Unregistering the client with clientID:", unregister.ClientID)
-	requestJSON, err := json.Marshal(unregister)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to marshal request body for unregister client")
-		return fmt.Errorf("error marshaling request body for unregister client: %s", err.Error())
-	}
-
-	// Passed background context as we dont want to cancel the unregister request upon client ctx cancellation
-	req, err := http.NewRequestWithContext(context.Background(), "POST", fmt.Sprintf("http://localhost:%d/agent/unregister", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to create request for unregister client")
-		return fmt.Errorf("error creating request for unregister client: %s", err.Error())
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.client.Do(req)
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("failed to send request for unregister client: %s", err.Error())
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to unregister client: %s", resp.Status)
-	}
-
-	return nil
-}
-
-// In platform/http/agent.go
-// In platform/http/agent.go
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
 
@@ -1039,41 +980,3 @@ func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {
 func (a *AgentClient) GetErrorChannel() <-chan error {
 	return nil
 }
-
-// func FindAvailableContainerName(ctx context.Context, cli *kdocker.Client, logger *zap.Logger, baseName string) (string, error) {
-// 	// 1. First, check if the base name itself is available.
-// 	_, err := cli.ContainerInspect(ctx, baseName)
-// 	if err != nil {
-// 		if errdefs.IsNotFound(err) {
-// 			logger.Info("Base container name is available", zap.String("name", baseName))
-// 			// The container was not found, so the name is available.
-// 			return baseName, nil
-// 		}
-// 		// For any other error (e.g., Docker daemon not running), return it.
-// 		return "", fmt.Errorf("failed to inspect container '%s': %w", baseName, err)
-// 	}
-
-// 	// 2. If the base name is taken (no error from Inspect), start looping.
-// 	logger.Warn("Base container name is already in use, finding an alternative.", zap.String("name", baseName))
-
-// 	// Limit attempts to prevent an infinite loop in an edge case.
-// 	const maxAttempts = 100
-// 	for i := 1; i <= maxAttempts; i++ {
-// 		candidateName := fmt.Sprintf("%s-%d", baseName, i)
-
-// 		_, err := cli.ContainerInspect(ctx, candidateName)
-// 		if err != nil {
-// 			if errdefs.IsNotFound(err) {
-// 				logger.Info("Found available container name.", zap.String("name", candidateName))
-// 				// Success! This name is not in use.
-// 				return candidateName, nil
-// 			}
-// 			// Another error occurred.
-// 			return "", fmt.Errorf("failed to inspect container '%s': %w", candidateName, err)
-// 		}
-// 		// If err is nil, this name is also taken. The loop will try the next number.
-// 	}
-
-// 	// If the loop finishes, we've failed to find a name after all attempts.
-// 	return "", fmt.Errorf("could not find an available name for base '%s' after %d attempts", baseName, maxAttempts)
-// }

@@ -5,8 +5,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v2/config"
-	// "go.keploy.io/server/v2/pkg/agent/app"
-	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
+
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/utils"
 
@@ -17,10 +16,6 @@ type Hooks interface {
 	// AppInfo
 	DestInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg, setupOpts models.SetupOptions) error
-	// Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
-	SendKeployClientInfo(clientInfo structs.ClientInfo) error
-	DeleteKeployClientInfo(clientID uint64) error
-	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 	GetUnloadDone() <-chan struct{}
 }
@@ -65,18 +60,12 @@ type ProxyOptions struct {
 	DNSIPv4Addr string
 	// DNSIPv6Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv6Addr string
-	// BigPayload  bool
-	// Mode        models.Mode
 }
 
 type DestInfo interface {
 	Get(ctx context.Context, srcPort uint16) (*NetworkAddress, error)
 	Delete(ctx context.Context, srcPort uint16) error
 }
-
-// type AppInfo interface {
-// 	// SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error
-// }
 
 // For keploy test bench
 

@@ -10,7 +10,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks/common"
-	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
@@ -59,22 +58,4 @@ func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*agent.NetworkAddress,
 func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
 	h.Logger.Error("Network address deletion is not supported on this platform")
 	return errors.New("network address deletion is not supported on non-Linux platforms")
-}
-
-// SendKeployClientInfo implements the SendKeployClientInfo method for non-Linux platforms.
-func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
-	h.Logger.Warn("SendKeployClientInfo not implemented for non-Linux platforms")
-	return nil
-}
-
-// DeleteKeployClientInfo implements the DeleteKeployClientInfo method for non-Linux platforms.
-func (h *Hooks) DeleteKeployClientInfo(clientID uint64) error {
-	h.Logger.Warn("DeleteKeployClientInfo not implemented for non-Linux platforms")
-	return nil
-}
-
-// SendClientProxyInfo implements the SendClientProxyInfo method for non-Linux platforms.
-func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
-	h.Logger.Warn("SendClientProxyInfo not implemented for non-Linux platforms")
-	return nil
 }

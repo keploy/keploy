@@ -68,10 +68,6 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 
 func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
-	// h := hooks.NewHooks(logger, c)
-	// p := proxy.New(logger, h, c)
-	// //for keploy test bench
-	// t := tester.New(logger, h)
 	app.HookImpl = app.NewHooks(logger)
 	logger.Debug("app hooks initialized - oss")
 

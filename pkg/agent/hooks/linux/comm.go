@@ -36,19 +36,6 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 	}, nil
 }
 
-func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
-	h.M.Lock()
-	defer h.M.Unlock()
-	fmt.Println("Deleting client info from ebpf program with clientId", id)
-	err := h.clientRegistrationMap.Delete(id)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to send the app info to the ebpf program")
-		return err
-	}
-	h.Logger.Info("successfully removed the client info from the ebpf program with clientId", zap.Any("clientId", id))
-	return nil
-}
-
 // SendClientProxyInfo sends the network information to the kernel
 func (h *Hooks) SendClientProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
 	h.M.Lock()
@@ -164,7 +151,6 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 				utils.LogError(h.Logger, err, "failed to decode ingress event")
 				continue
 			}
-			fmt.Println("GOT BIND EVENT")
 			h.Logger.Info("Intercepted application bind event")
 			select {
 			case <-ctx.Done(): // Context was cancelled, so we shut down.

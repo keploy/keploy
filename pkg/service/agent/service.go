@@ -13,8 +13,6 @@ type Service interface {
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
-	RegisterClient(ctx context.Context, opts models.SetupOptions) error
-	DeRegisterClient(ctx context.Context, opts models.UnregisterReq) error
 	StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error
 	// SendKtInfo(ctx context.Context, tb models.TestBenchReq) error

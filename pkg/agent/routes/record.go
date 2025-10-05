@@ -37,7 +37,6 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		r.Post("/updatemockparams", a.UpdateMockParams)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
-		r.Post("/unregister", a.DeRegisterClients)
 	})
 }
 
@@ -71,16 +70,6 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// incomingOpts := models.IncomingOptions{
-	// 			Filters:  r.config,
-	// 			BasePath: r.config.Record.BasePath,
-	// 		}
-	// 		// Call the new core method to start the ingress proxy listener.
-	// 		// This call is non-blocking.
-	// 		var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
-	// 			return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-	// 		}
-
 	fmt.Println("STARTING INCOMING PROXY")
 	tc, err := a.agent.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
@@ -89,15 +78,7 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error starting incoming proxy", http.StatusInternalServerError)
 		return // Important: return after handling the error
 	}
-	// Call GetIncoming to get the channel
-	// tc, err := a.agent.GetIncoming(ctx, incomingReq.ClientID, incomingReq.IncomingOptions)
-	// if err != nil {
-	// 	http.Error(w, "Error retrieving test cases", http.StatusInternalServerError)
-	// 	return
-	// }
-	// <-r.Context().Done()
-	// fmt.Println("CONTEXT CANCELLED of request")
-	// return
+
 
 	// Keep the connection alive and stream data
 	for t := range tc {
@@ -161,35 +142,3 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
-func (a *AgentRequest) DeRegisterClients(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Println("De-register client req")
-	var UnregisterReq models.UnregisterReq
-	err := json.NewDecoder(r.Body).Decode(&UnregisterReq)
-
-	mockRes := models.AgentResp{
-		ClientID:  UnregisterReq.ClientID,
-		Error:     nil,
-		IsSuccess: true,
-	}
-
-	if err != nil {
-		mockRes.Error = err
-		mockRes.IsSuccess = false
-		render.JSON(w, r, mockRes)
-		render.Status(r, http.StatusBadRequest)
-		return
-	}
-
-	err = a.agent.DeRegisterClient(r.Context(), UnregisterReq)
-	if err != nil {
-		mockRes.Error = err
-		mockRes.IsSuccess = false
-		render.JSON(w, r, err)
-		render.Status(r, http.StatusInternalServerError)
-		return
-	}
-
-	render.JSON(w, r, "Client De-registered")
-}

@@ -54,13 +54,11 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	ClientNSPID         uint32
+	ClientNSPID       uint32
 	Container         string
 	KeployContainer   string
 	DockerNetwork     string
 	DockerDelay       uint64
-	// ClientInode       uint64
-	// AppInode          uint64
 	Cmd               string
 	IsDocker          bool
 	CommandType       string
@@ -68,8 +66,6 @@ type SetupOptions struct {
 	ProxyPort         uint32
 	DnsPort           uint32
 	Mode              Mode
-	// ClientNsPid       uint32
-	// ClientID          uint64
 	AgentIP           string
 	GlobalPassthrough bool
 	AgentPort         uint32

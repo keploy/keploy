@@ -307,12 +307,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 
-		cmd.Flags().Uint32("client-nspid", 0, "Namespcae PID of the client")
 		cmd.Flags().String("docker-network", "", "Name of the docker network the application is on")
 		cmd.Flags().String("agent-ip", "", "IP address of the Keploy agent container")
 		cmd.Flags().String("mode", "record", "Mode of operation for Keploy (record or test)")
-		cmd.Flags().Uint64("app-inode", 0, "Inode of the application's network namespace")
-
+		
 	default:
 		return errors.New("unknown command name")
 	}

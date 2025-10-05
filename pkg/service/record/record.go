@@ -87,19 +87,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			}
 		}
 
-		// unregister := models.UnregisterReq{
-		// 	ClientID: clientID,
-		// 	Mode:     models.MODE_RECORD,
-		// }
-
-		// Dont call the Unregister if there is an error in the running application
-		// if runAppError.AppErrorType == "" {
-		// 	// err := r.instrumentation.UnregisterClient(ctx, unregister)
-		// 	// if err != nil && err != io.EOF {
-		// 	// 	utils.LogError(r.logger, err, "failed to unregister client")
-		// 	// }
-		// }
-
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
 		if err != nil {
@@ -159,13 +146,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	default:
 	}
 
-	// TODO: Ask this persister usecase and integrate
-	// var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
-	// 	return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-	// }
+	
 	// Instrument will setup the environment and start the hooks and proxy
 	clientID, err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough})
-	// appID, err := r.Instrument(hookCtx, newTestSetID)
 
 	if err != nil {
 		stopReason = "failed setting up the environment"
@@ -334,62 +317,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-// func (r *Recorder) Instrument(ctx context.Context, newTestSetID string) (uint64, error) {
-// 	var stopReason string
-// 	// setting up the environment for recording
-// 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
-// 	if err != nil {
-// 		stopReason = "failed setting up the environment"
-// 		utils.LogError(r.logger, err, stopReason)
-// 		return 0, fmt.Errorf("%s", stopReason)
-// 	}
-// 	r.config.AppID = appID
-
-// 	// checking for context cancellation as we don't want to start the hooks and proxy if the context is cancelled
-// 	select {
-// 	case <-ctx.Done():
-// 		return appID, nil
-// 	default:
-// 		// Starting the hooks and proxy
-// 		hooks := models.HookOptions{
-// 			Mode:          models.MODE_RECORD,
-// 			EnableTesting: r.config.EnableTesting,
-// 			Rules:         r.config.BypassRules,
-// 			E2E:           r.config.E2E,
-// 			Port:          r.config.Port,
-// 			BigPayload:    r.config.Record.BigPayload,
-// 		}
-
-// 		err = r.instrumentation.Hook(ctx, appID, hooks)
-// 		if err != nil {
-// 			stopReason = "failed to start the hooks and proxy"
-// 			utils.LogError(r.logger, err, stopReason)
-// 			if ctx.Err() == context.Canceled {
-// 				return appID, err
-// 			}
-// 			return appID, fmt.Errorf("%s", stopReason)
-// 		}
-
-// 		if r.config.Record.BigPayload && hooks.Mode == models.MODE_RECORD {
-// 			r.logger.Debug("BigPayload mode enabled, starting ingress proxy.")
-// 			incomingOpts := models.IncomingOptions{
-// 				Filters:  r.config.Record.Filters,
-// 				BasePath: r.config.Record.BasePath,
-// 			}
-// 			// Call the new core method to start the ingress proxy listener.
-// 			// This call is non-blocking.
-// 			var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
-// 				return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-// 			}
-// 			if err := r.instrumentation.StartIncomingProxy(ctx, persister, incomingOpts); err != nil {
-// 				stopReason = "failed to start the ingress proxy"
-// 				utils.LogError(r.logger, err, stopReason)
-// 				return appID, fmt.Errorf("%s", stopReason)
-// 			}
-// 		}
-// 	}
-// 	return appID, nil
-// }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
 	clientID := appID
