@@ -773,7 +773,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		fmt.Println("COMMAND AFTER REMOVING PORTS:", cmd)
 
 		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
-		
+
 	}
 
 	if opts.CommandType != "docker-compose" {

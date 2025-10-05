@@ -288,4 +288,3 @@ func (a *Agent) filterOutDeleted(mocks []*models.Mock, totalConsumedMocks map[st
 	}
 	return filtered
 }
-

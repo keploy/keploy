@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1188,12 +1189,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Handle Docker environment IP replacement
-		// if utils.IsDockerCmd(cmdType) {
-		// 	err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
-		// 	if err != nil {
-		// 		break
-		// 	}
-		// }
+		if utils.IsDockerCmd(cmdType) && runtime.GOOS != "darwin" {
+			err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
+			if err != nil {
+				break
+			}
+		}
 
 		// Handle user-provided host replacement
 		if r.config.Test.Host != "" {

@@ -310,7 +310,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("docker-network", "", "Name of the docker network the application is on")
 		cmd.Flags().String("agent-ip", "", "IP address of the Keploy agent container")
 		cmd.Flags().String("mode", "record", "Mode of operation for Keploy (record or test)")
-		
+
 	default:
 		return errors.New("unknown command name")
 	}

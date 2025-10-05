@@ -79,7 +79,6 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
-
 	// Keep the connection alive and stream data
 	for t := range tc {
 		select {
@@ -141,4 +140,3 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
