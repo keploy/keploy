@@ -226,6 +226,10 @@ github.com/jstemmer/go-junit-report v0.0.0-20190106144839-af01ea7f8024/go.mod h1
 github.com/jstemmer/go-junit-report v0.9.1/go.mod h1:Brl9GWCQeLvo8nXZwPNNblvFj/XSXhF0NWZEnDohbsk=
 github.com/k0kubun/pp/v3 v3.2.0 h1:h33hNTZ9nVFNP3u2Fsgz8JXiF5JINoZfFq4SvKJwNcs=
 github.com/k0kubun/pp/v3 v3.2.0/go.mod h1:ODtJQbQcIRfAD3N+theGCV1m/CBxweERz2dapdz1EwA=
+github.com/keploy/integrations v0.0.0-20250905110920-0febf76e4225 h1:UxgtB/3No6uvN3FuD3rzI7U9txrWhP1LxC/qB46BedQ=
+github.com/keploy/integrations v0.0.0-20250905110920-0febf76e4225/go.mod h1:ozLIwVyPKALrc8A/MLpACOuJKaWV0U+yYYsMxP+ZS3o=
+github.com/keploy/integrations v0.0.0-20250925101223-fa66810ffc7b h1:DfUpb3VBN5ijHtyZXbeJ9m1hE/1wmGLXzVj9q5e/J/M=
+github.com/keploy/integrations v0.0.0-20250925101223-fa66810ffc7b/go.mod h1:pdqCpf3dnQ92fdieXZIkCW5BvnSQZZdIvxflFimeuAE=
 github.com/keploy/jsonDiff v1.0.8 h1:B/75cfLNZ7kayAjF1Jox70Iwa/nwCjBYNOuSt+RHH5A=
 github.com/keploy/jsonDiff v1.0.8/go.mod h1:wUuLbVs3Oe3mIQ61C7G88bppP//ArLtoDU0S9Awwv+s=
 github.com/keploy/pgproto3/v2 v2.0.5 h1:8spdNKZ+nOnHVxiimDsqulBRN6viPXPghkA7xppnzJ8=
