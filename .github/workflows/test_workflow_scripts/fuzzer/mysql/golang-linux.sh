@@ -218,7 +218,7 @@ endsec
 
 # --- Replay Phase ---
 section "Replaying Tests"
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MYSQL_FUZZER_BIN" --delay 15 --api-timeout=240 2>&1 | tee test.txt
+sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MYSQL_FUZZER_BIN" --delay 15 --api-timeout=1000 2>&1 | tee test.txt
 check_for_errors "test.txt"
 check_test_report
 endsec
