@@ -200,8 +200,12 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
-		Volumes = Volumes + " -v " + volume
-		if i != len(DockerConfig.VolumeMounts)-1 {
+		if i != 0 {
+			Volumes = Volumes + " -v " + volume
+		} else {
+			Volumes = "-v " + volume
+		}
+		if i == len(DockerConfig.VolumeMounts)-1 {
 			Volumes = Volumes + " "
 		}
 	}
