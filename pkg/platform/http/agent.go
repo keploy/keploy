@@ -720,45 +720,36 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		zap.Uint32("dns-port", dnsPort))
 
 	if isDockerCmd {
+
+		a.logger.Info("Application command provided :", zap.String("cmd", cmd))
 		randomBytes := make([]byte, 2)
 		// Read cryptographically secure random bytes.
 		if _, err := rand.Read(randomBytes); err != nil {
-			// Handle the error appropriately in your application.
 			log.Fatal("Failed to generate random part for container name:", err)
 		}
-		// Encode the 2 bytes into a 4-character hexadecimal string.
 		uuidSuffix := hex.EncodeToString(randomBytes)
 
 		// Append the random string.
 		opts.KeployContainer = "keploy-v2-" + uuidSuffix
 		a.conf.KeployContainer = opts.KeployContainer
 
-
 		// Regex to find all port mapping flags (-p or --publish)
 		portRegex := regexp.MustCompile(`\s+(-p|--publish)\s+[^\s]+`)
-
-		// Find all port arguments in the command string
 		portArgs := portRegex.FindAllString(cmd, -1)
-
-		// Clean and store the extracted port arguments in opts
 		cleanedPorts := []string{}
 		for _, p := range portArgs {
 			cleanedPorts = append(cleanedPorts, strings.TrimSpace(p))
 		}
-		opts.AppPorts = cleanedPorts // Store the extracted ports
-
-		// Remove the port arguments from the original command string
+		opts.AppPorts = cleanedPorts
 		cmd = portRegex.ReplaceAllString(cmd, "")
-
 		networkRegex := regexp.MustCompile(`(--network|--net)\s+([^\s]+)`)
-
-		// Find the first match and its submatches (the captured group).
 		networkMatches := networkRegex.FindStringSubmatch(cmd)
 
 		if len(networkMatches) > 2 {
 			opts.AppNetwork = networkMatches[2]
 			cmd = networkRegex.ReplaceAllString(cmd, "")
 		}
+		a.logger.Info("Application command to execute :", zap.String("cmd", cmd))
 	}
 
 	if opts.CommandType != "docker-compose" {
@@ -767,16 +758,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if err != nil {
 			return 0, fmt.Errorf("failed to start agent: %w", err)
 		}
-
 		a.logger.Info("Agent is now running, proceeding with setup")
-
 	}
 
 	if utils.CmdType(opts.CommandType) != utils.DockerCompose {
 		time.Sleep(10 * time.Second)
 	}
 
-	// a.waitForAgent(ctx, 3000)
 	// Continue with app setup and registration as per normal flow
 	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, opts)
 	a.apps.Store(clientID, usrApp)
@@ -896,7 +884,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		// A "context canceled" error is expected on normal shutdown, so we don't treat it as a failure.
 		if ctx.Err() == context.Canceled {
 			cmd.Process.Kill()
-			logger.Info("Docker agent run cancelled gracefully.")
+			logger.Info("Keploy agent in docker stopped gracefully.")
 			return nil
 		}
 		utils.LogError(logger, err, "failed to run keploy agent in docker")

@@ -117,8 +117,7 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case <-startCh:
-					logger.Info("keploy agent successfully loaded hooks and proxies, will start the http server now :")
-					fmt.Println(port)
+					logger.Info("Starting Agent's HTTP server on :", zap.String("port", fmt.Sprintf("%d", port)))
 					if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
 						logger.Error("failed to start HTTP server", zap.Error(err))
 					} else {

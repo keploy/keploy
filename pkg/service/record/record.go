@@ -242,7 +242,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return nil
 	})
 
-
 	if r.config.CommandType != "docker-compose" {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})

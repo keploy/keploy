@@ -206,7 +206,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 				return err
 			}
 			h.cgBind6 = cg6
-			h.Logger.Info("Attached ingress redirection hooks.")
+			h.Logger.Debug("Attached ingress redirection hooks.")
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -275,7 +275,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		h.gp6 = gp6
 	}
 
-	h.Logger.Info("keploy initialized and probes added to the kernel.")
+	h.Logger.Debug("keploy initialized and probes added to the kernel.")
 
 	if opts.E2E {
 		pid, err := utils.GetPIDFromPort(ctx, h.Logger, int(opts.Port))
@@ -416,7 +416,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, rules []config.BypassRule) error {
-	h.Logger.Info("Registering the client with the keploy server")
+	h.Logger.Info("Registering the client Info with keploy")
 	// Register the client and start processing
 
 	// send the network info to the kernel

@@ -29,7 +29,7 @@ func (Hooks) BeforeDockerComposeSetup(ctx context.Context, _ *docker.Compose, _ 
 }
 
 func (h Hooks) BeforeDockerSetup(ctx context.Context, cmd string) (string, error) {
-	h.logger.Info("running before docker setup hook - oss", zap.String("cmd", cmd))
+	h.logger.Debug("running before docker setup hook - oss", zap.String("cmd", cmd))
 	// no-op
 	return cmd, nil
 }

@@ -135,7 +135,7 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 				utils.LogError(h.Logger, err, "failed to decode ingress event")
 				continue
 			}
-			h.Logger.Info("Intercepted application bind event")
+			h.Logger.Debug("Intercepted application bind event")
 			select {
 			case <-ctx.Done(): // Context was cancelled, so we shut down.
 				return
