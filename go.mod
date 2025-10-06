@@ -110,6 +110,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
+	github.com/keploy/integrations v0.0.0-20250905093741-f321c22aa2b3
 	github.com/keploy/jsonDiff v1.0.8
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
