@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	txttmpl "text/template"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -154,46 +153,31 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Render any template values in the test case before simulation.
 	// Render any template values in the test case before simulation.
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
-		testCaseStr, err := json.Marshal(tc)
+		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
 			return nil, err
 		}
 
-		funcMap := txttmpl.FuncMap{
-			"int":    utils.ToInt,
-			"string": utils.ToString,
-			"float":  utils.ToFloat,
-		}
-		tmpl, err := txttmpl.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-		if err != nil || tmpl == nil {
-			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
-			return nil, err
-		}
-
-		// Prepare the data for template execution.
-		templateData := make(map[string]interface{})
+		// Build the template data
+		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
 		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
 			templateData[k] = v
 		}
 		if len(utils.SecretValues) > 0 {
 			templateData["secret"] = utils.SecretValues
 		}
 
-		var output bytes.Buffer
-		// Execute template with the populated templateData (previously an empty data map was passed here)
-		err = tmpl.Execute(&output, templateData)
-
-		if err != nil {
-			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
+		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
+		// ignoring LaTeX/HTML like {{\pi}}.
+		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
+		if rerr != nil {
+			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
 		}
 
-		// Unmarshal the rendered string back into the test case struct.
-		renderedBytes := output.Bytes()
-		err = json.Unmarshal(renderedBytes, &tc)
+		err = json.Unmarshal([]byte(renderedStr), &tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", string(renderedBytes)))
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
 			return nil, err
 		}
 	}
