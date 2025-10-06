@@ -1,7 +1,7 @@
 name: pull-image
 description: "Pull Image"
 inputs:
-  image_ref:
+  image_tag:
     description: "Docker image tag or digest to pull"
     required: false
     default: ttl.sh/keploy/keploy:1h
@@ -12,7 +12,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        IMAGE_REF="${{ inputs.image_ref }}"
+        IMAGE_REF="${{ inputs.image_tag }}"
         echo "Pulling ${IMAGE_REF} ..."
         docker pull "${IMAGE_REF}"
 
