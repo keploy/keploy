@@ -4,6 +4,11 @@ on:
     branches: [main]
   # push:
   #   branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
