@@ -13,6 +13,13 @@ jobs:
           docker builder prune --all -f
           docker volume prune -f
 
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
       - name: Clean up git config
         if: always()
         continue-on-error: true
