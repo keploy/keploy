@@ -137,11 +137,12 @@ section "Starting to record test cases..."
 sudo -E env PATH="$PATH" $RECORD_BIN record -c "docker run --rm -p 8080:8080 --name go-joke-app-record --network keploy-network go-joke-app" --containerName "go-joke-app-record" --generateGithubActions=false 2>&1 | tee record.log &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
+sleep 30
 endsec
 
 section "Generating traffic to the application..."
 send_requests
-sleep 5
+sleep 10
 endsec
 
 section "Stopping the recording process..."
