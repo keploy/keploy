@@ -1,7 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# --- Centralized Cleanup Function ---
 # This function is called whenever the script exits, for any reason.
 cleanup() {
   # Capture the exit code of the last command that ran
@@ -21,7 +20,7 @@ cleanup() {
   if [ $exit_code -ne 0 ]; then
     echo "::error::Script failed with exit code $exit_code."
   else
-    section "Script finished successfully. Dumping final logs..."
+    echo "Script finished successfully."
   fi
 
   # Exit with the original exit code
@@ -31,9 +30,7 @@ cleanup() {
 # Register the cleanup function to run on script EXIT
 trap cleanup EXIT
 
-# --- Helper Functions (Unchanged) ---
 section() { echo "::group::$*"; }
-# endsec is now called in the trap, but we keep it for explicit group closing
 endsec()  { echo "::endgroup::"; }
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
@@ -122,46 +119,44 @@ check_test_report() {
     return 0
 }
 
-# --- Main Execution ---
-
-section "🟢 Building Go application..."
+section "Building Go application..."
 go build -o go-joke-app .
 chmod +x ./go-joke-app
 echo "✅ Application built successfully."
 endsec
 
-section "🟢 Setting up Keploy..."
+section "Setting up Keploy..."
 rm -rf keploy*
 sudo -E env PATH="$PATH" $RECORD_BIN config --generate
 echo "✅ Keploy setup complete."
 endsec
 
 # 1️⃣ Record test cases
-section "🟢 Starting to record test cases..."
+section "Starting to record test cases..."
 # Run traffic generation in the background
 sudo -E env PATH="$PATH" $RECORD_BIN record -c "./go-joke-app" --generateGithubActions=false 2>&1 | tee record.log &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
-section "🟢 Generating traffic to the application..."
+section "Generating traffic to the application..."
 send_requests
 sleep 5 # Give a moment for logs to flush
 endsec
 
 # 2️⃣ Stop Recording Process before testing
-section "🟢 Stopping the recording process..."
+section "Stopping the recording process..."
 # The trap will handle cleanup on failure, but for the happy path, we need to stop record before starting test.
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-sudo kill "$KEPLOY_PID" || echo "Keploy process was not running."
-wait "$KEPLOY_PID" 2>/dev/null || true
+pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+wait "$pid" 2>/dev/null || true
 sleep 5
 check_for_errors "record.log"
 echo "Recording stopped."
 endsec
 
 # 3️⃣ Test with captured mocks
-section "🟢 Starting to test with captured mocks..."
+section "Starting to test with captured mocks..."
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./go-joke-app" --delay 10 --generateGithubActions=false --disableMockUpload 2>&1 | tee test.log
 check_for_errors "test.log"
 check_test_report
