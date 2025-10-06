@@ -1,135 +1,163 @@
 #!/bin/bash
+set -Eeuo pipefail
 
-# Setup sudo access, a common requirement in CI environments.
+# This function is called whenever the script exits, for any reason.
+cleanup() {
+  # Capture the exit code of the last command that ran
+  local exit_code=$?
+  
+  # Always close the last log group to prevent broken folding in CI UIs
+  endsec 
+
+  echo "--- Running cleanup ---"
+  # Stop any running Docker containers started by this script.
+  # This is more robust than pkill for containerized apps.
+  # The 'xargs -r' ensures 'docker stop' is only run if containers are found.
+  docker ps -q --filter "name=go-joke-app" | xargs -r sudo docker stop || true
+  # Use pkill to find and kill the Keploy process on the host
+  sudo pkill -f "keploy" || true
+  echo "Cleanup complete."
+
+  # If the script failed (exit code is not 0), print an error message
+  if [ $exit_code -ne 0 ]; then
+    echo "::error::Script failed with exit code $exit_code."
+  else
+    echo "Script finished successfully."
+  fi
+
+  # Exit with the original exit code
+  exit $exit_code
+}
+
+# Register the cleanup function to run on script EXIT
+trap cleanup EXIT
+
+section() { echo "::group::$*"; }
+endsec()  { echo "::endgroup::"; }
+
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
-# Function to generate API traffic for the go-joke-app
-generate_traffic() {
-  # Wait for the Go application to start on port 8080
-  echo "Waiting for app to start..."
-  for i in {1..30}; do
-    # Use curl to check for readiness, which is more portable than nc
-    if curl -s "http://localhost:8080/joke" >/dev/null; then
-      echo "✅ App started and responded."
-      break
+wait_for_http() {
+  local host="localhost" # Assuming localhost
+  local port="$1"
+  section "Waiting for application on port $port..."
+  for i in {1..120}; do
+    if nc -z "$host" "$port" >/dev/null 2>&1; then
+      echo "✅ Application port $port is open."
+      endsec
+      return 0
     fi
-    echo "Waiting... ($i/30)"
     sleep 1
   done
-  if [ "$i" -eq 30 ]; then
-    echo "❌ Application did not start in 30 seconds."
-    # Stop the container on failure to allow the main script to exit
-    docker stop go-joke-app-record || true
-    exit 1
-  fi
+  echo "::error::Application did not become available on port $port in time."
+  # No endsec here, failure will trigger the trap which handles it.
+  return 1
+}
+
+send_requests() {
+  wait_for_http 8080
 
   echo "Generating API calls..."
   curl -X GET http://localhost:8080/joke
   curl -X GET http://localhost:8080/joke
   echo "✅ Traffic generation complete."
-
-  # Wait for Keploy to process the captured traffic
-  echo "Waiting 10 seconds for Keploy to record..."
-  sleep 10
-  
-  # Stop the container, which will cause the Keploy record session to end.
-  echo "Stopping the application container to end recording..."
-  if docker stop go-joke-app-record; then
-    echo "✅ Container stopped successfully."
-  else
-    echo "⚠️  Could not stop container. It may have already exited."
-  fi
 }
 
-# Function to check test results from a log file
-check_test_results() {
-    local log_file=$1
-    local stage=$2 # "record" or "test"
-
-    if [ "$stage" = "record" ]; then
-        if grep "Keploy has captured test cases" "$log_file"; then
-            echo "✅ Keploy captured test cases successfully."
-        else
-            echo "❌ Failed to capture test cases."
-            cat "$log_file"
-            exit 1
-        fi
+check_for_errors() {
+  local logfile=$1
+  echo "Checking for errors in $logfile..."
+  if [ -f "$logfile" ]; then
+    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+      echo "::error::Critical error found in $logfile. Failing the build."
+      echo "--- Failing Errors ---"
+      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      echo "----------------------"
+      exit 1
     fi
+    if grep -q "WARNING: DATA RACE" "$logfile"; then
+      echo "::error::Race condition detected in $logfile"
+      exit 1
+    fi
+  fi
+  echo "No critical errors found in $logfile."
+}
 
-    if grep "WARNING: DATA RACE" "$log_file"; then
-        echo "❌ Race condition detected in $log_file, stopping pipeline..."
-        cat "$log_file"
+check_test_report() {
+    echo "Checking test reports..."
+    if [ ! -d "./keploy/reports" ]; then
+        echo "Test report directory not found!"
         exit 1
     fi
 
-    if grep -E "Testrun failed for testcase|error while running the app|FATAL" "$log_file"; then
-        echo "❌ Critical error detected in $log_file"
-        cat "$log_file"
+    local latest_report_dir
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+    if [ -z "$latest_report_dir" ]; then
+        echo "No test run directory found in ./keploy/reports/"
+        exit 1
+    fi
+    
+    local all_passed=true
+    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
+        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
+        
+        local test_set_name
+        test_set_name=$(basename "$report_file" -report.yaml)
+        local test_status
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        
+        echo "Status for ${test_set_name}: $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Test set ${test_set_name} did not pass."
+        fi
+    done
+
+    if [ "$all_passed" = false ]; then
+        echo "One or more test sets failed."
         exit 1
     fi
 
-    if [ "$stage" = "test" ]; then
-        echo "🟢 Checking test reports..."
-        local latest_run_dir
-        latest_run_dir=$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)
-        if [ -z "${latest_run_dir:-}" ]; then
-            echo "❌ Test report directory not found! Failing test."
-            cat "$log_file"
-            exit 1
-        fi
-
-        # Check for any failed tests in the YAML reports
-        if grep -r 'status: FAILED' "$latest_run_dir"; then
-            echo "❌ Found FAILED status in test reports."
-            cat "$log_file"
-            grep -r 'status: FAILED' "$latest_run_dir"
-            exit 1
-        else
-            echo "✅ All test reports show PASSED."
-        fi
-    fi
-    # If no failures, print the log for context
-    cat "$log_file"
+    echo "All tests passed in reports."
 }
 
 # --- Main Execution ---
 
-# Build the application Docker image
-echo "🟢 Building Docker image for the application..."
+section "Building Docker image for the application..."
 docker build -t go-joke-app .
-if [ $? -ne 0 ]; then
-    echo "❌ Failed to build the Docker image."
-    exit 1
-fi
 echo "✅ Docker image built successfully."
+endsec
 
-# Setup Keploy configuration
-echo "🟢 Setting up Keploy..."
+section "Setting up Keploy..."
 rm -rf keploy*
 sudo -E env PATH="$PATH" $RECORD_BIN config --generate
-if [ $? -ne 0 ]; then
-    echo "❌ Failed to generate Keploy config."
-    exit 1
-fi
 echo "✅ Keploy setup complete."
+endsec
 
-# 1️⃣ Record test cases
-echo "🟢 Starting to record test cases..."
-generate_traffic & # Run traffic generation in the background
-# Keploy will wrap the docker run command
-sudo -E env PATH="$PATH" $RECORD_BIN record -c "docker run --rm -p 8080:8080 --name go-joke-app-record --network keploy-network go-joke-app" --containerName "go-joke-app-record" --generateGithubActions=false &> record.log
-check_test_results "record.log" "record"
-sleep 5 # Give a moment for processes to terminate cleanly
-wait
+section "Starting to record test cases..."
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "docker run --rm -p 8080:8080 --name go-joke-app-record --network keploy-network go-joke-app" --containerName "go-joke-app-record" --generateGithubActions=false 2>&1 | tee record.log &
+KEPLOY_PID=$!
+echo "Keploy record process started with PID: $KEPLOY_PID"
+endsec
 
-# 2️⃣ Test with captured mocks
-echo "🟢 Starting to test with captured mocks..."
-# Keploy will run the docker command for testing
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "docker run --rm -p 8080:8080 --name go-joke-app-test --network keploy-network go-joke-app" --containerName "go-joke-app-test" --delay 10 --generateGithubActions=false --disableMockUpload &> test.log
-check_test_results "test.log" "test"
+section "Generating traffic to the application..."
+send_requests
+sleep 5
+endsec
 
-# Final cleanup and success message
-echo "🟢 Cleaning up temporary log files..."
-rm -f record.log test.log
+section "Stopping the recording process..."
+# The trap will handle cleanup on failure, but for the happy path, we need to stop record before starting test.
+pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+wait "$pid" 2>/dev/null || true
+sleep 5
+check_for_errors "record.log"
+echo "Recording stopped."
+endsec
+
+echo "Starting to test with captured mocks..."
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "docker run --rm -p 8080:8080 --name go-joke-app-test --network keploy-network go-joke-app" --containerName "go-joke-app-test" --delay 10 --generateGithubActions=false --disableMockUpload 2>&1 | tee test.log
+check_for_errors "test.log"
+check_test_report
+endsec
+
 echo "✅ All tests completed successfully."
-exit 0
+# The 'trap' will run on this successful exit as well, but the exit_code will be 0.
