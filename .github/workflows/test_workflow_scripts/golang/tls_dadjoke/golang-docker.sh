@@ -124,7 +124,7 @@ check_test_report() {
 
 section "Building Docker image for the application..."
 docker build -t go-joke-app .
-echo "✅ Docker image built successfully."
+echo "✅ Docker image built successfully."  
 endsec
 
 section "Setting up Keploy..."
@@ -146,9 +146,12 @@ sleep 10
 endsec
 
 section "Stopping the recording process..."
-# The trap will handle cleanup on failure, but for the happy path, we need to stop record before starting test.
-pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-wait "$pid" 2>/dev/null || true
+pids=$(pgrep -f '^keploy .* record' || true)
+if [ -n "$pids" ]; then
+  echo "$pids" | xargs -r -n1 sudo kill
+  # wait can take multiple PIDs; don't quote to let word-splitting happen
+  wait $pids 2>/dev/null || true
+fi
 sleep 5
 check_for_errors "record.log"
 echo "Recording stopped."
