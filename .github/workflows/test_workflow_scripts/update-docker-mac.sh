@@ -107,7 +107,7 @@ build_docker_image() {
   # Buildx required for multi-arch; your workflow already sets it up.
   docker buildx build \
     --ssh default \
-    --platform linux/amd64,linux/arm64 \
+    --platform linux/arm64 \
     -t ttl.sh/keploy/keploy:1h \
     --push \
     .
