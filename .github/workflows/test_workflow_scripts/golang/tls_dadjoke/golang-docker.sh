@@ -120,6 +120,13 @@ check_test_report() {
     echo "All tests passed in reports."
 }
 
+container_kill() {
+    pid=$(pgrep -n keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
+}
+
 # --- Main Execution ---
 
 section "Building Docker image for the application..."
@@ -146,13 +153,8 @@ sleep 10
 endsec
 
 section "Stopping the recording process..."
-pids=$(pgrep -f '^keploy .* record' || true)
-if [ -n "$pids" ]; then
-  echo "$pids" | xargs -r -n1 sudo kill
-  # wait can take multiple PIDs; don't quote to let word-splitting happen
-  wait $pids 2>/dev/null || true
-fi
 sleep 5
+container_kill
 check_for_errors "record.log"
 echo "Recording stopped."
 endsec
