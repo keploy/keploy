@@ -101,16 +101,7 @@ build_docker_image() {
   echo "Building Docker image with BuildKit and SSH forwarding..."
   # On mac, Docker Desktop supports BuildKit and --ssh if enabled.
   # Ensure you have an SSH agent running with your key loaded (ssh-add -l to verify).
-  # Ensure Buildx is the builder (your workflow already sets it up)
-  export DOCKER_BUILDKIT=1
-
-  # Buildx required for multi-arch; your workflow already sets it up.
-  docker buildx build \
-    --ssh default \
-    --platform linux/arm64 \
-    -t ttl.sh/keploy/keploy:1h \
-    --push \
-    .
+  DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
 }
 
 main() {

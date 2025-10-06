@@ -79,51 +79,43 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
       
-      - name: Set up QEMU (for cross-arch emulation)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          install: true
-
       - name: Build and push Docker image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
-
+          
       - name: Clean up git config
         if: always() # This ensures the step runs even if previous steps fail
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
-  # Pull docker image on macOS
-  pull-docker-image:
-    runs-on: [self-hosted, macOS, native]
-    needs: [build-docker-image]
-    steps:
-      - name: Clear docker images and cache
-        run: |
-          docker builder prune --all -f
-          docker volume prune -f
+  # # Pull docker image on macOS
+  # pull-docker-image:
+  #   runs-on: [self-hosted, macOS, native]
+  #   needs: [build-docker-image]
+  #   steps:
+  #     - name: Clear docker images and cache
+  #       run: |
+  #         docker builder prune --all -f
+  #         docker volume prune -f
 
-      - name: Unlock keychain
-        if: runner.os == 'macOS'
-        run: |
-          security unlock-keychain -p $KEYCHAIN_PASSWORD
-        env:
-          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+  #     - name: Unlock keychain
+  #       if: runner.os == 'macOS'
+  #       run: |
+  #         security unlock-keychain -p $KEYCHAIN_PASSWORD
+  #       env:
+  #         KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
-      - name: Pull Docker image
-        run: |
-          docker pull ttl.sh/keploy/keploy:1h
+  #     - name: Pull Docker image
+  #       run: |
+  #         docker pull ttl.sh/keploy/keploy:1h
 
   run_python_docker_macos:
-    needs: [build-and-upload, pull-docker-image]
+    needs: [build-and-upload, build-docker-image]
     # needs: [upload-latest]
     uses: ./.github/workflows/python_docker_macos.yml
 
   run_golang_docker_macos:
-    needs: [build-and-upload, pull-docker-image]
+    needs: [build-and-upload, build-docker-image]
     # needs: [upload-latest]
     uses: ./.github/workflows/golang_docker_macos.yml
