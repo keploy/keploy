@@ -125,6 +125,10 @@ container_kill() {
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
+    echo "Cleaning up Keploy's internal container before testing..."
+    docker stop keploy-v2 &>/dev/null || true
+    docker rm -f keploy-v2 &>/dev/null || true
+
 }
 
 # --- Main Execution ---
