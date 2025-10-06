@@ -1,7 +1,39 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# --- Centralized Cleanup Function ---
+# This function is called whenever the script exits, for any reason.
+cleanup() {
+  # Capture the exit code of the last command that ran
+  local exit_code=$?
+  
+  # Always close the last log group to prevent broken folding in CI UIs
+  endsec 
+
+  echo "--- Running cleanup ---"
+  # Use pkill to find and kill the processes by name, which is more robust
+  # The '|| true' prevents the script from failing if the process isn't found
+  sudo pkill -f "keploy" || true
+  sudo pkill -f "./go-joke-app" || true
+  echo "Cleanup complete."
+
+  # If the script failed (exit code is not 0), print an error message
+  if [ $exit_code -ne 0 ]; then
+    echo "::error::Script failed with exit code $exit_code."
+  else
+    section "Script finished successfully. Dumping final logs..."
+  fi
+
+  # Exit with the original exit code
+  exit $exit_code
+}
+
+# Register the cleanup function to run on script EXIT
+trap cleanup EXIT
+
+# --- Helper Functions (Unchanged) ---
 section() { echo "::group::$*"; }
+# endsec is now called in the trap, but we keep it for explicit group closing
 endsec()  { echo "::endgroup::"; }
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
@@ -11,7 +43,6 @@ wait_for_http() {
   local port="$1"
   section "Waiting for application on port $port..."
   for i in {1..120}; do
-    # Use netcat (nc) to check if the port is open without sending app-level data
     if nc -z "$host" "$port" >/dev/null 2>&1; then
       echo "✅ Application port $port is open."
       endsec
@@ -20,7 +51,7 @@ wait_for_http() {
     sleep 1
   done
   echo "::error::Application did not become available on port $port in time."
-  endsec
+  # No endsec here, failure will trigger the trap which handles it.
   return 1
 }
 
@@ -37,10 +68,8 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
-    # Find critical Keploy errors, but exclude specific non-critical ones.
     if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
       echo "::error::Critical error found in $logfile. Failing the build."
-      # Print the specific errors that caused the failure
       echo "--- Failing Errors ---"
       grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
       echo "----------------------"
@@ -54,7 +83,6 @@ check_for_errors() {
   echo "No critical errors found in $logfile."
 }
 
-# Validates the Keploy test report to ensure all test sets passed
 check_test_report() {
     echo "Checking test reports..."
     if [ ! -d "./keploy/reports" ]; then
@@ -70,7 +98,6 @@ check_test_report() {
     fi
     
     local all_passed=true
-    # Loop through all generated report files
     for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
         [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
         
@@ -97,31 +124,21 @@ check_test_report() {
 
 # --- Main Execution ---
 
-# Build the application
 section "🟢 Building Go application..."
 go build -o go-joke-app .
-if [ $? -ne 0 ]; then
-    echo "❌ Failed to build the application."
-    exit 1
-fi
 chmod +x ./go-joke-app
 echo "✅ Application built successfully."
 endsec
 
-# Setup Keploy configuration
 section "🟢 Setting up Keploy..."
 rm -rf keploy*
 sudo -E env PATH="$PATH" $RECORD_BIN config --generate
-if [ $? -ne 0 ]; then
-    echo "❌ Failed to generate Keploy config."
-    exit 1
-fi
 echo "✅ Keploy setup complete."
 endsec
 
 # 1️⃣ Record test cases
 section "🟢 Starting to record test cases..."
-generate_traffic & # Run traffic generation in the background
+# Run traffic generation in the background
 sudo -E env PATH="$PATH" $RECORD_BIN record -c "./go-joke-app" --generateGithubActions=false 2>&1 | tee record.log &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
@@ -129,19 +146,21 @@ endsec
 
 section "🟢 Generating traffic to the application..."
 send_requests
-sleep 5 # Give a moment for processes to terminate cleanly
+sleep 5 # Give a moment for logs to flush
 endsec
 
-section "🟢 Stop Recording"
+# 2️⃣ Stop Recording Process before testing
+section "🟢 Stopping the recording process..."
+# The trap will handle cleanup on failure, but for the happy path, we need to stop record before starting test.
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-wait "$pid" 2>/dev/null || true
+sudo kill "$KEPLOY_PID" || echo "Keploy process was not running."
+wait "$KEPLOY_PID" 2>/dev/null || true
 sleep 5
-check_for_errors "record.txt"
+check_for_errors "record.log"
 echo "Recording stopped."
 endsec
 
-# 2️⃣ Test with captured mocks
+# 3️⃣ Test with captured mocks
 section "🟢 Starting to test with captured mocks..."
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./go-joke-app" --delay 10 --generateGithubActions=false --disableMockUpload 2>&1 | tee test.log
 check_for_errors "test.log"
@@ -149,4 +168,4 @@ check_test_report
 endsec
 
 echo "✅ All tests completed successfully."
-exit 0
+# The 'trap' will run on this successful exit as well, but the exit_code will be 0.
