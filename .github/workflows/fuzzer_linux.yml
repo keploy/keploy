@@ -94,7 +94,7 @@ jobs:
           chmod +x ./mysql-fuzzer
           echo "path=$(realpath ./mysql-fuzzer)" >> $GITHUB_OUTPUT
 
-      - name: Run Rerecord Fuzzer Test
+      - name: Run ${{ matrix.fuzzer.type }} Fuzzer Test
         env:
           RECORD_KEPLOY_BIN:    ${{ steps.record_keploy.outputs.path }}
           REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}

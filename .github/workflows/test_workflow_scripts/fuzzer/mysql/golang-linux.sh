@@ -13,28 +13,100 @@ set -Eeuo pipefail
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
-# Error handler: dumps context and logs before exiting
-die() {
-  local rc=$?
-  echo "::error::Pipeline failed (exit code=$rc). Dumping context..."
-  section "Docker Status"
-  docker ps -a || true
+dump_logs() {
+  section "Record Log"
+  cat record.txt 2>/dev/null || echo "Record log not found."
   endsec
-  section "MySQL Container Logs"
-  docker logs mysql-container || true
+  section "Test Log"
+  cat test.txt 2>/dev/null || echo "Test log not found."
   endsec
-  section "Workspace Tree"
-  find . -maxdepth 3 -print | sort || true
-  endsec
-  section "Keploy Artifacts"
-  find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
-  endsec
-  section "Log Files"
-  for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- Log: $f ---"; cat "$f"; }; done
-  endsec
-  exit "$rc"
 }
-trap die ERR
+
+final_cleanup() {
+  local rc=$? # Capture the script's final exit code
+  if [[ $rc -ne 0 ]]; then
+    echo "::error::Pipeline failed (exit code=$rc). Dumping final logs..."
+  else
+    section "Script finished successfully. Dumping final logs..."
+  fi
+  
+  dump_logs
+
+  section "Stopping MySQL container..."
+  docker stop mysql-container || true
+  docker rm mysql-container || true
+  endsec
+
+  if [[ $rc -eq 0 ]]; then
+    endsec
+  fi
+  # The script will exit with the original exit code automatically
+}
+
+trap final_cleanup EXIT
+
+# Checks a log file for critical errors or data races
+check_for_errors() {
+  local logfile=$1
+  echo "Checking for errors in $logfile..."
+  if [ -f "$logfile" ]; then
+    # Find critical Keploy errors, but exclude specific non-critical ones.
+    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+      echo "::error::Critical error found in $logfile. Failing the build."
+      # Print the specific errors that caused the failure
+      echo "--- Failing Errors ---"
+      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      echo "----------------------"
+      exit 1
+    fi
+    if grep -q "WARNING: DATA RACE" "$logfile"; then
+      echo "::error::Race condition detected in $logfile"
+      exit 1
+    fi
+  fi
+  echo "No critical errors found in $logfile."
+}
+
+# Validates the Keploy test report to ensure all test sets passed
+check_test_report() {
+    echo "Checking test reports..."
+    if [ ! -d "./keploy/reports" ]; then
+        echo "Test report directory not found!"
+        return 1
+    fi
+
+    local latest_report_dir
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+    if [ -z "$latest_report_dir" ]; then
+        echo "No test run directory found in ./keploy/reports/"
+        return 1
+    fi
+    
+    local all_passed=true
+    # Loop through all generated report files
+    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
+        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
+        
+        local test_set_name
+        test_set_name=$(basename "$report_file" -report.yaml)
+        local test_status
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        
+        echo "Status for ${test_set_name}: $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Test set ${test_set_name} did not pass."
+        fi
+    done
+
+    if [ "$all_passed" = false ]; then
+        echo "One or more test sets failed."
+        return 1
+    fi
+
+    echo "All tests passed in reports."
+    return 0
+}
 
 # Waits for the MySQL container to become ready and accept connections
 wait_for_mysql() {
@@ -73,7 +145,7 @@ wait_for_http() {
 }
 
 # Triggers the fuzzer, lets it run for a short time, and then kills the Keploy process.
-drive_traffic_and_stop_keploy() {
+send_requests() {
   local kp_pid="$1"
 
   # Wait for the fuzzer's API to be ready
@@ -83,7 +155,7 @@ drive_traffic_and_stop_keploy() {
   curl -sS --request POST 'http://localhost:18080/run' \
     --header 'Content-Type: application/json' \
     --data-raw '{
-      "dsn": "root:password@tcp(127.0.0.1:3306)",
+      "dsn": "root:password@tcp(127.0.0.1:3306)/",
       "db_name": "fuzzdb",
       "drop_db_first": true,
       "seed": 42,
@@ -92,13 +164,6 @@ drive_traffic_and_stop_keploy() {
       "mode": "record",
       "golden_path": "./golden/mysqlfuzz_golden.json"
     }'
-
-  echo "Letting fuzzer run for 230 seconds to generate traffic..."
-  sleep 230
-
-  echo "$kp_pid Keploy PID"
-  echo "Killing Keploy"
-  sudo kill "$kp_pid" 2>/dev/null || true
 }
 
 # --- Main Execution Logic ---
@@ -110,10 +175,7 @@ echo "RECORD_KEPLOY_BIN: $RECORD_KEPLOY_BIN"
 echo "REPLAY_KEPLOY _BIN: $REPLAY_KEPLOY_BIN"
 rm -rf keploy/ keploy.yml golden/ record.txt test.txt
 mkdir -p golden/
-endsec
 
-# --- Recording Phase ---
-section "Recording with MySQL Fuzzer"
 # Start a MySQL instance for the recording session
 docker run --name mysql-container \
   -e MYSQL_ROOT_PASSWORD=password \
@@ -124,36 +186,28 @@ wait_for_mysql
 sudo "$RECORD_KEPLOY_BIN" config --generate
 sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
 echo "Keploy config generated and updated."
+endsec
 
-# Start Keploy recording in the background
-echo "Starting Keploy in record mode..."
+# --- Recording Phase ---
+section "Start Recording Server"
 sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$MYSQL_FUZZER_BIN" > record.txt 2>&1 &
 KEPLOY_PID=$!
+echo "Keploy record process started with PID: $KEPLOY_PID"
+endsec
 
+section "Generate Fuzzer Traffic"
 # Trigger traffic and explicitly kill the Keploy process after a delay
-drive_traffic_and_stop_keploy "$KEPLOY_PID"
+send_requests "$KEPLOY_PID"
+sleep 5
+endsec
 
-# Wait for Keploy to finish recording and check its exit status
-set +e
-wait "$KEPLOY_PID"
-RECORD_RC=$?
-set -e
-
-# Validate recording logs
-if grep -q "ERROR" record.txt; then
-  echo "::warning::Errors detected in recording log."
-  cat record.txt
-fi
-if grep -q "WARNING: DATA RACE" record.txt; then
-  echo "::error::Data race detected during recording!"
-  cat record.txt
-  exit 1
-fi
-if [[ $RECORD_RC -ne 0 ]]; then
-  echo "::error::Keploy record process exited with non-zero status: $RECORD_RC"
-  exit $RECORD_RC
-fi
-echo "✅ Recording phase completed successfully."
+section "Stop Recording"
+echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
+pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+wait "$pid" 2>/dev/null || true
+sleep 5
+check_for_errors "record.txt"
+echo "Recording stopped."
 endsec
 
 # --- Teardown before Replay ---
@@ -163,51 +217,11 @@ echo "✅ MySQL container stopped. Replay will rely on Keploy mocks."
 endsec
 
 # --- Replay Phase ---
-section "Replaying Tests with Keploy Mocks"
-# Start Keploy in test mode in the background
-echo "Starting Keploy in test mode..."
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MYSQL_FUZZER_BIN" --delay 15 > test.txt 2>&1 &
-KEPLOY_PID=$!
-
-# Trigger traffic and explicitly kill the Keploy process after a delay
-drive_traffic_and_stop_keploy "$KEPLOY_PID"
-
-# Wait for the replay to complete and capture its exit code
-set +e
-wait "$KEPLOY_PID"
-REPLAY_RC=$?
-set -e
-echo "Replay finished with exit code: $REPLAY_RC"
-cat test.txt
+section "Replaying Tests"
+sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MYSQL_FUZZER_BIN" --delay 15 --api-timeout=240 > test.txt 2>&1
+check_for_errors "test.txt"
+check_test_report
 endsec
 
-# --- Verification Phase ---
-section "Verifying Test Reports"
-# Find the latest test run directory
-RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
-if [[ -z "${RUN_DIR:-}" ]]; then
-  echo "::error::No test run directory found in ./keploy/reports."
-  exit 1
-fi
-echo "Analyzing reports in: $RUN_DIR"
-
-# Check the status of each test set report
-all_passed=true
-for report in "$RUN_DIR"/test-set-*-report.yaml; do
-  [[ -f "$report" ]] || continue
-  status=$(awk '/^status:/{print $2; exit}' "$report")
-  echo "Status for $(basename "$report"): ${status:-<unknown>}"
-  if [[ "$status" != "PASSED" ]]; then
-    all_passed=false
-  fi
-done
-endsec
-
-# --- Final Result ---
-if [[ "$all_passed" == "true" && $REPLAY_RC -eq 0 ]]; then
-  echo "✅ All tests passed successfully!"
-  exit 0
-else
-  echo "::error::One or more tests failed or the replay process exited with an error."
-  exit 1
-fi
+echo "✅ All tests completed successfully."
+exit 0
