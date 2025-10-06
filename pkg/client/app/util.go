@@ -39,7 +39,7 @@ func findComposeFile(cmd string) []string {
 	return []string{}
 }
 
-func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
+func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath string) string {
 	// Ensure newComposeFile starts with ./
 	if !strings.HasPrefix(newComposeFile, "./") {
 		newComposeFile = "./" + newComposeFile
@@ -49,10 +49,31 @@ func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
 	pattern := `(-f\s+("[^"]+"|'[^']+'|\S+))`
 	re := regexp.MustCompile(pattern)
 
-	// Check if the "-f <file>" pattern exists in the appCmd
-	if re.MatchString(appCmd) {
-		// Replace it with the new Compose file
-		return re.ReplaceAllString(appCmd, fmt.Sprintf("-f %s", newComposeFile))
+	// Find all matches and replace only the one that matches appComposePath
+	matches := re.FindAllStringSubmatch(appCmd, -1)
+	if len(matches) > 0 {
+		for _, match := range matches {
+			fullMatch := match[0]
+			filePart := match[1]
+
+			// Extract the actual file path from the match (remove -f and whitespace)
+			filePattern := `-f\s+("[^"]+"|'[^']+'|\S+)`
+			fileRe := regexp.MustCompile(filePattern)
+			fileMatch := fileRe.FindStringSubmatch(filePart)
+
+			if len(fileMatch) > 1 {
+				quotedFile := fileMatch[1]
+				// Remove quotes if present
+				actualFile := strings.Trim(quotedFile, `"'`)
+
+				// Check if this file matches the appComposePath
+				if actualFile == appComposePath {
+					return strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
+				}
+			}
+		}
+		// If no matching compose path found, return original command
+		return appCmd
 	}
 
 	// If the pattern doesn't exist, inject the new Compose file right after "docker-compose" or "docker compose"

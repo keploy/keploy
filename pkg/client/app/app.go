@@ -300,7 +300,7 @@ func (a *App) SetupCompose() error {
 		}
 		a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
 		//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
-		a.cmd = modifyDockerComposeCommand(a.cmd, newPath)
+		a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath)
 	}
 
 	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
