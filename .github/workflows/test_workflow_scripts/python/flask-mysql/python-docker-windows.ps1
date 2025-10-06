@@ -1,4 +1,4 @@
-<#
+ <#
   PowerShell test runner for Keploy (Windows) - Flask-MySQL sample
 
   - Cleans up previous Docker containers, networks, and Keploy files.
@@ -6,6 +6,7 @@
   - Builds the application's Docker image.
   - Runs the record phase, automatically making all API calls to generate tests.
   - Kills the record process cleanly.
+  - MODIFIES keploy.yml to add a global noise rule for dynamic JWTs.
   - Runs the replay phase and validates the test report.
 #>
 
@@ -177,6 +178,37 @@ $testCount = (Get-ChildItem -Path "$testSetPath\tests" -Filter "test-*.yaml").Co
 if ($testCount -lt 12) { Write-Error "Expected at least 12 test files, but found $testCount."; exit 1 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
+
+
+Write-Host "Adding global noise rule to keploy.yml to ignore 'access_token' field..."
+$configPath = ".\keploy.yml"
+try {
+    # Read the entire file content as a single string
+    $configContent = Get-Content -Path $configPath -Raw
+
+    # Define the exact string to find (with correct indentation)
+    $placeholder = '        global: {}'
+    
+    # Define the new configuration block to insert.
+    # The indentation in this here-string is critical for valid YAML.
+    $replacement = @"
+        global: {
+            body: {
+                "access_token": [],
+            }
+        }
+"@
+
+    # Replace the placeholder with the actual noise configuration
+    $newConfigContent = $configContent.Replace($placeholder, $replacement)
+
+    # Write the modified content back to the file
+    Set-Content -Path $configPath -Value $newConfigContent
+    Write-Host "Successfully updated keploy.yml with global noise rule."
+} catch {
+    Write-Error "Failed to update keploy.yml with noise configuration: $_"
+    exit 1
+}
 
 # =========================
 # ========== REPLAY =======
