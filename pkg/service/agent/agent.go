@@ -153,7 +153,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions, se
 		IsDocker:   opts.IsDocker,
 		KeployIPV4: "172.18.0.2",
 		Mode:       opts.Mode,
-		BigPayload: true,
 	}, setupOpts)
 
 	if err != nil {

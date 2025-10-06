@@ -1108,9 +1108,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 	}
 
-	if cmdType == utils.DockerCompose {
-		time.Sleep(10 * time.Second)
-	}
+	// if cmdType == utils.DockerCompose {
+	// 	time.Sleep(10 * time.Second)
+	// }
 
 	for idx, testCase := range testCases {
 

@@ -189,7 +189,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
-	// if !r.config.Record.BigPayload {
+
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
@@ -211,7 +211,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return nil
 	})
-	// }
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
@@ -324,7 +323,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
-	// if !r.config.Record.BigPayload {
 	g.Go(func() error {
 		defer close(incomingChan)
 
@@ -350,7 +348,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 			}
 		}
 	})
-	// }
 
 	// OUTGOING
 	g.Go(func() error {
@@ -393,7 +390,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		}
 	})
 
-	// if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
 	return FrameChan{
 		Incoming: incomingChan,
 		Outgoing: outgoingChan,

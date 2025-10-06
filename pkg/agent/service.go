@@ -29,7 +29,6 @@ type HookCfg struct {
 	Rules      []config.BypassRule
 	E2E        bool
 	Port       uint32
-	BigPayload bool
 }
 
 // TODO: should not be in the agent package
