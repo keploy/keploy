@@ -762,7 +762,17 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	if utils.CmdType(opts.CommandType) != utils.DockerCompose {
-		time.Sleep(10 * time.Second)
+		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		agentReadyCh := make(chan bool, 1)
+		go pkg.ContinuouslyCheckAgent(agentCtx, int(opts.AgentPort), agentReadyCh, 1*time.Second)
+
+		select {
+		case <-agentCtx.Done():
+			return 0, fmt.Errorf("keploy-agent did not become ready in time")
+		case <-agentReadyCh:
+		}
 	}
 
 	// Continue with app setup and registration as per normal flow
@@ -892,49 +902,6 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 	}
 
 	return nil
-}
-
-func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to send request to the agent server")
-		return false
-	}
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		a.logger.Debug("Keploy agent health check failed", zap.Error(err))
-		return false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		a.logger.Debug("Agent health check returned non-OK status", zap.String("status", resp.Status))
-		return false
-	}
-
-	a.logger.Debug("Agent health check successful", zap.String("status", resp.Status))
-	return true
-}
-
-// waitForAgent waits for the agent to become available within the timeout period
-func (a *AgentClient) waitForAgent(ctx context.Context, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for agent to become ready: %w", ctx.Err())
-		case <-ticker.C:
-			if a.isAgentRunning(ctx) {
-				return nil
-			}
-		}
-	}
 }
 
 func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {
