@@ -1,7 +1,7 @@
 name: Python On Docker
 on:
   workflow_call:
-  inputs:
+    inputs:
       image_ref:            
         description: "Docker image tag or digest to pull"
         required: false
