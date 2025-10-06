@@ -70,7 +70,6 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Println("STARTING INCOMING PROXY")
 	tc, err := a.agent.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"

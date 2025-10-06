@@ -1100,7 +1100,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	volumes := idc.generateKeployVolumes(workingDir, homeDir)
 
 	clientPid := int(os.Getpid())
-	fmt.Println("SENDING THIS CLIENT ID : ", clientPid)
 	// Build command arguments
 	command := []string{
 		"--port", fmt.Sprintf("%d", opts.AgentPort),

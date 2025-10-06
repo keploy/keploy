@@ -399,9 +399,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 				}
 			}
 		}(tc.Name)
-		fmt.Println("printing the IP AGAIN :", pkg.AgentIP)
 		if utils.IsDockerCmd(cmdType) {
-			fmt.Println("getting heres")
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, pkg.AgentIP)
 			if err != nil {
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")

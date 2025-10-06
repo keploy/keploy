@@ -100,7 +100,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 
 	go func() {
 		defer func() {
-			fmt.Println("Closing the test case channel")
 			close(tcChan)
 		}()
 		defer func() {
@@ -170,7 +169,6 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 
 	grp.Go(func() error {
 		defer func() {
-			fmt.Println("closing the mock channel")
 			close(mockChan)
 		}()
 		defer func() {
@@ -208,8 +206,6 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 }
 
 func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
-
-	fmt.Println("Inside MockOutgoing of agent client")
 
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
@@ -469,7 +465,6 @@ func (a *AgentClient) GetContainerIP4(ctx context.Context, clientID uint64) (str
 }
 
 func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOptions) models.AppError {
-	fmt.Println("Inside Run of agent binary !!.. ")
 	app, err := a.getApp(clientID)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
@@ -603,7 +598,6 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	a.mu.Lock()
 	a.agentCmd = cmd
 	a.mu.Unlock()
-	fmt.Println(cmd)
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
 		if logFile != nil {
@@ -726,7 +720,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		zap.Uint32("dns-port", dnsPort))
 
 	if isDockerCmd {
-		fmt.Println("HERE IS THE DOCKER COMMAND :", cmd)
 		randomBytes := make([]byte, 2)
 		// Read cryptographically secure random bytes.
 		if _, err := rand.Read(randomBytes); err != nil {
@@ -740,7 +733,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		opts.KeployContainer = "keploy-v2-" + uuidSuffix
 		a.conf.KeployContainer = opts.KeployContainer
 
-		fmt.Println("ORIGINAL DOCKER COMMAND:", cmd)
 
 		// Regex to find all port mapping flags (-p or --publish)
 		portRegex := regexp.MustCompile(`\s+(-p|--publish)\s+[^\s]+`)
@@ -764,16 +756,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		networkMatches := networkRegex.FindStringSubmatch(cmd)
 
 		if len(networkMatches) > 2 {
-			opts.AppNetwork = networkMatches[2] // Store the extracted network name (the 2nd capture group)
-			fmt.Println("FOUND APP NETWORK:", opts.AppNetwork)
-
-			// Remove the network argument from the original command string
+			opts.AppNetwork = networkMatches[2]
 			cmd = networkRegex.ReplaceAllString(cmd, "")
 		}
-		fmt.Println("COMMAND AFTER REMOVING PORTS:", cmd)
-
-		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
-
 	}
 
 	if opts.CommandType != "docker-compose" {
@@ -817,7 +802,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	if isDockerCmd && opts.CommandType != "docker-compose" {
-		fmt.Println("HERE IS THE KEPLOY CONTAINER : ", opts.KeployContainer)
 		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
 		if err != nil {
 			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
@@ -838,7 +822,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		pkg.AgentIP = keployIPv4
-		fmt.Println("here is the agent's IP address in client :", keployIPv4)
 		opts.AgentIP = keployIPv4
 	}
 	a.logger.Info("Client setup completed successfully", zap.Uint64("clientID", clientID))
@@ -861,8 +844,6 @@ func (a *AgentClient) getApp(clientID uint64) (*app.App, error) {
 }
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
-
-	fmt.Println("Starting the keploy agent in docker container....")
 
 	// Step 1: Prepare the Docker environment and get the command components.
 	// We delegate all Docker-specific setup to the new helper function.
@@ -926,9 +907,6 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 }
 
 func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
-	fmt.Println("chekcing on port :", a.conf.Agent.Port)
-	clientPID := int32(os.Getpid())
-	fmt.Println("SECOND CHECK ON CLIENT PID :", clientPID)
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send request to the agent server")

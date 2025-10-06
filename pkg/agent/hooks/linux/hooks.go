@@ -21,7 +21,6 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/davecgh/go-spew/spew"
 
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks/common"
@@ -446,8 +445,6 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
-	fmt.Println("here is the client pid whic we have sent :", opts.ClientNSPID)
-	spew.Dump(clientInfo)
 	return h.SendKeployClientInfo(clientInfo)
 }
 
@@ -462,9 +459,6 @@ func (h *Hooks) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 			IP6:  [4]uint32{0, 0, 0, 0},
 			Port: opts.ProxyPort,
 		}
-		fmt.Println("MAJOR BIG DUMP")
-		spew.Dump(opts)
-		spew.Dump(proxyInfo)
 		err = h.SendClientProxyInfo(uint64(0), proxyInfo)
 		if err != nil {
 			return err
@@ -472,8 +466,6 @@ func (h *Hooks) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		return nil
 	}
 	opts.AgentIP, _ = GetContainerIP()
-	fmt.Println("here is the agent ip address :", opts.AgentIP)
-
 	ipv4, err := IPv4ToUint32(opts.AgentIP)
 	if err != nil {
 		return err

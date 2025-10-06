@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -40,7 +39,6 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 func (h *Hooks) SendClientProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
 	h.M.Lock()
 	defer h.M.Unlock()
-	fmt.Println("Sending proxy info to ebpf program", proxInfo)
 	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to send the proxy info to the ebpf program")
@@ -77,30 +75,16 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 }
 
 func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
-	fmt.Println("Sending client info to ebpf program", clientInfo)
 	err := h.clientRegistrationMap.Update(uint64(0), clientInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to send the client info to the ebpf program")
 		return err
 	}
-
-	var retrievedInfo structs.ClientInfo
-
-	// 2. Look up the key and pass a pointer to your variable.
-	err = h.clientRegistrationMap.Lookup(uint64(0), &retrievedInfo)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to read the app info from the ebpf program")
-		return err
-	}
-
-	// 3. Print the retrieved value.
-	fmt.Println("Value at index 0 is:", retrievedInfo)
 	return nil
 }
 
 func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	key := 0
-	fmt.Println("Sending agent info to ebpf program", agentInfo)
 	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to send the agent info to the ebpf program")

@@ -44,7 +44,6 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
-	fmt.Println("Starting the recording process...")
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
@@ -141,7 +140,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
 	case <-ctx.Done():
-		fmt.Println("Context cancelled, stopping the recording process...")
 		return nil
 	default:
 	}
@@ -156,12 +154,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	r.config.ClientID = clientID
-	fmt.Println("Client ID from instrumentation setup is :", clientID)
 
 	if r.config.CommandType == "docker-compose" {
 
 		runAppErrGrp.Go(func() error {
-			fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
 			runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
@@ -218,9 +214,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	// }
 
 	errGrp.Go(func() error {
-		fmt.Println("Starting recording with outgoing proxy")
 		for mock := range frames.Outgoing {
-			fmt.Println("Received mock of kind:", mock.GetKind())
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
 				currMockID := r.mockDB.GetCurrMockID()
@@ -248,11 +242,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return nil
 	})
 
-	fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
 
 	if r.config.CommandType != "docker-compose" {
 		runAppErrGrp.Go(func() error {
-			fmt.Println("Before starting application from RunApplication of agent binary !!.. ")
 			runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
@@ -411,7 +403,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 }
 
 func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
-	fmt.Println("Inside RunApplication of agent binary !!..dfmlasdmf ")
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
