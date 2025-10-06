@@ -13,10 +13,6 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
-      - name: Clear docker images and cache
-        run: |
-          docker system prune -af --volumes
-
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
