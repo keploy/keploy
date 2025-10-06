@@ -158,7 +158,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 
 		// Build the template data
-		templateData := make(map[string]interface{}, len(utils.TemplatizedValues) + len(utils.SecretValues))
+		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
 		for k, v := range utils.TemplatizedValues {
 			templateData[k] = v
 		}
