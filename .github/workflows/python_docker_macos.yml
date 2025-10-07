@@ -28,14 +28,16 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.job }} (macOS)
+
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (macOS)
+
     steps:
-      - name: Unlock keychain
-        if: runner.os == 'macOS'
-        run: |
-          security unlock-keychain -p $KEYCHAIN_PASSWORD
-        env:
-          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+    #   - name: Unlock keychain
+    #     if: runner.os == 'macOS'
+    #     run: |
+    #       security unlock-keychain -p $KEYCHAIN_PASSWORD
+    #     env:
+    #       KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
       - name: Docker System Prune
         run: |
