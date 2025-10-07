@@ -153,12 +153,27 @@ func (conn *Tracker) reset() {
 	conn.req = []byte{}
 }
 
-func (conn *Tracker) verifyRequestData(expectedRecvBytes, actualRecvBytes uint64) bool {
-	return expectedRecvBytes == actualRecvBytes
+func (conn *Tracker) verifyDataIntegrity(exp, act uint64) bool {
+	return exp == act && exp != 0
 }
 
-func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint64) bool {
-	return expectedSentBytes == actualSentBytes
+func (conn *Tracker) dumpConnState(tag string) {
+	conn.logger.Debug("conn state",
+		zap.String("tag", tag),
+		zap.Any("connID", conn.connID),
+		zap.Bool("firstRequest", conn.firstRequest),
+		zap.Bool("lastChunkWasReq", conn.lastChunkWasReq),
+		zap.Bool("lastChunkWasResp", conn.lastChunkWasResp),
+		zap.Int("userReqSizes_len", len(conn.userReqSizes)),
+		zap.Int("kernelReqSizes_len", len(conn.kernelReqSizes)),
+		zap.Int("userRespSizes_len", len(conn.userRespSizes)),
+		zap.Int("kernelRespSizes_len", len(conn.kernelRespSizes)),
+		zap.Int("userReqs_len", len(conn.userReqs)),
+		zap.Int("userResps_len", len(conn.userResps)),
+		zap.Uint64("reqSize_buf", conn.reqSize),
+		zap.Uint64("respSize_buf", conn.respSize),
+		zap.Int("recTestCounter", int(atomic.LoadInt32(&conn.recTestCounter))),
+	)
 }
 
 // func (conn *Tracker) Malformed() bool {
@@ -193,7 +208,7 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
-		conn.logger.Debug("Connection check")
+		conn.logger.Debug("Detecting the http protocol")
 		if isHTTP2Request(data) {
 			// Create HTTP/2 parser and stream manager
 			conn.protocol = HTTP2
@@ -319,6 +334,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 	if conn.recTestCounter > 0 {
 		if (len(conn.userReqSizes) > 0 && len(conn.kernelReqSizes) > 0) &&
 			(len(conn.userRespSizes) > 0 && len(conn.kernelRespSizes) > 0) {
+			conn.logger.Debug("real time recording request") // this means this after this request there were more requests on the same conn
 			validReq, validRes := false, false
 
 			expectedRecvBytes := conn.userReqSizes[0]
@@ -326,13 +342,15 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
 				conn.logger.Warn("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
+				validReq = false
+				conn.dumpConnState("Malformed request in real time recording")
 			}
 
 			//popping out the current request info
 			conn.userReqSizes = conn.userReqSizes[1:]
 			conn.kernelReqSizes = conn.kernelReqSizes[1:]
 
-			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
+			if conn.verifyDataIntegrity(expectedRecvBytes, actualRecvBytes) {
 				validReq = true
 			} else {
 				conn.logger.Debug("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
@@ -345,7 +363,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 			conn.userRespSizes = conn.userRespSizes[1:]
 			conn.kernelRespSizes = conn.kernelRespSizes[1:]
 
-			if conn.verifyResponseData(expectedSentBytes, actualSentBytes) {
+			if conn.verifyDataIntegrity(expectedSentBytes, actualSentBytes) {
 				validRes = true
 				respTimestamp = time.Now()
 			} else {
@@ -388,9 +406,10 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
 				conn.logger.Warn("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
+				conn.dumpConnState("Malformed request in unverified recording")
 			}
 
-			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
+			if conn.verifyDataIntegrity(expectedRecvBytes, actualRecvBytes) {
 				recordTraffic = true
 			} else {
 				conn.logger.Debug("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
@@ -491,7 +510,9 @@ func (conn *Tracker) handleHTTP2Data(event SocketDataEvent) {
 
 // Existing HTTP/1 handling
 func (conn *Tracker) handleHTTP1Data(event SocketDataEvent) {
-	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
+
+	debugDataSize := min(event.MsgSize, 256)
+	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID), zap.ByteString("data", event.Msg[:debugDataSize]))
 
 	switch event.Direction {
 	case EgressTraffic:
