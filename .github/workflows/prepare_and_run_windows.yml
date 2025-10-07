@@ -90,6 +90,10 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
+      - name: Build image
+        run: |
+          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+
       - name: Set PR image tag
         run: echo "PR_IMAGE_TAG=ghcr.io/${GITHUB_REPOSITORY}:pr-${GITHUB_SHA::7}" >> $GITHUB_ENV
 
