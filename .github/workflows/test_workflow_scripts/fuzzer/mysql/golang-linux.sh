@@ -176,6 +176,9 @@ echo "REPLAY_KEPLOY _BIN: $REPLAY_KEPLOY_BIN"
 rm -rf keploy/ keploy.yml golden/ record.txt test.txt
 mkdir -p golden/
 sudo chown -R $(whoami):$(whoami) golden
+sudo chmod +x $RECORD_KEPLOY_BIN
+sudo chmod +x $REPLAY_KEPLOY_BIN
+sudo chmod +x $MYSQL_FUZZER_BIN
 # Start a MySQL instance for the recording session
 docker run --name mysql-container \
   -e MYSQL_ROOT_PASSWORD=password \
