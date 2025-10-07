@@ -14,10 +14,26 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
-      - name: Build Keploy (PR)
-        run: go build -race -tags=viper_bind_struct -o keploy
+      - name: Build Keploy (non-race)
+        run: |
+          mkdir -p out/build-no-race
+          go build -tags=viper_bind_struct -o out/build-no-race/keploy
       - uses: actions/upload-artifact@v4
-        with: { name: build, path: keploy }
+        with:
+          name: build-no-race
+          path: out/build-no-race/keploy
+
+      - name: Build Keploy (race)
+        env:
+          CGO_ENABLED: "1"   # race requires cgo; on ubuntu-latest it's fine
+        run: |
+          mkdir -p out/build
+          go build -race -tags=viper_bind_struct -o out/build/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: out/build/keploy
+
 
   upload-latest:
     runs-on: ubuntu-latest
