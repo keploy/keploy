@@ -13,7 +13,7 @@ runs:
       uses: actions/setup-go@v5
       with:
         go-version: ">=1.24"
-        cache: false
+        cache: ${{ contains(runner.labels, 'self-hosted') && 'false' || 'true' }}
 
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
