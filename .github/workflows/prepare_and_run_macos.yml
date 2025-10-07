@@ -5,20 +5,31 @@ on:
   # push:
   #   branches: [ main ]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+# Commenting out because making jobs parallel
+# concurrency:
+#   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+#   cancel-in-progress: true
 
 jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
+      - name: Who am I?
+        run: |
+          echo "whoami = $(whoami)"
+          echo "HOME = $HOME"
+          echo "UID = $(id -u)"
+
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
           security unlock-keychain -p $KEYCHAIN_PASSWORD
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Docker System Prune
+        run: |
+          docker system prune -af --volumes
 
       - name: Clean up git config
         if: always()
@@ -41,12 +52,6 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
-      
-      - name: Clean up git config
-        if: always() # This ensures the step runs even if previous steps fail
-        continue-on-error: true
-        run: |
-          git config --global --unset url."git@github.com:".insteadOf
 
   # upload-latest:
   #   runs-on: [self-hosted, macOS, native]
@@ -71,6 +76,9 @@ jobs:
   # Build docker image on Ubuntu and push to registry
   build-docker-image:
     runs-on: ubuntu-24.04-arm
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+      image_digest: ${{ steps.digest.outputs.image_digest }}
     steps:
       - uses: actions/checkout@v4
 
