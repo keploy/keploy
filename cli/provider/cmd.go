@@ -1119,6 +1119,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 
+		c.cfg.Normalize.AllowHighRisk, err = cmd.Flags().GetBool("allow-high-risk")
+		if err != nil {
+			errMsg := "failed to read allow-high-risk flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
 	case "templatize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 	case "gen":

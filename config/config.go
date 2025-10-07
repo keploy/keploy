@@ -106,7 +106,7 @@ type Mappings struct {
 type Normalize struct {
 	SelectedTests []SelectedTests `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	TestRun       string          `json:"testReport" yaml:"testReport" mapstructure:"testReport"`
-	AllowHighRisk bool            `json:"allowHighRisk" yaml:"allowHighRisk" mapstructure:"allowhighrisk"`
+	AllowHighRisk bool            `json:"allowHighRisk" yaml:"allowHighRisk" mapstructure:"allowHighRisk"`
 }
 
 type BypassRule struct {

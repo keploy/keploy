@@ -1830,7 +1830,6 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 
 		if testCaseResult.FailureRisk == models.RiskHigh && !r.config.Normalize.AllowHighRisk {
 			errMsg := fmt.Sprintf("failed to normalize test case %s due to a high-risk failure. please confirm the schema compatibility with all consumers and then run with --allow-high-risk", testCase.Name)
-			r.logger.Error(errMsg)
 			return errors.New(errMsg)
 		}
 
