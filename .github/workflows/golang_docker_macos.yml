@@ -25,13 +25,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (macOS)
 
     steps:
-      # - name: Unlock keychain
-      #   if: runner.os == 'macOS'
-      #   run: |
-      #     security unlock-keychain -p $KEYCHAIN_PASSWORD
-      #   env:
-      #     KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
-
+      
       - name: Docker System Prune
         run: |
           docker system prune -af --volumes
