@@ -14,17 +14,6 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
-      - name: Unlock keychain
-        if: runner.os == 'macOS'
-        run: |
-          security unlock-keychain -p $KEYCHAIN_PASSWORD
-        env:
-          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
-
-      - name: Docker System Prune
-        run: |
-          docker system prune -af --volumes
-
       - name: Clean up git config
         if: always()
         continue-on-error: true
@@ -76,10 +65,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clear docker images and cache
-        run: |
-          docker system prune -af --volumes
-
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
@@ -121,9 +106,17 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
-      - name: Clear docker images and cache
+      - name: Docker Image Prune (dangling only, wait if locked)
         run: |
-          docker system prune -af --volumes
+          # Wait if another prune is running (lock file /var/lib/docker/tmp/docker-prune.lock may exist)
+          while lsof /var/lib/docker/tmp/docker-prune.lock >/dev/null 2>&1; do
+            echo "Waiting for existing docker prune operation to finish..."
+            sleep 5
+          done
+          # Prune only dangling (untagged) images not in use
+          docker image prune -f
+          # Prune dangling (unused) volumes as well
+          docker volume prune -f
 
       - name: Pull Docker image
         run: |

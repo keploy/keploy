@@ -32,10 +32,6 @@ jobs:
     name: ${{ matrix.job }} (macOS)
 
     steps:
-      - name: Docker System Prune
-        run: |
-          docker system prune -af --volumes
-
       - name: Clean up git config
         if: always()
         continue-on-error: true
