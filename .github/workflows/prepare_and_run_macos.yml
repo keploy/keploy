@@ -83,7 +83,7 @@ jobs:
         env:
           PRNUM: ${{ github.event.pull_request.number }}
         run: |
-          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_RUN_ID}-${GITHUB_SHA}-1h"
+          IMAGE_TAG="ttl.sh/keploy/keploy:${PRNUM}-${GITHUB_SHA}-1h"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
           docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
