@@ -90,7 +90,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
-      - name: Build image
+      - name: update Dockerfile
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
 
