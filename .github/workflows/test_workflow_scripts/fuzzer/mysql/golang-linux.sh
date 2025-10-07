@@ -200,13 +200,11 @@ endsec
 section "Generate Fuzzer Traffic"
 # Trigger traffic and explicitly kill the Keploy process after a delay
 send_requests "$KEPLOY_PID"
-sleep 60
+sleep 10
 endsec
 
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-# pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-# wait "$pid" 2>/dev/null || true
 
 REC_PID="$(pgrep -n -f 'keploy record' || true)"
 echo "$REC_PID Keploy PID"
