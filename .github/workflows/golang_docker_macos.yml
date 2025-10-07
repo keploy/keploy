@@ -6,6 +6,10 @@ on:
         description: "Docker image tag or digest to pull"
         required: false
         type: string
+    secrets:
+      MAC_RUNNER_USER_PASSWORD:
+        description: "Keychain password for macOS runner"
+        required: true
 
 jobs:
   golang_docker_macos:
