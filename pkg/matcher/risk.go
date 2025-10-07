@@ -83,13 +83,19 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps) {
 	case map[string]interface{}:
 		for k, child := range t {
 			p := k
-			if path != "" { p = path + "." + k }
+			if path != "" {
+				p = path + "." + k
+			}
 			collectJSON(child, p, ni, out)
 		}
 	case []interface{}:
 		// normalize array paths using [] suffix so we don't depend on indices
 		p := path
-		if p != "" { p += "[]" } else { p = "[]" }
+		if p != "" {
+			p += "[]"
+		} else {
+			p = "[]"
+		}
 		for _, e := range t {
 			collectJSON(e, p, ni, out)
 		}
