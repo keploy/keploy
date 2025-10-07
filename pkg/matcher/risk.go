@@ -1,4 +1,3 @@
-// pkg/matcher/risk.go
 package matcher
 
 import (

@@ -1819,13 +1819,21 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 	}
 
 	for _, testCase := range selectedTestCases {
-		if _, ok := testCaseResultMap[testCase.Name]; !ok {
+		testCaseResult, ok := testCaseResultMap[testCase.Name]
+		if !ok {
 			r.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
 			continue
 		}
-		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
+		if testCaseResult.Status == models.TestStatusPassed {
 			continue
 		}
+
+		if testCaseResult.FailureRisk == models.RiskHigh && !r.config.Normalize.AllowHighRisk {
+			errMsg := fmt.Sprintf("failed to normalize test case %s due to a high-risk failure. please confirm the schema compatibility with all consumers and then run with --allow-high-risk", testCase.Name)
+			r.logger.Error(errMsg)
+			return errors.New(errMsg)
+		}
+
 		// Handle normalization based on test case kind
 		switch testCase.Kind {
 		case models.HTTP:
