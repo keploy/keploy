@@ -19,6 +19,10 @@ jobs:
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
+
+      - name: Docker Host Env
+        run: |
+          echo "$DOCKER_HOST"
       
       - name: Checkout Repository
         uses: actions/checkout@v4
