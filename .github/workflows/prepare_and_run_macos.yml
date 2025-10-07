@@ -114,10 +114,6 @@ jobs:
     needs: [build-docker-image]
     
     steps:
-      - name: Clear docker images and cache
-        run: |
-          docker system prune -af --volumes
-
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
@@ -125,20 +121,22 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
+      - name: Clear docker images and cache
+        run: |
+          docker system prune -af --volumes
+
       - name: Pull Docker image
         run: |
           docker pull ${{ needs.build-docker-image.outputs.image_tag }}
 
   run_python_docker_macos:
-    needs: [build-and-upload, pull-docker-image]
-    # needs: [upload-latest]
+    needs: [build-and-upload, pull-docker-image, build-docker-image]
     uses: ./.github/workflows/python_docker_macos.yml
     with:
       image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
 
   run_golang_docker_macos:
-    needs: [build-and-upload, pull-docker-image]
-    # needs: [upload-latest]
+    needs: [build-and-upload, pull-docker-image, build-docker-image]
     uses: ./.github/workflows/golang_docker_macos.yml
     with:
       image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
