@@ -1,6 +1,11 @@
 name: Python On Docker (macOS)
 on:
   workflow_call:
+    inputs:
+      image_tag:            
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
 
 jobs:
   python_docker_macos:
@@ -25,11 +30,16 @@ jobs:
             replay_src: build
     name: ${{ matrix.job }} (macOS)
     steps:
-
-      - name: Clear docker images and cache
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
         run: |
-          docker builder prune --all -f
-          docker volume prune -f
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Docker System Prune
+        run: |
+          docker system prune -af --volumes
 
       - name: Clean up git config
         if: always()
@@ -42,8 +52,8 @@ jobs:
 
       - id: image
         uses: ./.github/actions/download-image
-        env:
-          DOCKER_HOST: ""
+        with:
+          image_tag: ${{ inputs.image_tag }}
 
       - id: record
         uses: ./.github/actions/download-binary

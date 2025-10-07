@@ -14,12 +14,6 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
-      - name: Who am I?
-        run: |
-          echo "whoami = $(whoami)"
-          echo "HOME = $HOME"
-          echo "UID = $(id -u)"
-
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
@@ -94,6 +88,20 @@ jobs:
       - name: Build and push Docker image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+
+      - name: Make unique tag for this run
+        id: tag
+        env:
+          PRNUM: ${{ github.event.pull_request.number }}
+        run: |
+          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_RUN_ID}-${GITHUB_SHA}-1h"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
+          docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
+
+      - name: Push unique tag
+        run: |
+          docker push "${{ steps.tag.outputs.image_tag }}"
           
       - name: Clean up git config
         if: always() # This ensures the step runs even if previous steps fail
@@ -101,10 +109,12 @@ jobs:
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
-  # # Pull docker image on macOS
   pull-docker-image:
     runs-on: [self-hosted, macOS, native]
     needs: [build-docker-image]
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
+    
     steps:
       - name: Clear docker images and cache
         run: |
@@ -119,14 +129,18 @@ jobs:
 
       - name: Pull Docker image
         run: |
-          docker pull ttl.sh/keploy/keploy:1h
+          docker pull ${{ inputs.image_tag }}
 
   run_python_docker_macos:
     needs: [build-and-upload, pull-docker-image]
     # needs: [upload-latest]
     uses: ./.github/workflows/python_docker_macos.yml
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
 
   run_golang_docker_macos:
     needs: [build-and-upload, pull-docker-image]
     # needs: [upload-latest]
     uses: ./.github/workflows/golang_docker_macos.yml
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
