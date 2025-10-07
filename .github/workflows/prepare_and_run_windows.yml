@@ -80,6 +80,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Tidy Go modules
+        run: go mod tidy
+
       - name: Set PR image tag
         run: echo "PR_IMAGE_TAG=ghcr.io/${GITHUB_REPOSITORY}:pr-${GITHUB_SHA::7}" >> $GITHUB_ENV
 
