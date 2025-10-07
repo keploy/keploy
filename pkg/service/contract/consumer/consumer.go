@@ -76,45 +76,130 @@ func (s *consumer) scoresForMocks(mocks []*models.OpenAPI, mockSet map[string]mo
 	if mockSet == nil {
 		mockSet = make(map[string]models.SchemaInfo)
 	}
+
+	// Enhanced comprehensive validation when proxy flag is enabled
+	if s.config.Contract.Proxy && s.config.Contract.Driven == "consumer" {
+		s.comprehensiveValidation(mocks, mockSet, testsMapping, mockSetID)
+	} else {
+		s.bestMatchValidation(mocks, mockSet, testsMapping, mockSetID)
+	}
+}
+
+// bestMatchValidation performs the original best-match validation logic
+func (s *consumer) bestMatchValidation(mocks []*models.OpenAPI, mockSet map[string]models.SchemaInfo, testsMapping map[string]map[string]*models.OpenAPI, mockSetID string) {
 	// Loop through each mock in the provided list of mocks.
 	for _, mock := range mocks {
 		// Initialize the mock's score to 0.0 and store the mock's data in the mockSet map.
-		// 'mockSet' is a map where the key is the mock title and the value is the SchemaInfo structure containing score and data.
 		mockSet[mock.Info.Title] = models.SchemaInfo{
 			Score: 0.0,
 			Data:  *mock, // Store the mock data here.
 		}
 
 		// Loop through each test set (testSetID) in the testsMapping.
-		// testsMapping maps test set IDs to test case titles.
 		for testSetID, tests := range testsMapping {
 			// Loop through each test in the current test set.
 			for _, test := range tests {
-				// Call 'match2' to compare the mock with the current test.
-				// This function returns a candidateScore (how well the mock matches the test) and a pass boolean.
-				candidateScore, pass, err := schemaMatcher.Match(*mock, *test, testSetID, mockSetID, s.logger, models.IdentifyMode)
-				// Handle any errors encountered during the comparison process.
+				var candidateScore float64
+				var pass bool
+				var err error
+
+				candidateScore, pass, err = schemaMatcher.Match(*mock, *test, testSetID, mockSetID, s.logger, models.IdentifyMode)
 				if err != nil {
-					// Log the error and continue with the next iteration, skipping the current comparison.
 					utils.LogError(s.logger, err, "Error in matching the two models")
 					continue
 				}
 
-				// If the mock passed the comparison and the candidate score is greater than the current score:
+				// Keep only the best matching test for each mock
 				if pass && candidateScore > mockSet[mock.Info.Title].Score {
-					// Update the mock's score and store the test case information in the mockSet.
-					// This keeps track of the best matching test case for the current mock.
 					mockSet[mock.Info.Title] = models.SchemaInfo{
-						Service:   "",              // Optional: could store service info if needed.
-						TestSetID: testSetID,       // Store the test set ID that provided the highest score.
-						Name:      test.Info.Title, // Store the test case name (title).
-						Score:     candidateScore,  // Update the score with the highest candidate score.
-						Data:      *mock,           // Store the mock data.
+						Service:   "",
+						TestSetID: testSetID,
+						Name:      test.Info.Title,
+						Score:     candidateScore,
+						Data:      *mock,
 					}
 				}
 			}
 		}
 	}
+}
+
+// comprehensiveValidation validates ALL combinations of mocks and tests when --proxy flag is used
+func (s *consumer) comprehensiveValidation(mocks []*models.OpenAPI, mockSet map[string]models.SchemaInfo, testsMapping map[string]map[string]*models.OpenAPI, mockSetID string) {
+	validationCounter := 0
+
+	// Loop through each mock in the mocks slice.
+	for _, mock := range mocks {
+		bestScore := 0.0
+		var bestTest models.SchemaInfo
+
+		// Track all successful validations for this mock
+		allValidations := []models.SchemaInfo{}
+
+		// Loop through each test set (testSetID) in the testsMapping.
+		for testSetID, tests := range testsMapping {
+			// Loop through each test in the current test set.
+			for _, test := range tests {
+				var candidateScore float64
+				var pass bool
+				var err error
+
+				// Use enhanced matching with nil checks for proxy mode
+				candidateScore, pass, err = schemaMatcher.MatchWithEnhancedChecks(*mock, *test, testSetID, mockSetID, s.logger, models.IdentifyMode)
+				
+				if err != nil {
+					utils.LogError(s.logger, err, "Error in matching the two models")
+					continue
+				}
+
+				// Store validation result for comprehensive tracking
+				validation := models.SchemaInfo{
+					Service:   "",
+					TestSetID: testSetID,
+					Name:      test.Info.Title,
+					Score:     candidateScore,
+					Data:      *mock,
+				}
+
+				// Track all successful validations, not just the best one
+				if pass && candidateScore > 0 {
+					allValidations = append(allValidations, validation)
+					validationCounter++
+
+					// Also track the best score for fallback
+					if candidateScore > bestScore {
+						bestScore = candidateScore
+						bestTest = validation
+					}
+				}
+			}
+		}
+
+		// For comprehensive validation, create multiple entries for the same mock with different test combinations
+		if len(allValidations) > 0 {
+			// Primary entry uses best match
+			mockSet[mock.Info.Title] = bestTest
+
+			// Additional entries for other successful validations to ensure comprehensive coverage
+			for _, validation := range allValidations {
+				if validation.Score != bestScore || validation.Name != bestTest.Name {
+					uniqueKey := fmt.Sprintf("%s_test_%s", mock.Info.Title, validation.Name)
+					mockSet[uniqueKey] = validation
+				}
+			}
+		} else {
+			// No matches found
+			mockSet[mock.Info.Title] = models.SchemaInfo{
+				Score: 0.0,
+				Data:  *mock,
+			}
+		}
+	}
+
+	s.logger.Info("Comprehensive validation completed", 
+		zap.Int("totalValidations", validationCounter),
+		zap.Int("mockCount", len(mocks)),
+		zap.Int("resultCount", len(mockSet)))
 }
 
 // ValidateMockAgainstTests compares mock results with test cases and generates a summary report
@@ -200,7 +285,12 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 					fmt.Printf("                                    Current %s   ||   Consumer %s\n", serviceColor(s.config.Contract.Mappings.Self), serviceColor(service))
 
 					// Perform comparison between the mock and test case again
-					_, _, err := schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, models.CompareMode)
+					var err error
+					if s.config.Contract.Proxy && s.config.Contract.Driven == "consumer" {
+						_, _, err = schemaMatcher.MatchWithEnhancedChecks(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, models.CompareMode)
+					} else {
+						_, _, err = schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, models.CompareMode)
+					}
 					if err != nil {
 						// If an error occurs during comparison, return it
 						utils.LogError(s.logger, err, "Error in matching the two models")
