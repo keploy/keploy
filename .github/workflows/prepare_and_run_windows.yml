@@ -85,8 +85,10 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Tidy Go modules
-        run: go mod tidy
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Set PR image tag
         run: echo "PR_IMAGE_TAG=ghcr.io/${GITHUB_REPOSITORY}:pr-${GITHUB_SHA::7}" >> $GITHUB_ENV
