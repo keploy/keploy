@@ -85,7 +85,7 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/rerecord/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/rerecord/golang-linux.sh
 
-  mysql_fuzzer_linux:
+  mysql_fuzzer:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
