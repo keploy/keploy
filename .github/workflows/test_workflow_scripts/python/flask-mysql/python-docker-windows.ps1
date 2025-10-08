@@ -74,6 +74,15 @@ try { docker network create $appNetwork 2>$null | Out-Null } catch {}
 Write-Host "Starting MySQL database..."
 docker compose up -d db
 
+Write-Host "Waiting for MySQL (simple-demo-db) to become healthy…"
+$deadline = (Get-Date).AddMinutes(3)
+do {
+  $status = docker inspect -f "{{.State.Health.Status}}" simple-demo-db 2>$null
+  if ($status -eq "healthy") { break }
+  Start-Sleep -Seconds 2
+} while ((Get-Date) -lt $deadline)
+if ($status -ne "healthy") { throw "MySQL container not healthy (status=$status)" }
+
 Write-Host "Building Docker image: $appImage"
 docker build -t $appImage .
 
