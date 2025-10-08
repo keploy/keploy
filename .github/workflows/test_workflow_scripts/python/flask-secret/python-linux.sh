@@ -150,7 +150,7 @@ rm main.py
 mv temp_main.py main.py
 
 echo "remove test-set-2"
-rm keploy/test-set-2
+sudo rm -rf keploy/test-set-2
 
 echo "running the test again, this will fail as expected and generate the report file"
 # run the test again, this will fail as expected and generate the report file
