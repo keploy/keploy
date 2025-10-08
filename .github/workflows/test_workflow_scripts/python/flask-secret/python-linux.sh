@@ -146,6 +146,7 @@ else
 fi
 
 echo "removing main.py and changing temp_main.py to main.py"
+# temp_main contains a change in the response so that the tests fails and we can use normalize command
 rm main.py
 mv temp_main.py main.py
 

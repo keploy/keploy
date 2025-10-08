@@ -8,5 +8,5 @@ import (
 
 func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 	emoji := "\U0001F430" + " Keploy:"
-	enc.AppendString(emoji + " " + t.Format(time.RFC3339) + " ")
+	enc.AppendString(emoji + " " + t.Format(time.RFC3339Nano) + " ")
 }
