@@ -16,6 +16,7 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.18.0
 	github.com/k0kubun/pp/v3 v3.2.0
+	github.com/keploy/integrations v0.0.0-20251008073954-ab89a697e03f
 	github.com/miekg/dns v1.1.57
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5
@@ -141,6 +142,7 @@ require (
 	github.com/fatih/semgroup v1.2.0 // indirect
 	github.com/gitleaks/go-gitdiff v0.9.1 // indirect
 	github.com/golang/glog v1.2.4 // indirect
+	github.com/golang/snappy v1.0.0 // indirect
 	github.com/h2non/filetype v1.1.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
@@ -165,6 +167,9 @@ require (
 	github.com/ulikunitz/xz v0.5.12 // indirect
 	github.com/wasilibs/go-re2 v1.9.0 // indirect
 	github.com/wasilibs/wazero-helpers v0.0.0-20240620070341-3dff1577cd52 // indirect
+	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
+	github.com/xdg-go/scram v1.1.1 // indirect
+	github.com/xdg-go/stringprep v1.0.4 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250313205543-e70fdf4c4cb4 // indirect

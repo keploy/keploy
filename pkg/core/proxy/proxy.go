@@ -603,6 +603,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
+			dstConn, err = net.Dial("tcp", dstAddr)
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				return err
+			}
+
+			dstCfg := &models.ConditionalDstCfg{
+				Port: uint(destInfo.Port),
+			}
+			rule.DstCfg = dstCfg
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
