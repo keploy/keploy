@@ -43,13 +43,11 @@ check_for_errors() {
        echo "Error found in $logfile"
        # show only ERROR lines for quick triage
        grep -n "ERROR" "$logfile" || true
-       cat "$logfile"
        exit 1
      fi
    fi
    if grep -q "WARNING: DATA RACE" "$logfile"; then
      echo "Race condition detected in $logfile"
-     cat "$logfile"
      exit 1
    fi
  fi
@@ -75,12 +73,12 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Start server with keploy in record mode
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" &> record_incoming.txt &
+ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
  sleep 10
 
 
  # Start client HTTP driver
- "$FUZZER_CLIENT_BIN" --http :18080 &> client_incoming.txt &
+ "$FUZZER_CLIENT_BIN" --http :18080 2>&1 | tee client_incoming.txt &
  sleep 10
 
 
@@ -123,7 +121,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Replay
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt
+ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" 2>&1 | tee test_incoming.txt
  echo "checking for errors"
  check_for_errors test_incoming.txt
 
@@ -171,7 +169,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
 
  # Record the client (it makes outgoing RPCs)
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" &> record_outgoing.txt &
+ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
  sleep 10
 
 
@@ -204,7 +202,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
 
  # Replay the client (relying on mocks)
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" &> test_outgoing.txt
+ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee test_outgoing.txt
  check_for_errors test_outgoing.txt
  ensure_success_phrase test_outgoing.txt
  echo "✅ Outgoing mode passed. "
