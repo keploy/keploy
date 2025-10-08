@@ -108,7 +108,7 @@ send_request(){
 for i in {1..2}; do
     container_name="$APP_CONTAINER"
     send_request &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --container-name "$KEPLOY_CONTAINER" --debug 2>&1 | tee "${container_name}.txt"
+    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "25s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --container-name "$KEPLOY_CONTAINER" --debug 2>&1 | tee "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
