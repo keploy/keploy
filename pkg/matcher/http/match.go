@@ -14,6 +14,7 @@ import (
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/v2/pkg"
+	matcher "go.keploy.io/server/v2/pkg/matcher"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/tools"
@@ -284,17 +285,47 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 
-		if !res.BodyResult[0].Normal {
-			// Prefer JSON assessment when the bodies are JSON
-			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
-				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
-					res.FailureRisk = assess.Risk
+		currentRisk := models.None
+
+		// 1) Status code mismatch => HIGH
+		if isStatusMismatch {
+			currentRisk = models.High
+		}
+
+		// 2) Header mismatches => MEDIUM, except Content-Type => HIGH
+		if isHeaderMismatch {
+			// any non-noisy header that mismatched is already in expectedHeader/actualHeader
+			ctHigh := false
+			for hk := range expectedHeader {
+				if strings.EqualFold(hk, "Content-Type") {
+					ctHigh = true
+					break
 				}
+			}
+			if ctHigh {
+				currentRisk = matcher.MaxRisk(currentRisk, models.High)
 			} else {
-				// Non-JSON: ignore categorization entirely
-				res.FailureRisk = models.High
+				currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
 			}
 		}
+
+		// 3) Body mismatches
+		if isBodyMismatch {
+			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
+				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
+					// Noisy fields are ignored inside ComputeFailureAssessmentJSON already.
+					currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
+				} else {
+					// If we couldn't classify, be conservative but not silent.
+					currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+				}
+			} else {
+				// Non-JSON: no noise-masking available → treat as HIGH
+				currentRisk = matcher.MaxRisk(currentRisk, models.High)
+			}
+		}
+
+		res.FailureRisk = currentRisk
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true

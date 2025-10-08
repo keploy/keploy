@@ -22,6 +22,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		BodyResult:    make([]models.BodyResult, 0),
 		TrailerResult: make([]models.HeaderResult, 0),
 	}
+	currentRisk := models.None
 
 	// Local variables to track overall match status
 	differences := make(map[string]struct {
@@ -69,6 +70,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Actual:   actualStatus,
 					Message:  "status header value mismatch",
 				}
+				currentRisk = matcher.MaxRisk(currentRisk, models.High)
 			}
 		}
 
@@ -284,16 +286,18 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 
 	if !decodedDataNormal {
-		// Prefer JSON classification if decoded payloads are JSON
 		if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
 			if assess, err := matcher.ComputeFailureAssessmentJSON(expectedDecodedData, actualDecodedData, bodyNoise, ignoreOrdering); err == nil && assess != nil {
-				result.FailureRisk = assess.Risk
+				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
+			} else {
+				currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
 			}
 		} else {
-			// Non-JSON: ignore categorization entirely
-			result.FailureRisk = models.High
+			currentRisk = matcher.MaxRisk(currentRisk, models.High)
 		}
 	}
+
+	result.FailureRisk = currentRisk
 
 	return matched, result
 }

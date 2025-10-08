@@ -1247,11 +1247,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 			}
 
-			if testStatus == models.TestStatusFailed && testResult != nil && testResult.FailureRisk != models.None {
-				testCaseResult.FailureInfo.Risk = testResult.FailureRisk
-			}
-
 			if testCaseResult != nil {
+				if testStatus == models.TestStatusFailed && testResult.FailureRisk != models.None {
+					testCaseResult.FailureInfo.Risk = testResult.FailureRisk
+				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")

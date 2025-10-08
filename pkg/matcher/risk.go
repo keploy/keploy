@@ -148,3 +148,16 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 	}
 	return
 }
+
+func MaxRisk(a, b models.RiskLevel) models.RiskLevel {
+	rank := map[models.RiskLevel]int{
+		models.None:   0,
+		models.Low:    1,
+		models.Medium: 2,
+		models.High:   3,
+	}
+	if rank[b] > rank[a] {
+		return b
+	}
+	return a
+}
