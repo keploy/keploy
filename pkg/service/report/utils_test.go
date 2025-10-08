@@ -135,7 +135,7 @@ func TestApplyCliColorsToDiff(t *testing.T) {
 
 	colored := applyCliColorsToDiff(diff)
 
-    // This assertion will now pass because the function will add all three colors.
+	// This assertion will now pass because the function will add all three colors.
 	if !strings.Contains(colored, "\x1b[33m") || !strings.Contains(colored, "\x1b[31m") || !strings.Contains(colored, "\x1b[32m") {
 		t.Fatalf("color codes missing: %q", colored)
 	}

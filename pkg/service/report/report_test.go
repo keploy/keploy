@@ -2,13 +2,13 @@ package report
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"bytes"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
