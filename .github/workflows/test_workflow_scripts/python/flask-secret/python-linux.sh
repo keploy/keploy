@@ -151,16 +151,16 @@ mv temp_main.py main.py
 
 echo "running the test again, this will fail as expected and generate the report file"
 # run the test again, this will fail as expected and generate the report file
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 2>&1 | tee test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
 
 # run the normalize command 
 # now the tests are fixed and we have secrets with updated values
 echo "running the normalize command"
-sudo -E env PATH="$PATH" $REPLAY_BIN normalize -t test-set-1
+sudo -E env PATH="$PATH" $REPLAY_BIN normalize
 
 echo "running the test again, this time it will pass"
 # run the test again, this time it will pass
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 2>&1 | tee test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
