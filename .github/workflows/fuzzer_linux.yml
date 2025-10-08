@@ -158,13 +158,13 @@ jobs:
         config:
           - job: record_latest_replay_build
             record_src: latest
-            replay_src: build
+            replay_src: build-no-race
           - job: record_build_replay_latest
-            record_src: build
+            record_src: build-no-race
             replay_src: latest
           - job: record_build_replay_build
-            record_src: build
-            replay_src: build
+            record_src: build-no-race
+            replay_src: build-no-race
 
     name: gRPC Fuzzer (${{ matrix.config.job }})
     steps:
