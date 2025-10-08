@@ -90,7 +90,7 @@ section "Start Rerecord"
 
 # Run rerecord non-interactively using the RERECORD binary
 printf 'y\ny\n' | sudo -E env PATH="$PATH" ASSERT_CHAINS_WITH="$ASSERT_CHAINS_WITH" \
-$RERECORD_KEPLOY_BIN rerecord -c $RERECORD_SERVER_BIN -t "test-set-0" --show-diff \
+$RERECORD_KEPLOY_BIN rerecord -c $RERECORD_SERVER_BIN -t "test-set-0" --show-diff --disableMockUpload \
   > rerecord.log 2>&1
 RERECORD_RC=$?
 cat rerecord.log

@@ -1,0 +1,47 @@
+name: Go-Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+  # Optional: allow read access to pull request. Use with `only-new-issues` option.
+  pull-requests: read
+
+jobs:
+  test:
+    name: go-test
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1" # Enable CGO for this job
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.24'
+          cache: false     
+      
+      - name: Installing build Essentials and gcc
+        run: |
+          sudo apt -y update
+          sudo apt -y install build-essential gcc libc-dev  \
+            pkg-config \
+            libgl1-mesa-dev          \
+            libxi-dev libxcursor-dev \
+            libxrandr-dev libxinerama-dev \
+            libxxf86vm-dev libx11-dev libx11-xcb-dev  
+
+      - name: Install dependencies
+        run: go get .
+          
+      - name: Running Unit Tests
+        run: go test ./...
