@@ -96,6 +96,9 @@ docker compose up -d db
 Write-Host "Waiting for MySQL (simple-demo-db) to become ready…"
 Wait-MySQLReady simple-demo-db 180 "rootpass"
 
+docker exec simple-demo-db mysql -uroot -prootpass -e `
+  "ALTER USER 'demo'@'%' IDENTIFIED WITH mysql_native_password BY 'demopass'; FLUSH PRIVILEGES;"
+
 Write-Host "Building Docker image: $appImage"
 docker build -t $appImage .
 
