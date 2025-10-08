@@ -120,9 +120,9 @@ jobs:
             sleep 5
           done
           # Prune only dangling (untagged) images not in use
-          docker image prune -f
+          docker image prune -a -f
           # Prune dangling (unused) volumes as well
-          docker volume prune -f
+          docker volume prune -a -f
 
       - name: Pull Docker image
         run: |
