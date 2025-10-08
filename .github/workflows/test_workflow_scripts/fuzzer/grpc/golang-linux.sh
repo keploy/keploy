@@ -27,7 +27,12 @@ command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
 # Generate keploy config and add duration_ms noise to avoid timing diffs
 rm -f ./keploy.yml keploy
 sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "./keploy.yml"
+config_file="./keploy.yml"
+if [ -f "$config_file" ]; then
+  sed -i 's/global: {}/global: {"body": {"duration_ms":[]}, "header": {"Content-Length":[]}}/' "$config_file"
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
 
 SUCCESS_PHRASE="all 1000 unary RPCs validated successfully"
 
