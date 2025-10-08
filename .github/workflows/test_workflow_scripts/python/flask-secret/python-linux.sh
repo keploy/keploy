@@ -177,20 +177,35 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
-echo "checking the last report file"
-report_file="./keploy/reports/test-run-3/test-set-1-report.yaml"
-if [ ! -f "$report_file" ]; then
-    echo "Report missing for test-set-1: $report_file"
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-2/test-set-$i-report.yaml"
+    if [ ! -f "$report_file" ]; then
+        echo "Report missing for test-set-$i: $report_file"
+        all_passed=false
+        break
+    fi
+
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
+    fi
+done
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
+    exit 0
+else
+    cat "test_logs.txt"
     exit 1
 fi
-
-test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-echo "Test status for test-set-1: $test_status"
-
-if [ "$test_status" != "PASSED" ]; then
-    echo "Test-set-1 did not pass."
-    exit 1
-fi
-
-echo "all tests passed"
-exit 0
