@@ -23,9 +23,10 @@ DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
 TIMESTAMP=$(date +%s)
 APP_CONTAINER="echoApp_${TIMESTAMP}"
 DB_CONTAINER="postgresDb_${TIMESTAMP}"
+KEPLOY_CONTAINER="keploy_${TIMESTAMP}"
 
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
-echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER"
+echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
 
 # Replace ports and container names in all files in current directory
 echo "Updating configuration files with dynamic ports and container names..."
@@ -107,7 +108,7 @@ send_request(){
 for i in {1..2}; do
     container_name="$APP_CONTAINER"
     send_request &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT 2>&1 | tee "${container_name}.txt"
+    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --container-name "$KEPLOY_CONTAINER" 2>&1 | tee "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -131,7 +132,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="$APP_CONTAINER"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT 2>&1 | tee "${test_container}.txt"
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --container-name "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
