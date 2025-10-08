@@ -83,7 +83,11 @@ docker build -t $appImage .
 $logPath = "$appName.record.txt"
 $expectedTestSetIndex = 0
 
-$dockerRunCommand = "docker run -p 5000:5000 --name $appName --network $appNetwork -e DB_HOST=db $appImage"
+$dockerRunCommand = "docker run -p 5000:5000 --name $appName --network $appNetwork " +
+                    "-e LD_PRELOAD= " +
+                    "-e DB_HOST=db -e DB_USER=demo -e DB_PASSWORD=demopass -e DB_NAME=demo " +
+                    "-e DB_SSL_DISABLED=1 " +
+                    "$appImage"
 
 # Build the entire argument list as a single string, using backticks `` to embed the quotes
 # This ensures Keploy receives -c "<command>" as it expects.
