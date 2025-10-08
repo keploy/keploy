@@ -31,26 +31,68 @@ sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "./keploy.yml"
 
 SUCCESS_PHRASE="all 1000 unary RPCs validated successfully"
 
+# Validates the Keploy test report to ensure all test sets passed
+check_test_report() {
+    echo "Checking test reports..."
+    if [ ! -d "./keploy/reports" ]; then
+        echo "Test report directory not found!"
+        return 1
+    fi
+
+    local latest_report_dir
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+    if [ -z "$latest_report_dir" ]; then
+        echo "No test run directory found in ./keploy/reports/"
+        return 1
+    fi
+    
+    local all_passed=true
+    # Loop through all generated report files
+    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
+        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
+
+        cat $report_file
+        
+        local test_set_name
+        test_set_name=$(basename "$report_file" -report.yaml)
+        local test_status
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        
+        echo "Status for ${test_set_name}: $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Test set ${test_set_name} did not pass."
+        fi
+    done
+
+    if [ "$all_passed" = false ]; then
+        echo "One or more test sets failed."
+        return 1
+    fi
+
+    echo "All tests passed in reports."
+    return 0
+}
 
 check_for_errors() {
- local logfile=$1
- if [ -f "$logfile" ]; then
-   if grep -q "ERROR" "$logfile"; then
-     # Ignore benign coverage-symbol errors from stripped binaries
-     if grep -Eq 'failed to read symbols, skipping coverage calculation|no symbol section' "$logfile"; then
-       echo "Ignoring benign coverage-symbol error in $logfile"
-     else
-       echo "Error found in $logfile"
-       # show only ERROR lines for quick triage
-       grep -n "ERROR" "$logfile" || true
-       exit 1
-     fi
-   fi
-   if grep -q "WARNING: DATA RACE" "$logfile"; then
-     echo "Race condition detected in $logfile"
-     exit 1
-   fi
- fi
+  local logfile=$1
+  echo "Checking for errors in $logfile..."
+  if [ -f "$logfile" ]; then
+    # Find critical Keploy errors, but exclude specific non-critical ones.
+    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+      echo "::error::Critical error found in $logfile. Failing the build."
+      # Print the specific errors that caused the failure
+      echo "--- Failing Errors ---"
+      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      echo "----------------------"
+      exit 1
+    fi
+    if grep -q "WARNING: DATA RACE" "$logfile"; then
+      echo "::error::Race condition detected in $logfile"
+      exit 1
+    fi
+  fi
+  echo "No critical errors found in $logfile."
 }
 
 ensure_success_phrase() {
@@ -122,6 +164,7 @@ if [ "$MODE" = "incoming" ]; then
  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 2>&1 | tee test_incoming.txt
  echo "checking for errors"
  check_for_errors test_incoming.txt
+ check_test_report
 
 
  # ✅ For INCOMING mode: no success-phrase check. Instead, verify Keploy reports PASSED.
@@ -202,6 +245,7 @@ elif [ "$MODE" = "outgoing" ]; then
  # Replay the client (relying on mocks)
  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee test_outgoing.txt
  check_for_errors test_outgoing.txt
+ check_test_report
  ensure_success_phrase test_outgoing.txt
  echo "✅ Outgoing mode passed. "
 
