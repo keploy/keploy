@@ -44,7 +44,7 @@ send_request(){
 for i in 1 2; do
     app_name="flaskSecret_${i}"
     send_request "secrets" &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee test_logs.txt
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -67,7 +67,7 @@ sleep 5
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
 send_request "astro" &
-sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee test_logs.txt
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in pipeline..."
     cat "${app_name}.txt"
@@ -97,7 +97,7 @@ else
 fi
 
 # Testing phase
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 &> test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
