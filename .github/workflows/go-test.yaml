@@ -30,11 +30,6 @@ jobs:
           go-version: '1.24'
           cache: false     
       
-      # - name: Setup ssh and private go modules
-      #   uses: ./.github/actions/setup-ssh
-      #   with:
-      #     ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-      
       - name: Installing build Essentials and gcc
         run: |
           sudo apt -y update
