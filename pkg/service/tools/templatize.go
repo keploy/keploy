@@ -874,15 +874,50 @@ func removeQuotesInTemplates(jsonStr string) string {
 	})
 }
 
+// func addQuotesInTemplates(jsonStr string) string {
+// 	if jsonStr == "" {
+// 		return ""
+// 	}
+// 	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+// 	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+// 		if strings.Contains(match, "{{string") {
+// 			return match
+// 		}
+// 		return `"` + match + `"`
+// 	})
+// }
 func addQuotesInTemplates(jsonStr string) string {
-	if jsonStr == "" {
-		return ""
-	}
-	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
-	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
-		if strings.Contains(match, "{{string") {
-			return match
-		}
-		return `"` + match + `"`
-	})
+    if jsonStr == "" {
+        return ""
+    }
+    re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+    
+    // 1. Find the start and end positions of all matches
+    matches := re.FindAllStringIndex(jsonStr, -1)
+
+    // 2. Loop through the matches in reverse order
+    //    (This prevents our changes from messing up the indexes of later matches)
+    for i := len(matches) - 1; i >= 0; i-- {
+        matchBounds := matches[i]
+        start, end := matchBounds[0], matchBounds[1]
+
+        // This is the actual placeholder string, e.g., "{{.id}}"
+        placeholder := jsonStr[start:end]
+
+        // Skip explicit {{string}} types
+        if strings.Contains(placeholder, "{{string") {
+            continue
+        }
+
+        // 3. Check if the match is already inside quotes
+        isQuoted := (start > 0 && (jsonStr[start-1] == '"' || jsonStr[start-1] == '\'')) &&
+                    (end < len(jsonStr) && (jsonStr[end] == '"' || jsonStr[end] == '\''))
+
+        // 4. If not quoted, wrap it in quotes by rebuilding the string
+        if !isQuoted {
+            jsonStr = jsonStr[:start] + `"` + placeholder + `"` + jsonStr[end:]
+        }
+    }
+    
+    return jsonStr
 }

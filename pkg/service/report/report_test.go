@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"bytes"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -342,9 +343,19 @@ func TestGenerateReport_Summary(t *testing.T) {
 
 	r := New(newTestLogger(), cfg, mockReportDB, mockTestDB)
 
+	var buf bytes.Buffer
+	r.out = bufio.NewWriter(&buf)
+
 	err := r.GenerateReport(ctx)
 	if err != nil {
 		t.Fatalf("GenerateReport failed: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "COMPLETE TESTRUN SUMMARY") {
+		t.Error("The report summary is missing the expected title")
+	}
+	if !strings.Contains(output, "Total tests: 2") {
+		t.Error("The report summary did not correctly calculate the total number of tests")
 	}
 }
 
