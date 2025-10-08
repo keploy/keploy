@@ -175,11 +175,6 @@ jobs:
           path: samples-python
           clean: true
 
-      - name: Docker works?
-        run: |
-          docker version
-          docker run --rm hello-world
-
       # Your existing run step
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
