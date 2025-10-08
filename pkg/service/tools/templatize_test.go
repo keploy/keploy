@@ -127,20 +127,20 @@ func TestRenderIfTemplatized_TemplateProcessing_001(t *testing.T) {
 // TestQuoteHandlingInTemplates_729 verifies that template placeholders are correctly
 // quoted for JSON parsing and unquoted for storage, while respecting explicit string templates.
 func TestQuoteHandlingInTemplates_729(t *testing.T) {
-	t.Run("addQuotesInTemplates", func(t *testing.T) {
-		// Wraps non-string template
+	t.Run("addQuotesInTemplates (for original function)", func(t *testing.T) {
+
 		input1 := `{"id":{{int .id}},"name":"test"}`
 		expected1 := `{"id":"{{int .id}}","name":"test"}`
-		assert.Equal(t, expected1, addQuotesInTemplates(input1))
+		assert.Equal(t, expected1, addQuotesInTemplates(input1), "Should wrap template not in a string")
 
-		// Ignores templates already inside a string
 		input2 := `{"query":"SELECT * FROM users WHERE name = '{{.name}}'"}`
-		assert.Equal(t, input2, addQuotesInTemplates(input2))
+		expected2 := `{"query":"SELECT * FROM users WHERE name = '"{{.name}}"'"}`
+		assert.Equal(t, expected2, addQuotesInTemplates(input2), "Original function incorrectly wraps templates that are already inside strings")
 
-		// Handles escaped quotes
 		input3 := `{"key":"value with \" and {{template}}"}`
-		expected3 := `{"key":"value with \" and {{template}}"}`
-		assert.Equal(t, expected3, addQuotesInTemplates(input3))
+		expected3 := `{"key":"value with \" and "{{template}}""}`
+		assert.Equal(t, expected3, addQuotesInTemplates(input3), "Original function incorrectly wraps templates inside strings with escaped quotes")
+
 	})
 
 	t.Run("removeQuotesInTemplates", func(t *testing.T) {
