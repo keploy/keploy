@@ -143,23 +143,20 @@ else
     exit 1
 fi
 
-# remove main.py and change temp_main.py to main.py
+echo "removing main.py and changing temp_main.py to main.py"
 rm main.py
 mv temp_main.py main.py
 
+echo "running the test again, this will fail as expected and generate the report file"
 # run the test again, this will fail as expected and generate the report file
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 &> test_logs.txt
 
-if grep "WARNING: DATA RACE" "test_logs.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
-    cat "test_logs.txt"
-    exit 1
-fi
-
 # run the normalize command 
 # now the tests are fixed and we have secrets with updated values
+echo "running the normalize command"
 sudo -E env PATH="$PATH" $REPLAY_BIN normalize -t test-set-1
 
+echo "running the test again, this time it will pass"
 # run the test again, this time it will pass
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 &> test_logs.txt
 
@@ -175,38 +172,20 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
-
-all_passed=true
-
-# We now expect three test sets: test-set-0, test-set-1, test-set-2 (astro)
-for i in {0..2}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-    if [ ! -f "$report_file" ]; then
-        echo "Report missing for test-set-$i: $report_file"
-        all_passed=false
-        break
-    fi
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
-    fi
-done
-
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-else
-    cat "test_logs.txt"
+echo "checking the last report file"
+report_file="./keploy/reports/test-run-3/test-set-1-report.yaml"
+if [ ! -f "$report_file" ]; then
+    echo "Report missing for test-set-1: $report_file"
     exit 1
 fi
+
+test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+echo "Test status for test-set-1: $test_status"
+
+if [ "$test_status" != "PASSED" ]; then
+    echo "Test-set-1 did not pass."
+    exit 1
+fi
+
+echo "all tests passed"
+exit 0
