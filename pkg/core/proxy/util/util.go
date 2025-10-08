@@ -106,7 +106,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 					return
 				}
-				if err != io.EOF {
+				if err != io.EOF && !strings.Contains(err.Error(), "tls: user canceled"){
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
 				}
 				errChannel <- err

@@ -614,13 +614,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			rule.DstCfg = dstCfg
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
 				proxyErr := models.ParserError{
