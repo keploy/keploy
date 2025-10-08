@@ -14,6 +14,9 @@ jobs:
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
+          - name: tls-dadjoke
+            path: tls-dadjoke
+            script_dir: tls_dadjoke
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -47,6 +50,7 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+          ref: add-tls-app
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
