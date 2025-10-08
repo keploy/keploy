@@ -125,8 +125,9 @@ func TestPrintDefaultBodyDiff(t *testing.T) {
 }
 
 func TestApplyCliColorsToDiff(t *testing.T) {
-	diff := "Path: foo\n  Old: 1\n  New: 2"
+	diff := "Path: foo\n  Expected: 1\n  Actual: 2"
 	colored := applyCliColorsToDiff(diff)
+
 	if !strings.Contains(colored, "\x1b[33m") || !strings.Contains(colored, "\x1b[31m") || !strings.Contains(colored, "\x1b[32m") {
 		t.Fatalf("color codes missing: %q", colored)
 	}
