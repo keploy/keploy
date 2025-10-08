@@ -149,6 +149,9 @@ echo "removing main.py and changing temp_main.py to main.py"
 rm main.py
 mv temp_main.py main.py
 
+echo "remove test-set-2"
+rm keploy/test-set-2
+
 echo "running the test again, this will fail as expected and generate the report file"
 # run the test again, this will fail as expected and generate the report file
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
