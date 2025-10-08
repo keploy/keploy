@@ -31,6 +31,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v2/pkg/platform/coverage/python"
 	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -1757,9 +1758,38 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	for _, testSet := range r.config.Normalize.SelectedTests {
 		testSetID := testSet.TestSet
 		testCases := testSet.Tests
-		err := r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
+
+		// Check if test set is sanitized (has secret.yaml)
+		// If yes, desanitize before normalization
+		desanitized, err := tools.DesanitizeTestSet(testSetID, r.config.Path, r.logger)
+		if err != nil {
+			r.logger.Error("Failed to desanitize test set before normalization",
+				zap.String("testSetID", testSetID),
+				zap.Error(err))
+			return fmt.Errorf("failed to desanitize test set %s: %w", testSetID, err)
+		}
+		if desanitized {
+			r.logger.Info("Desanitized test set before normalization",
+				zap.String("testSetID", testSetID))
+		}
+
+		// Normalize test cases
+		err = r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
 		if err != nil {
 			return err
+		}
+
+		// Re-sanitize after normalization if it was originally sanitized
+		if desanitized {
+			err = tools.SanitizeTestSet(testSetID, r.config.Path, r.logger)
+			if err != nil {
+				r.logger.Error("Failed to re-sanitize test set after normalization",
+					zap.String("testSetID", testSetID),
+					zap.Error(err))
+				return fmt.Errorf("failed to re-sanitize test set %s: %w", testSetID, err)
+			}
+			r.logger.Info("Re-sanitized test set after normalization",
+				zap.String("testSetID", testSetID))
 		}
 	}
 	r.logger.Info("Normalized test cases successfully. Please run keploy tests to verify the changes.")

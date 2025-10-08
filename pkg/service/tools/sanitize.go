@@ -597,17 +597,198 @@ func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(path, out.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(path, out.Bytes(), 0777); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
 
-// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with 0644 perms.
+// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with 0777 perms.
 func WriteSecretsYAML(path string, secrets map[string]string) error {
 	b, err := yaml.Marshal(secrets)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0644)
+	return os.WriteFile(path, b, 0777)
+}
+
+// DesanitizeFileInPlace reads a sanitized YAML file and replaces placeholders with actual secret values.
+func DesanitizeFileInPlace(path string, secrets map[string]string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	// Replace all placeholders with actual values
+	content := string(raw)
+	for key, value := range secrets {
+		// sanitize only follows this pattern as of now
+		placeholder := fmt.Sprintf("{{string .secret.%s }}", key)
+		content = strings.ReplaceAll(content, placeholder, value)
+	}
+
+	// Normalize YAML formatting
+	var root yaml.Node
+	err = yaml.Unmarshal([]byte(content), &root)
+	if err != nil {
+		return fmt.Errorf("parse desanitized yaml %s: %w", path, err)
+	}
+
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+
+	// to ensure the same formatting as the original file
+	err = enc.Encode(&root)
+	if err != nil {
+		_ = enc.Close()
+		return fmt.Errorf("encode desanitized yaml %s: %w", path, err)
+	}
+	_ = enc.Close()
+
+	err = os.WriteFile(path, out.Bytes(), 0777)
+	if err != nil {
+		return fmt.Errorf("write desanitized %s: %w", path, err)
+	}
+	return nil
+}
+
+// DesanitizeTestSet is a standalone function that desanitizes a test set directory.
+// It reads secret.yaml, desanitizes all test files, and removes the secret.yaml file.
+// Returns true if desanitization was performed, false if no secret.yaml was found.
+func DesanitizeTestSet(testSetID string, path string, logger *zap.Logger) (bool, error) {
+	logger.Debug("Desanitizing test set", zap.String("testSetID", testSetID), zap.String("path", path))
+
+	testSetDir := filepath.Join(path, testSetID)
+	if !isDir(testSetDir) {
+		return false, fmt.Errorf("test set directory not found: %s", testSetDir)
+	}
+
+	secretPath := filepath.Join(testSetDir, "secret.yaml")
+
+	logger.Debug("Checking if secret.yaml exists", zap.String("path", secretPath))
+
+	// Check if secret.yaml exists
+	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
+		return false, nil
+	}
+
+	// Read secret.yaml
+	secretBytes, err := os.ReadFile(secretPath)
+	if err != nil {
+		return false, fmt.Errorf("read secret.yaml: %w", err)
+	}
+
+	// Parse secrets map
+	secrets := make(map[string]string)
+	err = yaml.Unmarshal(secretBytes, &secrets)
+	if err != nil {
+		return false, fmt.Errorf("parse secret.yaml: %w", err)
+	}
+
+	logger.Debug("Parsed secrets map for desanitization", zap.Any("secrets", secrets))
+
+	// Get all test files
+	testsDir := filepath.Join(testSetDir, "tests")
+	if !isDir(testsDir) {
+		return false, fmt.Errorf("tests directory not found: %s", testsDir)
+	}
+
+	ents, err := os.ReadDir(testsDir)
+	if err != nil {
+		return false, fmt.Errorf("read tests dir: %w", err)
+	}
+
+	var files []string
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".yaml") {
+			continue
+		}
+		files = append(files, filepath.Join(testsDir, name))
+	}
+
+	// Desanitize each file
+	for _, f := range files {
+		logger.Debug("Desanitizing file", zap.String("file", f))
+
+		err = DesanitizeFileInPlace(f, secrets)
+		if err != nil {
+			return false, fmt.Errorf("failed to desanitize file %s: %w", f, err)
+		}
+	}
+
+	// Remove secret.yaml after desanitization
+	err = os.Remove(secretPath)
+	if err != nil {
+		return false, fmt.Errorf("remove secret.yaml: %w", err)
+	}
+
+	return true, nil
+}
+
+// SanitizeTestSet is a standalone function that sanitizes a test set directory.
+// It scans all test files for secrets and writes them to secret.yaml.
+func SanitizeTestSet(testSetID string, path string, logger *zap.Logger) error {
+	testSetDir := filepath.Join(path, testSetID)
+	if !isDir(testSetDir) {
+		return fmt.Errorf("test set directory not found: %s", testSetDir)
+	}
+
+	// Check if secret.yaml already exists
+	secretPath := filepath.Join(testSetDir, "secret.yaml")
+	if _, err := os.Stat(secretPath); err == nil {
+		// secret.yaml already exists, skip sanitization
+		logger.Debug("secret.yaml already exists, skipping sanitization", zap.String("path", secretPath))
+		return nil
+	}
+
+	// Aggregate secrets across ALL files in this test set
+	aggSecrets := map[string]string{}
+
+	testsDir := filepath.Join(testSetDir, "tests")
+	if !isDir(testsDir) {
+		return fmt.Errorf("tests directory not found: %s", testsDir)
+	}
+
+	ents, err := os.ReadDir(testsDir)
+	if err != nil {
+		return fmt.Errorf("read tests dir: %w", err)
+	}
+
+	var files []string
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".yaml") {
+			continue
+		}
+		files = append(files, filepath.Join(testsDir, name))
+	}
+
+	if len(files) == 0 {
+		return nil
+	}
+
+	// Sanitize each file
+	for _, f := range files {
+		logger.Debug("Sanitizing file", zap.String("file", f))
+		err = SanitizeFileInPlace(f, aggSecrets)
+		if err != nil {
+			return fmt.Errorf("failed to sanitize file %s: %w", f, err)
+		}
+	}
+
+	// Write secret.yaml
+	err = WriteSecretsYAML(secretPath, aggSecrets)
+	if err != nil {
+		return fmt.Errorf("write secret.yaml: %w", err)
+	}
+
+	return nil
 }
