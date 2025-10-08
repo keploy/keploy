@@ -886,38 +886,69 @@ func removeQuotesInTemplates(jsonStr string) string {
 // 		return `"` + match + `"`
 // 	})
 // }
+
 func addQuotesInTemplates(jsonStr string) string {
-    if jsonStr == "" {
-        return ""
-    }
-    re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
-    
-    // 1. Find the start and end positions of all matches
-    matches := re.FindAllStringIndex(jsonStr, -1)
+	if jsonStr == "" {
+		return ""
+	}
+	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	matches := re.FindAllStringIndex(jsonStr, -1)
+	if len(matches) == 0 {
+		return jsonStr
+	}
 
-    // 2. Loop through the matches in reverse order
-    //    (This prevents our changes from messing up the indexes of later matches)
-    for i := len(matches) - 1; i >= 0; i-- {
-        matchBounds := matches[i]
-        start, end := matchBounds[0], matchBounds[1]
+	// --- Pass 1: Identify which matches are NOT inside a string literal ---
 
-        // This is the actual placeholder string, e.g., "{{.id}}"
-        placeholder := jsonStr[start:end]
+	// This slice will store the indices of matches that need to be quoted.
+	indicesToQuote := [][]int{}
 
-        // Skip explicit {{string}} types
-        if strings.Contains(placeholder, "{{string") {
-            continue
-        }
+	inString := false
+	quoteChar := rune(0)
+	matchCursor := 0
 
-        // 3. Check if the match is already inside quotes
-        isQuoted := (start > 0 && (jsonStr[start-1] == '"' || jsonStr[start-1] == '\'')) &&
-                    (end < len(jsonStr) && (jsonStr[end] == '"' || jsonStr[end] == '\''))
+	for i, char := range jsonStr {
+		// If we are at the beginning of the next match we are looking for...
+		if matchCursor < len(matches) && i == matches[matchCursor][0] {
+			// If we are NOT in a string, this match needs quotes.
+			if !inString {
+				indicesToQuote = append(indicesToQuote, matches[matchCursor])
+			}
+			// Move to the next match.
+			matchCursor++
+		}
 
-        // 4. If not quoted, wrap it in quotes by rebuilding the string
-        if !isQuoted {
-            jsonStr = jsonStr[:start] + `"` + placeholder + `"` + jsonStr[end:]
-        }
-    }
-    
-    return jsonStr
+		// Update our state based on the current character.
+		// This handles entering/leaving strings and ignores escaped quotes.
+		if (char == '"' || char == '\'') && (i == 0 || jsonStr[i-1] != '\\') {
+			if !inString {
+				inString = true
+				quoteChar = char
+			} else if inString && char == quoteChar {
+				inString = false
+				quoteChar = 0
+			}
+		}
+	}
+
+	// --- Pass 2: Rebuild the string with the necessary quotes ---
+
+	// If no matches needed quoting, we're done.
+	if len(indicesToQuote) == 0 {
+		return jsonStr
+	}
+
+	// Loop through the identified matches in reverse to safely modify the string.
+	for i := len(indicesToQuote) - 1; i >= 0; i-- {
+		match := indicesToQuote[i]
+		start, end := match[0], match[1]
+
+		// Skip explicit string types, as they should already be quoted.
+		if strings.Contains(jsonStr[start:end], "{{string") {
+			continue
+		}
+
+		jsonStr = jsonStr[:start] + `"` + jsonStr[start:end] + `"` + jsonStr[end:]
+	}
+
+	return jsonStr
 }
