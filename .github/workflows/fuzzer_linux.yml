@@ -166,7 +166,7 @@ jobs:
             record_src: build-no-race
             replay_src: build-no-race
 
-    name: gRPC Fuzzer (${{ matrix.config.job }})
+    name: gRPC Fuzzer ${{ matrix.mode }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -215,4 +215,4 @@ jobs:
           FUZZER_SERVER_BIN: ${{ steps.fuzzer.outputs.server }}
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
