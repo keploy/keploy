@@ -1781,7 +1781,8 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 
 		// Re-sanitize after normalization if it was originally sanitized
 		if desanitized {
-			err = tools.SanitizeTestSet(testSetID, r.config.Path, r.logger)
+			testSetDir := filepath.Join(r.config.Path, testSetID)
+			err = tools.SanitizeTestSetDir(ctx, testSetDir, r.logger)
 			if err != nil {
 				r.logger.Error("Failed to re-sanitize test set after normalization",
 					zap.String("testSetID", testSetID),
