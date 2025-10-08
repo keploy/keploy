@@ -28,4 +28,3 @@ jobs:
           set GOARCH=arm64
           go build -v ./...
         shell: cmd
-

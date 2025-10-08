@@ -27,6 +27,7 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
+	globalMockCh    chan<- *models.Mock
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
@@ -41,8 +42,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
-
+func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -75,7 +75,8 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		select {
 		case <-ctx.Done():
 		default:
-			if !reRecord {
+			if !reRecordCfg.Rerecord {
+
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -103,11 +104,26 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer close(insertTestErrChan)
 	defer close(insertMockErrChan)
 
-	newTestSetID, err := r.GetNextTestSetID(ctx)
-	if err != nil {
-		stopReason = "failed to get new test-set id"
-		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+	if reRecordCfg.TestSet != "" {
+		// --- TARGETING AN EXISTING TEST SET ---
+		newTestSetID = reRecordCfg.TestSet
+		r.logger.Info("Starting mocks-only refresh for existing test set.", zap.String("testSet", newTestSetID))
+
+		// Delete ONLY the old mocks.
+		err := r.mockDB.DeleteMocksForSet(ctx, newTestSetID) // We will create this new function
+		if err != nil {
+			stopReason = "failed to clear existing mocks for refresh"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s", stopReason)
+		}
+	} else {
+		var err error
+		newTestSetID, err = r.GetNextTestSetID(ctx)
+		if err != nil {
+			stopReason = "failed to get new test-set id"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s", stopReason)
+		}
 	}
 
 	// Create config.yaml if metadata is provided
@@ -123,7 +139,8 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err = r.Instrument(hookCtx)
+	appID, err := r.Instrument(hookCtx, newTestSetID)
+
 	if err != nil {
 		stopReason = "failed to instrument the application"
 		utils.LogError(r.logger, err, stopReason)
@@ -143,25 +160,45 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	errGrp.Go(func() error {
-		for testCase := range frames.Incoming {
-			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
-			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-			if err != nil {
-				if ctx.Err() == context.Canceled {
-					continue
+	if !r.config.Record.BigPayload {
+		r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
+		errGrp.Go(func() error {
+			for testCase := range frames.Incoming {
+				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+				if reRecordCfg.TestSet == "" {
+					err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+					if err != nil {
+						if ctx.Err() == context.Canceled {
+							continue
+						}
+						insertTestErrChan <- err
+					} else {
+						testCount++
+						r.telemetry.RecordedTestAndMocks()
+					}
+				} else {
+					r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 				}
-				insertTestErrChan <- err
-			} else {
-				testCount++
-				r.telemetry.RecordedTestAndMocks()
 			}
-		}
-		return nil
-	})
+			return nil
+		})
+	}
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			// Send a copy to global mock channel for correlation manager if available
+			if r.globalMockCh != nil {
+				currMockID := r.mockDB.GetCurrMockID()
+				// Create a deep copy of the mock to avoid race conditions
+				mockCopy := *mock
+				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
+				select {
+				case r.globalMockCh <- &mockCopy:
+					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
+				default:
+					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
+				}
+			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
@@ -241,7 +278,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
+func (r *Recorder) Instrument(ctx context.Context, newTestSetID string) (uint64, error) {
 	var stopReason string
 	// setting up the environment for recording
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
@@ -264,7 +301,9 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			Rules:         r.config.BypassRules,
 			E2E:           r.config.E2E,
 			Port:          r.config.Port,
+			BigPayload:    r.config.Record.BigPayload,
 		}
+
 		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
@@ -274,20 +313,29 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			}
 			return appID, fmt.Errorf("%s", stopReason)
 		}
+
+		if r.config.Record.BigPayload && hooks.Mode == models.MODE_RECORD {
+			r.logger.Debug("BigPayload mode enabled, starting ingress proxy.")
+			incomingOpts := models.IncomingOptions{
+				Filters:  r.config.Record.Filters,
+				BasePath: r.config.Record.BasePath,
+			}
+			// Call the new core method to start the ingress proxy listener.
+			// This call is non-blocking.
+			var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+				return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+			}
+			if err := r.instrumentation.StartIncomingProxy(ctx, persister, incomingOpts); err != nil {
+				stopReason = "failed to start the ingress proxy"
+				utils.LogError(r.logger, err, stopReason)
+				return appID, fmt.Errorf("%s", stopReason)
+			}
+		}
 	}
 	return appID, nil
 }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
-	incomingOpts := models.IncomingOptions{
-		Filters:  r.config.Record.Filters,
-		BasePath: r.config.Record.BasePath,
-	}
-	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
-	if err != nil {
-		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
-	}
-
 	outgoingOpts := models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
@@ -300,8 +348,22 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}
 
+	if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
+		incomingOpts := models.IncomingOptions{
+			Filters:  r.config.Record.Filters,
+			BasePath: r.config.Record.BasePath,
+		}
+		incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
+		if err != nil {
+			return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
+		}
+		return FrameChan{
+			Incoming: incomingChan,
+			Outgoing: outgoingChan,
+		}, nil
+	}
+
 	return FrameChan{
-		Incoming: incomingChan,
 		Outgoing: outgoingChan,
 	}, nil
 }
@@ -388,4 +450,10 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
+func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
+	r.globalMockCh = mockCh
+	r.logger.Info("Global mock channel set for record service")
 }

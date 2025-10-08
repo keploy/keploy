@@ -243,6 +243,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("bigPayload", false, "Enable the instrumentation hook to capture test cases and mocks.")
+		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -256,6 +258,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+		err := cmd.Flags().MarkHidden("bigPayload")
+		if err != nil {
+			errMsg := "failed to mark bigPayload as hidden flag"
+			utils.LogError(c.logger, err, errMsg)
+			return err
+		}
+
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
@@ -310,11 +319,16 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
+		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test and rerecord mode")
+		cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 		if cmd.Name() == "rerecord" {
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
+			cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
+			cmd.Flags().String("branch", c.cfg.ReRecord.Branch, "In which git branch to send the updated config file with new mock hash")
+			cmd.Flags().String("owner", c.cfg.ReRecord.Owner, "Git user to be referenced for commiting config change")
 		}
 		if cmd.Name() == "test" {
-			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
 			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
@@ -326,7 +340,6 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
-			cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
@@ -737,6 +750,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	case "record", "test", "rerecord":
 
+		if cmd.Name() == "rerecord" {
+			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
+			if err != nil {
+				errMsg := "failed to get the amend-testset flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.ReRecord.AmendTestSet = updateTestSet
+		}
+
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
@@ -916,6 +939,21 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
+
+				c.cfg.Test.APITimeout, err = cmd.Flags().GetUint64("api-timeout")
+				if err != nil {
+					errMsg := "failed to get the provided api-timeout"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+
+				c.cfg.Test.DisableMockUpload, err = cmd.Flags().GetBool("disableMockUpload")
+				if err != nil {
+					errMsg := "failed to get the provided disableMockUpload"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+
 				// optional flag to show response diffs during rerecord
 				showDiff, err := cmd.Flags().GetBool("show-diff")
 				if err != nil {
@@ -1047,6 +1085,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+
+		bigPayload, err := cmd.Flags().GetBool("bigPayload")
+		if err != nil {
+			errMsg := "failed to read the big payload flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Record.BigPayload = bigPayload
+
+		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
+		if err != nil {
+			errMsg := "failed to read the global passthrough flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
