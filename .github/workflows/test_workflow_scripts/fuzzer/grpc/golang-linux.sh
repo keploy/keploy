@@ -25,7 +25,7 @@ command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
 [ -x "${FUZZER_SERVER_BIN:-}" ] || { echo "FUZZER_SERVER_BIN not set or not executable"; exit 1; }
 
 # Generate keploy config and add duration_ms noise to avoid timing diffs
-rm -f ./keploy.yml
+rm -f ./keploy.yml keploy
 sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
 sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "./keploy.yml"
 
@@ -73,7 +73,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Start server with keploy in record mode
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
  sleep 10
 
 
@@ -94,9 +94,7 @@ if [ "$MODE" = "incoming" ]; then
      "max_diffs": 5
    }'
 
-
- sleep 120
-
+ sleep 10
 
  echo "Stopping keploy record and server"
 
@@ -121,7 +119,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Replay
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" 2>&1 | tee test_incoming.txt
+ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 2>&1 | tee test_incoming.txt
  echo "checking for errors"
  check_for_errors test_incoming.txt
 
