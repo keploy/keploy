@@ -177,7 +177,7 @@ func (a *App) SetupCompose() error {
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)
 	if ok {
-		err = a.docker.ForceAbsolutePath(compose, path)
+		err = a.docker.ForceAbsolutePath(compose, path, a.keployContainer)
 		if err != nil {
 			utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
 			return err

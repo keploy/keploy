@@ -341,7 +341,7 @@ func (idc *Impl) GetNetworkInfo(compose *Compose) *NetworkInfo {
 }
 
 // GetHostWorkingDirectory Inspects Keploy docker container to get bind mount for current directory
-func (idc *Impl) GetHostWorkingDirectory() (string, error) {
+func (idc *Impl) GetHostWorkingDirectory(keployContainer string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
@@ -351,7 +351,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		return "", err
 	}
 
-	container, err := idc.ContainerInspect(ctx, "keploy-v2")
+	container, err := idc.ContainerInspect(ctx, keployContainer)
 	if err != nil {
 		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")
 		return "", err
@@ -368,8 +368,8 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 }
 
 // ForceAbsolutePath replaces relative paths in bind mounts with absolute paths
-func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
-	hostWorkingDirectory, err := idc.GetHostWorkingDirectory()
+func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string, keployContainer string) error {
+	hostWorkingDirectory, err := idc.GetHostWorkingDirectory(keployContainer)
 	if err != nil {
 		return err
 	}
