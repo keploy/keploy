@@ -5,6 +5,8 @@ source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 # Install dependencies
 pip3 install -r requirements.txt
 
+sudo rm -rf keploy.yml
+
 # Database migrations
 sudo $RECORD_BIN config --generate
 sudo rm -rf keploy/  # Clean old test data
@@ -42,7 +44,7 @@ send_request(){
 for i in 1 2; do
     app_name="flaskSecret_${i}"
     send_request "secrets" &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee test_logs.txt
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -65,7 +67,7 @@ sleep 5
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
 send_request "astro" &
-sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" &> "${app_name}.txt"
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee test_logs.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in pipeline..."
     cat "${app_name}.txt"
@@ -149,7 +151,7 @@ mv temp_main.py main.py
 
 echo "running the test again, this will fail as expected and generate the report file"
 # run the test again, this will fail as expected and generate the report file
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 &> test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 2>&1 | tee test_logs.txt
 
 # run the normalize command 
 # now the tests are fixed and we have secrets with updated values
@@ -158,7 +160,7 @@ sudo -E env PATH="$PATH" $REPLAY_BIN normalize -t test-set-1
 
 echo "running the test again, this time it will pass"
 # run the test again, this time it will pass
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 &> test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" -t test-set-1 --delay 10 2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
