@@ -286,15 +286,17 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		currentRisk := models.None
+		currentCategory := models.FailureCategory("")
 
-		// 1) Status code mismatch => HIGH
+		// 1) Status code mismatch => HIGH & Broken (contract-level)
 		if isStatusMismatch {
 			currentRisk = models.High
+			currentCategory = matcher.MaxCategory(currentCategory, models.SchemaBroken)
 		}
 
-		// 2) Header mismatches => MEDIUM, except Content-Type => HIGH
+		//  2. Header mismatches => MEDIUM normally (schema unchanged: value-only),
+		//     but Content-Type change => HIGH & Broken
 		if isHeaderMismatch {
-			// any non-noisy header that mismatched is already in expectedHeader/actualHeader
 			ctHigh := false
 			for hk := range expectedHeader {
 				if strings.EqualFold(hk, "Content-Type") {
@@ -304,8 +306,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 			if ctHigh {
 				currentRisk = matcher.MaxRisk(currentRisk, models.High)
+				currentCategory = matcher.MaxCategory(currentCategory, models.SchemaBroken)
 			} else {
 				currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+				currentCategory = matcher.MaxCategory(currentCategory, models.SchemaUnchanged)
 			}
 		}
 
@@ -313,19 +317,24 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if isBodyMismatch {
 			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
 				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
-					// Noisy fields are ignored inside ComputeFailureAssessmentJSON already.
 					currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
+					currentCategory = matcher.MaxCategory(currentCategory, assess.Category)
 				} else {
-					// If we couldn't classify, be conservative but not silent.
+					// couldn't classify → conservative
 					currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+					currentCategory = matcher.MaxCategory(currentCategory, models.SchemaUnchanged)
 				}
 			} else {
-				// Non-JSON: no noise-masking available → treat as HIGH
+				// Non-JSON body mismatch: cannot noise-mask or classify precisely → treat as Broken
 				currentRisk = matcher.MaxRisk(currentRisk, models.High)
+				currentCategory = matcher.MaxCategory(currentCategory, models.SchemaBroken)
 			}
 		}
 
-		res.FailureRisk = currentRisk
+		res.FailureInfo = models.FailureInfo{
+			Risk:     currentRisk,
+			Category: currentCategory,
+		}
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true

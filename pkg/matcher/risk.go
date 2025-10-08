@@ -45,28 +45,63 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 		ValueChanges:  valueChanges,
 	}
 
-	// Categorize per your spec:
-	// - Schema Changes (broken/type change) -> High
-	// - Schema Same (value-only)           -> Medium
+	hasAdded := len(added) > 0
+	hasRemoved := len(removed) > 0
+	hasType := len(typeChanges) > 0
+	hasValue := len(valueChanges) > 0
+
+	// Build reasons (human friendly)
+	if hasRemoved {
+		assess.Reasons = append(assess.Reasons, "Removed fields: "+strings.Join(removed, ", "))
+	}
+	if hasType {
+		assess.Reasons = append(assess.Reasons, "Type changes at: "+strings.Join(typeChanges, ", "))
+	}
+	if hasAdded && !hasRemoved && !hasType && !hasValue {
+		assess.Reasons = append(assess.Reasons, "Backward-compatible: only new fields added.")
+	}
+	if hasAdded && !hasRemoved && !hasType && hasValue {
+		assess.Reasons = append(assess.Reasons, "Backward-compatible (with value differences): new fields plus value changes on existing fields.")
+	}
+	if !hasAdded && !hasRemoved && !hasType && hasValue {
+		assess.Reasons = append(assess.Reasons, "Schema identical; only values changed.")
+	}
+	if !hasAdded && !hasRemoved && !hasType && !hasValue {
+		assess.Reasons = append(assess.Reasons, "Schema and values are identical.")
+	}
+
+	// Categorize per spec:
+	// - Schema Changes (removed/type change) -> High
+	// - Schema Same (value-only)             -> Medium
 	// - Schema Addition:
-	//     * only new fields                -> Low
-	//     * new + some value changes       -> Medium
+	//     * only new fields                  -> Low
+	//     * new + some value changes        -> Medium
+	// - No differences at all               -> SchemaUnchanged / None
 	switch {
-	case len(typeChanges) > 0 || len(removed) > 0:
+	case hasRemoved || hasType:
 		assess.Category = models.SchemaBroken
 		assess.Risk = models.High
-	case len(added) > 0 && len(valueChanges) == 0:
-		assess.Category = models.SchemaAdded
-		assess.Risk = models.Low
-	case len(added) > 0 && len(valueChanges) > 0:
-		assess.Category = models.SchemaAdded
-		assess.Risk = models.Medium
-	case len(added) == 0 && len(valueChanges) > 0:
+
+	case !hasAdded && !hasRemoved && !hasType && !hasValue:
+		assess.Category = models.SchemaUnchanged
+		assess.Risk = models.None
+
+	case !hasAdded && !hasRemoved && !hasType && hasValue:
 		assess.Category = models.SchemaUnchanged
 		assess.Risk = models.Medium
+
+	case hasAdded && !hasRemoved && !hasType && !hasValue:
+		assess.Category = models.SchemaAdded
+		assess.Risk = models.Low
+
+	case hasAdded && !hasRemoved && !hasType && hasValue:
+		assess.Category = models.SchemaAdded
+		assess.Risk = models.Medium
+
 	default:
-		assess.Category = ""
-		assess.Risk = models.None
+		// Mixed but already-handled breaking cases (added along with removed/type change) fall here defensively.
+		assess.Category = models.SchemaBroken
+		assess.Risk = models.High
 	}
 
 	return assess, nil
@@ -155,6 +190,19 @@ func MaxRisk(a, b models.RiskLevel) models.RiskLevel {
 		models.Low:    1,
 		models.Medium: 2,
 		models.High:   3,
+	}
+	if rank[b] > rank[a] {
+		return b
+	}
+	return a
+}
+
+func MaxCategory(a, b models.FailureCategory) models.FailureCategory {
+	rank := map[models.FailureCategory]int{
+		"":                     0,
+		models.SchemaUnchanged: 1,
+		models.SchemaAdded:     2,
+		models.SchemaBroken:    3,
 	}
 	if rank[b] > rank[a] {
 		return b

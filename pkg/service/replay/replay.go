@@ -1248,9 +1248,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if testCaseResult != nil {
-				if testStatus == models.TestStatusFailed && testResult.FailureRisk != models.None {
-					testCaseResult.FailureInfo.Risk = testResult.FailureRisk
-
+				if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
+					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
+					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -1294,8 +1294,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	riskHigh, riskMed, riskLow := 0, 0, 0
 	for _, tr := range testCaseResults {
-		if tr.Status == models.TestStatusFailed && tr.Result.FailureRisk != models.None {
-			switch tr.Result.FailureRisk {
+		if tr.Status == models.TestStatusFailed && tr.Result.FailureInfo.Risk != models.None {
+			switch tr.Result.FailureInfo.Risk {
 			case models.High:
 				riskHigh++
 			case models.Medium:
@@ -1990,8 +1990,9 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		testCaseResult.Result = *result
 	}
 
-	if result != nil && result.FailureRisk != models.None {
-		testCaseResult.FailureInfo.Risk = result.FailureRisk
+	if result != nil && result.FailureInfo.Risk != models.None {
+		testCaseResult.FailureInfo.Risk = result.FailureInfo.Risk
+		testCaseResult.FailureInfo.Category = result.FailureInfo.Category
 	}
 
 	return testCaseResult

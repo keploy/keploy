@@ -23,6 +23,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		TrailerResult: make([]models.HeaderResult, 0),
 	}
 	currentRisk := models.None
+	currentCategory := models.FailureCategory("")
 
 	// Local variables to track overall match status
 	differences := make(map[string]struct {
@@ -71,6 +72,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Message:  "status header value mismatch",
 				}
 				currentRisk = matcher.MaxRisk(currentRisk, models.High)
+				currentCategory = matcher.MaxCategory(currentCategory, models.SchemaBroken)
 			}
 		}
 
@@ -289,15 +291,22 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
 			if assess, err := matcher.ComputeFailureAssessmentJSON(expectedDecodedData, actualDecodedData, bodyNoise, ignoreOrdering); err == nil && assess != nil {
 				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
+				currentCategory = matcher.MaxCategory(currentCategory, assess.Category)
 			} else {
 				currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+				currentCategory = matcher.MaxCategory(currentCategory, models.SchemaUnchanged)
 			}
 		} else {
+			// non-JSON payload mismatch → Broken
 			currentRisk = matcher.MaxRisk(currentRisk, models.High)
+			currentCategory = matcher.MaxCategory(currentCategory, models.SchemaBroken)
 		}
 	}
 
-	result.FailureRisk = currentRisk
+	result.FailureInfo = models.FailureInfo{
+		Risk:     currentRisk,
+		Category: currentCategory,
+	}
 
 	return matched, result
 }
