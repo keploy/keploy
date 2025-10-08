@@ -56,8 +56,8 @@ type TestResult struct {
 }
 
 type FailureInfo struct {
-	Risk     RiskLevel
-	Category FailureCategory
+	Risk     RiskLevel       `json:"risk,omitempty" yaml:"risk,omitempty"`
+	Category FailureCategory `json:"category,omitempty" yaml:"category,omitempty"`
 }
 
 func (tr *TestResult) GetKind() string {

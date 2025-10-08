@@ -1250,6 +1250,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if testCaseResult != nil {
 				if testStatus == models.TestStatusFailed && testResult.FailureRisk != models.None {
 					testCaseResult.FailureInfo.Risk = testResult.FailureRisk
+
 				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -1829,6 +1830,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 
 		if testCaseResult.FailureInfo.Risk == models.High && !r.config.Normalize.AllowHighRisk {
 			r.logger.Warn(fmt.Sprintf("failed to normalize test case %s due to a high-risk failure. please confirm the schema compatibility with all consumers and then run with --allow-high-risk", testCase.Name))
+			continue
 		}
 
 		// Handle normalization based on test case kind
