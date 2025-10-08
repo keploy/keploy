@@ -51,13 +51,10 @@ check_test_report() {
     for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
         [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
 
-        cat $report_file
-        
         local test_set_name
         test_set_name=$(basename "$report_file" -report.yaml)
         local test_status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-        
+        test_status=$(grep -m 1 'status:' "$report_file" | awk '{print $2}')        
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then
             all_passed=false
@@ -244,6 +241,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
  # Replay the client (relying on mocks)
  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee test_outgoing.txt
+ echo "checking for errors"
  check_for_errors test_outgoing.txt
  check_test_report
  ensure_success_phrase test_outgoing.txt
