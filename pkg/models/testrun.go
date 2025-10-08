@@ -37,22 +37,27 @@ func (tr *TestReport) GetKind() string {
 }
 
 type TestResult struct {
-	Kind         Kind       `json:"kind" yaml:"kind"`
-	Name         string     `json:"name" yaml:"name"`
-	Status       TestStatus `json:"status" yaml:"status"`
-	Started      int64      `json:"started" yaml:"started"`
-	Completed    int64      `json:"completed" yaml:"completed"`
-	TestCasePath string     `json:"testCasePath" yaml:"test_case_path"`
-	MockPath     string     `json:"mockPath" yaml:"mock_path"`
-	TestCaseID   string     `json:"testCaseID" yaml:"test_case_id"`
-	Req          HTTPReq    `json:"req" yaml:"req,omitempty"`
-	Res          HTTPResp   `json:"resp" yaml:"resp,omitempty"`
-	GrpcReq      GrpcReq    `json:"grpcReq,omitempty" yaml:"grpcReq,omitempty"`
-	GrpcRes      GrpcResp   `json:"grpcRes,omitempty" yaml:"grpcRes,omitempty"`
-	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
-	Result       Result     `json:"result" yaml:"result"`
-	TimeTaken    string     `json:"time_taken" yaml:"time_taken"`
-	FailureRisk  RiskLevel  `json:"failure_risk,omitempty" yaml:"failure_risk,omitempty"`
+	Kind         Kind        `json:"kind" yaml:"kind"`
+	Name         string      `json:"name" yaml:"name"`
+	Status       TestStatus  `json:"status" yaml:"status"`
+	Started      int64       `json:"started" yaml:"started"`
+	Completed    int64       `json:"completed" yaml:"completed"`
+	TestCasePath string      `json:"testCasePath" yaml:"test_case_path"`
+	MockPath     string      `json:"mockPath" yaml:"mock_path"`
+	TestCaseID   string      `json:"testCaseID" yaml:"test_case_id"`
+	Req          HTTPReq     `json:"req" yaml:"req,omitempty"`
+	Res          HTTPResp    `json:"resp" yaml:"resp,omitempty"`
+	GrpcReq      GrpcReq     `json:"grpcReq,omitempty" yaml:"grpcReq,omitempty"`
+	GrpcRes      GrpcResp    `json:"grpcRes,omitempty" yaml:"grpcRes,omitempty"`
+	Noise        Noise       `json:"noise" yaml:"noise,omitempty"`
+	Result       Result      `json:"result" yaml:"result"`
+	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
+	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+}
+
+type FailureInfo struct {
+	Risk     RiskLevel
+	Category FailureCategory
 }
 
 func (tr *TestResult) GetKind() string {
@@ -101,18 +106,18 @@ func StringToTestSetStatus(s string) (TestSetStatus, error) {
 type RiskLevel string
 
 const (
-	RiskNone   RiskLevel = "NONE"
-	RiskLow    RiskLevel = "LOW"
-	RiskMedium RiskLevel = "MEDIUM"
-	RiskHigh   RiskLevel = "HIGH"
+	None   RiskLevel = "NONE"
+	Low    RiskLevel = "LOW"
+	Medium RiskLevel = "MEDIUM"
+	High   RiskLevel = "HIGH"
 )
 
 type FailureCategory string
 
 const (
-	CatSchemaChange   FailureCategory = "SCHEMA_CHANGE"
-	CatSchemaSame     FailureCategory = "SCHEMA_SAME"
-	CatSchemaAddition FailureCategory = "SCHEMA_ADDITION"
+	SchemaUnchanged FailureCategory = "SCHEMA_UNCHANGED" // schema is identical
+	SchemaAdded     FailureCategory = "SCHEMA_ADDED"     // only new fields added; backward compatible
+	SchemaBroken    FailureCategory = "SCHEMA_BROKEN"    // removed/changed fields, type mismatch, or entirely different schema
 )
 
 type FailureAssessment struct {

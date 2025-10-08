@@ -53,20 +53,20 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	//     * new + some value changes       -> Medium
 	switch {
 	case len(typeChanges) > 0 || len(removed) > 0:
-		assess.Category = models.CatSchemaChange
-		assess.Risk = models.RiskHigh
+		assess.Category = models.SchemaBroken
+		assess.Risk = models.High
 	case len(added) > 0 && len(valueChanges) == 0:
-		assess.Category = models.CatSchemaAddition
-		assess.Risk = models.RiskLow
+		assess.Category = models.SchemaAdded
+		assess.Risk = models.Low
 	case len(added) > 0 && len(valueChanges) > 0:
-		assess.Category = models.CatSchemaAddition
-		assess.Risk = models.RiskMedium
+		assess.Category = models.SchemaAdded
+		assess.Risk = models.Medium
 	case len(added) == 0 && len(valueChanges) > 0:
-		assess.Category = models.CatSchemaSame
-		assess.Risk = models.RiskMedium
+		assess.Category = models.SchemaUnchanged
+		assess.Risk = models.Medium
 	default:
 		assess.Category = ""
-		assess.Risk = models.RiskNone
+		assess.Risk = models.None
 	}
 
 	return assess, nil

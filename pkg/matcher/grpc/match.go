@@ -291,7 +291,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			}
 		} else {
 			// Non-JSON: ignore categorization entirely
-			result.FailureRisk = models.RiskNone
+			result.FailureRisk = models.High
 		}
 	}
 

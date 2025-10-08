@@ -292,7 +292,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 			} else {
 				// Non-JSON: ignore categorization entirely
-				res.FailureRisk = models.RiskNone
+				res.FailureRisk = models.High
 			}
 		}
 
