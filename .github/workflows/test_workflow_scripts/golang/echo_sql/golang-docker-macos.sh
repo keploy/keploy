@@ -55,15 +55,15 @@ rm -rf keploy/
 rm ./keploy.yml >/dev/null 2>&1 || true
 
 # Generate the keploy-config file.
-$RECORD_BIN config --generate
+# $RECORD_BIN config --generate
 
 # Update the global noise to ts in the config file.
-config_file="./keploy.yml"
-if [ -f "$config_file" ]; then
-  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
-else
-  echo "⚠️ Config file $config_file not found, skipping sed replace."
-fi
+# config_file="./keploy.yml"
+# if [ -f "$config_file" ]; then
+#   sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+# else
+#   echo "⚠️ Config file $config_file not found, skipping sed replace."
+# fi
 
 container_kill() {
     pid=$(pgrep -n keploy)
