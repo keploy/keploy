@@ -35,7 +35,7 @@ rm -f ./keploy.yml keploy
 sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
 config_file="./keploy.yml"
 if [ -f "$config_file" ]; then
-  sed -i 's/global: {}/global: {"body": {"duration_ms":[]}, "header": {"Content-Length":[]}}/' "$config_file"
+  sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "$config_file"
 else
   echo "⚠️ Config file $config_file not found, skipping sed replace."
 fi
