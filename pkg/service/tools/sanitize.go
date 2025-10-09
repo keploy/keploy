@@ -17,6 +17,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// secrets file name
+const SecretsFileName = "secret.yaml"
+
 func (t *Tools) Sanitize(ctx context.Context) error {
 	t.logger.Info("Starting sanitize process...")
 
@@ -55,14 +58,14 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 			zap.String("dir", testSetDir))
 
 		// if secret.yaml exists in the testSetDir then skip sanitization
-		if _, err := os.Stat(filepath.Join(testSetDir, "secret.yaml")); err == nil {
+		if _, err := os.Stat(filepath.Join(testSetDir, SecretsFileName)); err == nil {
 			t.logger.Info("secret.yaml found in the test set directory, skipping sanitization",
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir))
 			continue
 		}
 
-		if err := SanitizeTestSetDir(ctx, testSetDir, t.logger); err != nil {
+		if err := t.SanitizeTestSetDir(ctx, testSetDir); err != nil {
 			t.logger.Error("Sanitize failed for test set",
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir),
@@ -99,7 +102,7 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-func SanitizeTestSetDir(ctx context.Context, testSetDir string, logger *zap.Logger) error {
+func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error {
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
 
@@ -123,12 +126,12 @@ func SanitizeTestSetDir(ctx context.Context, testSetDir string, logger *zap.Logg
 			files = append(files, filepath.Join(testsDir, name))
 		}
 	} else {
-		logger.Info("No tests directory found")
+		t.logger.Info("No tests directory found")
 		return nil
 	}
 
 	if len(files) == 0 {
-		logger.Info("No files to sanitize")
+		t.logger.Info("No files to sanitize")
 		return nil
 	}
 
@@ -136,24 +139,24 @@ func SanitizeTestSetDir(ctx context.Context, testSetDir string, logger *zap.Logg
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
-			logger.Info("File sanitization cancelled by context")
+			t.logger.Info("File sanitization cancelled by context")
 			return ctx.Err()
 		default:
 		}
 
 		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
 			// Continue to next file
-			logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
+			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
 			continue
 		}
 	}
 
 	// Write keploy/<set>/secret.yaml
-	secretPath := filepath.Join(testSetDir, "secret.yaml")
+	secretPath := filepath.Join(testSetDir, SecretsFileName)
 	if err := WriteSecretsYAML(secretPath, aggSecrets); err != nil {
 		return fmt.Errorf("write secret.yaml: %w", err)
 	}
-	logger.Info("Wrote secret.yaml", zap.String("path", secretPath))
+	t.logger.Info("Wrote secret.yaml", zap.String("path", secretPath))
 	return nil
 }
 
@@ -656,17 +659,17 @@ func DesanitizeFileInPlace(path string, secrets map[string]string) error {
 // DesanitizeTestSet is a standalone function that desanitizes a test set directory.
 // It reads secret.yaml, desanitizes all test files, and removes the secret.yaml file.
 // Returns true if desanitization was performed, false if no secret.yaml was found.
-func DesanitizeTestSet(testSetID string, path string, logger *zap.Logger) (bool, error) {
-	logger.Debug("Desanitizing test set", zap.String("testSetID", testSetID), zap.String("path", path))
+func (t *Tools) DesanitizeTestSet(testSetID string) (bool, error) {
+	t.logger.Debug("Desanitizing test set", zap.String("testSetID", testSetID), zap.String("path", t.config.Path))
 
-	testSetDir := filepath.Join(path, testSetID)
+	testSetDir := filepath.Join(t.config.Path, testSetID)
 	if !isDir(testSetDir) {
 		return false, fmt.Errorf("test set directory not found: %s", testSetDir)
 	}
 
-	secretPath := filepath.Join(testSetDir, "secret.yaml")
+	secretPath := filepath.Join(testSetDir, SecretsFileName)
 
-	logger.Debug("Checking if secret.yaml exists", zap.String("path", secretPath))
+	t.logger.Debug("Checking if secret.yaml exists", zap.String("path", secretPath))
 
 	// Check if secret.yaml exists
 	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
@@ -686,7 +689,7 @@ func DesanitizeTestSet(testSetID string, path string, logger *zap.Logger) (bool,
 		return false, fmt.Errorf("parse secret.yaml: %w", err)
 	}
 
-	logger.Debug("Parsed secrets map for desanitization", zap.Any("secrets", secrets))
+	t.logger.Debug("Parsed secrets map for desanitization", zap.Any("secrets", secrets))
 
 	// Get all test files
 	testsDir := filepath.Join(testSetDir, "tests")
@@ -713,7 +716,7 @@ func DesanitizeTestSet(testSetID string, path string, logger *zap.Logger) (bool,
 
 	// Desanitize each file
 	for _, f := range files {
-		logger.Debug("Desanitizing file", zap.String("file", f))
+		t.logger.Debug("Desanitizing file", zap.String("file", f))
 
 		err = DesanitizeFileInPlace(f, secrets)
 		if err != nil {

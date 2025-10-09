@@ -17,13 +17,15 @@ type Orchestrator struct {
 	logger                 *zap.Logger
 	record                 record.Service
 	replay                 replay.Service
+	reportDB               replay.ReportDB
+	testDB                 replay.TestDB
 	tools                  tools.Service
 	config                 *config.Config
 	mockCorrelationManager *MockCorrelationManager
 	globalMockCh           chan *models.Mock
 }
 
-func New(logger *zap.Logger, record record.Service, tools tools.Service, replay replay.Service, config *config.Config) *Orchestrator {
+func New(logger *zap.Logger, record record.Service, tools tools.Service, replay replay.Service, reportDB replay.ReportDB, testDB replay.TestDB, config *config.Config) *Orchestrator {
 	// Create global mock channel for communication between record service and correlation manager
 	globalMockCh := make(chan *models.Mock, 1000) // Buffered channel to prevent blocking
 
@@ -33,6 +35,8 @@ func New(logger *zap.Logger, record record.Service, tools tools.Service, replay 
 		replay:                 replay,
 		tools:                  tools,
 		config:                 config,
+		reportDB:               reportDB,
+		testDB:                 testDB,
 		globalMockCh:           globalMockCh,
 		mockCorrelationManager: nil, // Will be initialized when needed
 	}
