@@ -17,6 +17,7 @@ type Service interface {
 	Import(ctx context.Context, path, basePath string) error
 	Templatize(ctx context.Context) error
 	Sanitize(ctx context.Context) error
+	Normalize(ctx context.Context) error
 }
 
 type teleDB interface {
@@ -35,4 +36,9 @@ type TestDB interface {
 	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string, enableLog bool) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
+}
+
+type ReportDB interface {
+	GetAllTestRunIDs(ctx context.Context) ([]string, error)
+	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 }

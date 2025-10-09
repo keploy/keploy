@@ -5,6 +5,8 @@ source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 # Install dependencies
 pip3 install -r requirements.txt
 
+sudo rm -rf keploy.yml
+
 # Database migrations
 sudo $RECORD_BIN config --generate
 sudo rm -rf keploy/  # Clean old test data
@@ -42,7 +44,7 @@ send_request(){
 for i in 1 2; do
     app_name="flaskSecret_${i}"
     send_request "secrets" &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -59,13 +61,20 @@ for i in 1 2; do
 done
 
 # Sanitize the testcases
-sudo -E env PATH="$PATH" $RECORD_BIN sanitize
+sudo -E env PATH="$PATH" $RECORD_BIN sanitize 2>&1 | tee sanitize_logs.txt
+
+if grep "ERROR" "sanitize_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "sanitize_logs.txt"
+    exit 1
+fi
+
 sleep 5
 
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
 send_request "astro" &
-sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" &> "${app_name}.txt"
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in pipeline..."
     cat "${app_name}.txt"
@@ -95,7 +104,7 @@ else
 fi
 
 # Testing phase
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 &> test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
@@ -115,6 +124,77 @@ for i in {0..2}
 do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+    if [ ! -f "$report_file" ]; then
+        echo "Report missing for test-set-$i: $report_file"
+        all_passed=false
+        break
+    fi
+
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
+    fi
+done
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
+else
+    cat "test_logs.txt"
+    exit 1
+fi
+
+echo "removing main.py and changing temp_main.py to main.py"
+# temp_main contains a change in the response so that the tests fails and we can use normalize command
+rm main.py
+mv temp_main.py main.py
+
+echo "remove test-set-2"
+sudo rm -rf keploy/test-set-2
+
+echo "running the test again, this will fail as expected and generate the report file"
+# run the test again, this will fail as expected and generate the report file
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
+
+# run the normalize command 
+# now the tests are fixed and we have secrets with updated values
+echo "running the normalize command"
+sudo -E env PATH="$PATH" $REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
+
+if grep "ERROR" "normalize_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "normalize_logs.txt"
+    exit 1
+fi
+
+echo "running the test again, this time it will pass"
+# run the test again, this time it will pass
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
+
+if grep "ERROR" "test_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
+
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
+
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-2/test-set-$i-report.yaml"
     if [ ! -f "$report_file" ]; then
         echo "Report missing for test-set-$i: $report_file"
         all_passed=false

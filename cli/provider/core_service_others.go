@@ -40,14 +40,14 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
-	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, c)
+	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, auth, c)
 	reportSvc := report.New(logger, c, commonServices.YamlReportDb, commonServices.YamlTestDB)
 
-	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "mock" {
+	if (cmd == "test" && c.Test.BasePath != "") || cmd == "mock" {
 		return replaySvc, nil
 	}
 
-	if cmd == "templatize" || cmd == "config" || cmd == "update" || cmd == "login" || cmd == "export" || cmd == "import" || cmd == "sanitize" {
+	if cmd == "templatize" || cmd == "config" || cmd == "update" || cmd == "login" || cmd == "export" || cmd == "import" || cmd == "sanitize" || cmd == "normalize" {
 		return toolsSvc, nil
 	}
 

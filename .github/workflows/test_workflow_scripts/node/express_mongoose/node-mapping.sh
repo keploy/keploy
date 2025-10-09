@@ -107,7 +107,7 @@ run_rerecord() {
   
   # Start keploy rerecord in background, capture PID
   set +e
-  sudo -E env PATH="$PATH" "$RECORD_BIN" rerecord -c 'npm start' $extra_args \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" rerecord -c 'npm start' --disable-mapping=false $extra_args \
     > "$logfile" 2>&1 &
   local KEPLOY_PID=$!
 
@@ -223,7 +223,7 @@ run_replay() {
 
   section "Replay #$idx (args: ${extra_args:-<none>})"
   set +e
-  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --delay 10 $extra_args \
+  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --disable-mapping=false --delay 10 $extra_args \
     > "$logfile" 2>&1
   local rc=$?
   set -e
