@@ -50,23 +50,23 @@ const UNKNOWN_TEST = "UNKNOWN_TEST"
 var HookImpl TestHooks
 
 type Replayer struct {
-	logger          *zap.Logger
-	testDB          TestDB
-	mockDB          MockDB
-	mappingDB       MappingDB
-	reportDB        ReportDB
-	testSetConf     TestSetConfig
-	telemetry       Telemetry
-	instrumentation Instrumentation
-	config          *config.Config
-	auth            service.Auth
-	mock            *mock
-	instrument      bool
-	isLastTestSet   bool
-	isLastTestCase  bool
+	logger             *zap.Logger
+	testDB             TestDB
+	mockDB             MockDB
+	mappingDB          MappingDB
+	reportDB           ReportDB
+	telemetry          Telemetry
+	instrumentation    Instrumentation
+	config             *config.Config
+	auth               service.Auth
+	mock               *mock
+	sanitizationMgr    *tools.SanitizationManager
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
+
+	// Initialize the sanitization manager
+	sanitizationMgr := tools.NewSanitizationManager(logger)
 
 	// TODO: add some comment.
 	mock := &mock{
@@ -83,18 +83,19 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 
 	instrument := config.Command != ""
 	return &Replayer{
-		logger:          logger,
-		testDB:          testDB,
-		mockDB:          mockDB,
-		mappingDB:       mappingDB,
-		reportDB:        reportDB,
-		testSetConf:     testSetConf,
-		telemetry:       telemetry,
-		instrumentation: instrumentation,
-		config:          config,
-		instrument:      instrument,
-		auth:            auth,
-		mock:            mock,
+		logger:           logger,
+		testDB:           testDB,
+		mockDB:           mockDB,
+		mappingDB:        mappingDB,
+		reportDB:         reportDB,
+		testSetConf:      testSetConf,
+		telemetry:        telemetry,
+		instrumentation:  instrumentation,
+		config:           config,
+		instrument:       instrument,
+		auth:             auth,
+		mock:             mock,
+		sanitizationMgr:  sanitizationMgr,
 	}
 }
 
