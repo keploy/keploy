@@ -1,6 +1,11 @@
 package report
 
 import (
+<<<<<<< HEAD
+=======
+	"bufio"
+	"bytes"
+>>>>>>> main
 	"context"
 	"errors"
 	"fmt"
@@ -59,12 +64,354 @@ func TestNew_001(t *testing.T) {
 	assert.Equal(t, mockTestDB, report.testDB)
 }
 
+<<<<<<< HEAD
 // TestGenerateReport_FromFilePath_002 tests generating report from a specified file path
 func TestGenerateReport_FromFilePath_002(t *testing.T) {
 	// Create temporary report file
 	tempFile, err := os.CreateTemp("", "test_report_*.yaml")
 	require.NoError(t, err)
 	defer os.Remove(tempFile.Name())
+=======
+// TestCollectReports tests the collectReports method
+func TestCollectReports(t *testing.T) {
+	ctx := context.Background()
+	runID := "test-run-1"
+	testSetIDs := []string{"test-set-1-report", "test-set-2-report"}
+
+	mockReportDB := &mockReportDB{
+		GetReportFunc: func(ctx context.Context, runID, testSetID string) (*models.TestReport, error) {
+			if testSetID == "test-set-1" {
+				return &models.TestReport{
+					Name:    "test-set-1",
+					Total:   2,
+					Success: 1,
+					Failure: 1,
+				}, nil
+			}
+			if testSetID == "test-set-2" {
+				return &models.TestReport{
+					Name:    "test-set-2",
+					Total:   3,
+					Success: 2,
+					Failure: 1,
+				}, nil
+			}
+			return nil, errors.New("report not found")
+		},
+	}
+
+	r := &Report{
+		logger:   newTestLogger(),
+		reportDB: mockReportDB,
+	}
+
+	reports, err := r.collectReports(ctx, runID, testSetIDs)
+	if err != nil {
+		t.Fatalf("collectReports failed: %v", err)
+	}
+
+	if len(reports) != 2 {
+		t.Fatalf("expected 2 reports, got %d", len(reports))
+	}
+
+	if reports["test-set-1"].Total != 2 {
+		t.Error("test-set-1 report not collected correctly")
+	}
+	if reports["test-set-2"].Total != 3 {
+		t.Error("test-set-2 report not collected correctly")
+	}
+}
+
+// TestCollectReports_WithCancellation tests context cancellation
+func TestCollectReports_WithCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	r := &Report{
+		logger: newTestLogger(),
+	}
+
+	_, err := r.collectReports(ctx, "test-run-1", []string{"test-set-1"})
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+// TestCollectReports_NoReports tests when no reports are found
+func TestCollectReports_NoReports(t *testing.T) {
+	ctx := context.Background()
+	mockReportDB := &mockReportDB{
+		GetReportFunc: func(ctx context.Context, runID, testSetID string) (*models.TestReport, error) {
+			return nil, errors.New("no reports found")
+		},
+	}
+
+	r := &Report{
+		logger:   newTestLogger(),
+		reportDB: mockReportDB,
+	}
+
+	_, err := r.collectReports(ctx, "test-run-1", []string{"test-set-1"})
+	if err == nil {
+		t.Fatal("expected error when no reports found")
+	}
+	if !strings.Contains(err.Error(), "no reports found for summary") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestPrintSpecificTestCases tests printing specific test cases
+func TestPrintSpecificTestCases(t *testing.T) {
+	ctx := context.Background()
+	runID := "test-run-1"
+	testSetIDs := []string{"test-set-1-report"}
+	ids := []string{"test-1", "test-2"}
+
+	mockReportDB := &mockReportDB{
+		GetReportFunc: func(ctx context.Context, runID, testSetID string) (*models.TestReport, error) {
+			return &models.TestReport{
+				Name: "test-set-1",
+				Tests: []models.TestResult{
+					{TestCaseID: "test-1", Status: models.TestStatusPassed, Name: "Test 1", TimeTaken: "1s"},
+					{TestCaseID: "test-2", Status: models.TestStatusFailed, Name: "Test 2", TimeTaken: "2s"},
+					{TestCaseID: "test-3", Status: models.TestStatusPassed, Name: "Test 3", TimeTaken: "1s"},
+				},
+			}, nil
+		},
+	}
+
+	r := &Report{
+		logger:   newTestLogger(),
+		config:   &config.Config{},
+		reportDB: mockReportDB,
+		out:      bufio.NewWriterSize(os.Stdout, 4096),
+	}
+
+	err := r.printSpecificTestCases(ctx, runID, testSetIDs, ids)
+	if err != nil {
+		t.Fatalf("printSpecificTestCases failed: %v", err)
+	}
+}
+
+// TestGetLatestTestRunID tests getting the latest test run ID
+func TestGetLatestTestRunID(t *testing.T) {
+	ctx := context.Background()
+
+	mockReportDB := &mockReportDB{
+		GetAllTestRunIDsFn: func(ctx context.Context) ([]string, error) {
+			return []string{"test-run-1", "test-run-10", "test-run-2"}, nil
+		},
+	}
+
+	r := &Report{
+		logger:   newTestLogger(),
+		reportDB: mockReportDB,
+	}
+
+	latestID, err := r.getLatestTestRunID(ctx)
+	if err != nil {
+		t.Fatalf("getLatestTestRunID failed: %v", err)
+	}
+
+	if latestID != "test-run-10" {
+		t.Fatalf("expected test-run-10, got %s", latestID)
+	}
+}
+
+// TestGetLatestTestRunID_NoRuns tests when no test runs exist
+func TestGetLatestTestRunID_NoRuns(t *testing.T) {
+	ctx := context.Background()
+
+	mockReportDB := &mockReportDB{
+		GetAllTestRunIDsFn: func(ctx context.Context) ([]string, error) {
+			return []string{}, nil
+		},
+	}
+
+	r := &Report{
+		logger:   newTestLogger(),
+		reportDB: mockReportDB,
+	}
+
+	latestID, err := r.getLatestTestRunID(ctx)
+	if err != nil {
+		t.Fatalf("getLatestTestRunID failed: %v", err)
+	}
+
+	if latestID != "" {
+		t.Fatalf("expected empty string, got %s", latestID)
+	}
+}
+
+// TestCollectFailedTests tests collecting failed tests
+func TestCollectFailedTests(t *testing.T) {
+	ctx := context.Background()
+	runID := "test-run-1"
+	testSetIDs := []string{"test-set-1-report"}
+
+	mockReportDB := &mockReportDB{
+		GetReportFunc: func(ctx context.Context, runID, testSetID string) (*models.TestReport, error) {
+			return &models.TestReport{
+				Tests: []models.TestResult{
+					{TestCaseID: "test-1", Status: models.TestStatusPassed},
+					{TestCaseID: "test-2", Status: models.TestStatusFailed},
+					{TestCaseID: "test-3", Status: models.TestStatusFailed},
+				},
+			}, nil
+		},
+	}
+
+	r := &Report{
+		logger:   newTestLogger(),
+		reportDB: mockReportDB,
+	}
+
+	failedTests, err := r.collectFailedTests(ctx, runID, testSetIDs)
+	if err != nil {
+		t.Fatalf("collectFailedTests failed: %v", err)
+	}
+
+	if len(failedTests) != 2 {
+		t.Fatalf("expected 2 failed tests, got %d", len(failedTests))
+	}
+
+	if failedTests[0].TestCaseID != "test-2" || failedTests[1].TestCaseID != "test-3" {
+		t.Fatal("failed tests not collected correctly")
+	}
+}
+
+// TestCollectFailedTests_WithCancellation tests context cancellation during failed test collection
+func TestCollectFailedTests_WithCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	r := &Report{
+		logger: newTestLogger(),
+	}
+
+	_, err := r.collectFailedTests(ctx, "test-run-1", []string{"test-set-1"})
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+// TestExtractTestSetIDs tests extracting test set IDs from config
+func TestExtractTestSetIDs(t *testing.T) {
+	cfg := &config.Config{
+		Report: config.Report{
+			SelectedTestSets: map[string][]string{
+				"test-set-1": {},
+				"test-set-2": {},
+			},
+		},
+	}
+
+	r := &Report{
+		config: cfg,
+	}
+
+	testSetIDs := r.extractTestSetIDs()
+	if len(testSetIDs) != 2 {
+		t.Fatalf("expected 2 test set IDs, got %d", len(testSetIDs))
+	}
+
+	// Check that both test sets are present (order may vary due to map iteration)
+	found := make(map[string]bool)
+	for _, id := range testSetIDs {
+		found[id] = true
+	}
+
+	if !found["test-set-1"] || !found["test-set-2"] {
+		t.Fatal("test set IDs not extracted correctly")
+	}
+}
+
+// TestGenerateReport_Summary tests generating a summary report
+func TestGenerateReport_Summary(t *testing.T) {
+	ctx := context.Background()
+
+	mockReportDB := &mockReportDB{
+		GetAllTestRunIDsFn: func(ctx context.Context) ([]string, error) {
+			return []string{"test-run-1"}, nil
+		},
+		GetReportFunc: func(ctx context.Context, runID, testSetID string) (*models.TestReport, error) {
+			return &models.TestReport{
+				Name:      "test-set-1",
+				Total:     2,
+				Success:   1,
+				Failure:   1,
+				TimeTaken: "2s",
+				Tests: []models.TestResult{
+					{TestCaseID: "test-1", Status: models.TestStatusPassed, TimeTaken: "1s"},
+					{TestCaseID: "test-2", Status: models.TestStatusFailed, TimeTaken: "1s"},
+				},
+			}, nil
+		},
+	}
+
+	mockTestDB := &mockTestDB{
+		GetReportTestSetsFn: func(ctx context.Context, runID string) ([]string, error) {
+			return []string{"test-set-1-report"}, nil
+		},
+	}
+
+	cfg := &config.Config{
+		Report: config.Report{
+			Summary: true,
+		},
+	}
+
+	r := New(newTestLogger(), cfg, mockReportDB, mockTestDB)
+
+	var buf bytes.Buffer
+	r.out = bufio.NewWriter(&buf)
+
+	err := r.GenerateReport(ctx)
+	if err != nil {
+		t.Fatalf("GenerateReport failed: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "COMPLETE TESTRUN SUMMARY") {
+		t.Error("The report summary is missing the expected title")
+	}
+	if !strings.Contains(output, "Total tests: 2") {
+		t.Error("The report summary did not correctly calculate the total number of tests")
+	}
+}
+
+// TestGenerateReport_WithCancellation tests report generation with context cancellation
+func TestGenerateReport_WithCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	r := &Report{
+		logger: newTestLogger(),
+		config: &config.Config{},
+	}
+
+	err := r.GenerateReport(ctx)
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+// TestGenerateReportFromFile tests generating report from file
+func TestGenerateReportFromFile(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a temporary report file
+	tempDir := t.TempDir()
+	reportFile := filepath.Join(tempDir, "test-report.yaml")
+>>>>>>> main
 
 	reportContent := `
 tests:
