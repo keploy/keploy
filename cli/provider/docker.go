@@ -110,7 +110,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			volumeName = strings.Split(volume, ":")[0]
 		}
 		logger.Debug("creating volume", zap.String("volume", volumeName))
-		err := client.CreateVolume(ctx, volumeName, true, nil)
+		err := client.CreateVolume(ctx, volumeName, false, nil)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create volume "+volumeName)
 			return err
