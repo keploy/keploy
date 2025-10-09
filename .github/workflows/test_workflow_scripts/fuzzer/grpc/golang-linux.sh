@@ -157,6 +157,9 @@ if [ "$MODE" = "incoming" ]; then
    sudo kill "$pid" || true
  fi
 
+ echo "Ensuring fuzzer server is stopped..."
+ sudo pkill -f "$FUZZER_SERVER_BIN" || true
+ sleep 2 # Give a moment for the port to be released
 
  echo "Waiting for processes to settle"
 
@@ -245,6 +248,9 @@ elif [ "$MODE" = "outgoing" ]; then
  fi
  sleep 5
 
+ echo "Ensuring fuzzer client is stopped..."
+ sudo pkill -f "$FUZZER_CLIENT_BIN" || true
+ sleep 2 # Give a moment for the port to be released
 
  check_for_errors server_outgoing.txt
  check_for_errors record_outgoing.txt
