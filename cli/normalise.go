@@ -29,13 +29,13 @@ func Normalize(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
-			var normaliseService toolsSvc.Service
+			var tools toolsSvc.Service
 			var ok bool
-			if normaliseService, ok = svc.(toolsSvc.Service); !ok {
+			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
 				return nil
 			}
-			if err := normaliseService.Normalize(ctx); err != nil {
+			if err := tools.Normalize(ctx); err != nil {
 				utils.LogError(logger, err, "failed to normalize test cases")
 				return nil
 			}

@@ -4,6 +4,7 @@ import (
 	context "context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -45,7 +46,7 @@ func (t *Tools) Normalize(ctx context.Context) error {
 
 		// Check if test set is sanitized (has secret.yaml)
 		// If yes, desanitize before normalization
-		desanitized, err := DesanitizeTestSet(testSetID, t.config.Path, t.logger)
+		desanitized, err := t.DesanitizeTestSet(testSetID, t.config.Path)
 		if err != nil {
 			t.logger.Error("Failed to desanitize test set before normalization",
 				zap.String("testSetID", testSetID),
@@ -65,7 +66,8 @@ func (t *Tools) Normalize(ctx context.Context) error {
 
 		// Re-sanitize after normalization if it was originally sanitized
 		if desanitized {
-			err = SanitizeTestSet(testSetID, t.config.Path, t.logger)
+			testSetDir := filepath.Join(t.config.Path, testSetID)
+			err = t.SanitizeTestSetDir(ctx, testSetDir)
 			if err != nil {
 				t.logger.Error("Failed to re-sanitize test set after normalization",
 					zap.String("testSetID", testSetID),
