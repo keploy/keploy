@@ -25,7 +25,7 @@ type DockerConfigStruct struct {
 }
 
 var DockerConfig = DockerConfigStruct{
-	DockerImage: "ghcr.io/keploy/keploy",
+	DockerImage: "keploy-oss",
 }
 
 func GenerateDockerEnvs(config DockerConfigStruct) string {
@@ -99,7 +99,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 	if opts.AppNetwork != "" {
 		appNetworkStr = " --network " + opts.AppNetwork
 	}
-	opts.ClientNSPID = uint32(os.Getpid())
+
 	switch osName {
 	case "linux":
 		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +

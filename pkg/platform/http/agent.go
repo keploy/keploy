@@ -673,7 +673,7 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 	}
 }
 
-func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (error) {
+func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 
 	clientID := uint64(0)
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
@@ -748,6 +748,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if opts.CommandType != "docker-compose" {
 		// Start the agent process
+		opts.ClientNSPID = uint32(os.Getpid())
 		err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
 			return fmt.Errorf("failed to start agent: %w", err)

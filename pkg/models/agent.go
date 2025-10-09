@@ -15,8 +15,8 @@ type RegisterReq struct {
 }
 
 type AgentResp struct {
-	Error     error  `json:"error"`
-	IsSuccess bool   `json:"isSuccess"`
+	Error     error `json:"error"`
+	IsSuccess bool  `json:"isSuccess"`
 }
 
 type RunReq struct {
@@ -46,5 +46,5 @@ type UpdateMockParamsReq struct {
 }
 
 type UnregisterReq struct {
-	Mode     Mode   `json:"mode"`
+	Mode Mode `json:"mode"`
 }

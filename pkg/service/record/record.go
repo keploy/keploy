@@ -153,7 +153,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-
 	if r.config.CommandType == "docker-compose" {
 
 		runAppErrGrp.Go(func() error {
