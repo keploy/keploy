@@ -11,6 +11,10 @@ set -Eeuo pipefail
 
 MODE=${1:-incoming}
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+echo "📌 Setting up Keploy API Key..."
+export KEPLOY_API_KEY="$KEPLOY_CI_API_KEY"
+
 # If you keep test-iid.sh checks, source it from repo root:
 if [ -f "./.github/workflows/test_workflow_scripts/test-iid.sh" ]; then
  # shellcheck disable=SC1091
