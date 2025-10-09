@@ -12,8 +12,10 @@ set -Eeuo pipefail
 MODE=${1:-incoming}
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
-echo "📌 Setting up Keploy API Key..."
-export KEPLOY_API_KEY="$KEPLOY_CI_API_KEY"
+if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
+  echo "📌 Setting up Keploy API Key..."
+  export KEPLOY_API_KEY="$KEPLOY_CI_API_KEY"
+fi
 
 # If you keep test-iid.sh checks, source it from repo root:
 if [ -f "./.github/workflows/test_workflow_scripts/test-iid.sh" ]; then
