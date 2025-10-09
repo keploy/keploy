@@ -114,7 +114,7 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mockChan, err := a.agent.GetOutgoing(ctx, outgoingReq.ClientID, outgoingReq.OutgoingOptions)
+	mockChan, err := a.agent.GetOutgoing(ctx, uint64(0), outgoingReq.OutgoingOptions)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to get outgoing: %v", err), http.StatusInternalServerError)
 		a.logger.Error("failed to get outgoing", zap.Error(err))

@@ -145,7 +145,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	clientID, err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough})
+	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough})
 
 	if err != nil {
 		stopReason = "failed setting up the environment"
@@ -153,7 +153,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.config.ClientID = clientID
 
 	if r.config.CommandType == "docker-compose" {
 
@@ -454,8 +453,8 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	return assignedName, nil
 }
 
-func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
-	return r.instrumentation.GetContainerIP(ctx, id)
+func (r *Recorder) GetContainerIP(ctx context.Context) (string, error) {
+	return r.instrumentation.GetContainerIP(ctx)
 }
 
 func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID string) {

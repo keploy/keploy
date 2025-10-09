@@ -18,7 +18,6 @@ type DestInfo struct {
 	DestIP6   [4]uint32
 	DestPort  uint32
 	KernelPid uint32
-	ClientID  uint64
 }
 
 // struct proxy_info
@@ -32,11 +31,6 @@ type ProxyInfo struct {
 	IP4  uint32
 	IP6  [4]uint32
 	Port uint32
-}
-
-type DockerAppInfo struct {
-	AppInode uint64
-	ClientID uint64
 }
 
 // struct app_info
@@ -67,5 +61,6 @@ type AgentInfo struct {
 	DNSPort          int32
 	KeployAgentInode uint64
 	IsDocker         uint32
+	Proxy            ProxyInfo
 	_                [4]byte
 }

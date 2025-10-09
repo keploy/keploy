@@ -336,9 +336,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//get the session rule
-	rule, ok := p.sessions.Get(destInfo.ClientID)
+	rule, ok := p.sessions.Get(uint64(0))
 	if !ok {
-		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Uint64("ClientID", destInfo.ClientID))
+		utils.LogError(p.logger, nil, "failed to fetch the session rule")
 		return err
 	}
 
@@ -431,9 +431,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return nil
 		}
 
-		m, ok := p.MockManagers.Load(destInfo.ClientID)
+		m, ok := p.MockManagers.Load(uint64(0))
 		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Uint64("ClientID", destInfo.ClientID))
+			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
 			return err
 		}
 
@@ -481,18 +481,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
-	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
-	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the client connection id")
-		return err
-	}
 	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
 	if !ok {
 		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
 		return err
 	}
 
-	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
+	logger := p.logger.With(zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
 	// attempt to read conn until buffer is either filled or conn is closed
@@ -582,9 +577,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	// get the mock manager for the current app
-	m, ok := p.MockManagers.Load(destInfo.ClientID)
+	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Uint64("ClientID", destInfo.ClientID))
+		utils.LogError(logger, err, "failed to fetch the mock manager")
 		return err
 	}
 

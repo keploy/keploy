@@ -5,7 +5,6 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v2/pkg/models"
@@ -18,7 +17,6 @@ func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&OutgoingReq)
 
 	mockRes := models.AgentResp{
-		ClientID:  OutgoingReq.ClientID,
 		Error:     nil,
 		IsSuccess: true,
 	}
@@ -31,7 +29,7 @@ func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.agent.MockOutgoing(r.Context(), OutgoingReq.ClientID, OutgoingReq.OutgoingOptions)
+	err = a.agent.MockOutgoing(r.Context(), uint64(0), OutgoingReq.OutgoingOptions)
 	if err != nil {
 		mockRes.Error = err
 		mockRes.IsSuccess = false
@@ -51,8 +49,8 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&SetMocksReq)
 
 	setmockRes := models.AgentResp{
-		ClientID: SetMocksReq.ClientID,
-		Error:    nil,
+
+		Error: nil,
 	}
 	if err != nil {
 		setmockRes.Error = err
@@ -62,7 +60,7 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.agent.SetMocks(r.Context(), SetMocksReq.ClientID, SetMocksReq.Filtered, SetMocksReq.UnFiltered)
+	err = a.agent.SetMocks(r.Context(), uint64(0), SetMocksReq.Filtered, SetMocksReq.UnFiltered)
 	if err != nil {
 		setmockRes.Error = err
 		setmockRes.IsSuccess = false
@@ -79,17 +77,7 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	clientID := r.URL.Query().Get("id")
-
-	// convert string to uint64
-	clientIDInt, err := strconv.ParseUint(clientID, 10, 64)
-	if err != nil {
-		render.JSON(w, r, err)
-		render.Status(r, http.StatusBadRequest)
-		return
-	}
-
-	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), clientIDInt)
+	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), uint64(0))
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
@@ -106,7 +94,6 @@ func (a *AgentRequest) StoreMocks(w http.ResponseWriter, r *http.Request) {
 	var storeMocksReq models.StoreMocksReq
 	if err := gob.NewDecoder(r.Body).Decode(&storeMocksReq); err != nil {
 		storeMocksRes := models.AgentResp{
-			ClientID:  0,
 			Error:     err,
 			IsSuccess: false,
 		}
@@ -115,10 +102,9 @@ func (a *AgentRequest) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := a.agent.StoreMocks(r.Context(), storeMocksReq.ClientID, storeMocksReq.Filtered, storeMocksReq.UnFiltered)
+	err := a.agent.StoreMocks(r.Context(), uint64(0), storeMocksReq.Filtered, storeMocksReq.UnFiltered)
 
 	storeMocksRes := models.AgentResp{
-		ClientID:  storeMocksReq.ClientID,
 		Error:     err,
 		IsSuccess: err == nil,
 	}
@@ -138,7 +124,6 @@ func (a *AgentRequest) UpdateMockParams(w http.ResponseWriter, r *http.Request) 
 	err := json.NewDecoder(r.Body).Decode(&updateParamsReq)
 
 	updateParamsRes := models.AgentResp{
-		ClientID:  updateParamsReq.ClientID,
 		Error:     nil,
 		IsSuccess: true,
 	}
@@ -151,7 +136,7 @@ func (a *AgentRequest) UpdateMockParams(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err = a.agent.UpdateMockParams(r.Context(), updateParamsReq.ClientID, updateParamsReq.FilterParams)
+	err = a.agent.UpdateMockParams(r.Context(), uint64(0), updateParamsReq.FilterParams)
 	if err != nil {
 		updateParamsRes.Error = err
 		updateParamsRes.IsSuccess = false

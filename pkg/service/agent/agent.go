@@ -148,7 +148,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions, se
 
 	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, id, agent.HookCfg{
-		ClientID:   id,
 		Pid:        0,
 		IsDocker:   opts.IsDocker,
 		KeployIPV4: "172.18.0.2",

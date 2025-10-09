@@ -19,10 +19,9 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts models.SetupOptions) *App {
+func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.SetupOptions) *App {
 	app := &App{
 		logger:           logger,
-		id:               id,
 		cmd:              cmd,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
@@ -38,7 +37,6 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 type App struct {
 	logger           *zap.Logger
 	docker           docker.Client
-	id               uint64
 	cmd              string
 	kind             utils.CmdType
 	opts             models.SetupOptions

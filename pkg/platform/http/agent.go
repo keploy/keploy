@@ -62,7 +62,6 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
-		ClientID:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -138,7 +137,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientID:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -210,7 +208,6 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientID:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -251,7 +248,6 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 	requestBody := models.SetMocksReq{
 		Filtered:   filtered,
 		UnFiltered: unFiltered,
-		ClientID:   id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -291,7 +287,6 @@ func (a *AgentClient) StoreMocks(ctx context.Context, id uint64, filtered []*mod
 	requestBody := models.StoreMocksReq{
 		Filtered:   filtered,
 		UnFiltered: unFiltered,
-		ClientID:   id,
 	}
 
 	// gob-encode the body
@@ -346,7 +341,6 @@ func (a *AgentClient) StoreMocks(ctx context.Context, id uint64, filtered []*mod
 
 func (a *AgentClient) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
 	requestBody := models.UpdateMockParamsReq{
-		ClientID:     id,
 		FilterParams: params,
 	}
 
@@ -414,9 +408,9 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]models
 	return consumedMocks, nil
 }
 
-func (a *AgentClient) GetContainerIP(_ context.Context, clientID uint64) (string, error) {
+func (a *AgentClient) GetContainerIP(_ context.Context) (string, error) {
 
-	app, err := a.getApp(clientID)
+	app, err := a.getApp(uint64(0))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app")
 		return "", err
@@ -432,9 +426,9 @@ func (a *AgentClient) GetContainerIP(_ context.Context, clientID uint64) (string
 }
 
 // Creating a duplicate function to avoid breaking changes
-func (a *AgentClient) GetContainerIP4(ctx context.Context, clientID uint64) (string, error) {
+func (a *AgentClient) GetContainerIP4(ctx context.Context) (string, error) {
 
-	app, err := a.getApp(clientID)
+	app, err := a.getApp(uint64(0))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app")
 		return "", err
@@ -503,7 +497,7 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 }
 
 // startAgent starts the keploy agent process and handles its lifecycle
-func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerCmd bool, opts models.SetupOptions) error {
+func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts models.SetupOptions) error {
 	// Get the errgroup from context
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -526,7 +520,7 @@ func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerC
 		})
 	} else {
 		// Start the agent as a native process
-		err := a.startNativeAgent(agentCtx, clientID, opts)
+		err := a.startNativeAgent(agentCtx, opts)
 		if err != nil {
 			cancel()
 			return err
@@ -543,7 +537,7 @@ func (a *AgentClient) startAgent(ctx context.Context, clientID uint64, isDockerC
 }
 
 // startNativeAgent starts the keploy agent as a native process
-func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opts models.SetupOptions) error {
+func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOptions) error {
 
 	// Get the errgroup from context
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -552,7 +546,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, clientID uint64, opt
 	}
 
 	// Open the log file (truncate to start fresh)
-	filepath := fmt.Sprintf("keploy_agent_%d.log", clientID)
+	filepath := fmt.Sprintf("keploy_agent_%d.log", uint64(0))
 	logFile, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to open log file")
@@ -679,7 +673,7 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 	}
 }
 
-func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
+func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (error) {
 
 	clientID := uint64(0)
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
@@ -689,20 +683,20 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	// Start the keploy agent as a detached process and pipe the logs into a file
 	if !isDockerCmd && runtime.GOOS != "linux" {
-		return 0, fmt.Errorf("operating system not supported for this feature")
+		return fmt.Errorf("operating system not supported for this feature")
 	}
 
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find available port for agent")
-		return 0, err
+		return err
 	}
 
 	// Check and allocate available ports for proxy and DNS
 	proxyPort, dnsPort, err := utils.EnsureAvailablePorts(a.conf.ProxyPort, a.conf.DNSPort)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to ensure available ports for proxy and DNS")
-		return 0, err
+		return err
 	}
 
 	opts.AgentPort = agentPort
@@ -754,9 +748,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if opts.CommandType != "docker-compose" {
 		// Start the agent process
-		err = a.startAgent(ctx, clientID, isDockerCmd, opts)
+		err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
-			return 0, fmt.Errorf("failed to start agent: %w", err)
+			return fmt.Errorf("failed to start agent: %w", err)
 		}
 		a.logger.Info("Agent is now running, proceeding with setup")
 	}
@@ -770,13 +764,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		select {
 		case <-agentCtx.Done():
-			return 0, fmt.Errorf("keploy-agent did not become ready in time")
+			return fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
 		}
 	}
 
 	// Continue with app setup and registration as per normal flow
-	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, opts)
+	usrApp := app.NewApp(a.logger, cmd, a.dockerClient, opts)
 	a.apps.Store(clientID, usrApp)
 
 	// Set up cleanup on failure
@@ -790,20 +784,20 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	err = ptls.SetupCaCertEnv(a.logger)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to set TLS environment")
-		return 0, err
+		return err
 	}
 
 	err = usrApp.Setup(ctx)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to setup app")
-		return 0, err
+		return err
 	}
 
 	if isDockerCmd && opts.CommandType != "docker-compose" {
 		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
 		if err != nil {
 			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-			return 0, err
+			return err
 		}
 		var keployIPv4 string
 		keployIPv4 = inspect.NetworkSettings.IPAddress
@@ -822,8 +816,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		pkg.AgentIP = keployIPv4
 		opts.AgentIP = keployIPv4
 	}
-	a.logger.Info("Client setup completed successfully", zap.Uint64("clientID", clientID))
-	return clientID, nil
+	a.logger.Info("Client setup completed successfully")
+	return nil
 }
 
 func (a *AgentClient) getApp(clientID uint64) (*app.App, error) {

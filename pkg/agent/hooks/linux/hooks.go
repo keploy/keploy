@@ -154,7 +154,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
-		h.proxyInfoMap = objs.KeployProxyInfo
 		// h.tbenchFilterPid = objs.TestbenchInfoMap
 		h.objects = objs
 
@@ -307,7 +306,11 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	if err != nil {
 		h.Logger.Debug("Failed to register Client")
 	}
-
+	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts)
+	if err != nil {
+		return err
+	}
+	agentInfo.Proxy = proxyInfo
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.Logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
@@ -412,12 +415,6 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 	h.Logger.Info("Registering the client Info with keploy")
 	// Register the client and start processing
 
-	// send the network info to the kernel
-	err := h.SendNetworkInfo(ctx, opts)
-	if err != nil {
-		h.Logger.Error("failed to send network info to the kernel", zap.Error(err))
-		return err
-	}
 	clientInfo := structs.ClientInfo{}
 
 	switch opts.Mode {
@@ -441,34 +438,31 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 	return h.SendKeployClientInfo(clientInfo)
 }
 
-func (h *Hooks) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) error {
+func (h *Hooks) GetProxyInfo(ctx context.Context, opts models.SetupOptions) (structs.ProxyInfo, error) {
 	if !opts.IsDocker {
 		proxyIP, err := IPv4ToUint32("127.0.0.1")
 		if err != nil {
-			return err
+			return structs.ProxyInfo{}, err
 		}
 		proxyInfo := structs.ProxyInfo{
 			IP4:  proxyIP,
 			IP6:  [4]uint32{0, 0, 0, 0},
 			Port: opts.ProxyPort,
 		}
-		err = h.SendClientProxyInfo(uint64(0), proxyInfo)
-		if err != nil {
-			return err
-		}
-		return nil
+
+		return proxyInfo, nil
 	}
 	opts.AgentIP, _ = GetContainerIP()
 	ipv4, err := IPv4ToUint32(opts.AgentIP)
 	if err != nil {
-		return err
+		return structs.ProxyInfo{}, err
 	}
 
 	var ipv6 [4]uint32
 	if opts.IsDocker {
 		ipv6, err := ToIPv4MappedIPv6(opts.AgentIP)
 		if err != nil {
-			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
+			return structs.ProxyInfo{}, fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
 		}
 		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", opts.AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
 
@@ -480,11 +474,7 @@ func (h *Hooks) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		Port: opts.ProxyPort,
 	}
 
-	err = h.SendClientProxyInfo(uint64(0), proxyInfo)
-	if err != nil {
-		return err
-	}
-	return nil
+	return proxyInfo, nil
 }
 
 // IPv4ToUint32 converts a string representation of an IPv4 address to a 32-bit integer.

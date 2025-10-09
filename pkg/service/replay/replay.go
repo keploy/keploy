@@ -251,8 +251,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		utils.LogError(r.logger, err, stopReason)
 	}
 
-	// setting the appId for the first test-set.
-	inst.ClientID = r.config.ClientID
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -313,7 +311,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.ClientID, false)
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, uint64(0), false)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
@@ -526,16 +524,13 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	clientID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough})
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
 		return &InstrumentState{}, fmt.Errorf(stopReason)
 	}
-
-	r.config.ClientID = clientID
-
-	return &InstrumentState{ClientID: clientID}, nil
+	return &InstrumentState{}, nil
 }
 
 func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
@@ -728,7 +723,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-agentReadyCh:
 		}
 
-		containerIP, err := r.instrumentation.GetContainerIP4(ctx, r.config.ClientID)
+		containerIP, err := r.instrumentation.GetContainerIP4(ctx)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to get container IP")
 			return models.TestSetStatusFailed, err

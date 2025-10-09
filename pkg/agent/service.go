@@ -21,7 +21,6 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	ClientID   uint64
 	Pid        uint32
 	IsDocker   bool
 	KeployIPV4 string
@@ -77,7 +76,6 @@ type TestBenchInfo interface {
 }
 
 type NetworkAddress struct {
-	ClientID uint64
 	Version  uint32
 	IPv4Addr uint32
 	IPv6Addr [4]uint32
