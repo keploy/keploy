@@ -43,6 +43,7 @@ type Service interface {
 	// latest values rather than stale ones from the previous run.
 	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
+	Normalize(ctx context.Context) error
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testResult []models.TestResult) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error

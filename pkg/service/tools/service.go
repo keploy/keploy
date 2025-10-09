@@ -17,8 +17,6 @@ type Service interface {
 	Import(ctx context.Context, path, basePath string) error
 	Templatize(ctx context.Context) error
 	Sanitize(ctx context.Context) error
-	DesanitizeTestSet(testSetID string) (bool, error)
-	SanitizeTestSetDir(ctx context.Context, testSetID string) error
 }
 
 type teleDB interface {
