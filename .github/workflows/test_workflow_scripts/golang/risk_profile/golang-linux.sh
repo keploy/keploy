@@ -74,7 +74,6 @@ check_for_errors() {
 
 # Waits for the Go application's HTTP endpoint to become available
 wait_for_http() {
-  # ... (function is unchanged)
   local port="$1"
   section "Waiting for application on port $port..."
   for i in {1..60}; do
@@ -271,6 +270,7 @@ endsec
 
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
+export KEPLOY_MODE="test"
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --useLocalMock 2>&1 | tee test.log
 check_for_errors "test.log"
 endsec
