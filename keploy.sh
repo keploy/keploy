@@ -4,6 +4,7 @@
 show_loader() {
     local pid=$1
     local message=$2
+    local completion_message="${3:-$message}"
     local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
     local i=0
     
@@ -18,13 +19,14 @@ show_loader() {
     
     # Show cursor
     tput cnorm
-    printf "\r✓ $message\n"
+    printf "\r✓ $completion_message\n"
 }
 
 # Function to run command with loader
 run_with_loader() {
     local message=$1
-    shift
+    local completion_message=$2
+    shift 2
     local cmd="$@"
     
     # Execute command in background
@@ -32,7 +34,7 @@ run_with_loader() {
     local cmd_pid=$!
     
     # Show loader while command runs
-    show_loader $cmd_pid "$message"
+    show_loader $cmd_pid "$message" "$completion_message"
     
     # Wait for command to complete and get exit status
     wait $cmd_pid
@@ -135,7 +137,7 @@ installKeploy (){
         # to avoid the "File exists" error
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
-        run_with_loader "Downloading Keploy binary..." "curl --silent --location '$download_url' | tar xz -C /tmp/keploy/"
+        run_with_loader "Downloading Keploy binary..." "Downloaded binary" "curl --silent --location '$download_url' | tar xz -C /tmp/keploy/"
         move_keploy_binary
         delete_keploy_alias
     }
@@ -146,7 +148,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        run_with_loader "Downloading Keploy binary..." "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
+        run_with_loader "Downloading Keploy binary..." "Downloaded binary" "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
         move_keploy_binary
     }
 
@@ -157,7 +159,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        run_with_loader "Downloading Keploy binary..." "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
+        run_with_loader "Downloading Keploy binary..." "Downloaded binary" "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
         move_keploy_binary
     }
 
