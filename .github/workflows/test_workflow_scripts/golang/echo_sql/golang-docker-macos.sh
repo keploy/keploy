@@ -26,7 +26,7 @@ DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
 TIMESTAMP=$(date +%s)
 APP_CONTAINER="echoApp_${TIMESTAMP}"
 DB_CONTAINER="postgresDb_${TIMESTAMP}"
-KEPLOY_CONTAINER="keploy_${TIMESTAMP}"
+KEPLOY_CONTAINER="keploy-v2"
 
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
