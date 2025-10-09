@@ -3,10 +3,44 @@
 # macOS variant. Requires Docker Desktop for Mac running.
 set -euo pipefail
 
-
 # for the below shource make it such a way that if the file is not present or already present it does not error
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
+# Function to find available port
+find_available_port() {
+    local start_port=${1:-8080}
+    local port=$start_port
+    while lsof -i:$port >/dev/null 2>&1; do
+        port=$((port + 1))
+    done
+    echo $port
+}
+
+# Find 4 available ports
+APP_PORT=$(find_available_port 8080)
+DB_PORT=$(find_available_port $((APP_PORT + 1)))
+PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
+DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
+
+# Generate unique container names with timestamp suffix
+TIMESTAMP=$(date +%s)
+APP_CONTAINER="flaskApp_${TIMESTAMP}"
+DB_CONTAINER="mongo_${TIMESTAMP}"
+KEPLOY_CONTAINER="keploy_${TIMESTAMP}"
+APP_IMAGE="flask-app_${TIMESTAMP}:1.0"
+
+echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
+echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
+
+# Replace ports and container names in all files in current directory
+echo "Updating configuration files with dynamic ports and container names..."
+for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.go" -o -name "*.json" -o -name "*.sh" -o -name "*.env" -o -name "*.md" \)); do
+    if [ -f "$file" ] && [ "$file" != "./golang-docker-macos.sh" ]; then
+        # Replace 6000 with APP_PORT
+        sed -i '' "s/6000/${APP_PORT}/g" "$file" 2>/dev/null || true
+        echo "Updated $file"
+    fi
+done
 
 # --- Networking: create once, quietly ---
 if ! docker network ls --format '{{.Name}}' | grep -q '^keploy-network$'; then
@@ -15,13 +49,13 @@ fi
 
 # --- Start fresh Mongo (force remove any stale one first) ---
 docker rm -f mongo >/dev/null 2>&1 || true
-docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
+docker run --name $DB_CONTAINER --rm --net keploy-network -p $DB_PORT:27017 -d mongo
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data
 rm ./keploy.yml >/dev/null 2>&1 || true
 
-docker build -t flask-app:1.0 .
+docker build -t $APP_IMAGE .
 
 
 # Generate the keploy-config file.
@@ -42,7 +76,7 @@ send_request_and_shutdown() {
   local container_name="${1:-}"
   # Wait for the app to be ready
   for i in {1..10}; do
-    if curl --silent --fail http://localhost:6000/students >/dev/null 2>&1; then
+    if curl --silent --fail http://localhost:$APP_PORT/students >/dev/null 2>&1; then
       echo "Application is up. Sending requests..."
       break
     fi
@@ -52,30 +86,34 @@ send_request_and_shutdown() {
 
   # Exercise endpoints to produce testcases & mocks
   curl -sS -X POST -H "Content-Type: application/json" \
-    -d '{"student_id":"12345","name":"John Doe","age":20}' http://localhost:6000/students >/dev/null
+    -d '{"student_id":"12345","name":"John Doe","age":20}' http://localhost:$APP_PORT/students >/dev/null
   curl -sS -X POST -H "Content-Type: application/json" \
-    -d '{"student_id":"12346","name":"Alice Green","age":22}' http://localhost:6000/students >/dev/null
-  curl -sS http://localhost:6000/students >/dev/null
+    -d '{"student_id":"12346","name":"Alice Green","age":22}' http://localhost:$APP_PORT/students >/dev/null
+  curl -sS http://localhost:$APP_PORT/students >/dev/null
   curl -sS -X PUT -H "Content-Type: application/json" \
-    -d '{"name":"Jane Smith","age":21}' http://localhost:6000/students/12345 >/dev/null
-  curl -sS http://localhost:6000/students >/dev/null
-  curl -sS -X DELETE http://localhost:6000/students/12345 >/dev/null
+    -d '{"name":"Jane Smith","age":21}' http://localhost:$APP_PORT/students/12345 >/dev/null
+  curl -sS http://localhost:$APP_PORT/students >/dev/null
+  curl -sS -X DELETE http://localhost:$APP_PORT/students/12345 >/dev/null
 
 
 }
 
 # --- Record sessions ---
 for i in 1 2; do
-  container_name="flaskApp_${i}"
-  
+  container_name="${APP_CONTAINER}_${i}"
+
   # Run the request and shutdown sequence in the background
   send_request_and_shutdown "$container_name" &
   
   # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
   "$RECORD_BIN" record \
-    -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" \
+    -c "docker run -p $APP_PORT:$APP_PORT --net keploy-network --rm --name $container_name $APP_IMAGE" \
     --container-name "$container_name" \
     --generate-github-actions=false \
+    --proxy-port $PROXY_PORT \
+    --dns-port $DNS_PORT \
+    --keploy-container "$KEPLOY_CONTAINER" \
+    --debug \
     --record-timer=10s 2>&1 | tee "${container_name}.txt"
      
   
@@ -102,13 +140,16 @@ echo "Shutting down mongo before test mode..."
 docker stop mongo >/dev/null 2>&1 || true
 
 # --- Test phase ---
-test_container="flaskApp_test"
+test_container="${APP_CONTAINER}_1"
 echo "Starting test mode..."
 "$REPLAY_BIN" test \
-  -c "docker run -p6000:6000 --net keploy-network --name $test_container flask-app:1.0" \
+  -c "docker run -p $APP_PORT:$APP_PORT --net keploy-network --name $test_container $APP_IMAGE" \
   --container-name "$test_container" \
   --apiTimeout 60 \
   --delay 12 \
+  --proxy-port $PROXY_PORT \
+  --dns-port $DNS_PORT \
+  --keploy-container "$KEPLOY_CONTAINER" \
   --generate-github-actions=false 2>&1 | tee "${test_container}.txt"
 
 
