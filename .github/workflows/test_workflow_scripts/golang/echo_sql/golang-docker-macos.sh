@@ -8,7 +8,7 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 # Function to find available port
 find_available_port() {
-    local start_port=${1:-8080}
+    local start_port=${1:-6000}
     local port=$start_port
     while lsof -i:$port >/dev/null 2>&1; do
         port=$((port + 1))
@@ -17,7 +17,7 @@ find_available_port() {
 }
 
 # Find 4 available ports
-APP_PORT=$(find_available_port 8080)
+APP_PORT=$(find_available_port 6000)
 DB_PORT=$(find_available_port $((APP_PORT + 1)))
 PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
 DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
