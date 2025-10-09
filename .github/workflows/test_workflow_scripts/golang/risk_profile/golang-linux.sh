@@ -90,11 +90,11 @@ wait_for_http() {
 }
 
 check_report_for_risk_profiles() {
-    echo "validating the Keploy test report against expected risk profiles"
+    echo "validating the Keploy test report against expected risk profiles and categories"
     
     # Define the expected risk for each API endpoint path
     declare -A expected_risks
-    expected_risks["/users-low-risk"]="MEDIUM" # This one should fail as MEDIUM due to Content-Length issue
+    expected_risks["/users-low-risk"]="MEDIUM" # Medium risk due to header changes (Content-Length)
     expected_risks["/users-medium-risk"]="MEDIUM"
     expected_risks["/users-medium-risk-with-addition"]="MEDIUM"
     expected_risks["/users-high-risk-type"]="HIGH"
@@ -102,7 +102,18 @@ check_report_for_risk_profiles() {
     expected_risks["/status-change-high-risk"]="HIGH"
     expected_risks["/content-type-change-high-risk"]="HIGH"
     expected_risks["/header-change-medium-risk"]="MEDIUM"
-    expected_risks["/noisy-header"]="PASSED" # This one should pass
+    expected_risks["/noisy-header"]="PASSED"
+
+    # Define the expected categories for each API endpoint path (comma-separated)
+    declare -A expected_categories
+    expected_categories["/users-low-risk"]="SCHEMA_ADDED" # Body change is SCHEMA_ADDED, header change is implicit
+    expected_categories["/users-medium-risk"]="SCHEMA_UNCHANGED"
+    expected_categories["/users-medium-risk-with-addition"]="SCHEMA_ADDED"
+    expected_categories["/users-high-risk-type"]="SCHEMA_BROKEN"
+    expected_categories["/users-high-risk-removal"]="SCHEMA_BROKEN"
+    expected_categories["/status-change-high-risk"]="STATUS_CODE_CHANGE,SCHEMA_BROKEN"
+    expected_categories["/content-type-change-high-risk"]="HEADER_CHANGE,SCHEMA_BROKEN"
+    expected_categories["/header-change-medium-risk"]="HEADER_CHANGE"
 
     local latest_report
     latest_report=$(ls -t ./keploy/reports/test-run-*/test-set-0-report.yaml | head -n 1)
@@ -118,8 +129,6 @@ check_report_for_risk_profiles() {
     [ "$(yq '.failure' "$latest_report")" == "8" ] || { echo "::error::Expected 8 failed tests, found $(yq '.failure' "$latest_report")"; exit 1; }
     [ "$(yq '.high-risk' "$latest_report")" == "4" ] || { echo "::error::Expected 4 high-risk failures, found $(yq '.high-risk' "$latest_report")"; exit 1; }
     [ "$(yq '.medium-risk' "$latest_report")" == "4" ] || { echo "::error::Expected 4 medium-risk failures, found $(yq '.medium-risk' "$latest_report")"; exit 1; }
-    # After fixing the Content-Length bug, there should be 1 low-risk failure
-    # [ "$(yq '.tests[] | select(.failure_info.risk == "LOW") | .failure_info.risk' "$latest_report" | wc -l)" == "1" ] || { echo "::error::Expected 1 low-risk failure, but not found."; exit 1; }
     echo "✅ Summary counts are correct."
 
     # Assert each test case individually
@@ -134,7 +143,6 @@ check_report_for_risk_profiles() {
         local actual_status
         actual_status=$(yq ".tests[$i].status" "$latest_report")
         
-        # Check if we have an expectation for this URL
         if [[ -z "${expected_risks[$url_path]+_}" ]]; then
             echo "::warning::No expectation defined for URL: $url_path. Skipping."
             continue
@@ -163,6 +171,33 @@ check_report_for_risk_profiles() {
                 validation_failed=true
             else
                 echo "✅ OK: Status is FAILED with risk '$actual_risk' as expected."
+            fi
+
+            # Validate categories
+            local expected_cats="${expected_categories[$url_path]}"
+            local actual_cats_sorted
+            actual_cats_sorted=$(yq ".tests[$i].failure_info.category | .[]" "$latest_report" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ *$//')
+            local expected_cats_sorted
+            expected_cats_sorted=$(echo "$expected_cats" | tr ',' '\n' | sort | tr '\n' ' ' | sed 's/ *$//')
+
+            # Special handling for /users-low-risk which may or may not have HEADER_CHANGE depending on http client behavior
+            if [[ "$url_path" == "/users-low-risk" ]]; then
+                # It must at least contain SCHEMA_ADDED
+                if ! [[ " $actual_cats_sorted " =~ " SCHEMA_ADDED " ]]; then
+                    echo "::error::Category mismatch for $url_path! Must contain SCHEMA_ADDED."
+                    echo "  Expected to find: SCHEMA_ADDED"
+                    echo "  Got:              $actual_cats_sorted"
+                    validation_failed=true
+                else
+                    echo "✅ OK: Categories for $url_path contain SCHEMA_ADDED as expected."
+                fi
+            elif [ "$actual_cats_sorted" != "$expected_cats_sorted" ]; then
+                echo "::error::Category mismatch!"
+                echo "  Expected: $expected_cats_sorted"
+                echo "  Got:      $actual_cats_sorted"
+                validation_failed=true
+            else
+                echo "✅ OK: Categories match: '$actual_cats_sorted'"
             fi
         fi
     done
