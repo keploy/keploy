@@ -16,7 +16,7 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.18.0
 	github.com/k0kubun/pp/v3 v3.2.0
-	github.com/keploy/integrations v0.0.0-20251008073954-ab89a697e03f
+	github.com/keploy/integrations v0.0.0-20251009143006-96238736bd45
 	github.com/miekg/dns v1.1.57
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5
