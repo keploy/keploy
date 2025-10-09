@@ -61,7 +61,14 @@ for i in 1 2; do
 done
 
 # Sanitize the testcases
-sudo -E env PATH="$PATH" $RECORD_BIN sanitize
+sudo -E env PATH="$PATH" $RECORD_BIN sanitize 2>&1 | tee sanitize_logs.txt
+
+if grep "ERROR" "sanitize_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "sanitize_logs.txt"
+    exit 1
+fi
+
 sleep 5
 
 # --- Record cycle for the new /astro endpoint (its own test set) ---
@@ -160,7 +167,13 @@ sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 |
 # run the normalize command 
 # now the tests are fixed and we have secrets with updated values
 echo "running the normalize command"
-sudo -E env PATH="$PATH" $REPLAY_BIN normalize
+sudo -E env PATH="$PATH" $REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
+
+if grep "ERROR" "normalize_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "normalize_logs.txt"
+    exit 1
+fi
 
 echo "running the test again, this time it will pass"
 # run the test again, this time it will pass

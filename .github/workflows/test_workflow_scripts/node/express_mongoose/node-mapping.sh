@@ -223,7 +223,7 @@ run_replay() {
 
   section "Replay #$idx (args: ${extra_args:-<none>})"
   set +e
-  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --delay 10 $extra_args \
+  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --disableMapping=false --delay 10 $extra_args \
     > "$logfile" 2>&1
   local rc=$?
   set -e
