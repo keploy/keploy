@@ -114,17 +114,42 @@ $dockerRunCommand = "docker run -p 5000:5000 --name $appName --network $appNetwo
                     "-e DB_SSL_DISABLED=1 " +
                     "$appImage"
 
-# Build the entire argument list as a single string, using backticks `` to embed the quotes
-# This ensures Keploy receives -c "<command>" as it expects.
+# Build the entire argument list as a single string for Keploy's -c flag.
 $recArgs = "record -c `"$dockerRunCommand`" --container-name $appName"
+$fullRecordCommand = "$($env:RECORD_BIN) $recArgs"
 
 Write-Host "Starting keploy record (expecting test-set-$expectedTestSetIndex)…"
-Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
+Write-Host "Executing in background job: $fullRecordCommand"
 
-# Start Keploy in the background and stream its logs
-$proc = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $recArgs -PassThru -NoNewWindow -RedirectStandardOutput $logPath
-$logJob = Start-Job { Get-Content -Path $using:logPath -Wait -Tail 10 }
-Write-Host "Tailing Keploy logs from $logPath ..."
+# Start Keploy in a background job, piping its output to both the screen and a log file.
+$recordJob = Start-Job -ScriptBlock {
+    # Use Invoke-Expression to correctly handle the command string with nested quotes.
+    # Merge stderr (2) into stdout (1) so both are captured by Tee-Object.
+    Invoke-Expression -Command "$using:fullRecordCommand 2>&1" | Tee-Object -FilePath $using:logPath
+}
+
+# Wait briefly for the job and the Keploy process to initialize.
+Write-Host "Waiting for Keploy process to start..."
+Start-Sleep -Seconds 5
+
+# Find the PID of the actual Keploy process started by the background job.
+# The job runs in a child powershell.exe process; we need to find the PID of its child (keploy.exe).
+$jobProcessId = $null
+try { $jobProcessId = (Get-Job -Id $recordJob.Id).ChildJobs[0].ProcessId } catch {
+    throw "Could not determine the process ID of the background job runner."
+}
+Write-Host "Background job runner process started with PID: $jobProcessId"
+
+$keployProcess = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $jobProcessId -and $_.Name -like "keploy*" }
+if (-not $keployProcess) {
+    Write-Error "Could not find the Keploy process started by the background job. Aborting."
+    Receive-Job $recordJob # Show any output from the job before exiting
+    Stop-Job $recordJob -Force
+    exit 1
+}
+$keployRecordPid = $keployProcess.ProcessId
+Write-Host "Found Keploy record process with PID: $keployRecordPid"
+
 
 # Wait for app readiness
 Write-Host "Waiting for app to respond on $appBaseUrl/health …"
@@ -190,8 +215,8 @@ Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
 Start-Sleep -Seconds 10 # Give Keploy time to write files
 
 # Stop Keploy and the application
-Kill-Tree -ProcessId $proc.Id
-Stop-Job $logJob
+Kill-Tree -ProcessId $keployRecordPid
+Stop-Job $recordJob
 
 # Clean up the containers from the record session
 Write-Host "Cleaning up record session containers..."
