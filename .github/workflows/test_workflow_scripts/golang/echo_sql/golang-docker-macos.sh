@@ -31,6 +31,21 @@ KEPLOY_CONTAINER="keploy_${TIMESTAMP}"
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
 
+# Cleanup function to remove containers
+cleanup() {
+    echo "Cleaning up containers and services..."
+    docker compose down >/dev/null 2>&1 || true
+    docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "echoApp" >/dev/null 2>&1 || true
+    docker rm -f "postgresDb" >/dev/null 2>&1 || true
+    echo "Cleanup completed"
+}
+
+# Set trap to run cleanup on script exit (success, failure, or interrupt)
+trap cleanup EXIT INT TERM
+
 # Replace ports and container names in all files in current directory
 echo "Updating configuration files with dynamic ports and container names..."
 for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.go" -o -name "*.json" -o -name "*.sh" -o -name "*.env" -o -name "*.md" \)); do
@@ -172,7 +187,7 @@ done
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
-    exit 0
 else
+    echo "Some tests failed"
     exit 1
 fi
