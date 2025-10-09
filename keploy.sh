@@ -1,5 +1,44 @@
 #!/bin/bash
 
+# Loader function to show a spinner animation
+show_loader() {
+    local pid=$1
+    local message=$2
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    
+    # Hide cursor
+    tput civis
+    
+    while kill -0 $pid 2>/dev/null; do
+        i=$(( (i+1) %10 ))
+        printf "\r${spin:$i:1} $message"
+        sleep .1
+    done
+    
+    # Show cursor
+    tput cnorm
+    printf "\r✓ $message\n"
+}
+
+# Function to run command with loader
+run_with_loader() {
+    local message=$1
+    shift
+    local cmd="$@"
+    
+    # Execute command in background
+    eval "$cmd" &
+    local cmd_pid=$!
+    
+    # Show loader while command runs
+    show_loader $cmd_pid "$message"
+    
+    # Wait for command to complete and get exit status
+    wait $cmd_pid
+    return $?
+}
+
 installKeploy (){
     version="latest"
     IS_CI=false
@@ -96,7 +135,7 @@ installKeploy (){
         # to avoid the "File exists" error
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
-        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
+        run_with_loader "Downloading Keploy binary..." "curl --silent --location '$download_url' | tar xz -C /tmp/keploy/"
         move_keploy_binary
         delete_keploy_alias
     }
@@ -107,7 +146,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
+        run_with_loader "Downloading Keploy binary..." "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
         move_keploy_binary
     }
 
@@ -118,7 +157,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
+        run_with_loader "Downloading Keploy binary..." "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
         move_keploy_binary
     }
 
