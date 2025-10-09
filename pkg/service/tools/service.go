@@ -18,6 +18,7 @@ type Service interface {
 	Templatize(ctx context.Context) error
 	Sanitize(ctx context.Context) error
 	Normalize(ctx context.Context) error
+	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error
 }
 
 type teleDB interface {
