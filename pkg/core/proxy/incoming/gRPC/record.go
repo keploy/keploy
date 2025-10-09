@@ -313,9 +313,7 @@ func (p *grpcTestCaseProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod str
 
 		// :authority — derive from Host header if present, else from destConn
 		if _, ok := hdr.PseudoHeaders[":authority"]; !ok || hdr.PseudoHeaders[":authority"] == "" {
-			if host, ok := hdr.OrdinaryHeaders["host"]; ok && host != "" {
-				hdr.PseudoHeaders[":authority"] = host
-			} else if p.destConn != nil && p.destConn.RemoteAddr() != nil {
+			if p.destConn != nil && p.destConn.RemoteAddr() != nil {
 				hdr.PseudoHeaders[":authority"] = p.destConn.RemoteAddr().String()
 			}
 		}
