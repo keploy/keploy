@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
 )
 
@@ -539,6 +539,30 @@ func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 	return false, nil
 }
 
+// volumeOptionsMatch compares existing volume options with desired options
+// Returns true if they match, false otherwise
+func (idc *Impl) volumeOptionsMatch(existingOpts, desiredOpts map[string]string) bool {
+	// If both are empty or nil, they match
+	if len(existingOpts) == 0 && len(desiredOpts) == 0 {
+		return true
+	}
+
+	// If lengths are different, they don't match
+	if len(existingOpts) != len(desiredOpts) {
+		return false
+	}
+
+	// Compare each key-value pair
+	for key, desiredValue := range desiredOpts {
+		existingValue, exists := existingOpts[key]
+		if !exists || existingValue != desiredValue {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error {
 	// Set a timeout for the context
 	ctx, cancel := context.WithTimeout(ctx, idc.timeoutForDockerQuery)
@@ -554,18 +578,29 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 	}
 
 	if len(volumeList.Volumes) > 0 {
+		// Volume exists, check if it has the same options
+		existingVolume := volumeList.Volumes[0]
+
+		// Compare driver options
+		if idc.volumeOptionsMatch(existingVolume.Options, driverOpts) {
+			idc.logger.Info("volume already exists with the same options", zap.String("volume", volumeName))
+			return nil
+		}
+
 		if !recreate {
-			idc.logger.Info("volume already exists", zap.String("volume", volumeName))
-			return err
+			idc.logger.Info("volume already exists but with different options", zap.String("volume", volumeName))
+			return fmt.Errorf("volume %s exists with different options", volumeName)
 		}
 
-		err := idc.VolumeRemove(ctx, volumeName, false)
+		// Remove the existing volume
+		err := idc.VolumeRemove(ctx, volumeName, true)
 		if err != nil {
-			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+			idc.logger.Error("failed to remove existing volume", zap.String("volume", volumeName), zap.Error(err))
+			cancel()
 			return err
 		}
+		idc.logger.Info("removed existing volume", zap.String("volume", volumeName))
 	}
-
 	// Create the volume,
 	// Create volume with provided driver options or default
 	createOptions := volume.CreateOptions{
