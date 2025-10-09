@@ -1,4 +1,4 @@
-name: Python On Docker (Windows)
+name: Golang On Docker (Windows)
 on:
   workflow_call:
 
@@ -7,15 +7,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  python_docker_windows:
+  golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
     strategy:
       fail-fast: false
       matrix:
         app:
-          - name: flask-mysql
-            path: flask_mysql
-            script_dir: flask-mysql
+          - name: go-dedup
+            path: go-dedup
+            script_dir: go-dedup
         config:
           - job: record_build_replay_build
             record_src: build
@@ -23,7 +23,7 @@ jobs:
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
-      - name: Aggressive Cleanup (Runner + Docker)
+      - name: Aggressive Cleanup (Runner + Docker)  # ⚠️ Destructive
         if: always()
         shell: pwsh
         continue-on-error: true
@@ -168,11 +168,11 @@ jobs:
           docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:replay ghcr.io/keploy/keploy:v2-dev"
           echo "image=keploy:replay" >> $env:GITHUB_OUTPUT
 
-      - name: Checkout the samples-python repository
+      - name: Checkout the samples-go repository
         uses: actions/checkout@v4
         with:
-          repository: keploy/samples-python
-          path: samples-python
+          repository: keploy/samples-go
+          path: samples-go
           clean: true
 
       # Your existing run step
@@ -184,8 +184,8 @@ jobs:
           DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
         shell: pwsh
         run: |
-          cd samples-python/${{ matrix.app.path }}
-          & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\python\${{ matrix.app.script_dir }}\python-docker-windows.ps1"
+          cd samples-go/${{ matrix.app.path }}
+          & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-docker-windows.ps1"
 
       - name: Clean up git config
         if: always()
