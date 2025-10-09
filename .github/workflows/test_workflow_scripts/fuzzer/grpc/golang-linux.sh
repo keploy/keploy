@@ -172,7 +172,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Replay
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true --useLocalMock 2>&1 | tee test_incoming.txt
+ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true --disableMockUpload 2>&1 | tee test_incoming.txt
  echo "checking for errors"
  check_for_errors test_incoming.txt
  check_test_report
@@ -257,7 +257,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
 
  # Replay the client (relying on mocks)
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true --useLocalMock 2>&1 | tee test_outgoing.txt
+ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true --disableMockUpload 2>&1 | tee test_outgoing.txt
  echo "checking for errors"
  check_for_errors test_outgoing.txt
  check_test_report
