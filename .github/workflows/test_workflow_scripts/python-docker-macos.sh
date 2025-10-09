@@ -34,7 +34,7 @@ echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY
 
 # Replace ports and container names in all files in current directory
 echo "Updating configuration files with dynamic ports and container names..."
-for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.go" -o -name "*.json" -o -name "*.sh" -o -name "*.env" -o -name "*.md" \)); do
+for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.py" -o -name "*.json" -o -name "*.sh" -o -name "*.env" -o -name "*.md" \)); do
     if [ -f "$file" ] && [ "$file" != "./golang-docker-macos.sh" ]; then
         # Replace 6000 with APP_PORT
         sed -i '' "s/6000/${APP_PORT}/g" "$file" 2>/dev/null || true
@@ -114,7 +114,7 @@ for i in 1 2; do
     --dns-port $DNS_PORT \
     --keploy-container "$KEPLOY_CONTAINER" \
     --debug \
-    --record-timer=10s 2>&1 | tee "${container_name}.txt"
+    --record-timer=40s 2>&1 | tee "${container_name}.txt"
      
   
     cat "${container_name}.txt"  # For visibility in logs
