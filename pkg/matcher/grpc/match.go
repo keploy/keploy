@@ -23,7 +23,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		TrailerResult: make([]models.HeaderResult, 0),
 	}
 	currentRisk := models.None
-	currentCategory := models.FailureCategory("")
+	var currentCategories []models.FailureCategory
 
 	// Local variables to track overall match status
 	differences := make(map[string]struct {
@@ -57,6 +57,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				Message:  "missing status header in response",
 			}
 			headerResult.Normal = false
+			currentRisk = matcher.MaxRisk(currentRisk, models.High)
+			currentCategories = append(currentCategories, models.StatusCodeChange, models.SchemaBroken)
 		} else {
 			headerResult.Actual.Value = []string{actualStatus}
 			headerResult.Normal = expectedStatus == actualStatus
@@ -72,7 +74,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Message:  "status header value mismatch",
 				}
 				currentRisk = matcher.MaxRisk(currentRisk, models.High)
-				currentCategory = matcher.MaxCategory(currentCategory, models.SchemaBroken)
+				currentCategories = append(currentCategories, models.StatusCodeChange, models.SchemaBroken)
 			}
 		}
 
@@ -291,21 +293,31 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
 			if assess, err := matcher.ComputeFailureAssessmentJSON(expectedDecodedData, actualDecodedData, bodyNoise, ignoreOrdering); err == nil && assess != nil {
 				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
-				currentCategory = matcher.MaxCategory(currentCategory, assess.Category)
+				currentCategories = append(currentCategories, assess.Category...)
 			} else {
 				currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
-				currentCategory = matcher.MaxCategory(currentCategory, models.SchemaUnchanged)
+				currentCategories = append(currentCategories, models.SchemaUnchanged)
 			}
 		} else {
 			// non-JSON payload mismatch → Broken
 			currentRisk = matcher.MaxRisk(currentRisk, models.High)
-			currentCategory = matcher.MaxCategory(currentCategory, models.SchemaBroken)
+			currentCategories = append(currentCategories, models.SchemaBroken)
+		}
+	}
+
+	// remove duplicates
+	catMap := make(map[models.FailureCategory]bool)
+	uniqueCategories := []models.FailureCategory{}
+	for _, cat := range currentCategories {
+		if !catMap[cat] {
+			catMap[cat] = true
+			uniqueCategories = append(uniqueCategories, cat)
 		}
 	}
 
 	result.FailureInfo = models.FailureInfo{
 		Risk:     currentRisk,
-		Category: currentCategory,
+		Category: uniqueCategories,
 	}
 
 	return matched, result

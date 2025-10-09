@@ -79,28 +79,28 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	// - No differences at all               -> SchemaUnchanged / None
 	switch {
 	case hasRemoved || hasType:
-		assess.Category = models.SchemaBroken
+		assess.Category = []models.FailureCategory{models.SchemaBroken}
 		assess.Risk = models.High
 
 	case !hasAdded && !hasRemoved && !hasType && !hasValue:
-		assess.Category = models.SchemaUnchanged
+		assess.Category = []models.FailureCategory{models.SchemaUnchanged}
 		assess.Risk = models.None
 
 	case !hasAdded && !hasRemoved && !hasType && hasValue:
-		assess.Category = models.SchemaUnchanged
+		assess.Category = []models.FailureCategory{models.SchemaUnchanged}
 		assess.Risk = models.Medium
 
 	case hasAdded && !hasRemoved && !hasType && !hasValue:
-		assess.Category = models.SchemaAdded
+		assess.Category = []models.FailureCategory{models.SchemaAdded}
 		assess.Risk = models.Low
 
 	case hasAdded && !hasRemoved && !hasType && hasValue:
-		assess.Category = models.SchemaAdded
+		assess.Category = []models.FailureCategory{models.SchemaAdded}
 		assess.Risk = models.Medium
 
 	default:
 		// Mixed but already-handled breaking cases (added along with removed/type change) fall here defensively.
-		assess.Category = models.SchemaBroken
+		assess.Category = []models.FailureCategory{models.SchemaBroken}
 		assess.Risk = models.High
 	}
 
@@ -190,19 +190,6 @@ func MaxRisk(a, b models.RiskLevel) models.RiskLevel {
 		models.Low:    1,
 		models.Medium: 2,
 		models.High:   3,
-	}
-	if rank[b] > rank[a] {
-		return b
-	}
-	return a
-}
-
-func MaxCategory(a, b models.FailureCategory) models.FailureCategory {
-	rank := map[models.FailureCategory]int{
-		"":                     0,
-		models.SchemaUnchanged: 1,
-		models.SchemaAdded:     2,
-		models.SchemaBroken:    3,
 	}
 	if rank[b] > rank[a] {
 		return b

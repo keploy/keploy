@@ -56,8 +56,8 @@ type TestResult struct {
 }
 
 type FailureInfo struct {
-	Risk     RiskLevel       `json:"risk,omitempty" yaml:"risk,omitempty"`
-	Category FailureCategory `json:"category,omitempty" yaml:"category,omitempty"`
+	Risk     RiskLevel         `json:"risk,omitempty" yaml:"risk,omitempty"`
+	Category []FailureCategory `json:"category,omitempty" yaml:"category,omitempty"`
 }
 
 func (tr *TestResult) GetKind() string {
@@ -115,19 +115,21 @@ const (
 type FailureCategory string
 
 const (
-	SchemaUnchanged FailureCategory = "SCHEMA_UNCHANGED" // schema is identical
-	SchemaAdded     FailureCategory = "SCHEMA_ADDED"     // only new fields added; backward compatible
-	SchemaBroken    FailureCategory = "SCHEMA_BROKEN"    // removed/changed fields, type mismatch, or entirely different schema
+	SchemaUnchanged  FailureCategory = "SCHEMA_UNCHANGED"   // schema is identical
+	SchemaAdded      FailureCategory = "SCHEMA_ADDED"       // only new fields added; backward compatible
+	SchemaBroken     FailureCategory = "SCHEMA_BROKEN"      // removed/changed fields, type mismatch, or entirely different schema
+	StatusCodeChange FailureCategory = "STATUS_CODE_CHANGE" // status code changed
+	HeaderChange     FailureCategory = "HEADER_CHANGE"      // header changed
 )
 
 type FailureAssessment struct {
-	Category      FailureCategory `json:"category,omitempty" yaml:"category,omitempty"`
-	Risk          RiskLevel       `json:"risk,omitempty" yaml:"risk,omitempty"`
-	AddedFields   []string        `json:"added_fields,omitempty" yaml:"added_fields,omitempty"`
-	RemovedFields []string        `json:"removed_fields,omitempty" yaml:"removed_fields,omitempty"`
-	TypeChanges   []string        `json:"type_changes,omitempty" yaml:"type_changes,omitempty"`
-	ValueChanges  []string        `json:"value_changes,omitempty" yaml:"value_changes,omitempty"`
-	Reasons       []string        `json:"reasons,omitempty" yaml:"reasons,omitempty"`
+	Category      []FailureCategory `json:"category,omitempty" yaml:"category,omitempty"`
+	Risk          RiskLevel         `json:"risk,omitempty" yaml:"risk,omitempty"`
+	AddedFields   []string          `json:"added_fields,omitempty" yaml:"added_fields,omitempty"`
+	RemovedFields []string          `json:"removed_fields,omitempty" yaml:"removed_fields,omitempty"`
+	TypeChanges   []string          `json:"type_changes,omitempty" yaml:"type_changes,omitempty"`
+	ValueChanges  []string          `json:"value_changes,omitempty" yaml:"value_changes,omitempty"`
+	Reasons       []string          `json:"reasons,omitempty" yaml:"reasons,omitempty"`
 }
 
 type Result struct {
