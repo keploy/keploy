@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 # This script automates the testing of the risk profile identification feature.
-# It records test cases for a sample Go application and then validates that
-# the Keploy test report correctly categorizes each failure.
+# It records test cases, validates the initial failure report, then tests the
+# two-stage normalization process (safe and forced), and finally confirms
+# that all tests pass after forced normalization.
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
@@ -15,10 +16,19 @@ endsec()  { echo "::endgroup::"; }
 
 dump_logs() {
   section "Record Log"
-  cat record.log 2>/dev/null || echo "Record log not found."
+    cat record.log 2>/dev/null || echo "Record log not found."
   endsec
-  section "Test Log"
-  cat test.log 2>/dev/null || echo "Test log not found."
+  section "Initial Test Log"
+    cat test.log 2>/dev/null || echo "Initial test log not found."
+  endsec
+  section "Safe Normalize Log"
+    cat normalize_safe.log 2>/dev/null || echo "Safe normalize log not found."
+  endsec
+  section "Forced Normalize Log"
+    cat normalize_forced.log 2>/dev/null || echo "Forced normalize log not found."
+  endsec
+  section "Final Test Log"
+    cat final_test.log 2>/dev/null || echo "Final test log not found."
   endsec
 }
 
@@ -48,7 +58,7 @@ trap final_cleanup EXIT
 # Checks a log file for critical Keploy errors or data races
 check_for_errors() {
   local logfile=$1
-  echo "Checking for errors in $logfile..."
+  echo "Checking for critical errors in $logfile..."
   if [ -f "$logfile" ]; then
     if grep "ERROR" "$logfile" | grep "Keploy:"; then
       echo "::error::Critical error found in $logfile. Failing the build."
@@ -64,6 +74,7 @@ check_for_errors() {
 
 # Waits for the Go application's HTTP endpoint to become available
 wait_for_http() {
+  # ... (function is unchanged)
   local port="$1"
   section "Waiting for application on port $port..."
   for i in {1..60}; do
@@ -79,9 +90,8 @@ wait_for_http() {
   return 1
 }
 
-# Validates the Keploy test report against expected risk profiles
-check_test_report() {
-    section "Validating Test Report..."
+check_report_for_risk_profiles() {
+    section "validating the Keploy test report against expected risk profiles"
     
     # Define the expected risk for each API endpoint path
     declare -A expected_risks
@@ -167,6 +177,66 @@ check_test_report() {
     endsec
 }
 
+# Validates the Keploy test report to ensure all test sets passed
+check_test_report() {
+    echo "Checking test reports..."
+    if [ ! -d "./keploy/reports" ]; then
+        echo "Test report directory not found!"
+        return 1
+    fi
+
+    local latest_report_dir
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+    if [ -z "$latest_report_dir" ]; then
+        echo "No test run directory found in ./keploy/reports/"
+        return 1
+    fi
+    
+    local all_passed=true
+    # Loop through all generated report files
+    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
+        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
+        
+        local test_set_name
+        test_set_name=$(basename "$report_file" -report.yaml)
+        local test_status
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        
+        echo "Status for ${test_set_name}: $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Test set ${test_set_name} did not pass."
+        fi
+    done
+
+    if [ "$all_passed" = false ]; then
+        echo "One or more test sets failed."
+        return 1
+    fi
+
+    echo "All tests passed in reports."
+    return 0
+}
+
+# Checks that the safe normalize run produced the expected warnings
+check_normalize_warnings() {
+    section "Validating Safe Normalize Warnings..."
+    local logfile="normalize_safe.log"
+    local warning_msg="failed to normalize test case.*due to a high-risk failure"
+    
+    echo "Checking for high-risk normalization warnings in $logfile..."
+    
+    local warning_count
+    warning_count=$(grep -c "$warning_msg" "$logfile" || true)
+    
+    if [ "$warning_count" -ne 4 ]; then
+        echo "::error::Expected 4 high-risk normalization warnings, but found $warning_count."
+        exit 1
+    fi
+    
+    echo "✅ Found exactly 4 high-risk normalization warnings, as expected."
+    endsec
+}
 
 # --- Main Execution Logic ---
 
@@ -175,7 +245,7 @@ command -v yq >/dev/null 2>&1 || { echo "::error::'yq' is not installed. Please 
 
 section "Setup Environment"
 echo "Cleaning up previous runs..."
-rm -rf keploy/ my-app record.log test.log
+rm -rf keploy/ my-app *.log
 echo "Building the Go application..."
 go build -o my-app
 endsec
@@ -197,20 +267,37 @@ pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
 wait "$pid" 2>/dev/null || true
 sleep 5
 check_for_errors "record.log"
-echo "Recording stopped."
 endsec
 
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --delay 10 --skip-coverage=false --useLocalMock 2>&1 | tee test.log
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --useLocalMock 2>&1 | tee test.log
 check_for_errors "test.log"
 endsec
 
-section "Validate Test Report for correct Risk Profiles"
-# Validate the generated report
-check_test_report
-echo "✅ All tests completed successfully with correct risk profiles."
+check_report_for_risk_profiles
+
+section "Attempt Safe Normalization (Expected to Warn)"
+echo "Running normalize without force flag. Expecting warnings for high-risk failures..."
+sudo -E env PATH="$PATH" $REPLAY_BIN normalize 2>&1 | tee normalize_safe.log
+check_for_errors "normalize_safe.log"
+check_normalize_warnings
 endsec
 
+section "Run Forced Normalization (Expected to Succeed)"
+echo "Running normalize with --allow-high-risk flag..."
+sudo -E env PATH="$PATH" $REPLAY_BIN normalize --allow-high-risk 2>&1 | tee normalize_forced.log
+check_for_errors "normalize_forced.log"
+echo "Forced normalization complete. Test cases should now be updated."
+endsec
 
+section "Run Final Validation Test"
+echo "Running final test run to confirm all tests now pass..."
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --useLocalMock 2>&1 | tee final_test.log
+check_for_errors "final_test.log"
+endsec
+
+check_test_report
+
+echo "✅ Full Risk Profile & Normalization Test Pipeline Succeeded!"
 exit 0
