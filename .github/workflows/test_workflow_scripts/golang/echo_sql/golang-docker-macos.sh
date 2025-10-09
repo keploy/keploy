@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # for the below source make it such a way that if the file is not present or already present it does not error
-source ./../../../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+source ./../../../../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 # Function to find available port
 find_available_port() {

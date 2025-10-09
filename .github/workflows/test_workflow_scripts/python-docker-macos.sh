@@ -152,7 +152,7 @@ done
 
 # --- Stop Mongo before test ---
 echo "Shutting down mongo before test mode..."
-docker stop mongo >/dev/null 2>&1 || true
+docker stop $DB_CONTAINER >/dev/null 2>&1 || true
 
 # --- Test phase ---
 test_container="${APP_CONTAINER}_1"

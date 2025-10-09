@@ -83,6 +83,7 @@ jobs:
           bash ./../../.github/workflows/test_workflow_scripts/python-docker-macos.sh
       
       - name: Docker Image Prune (unused only, wait if locked)
+        if: always()
         run: |
           # Wait if another prune is running (lock file /var/lib/docker/tmp/docker-prune.lock may exist)
           while lsof /var/lib/docker/tmp/docker-prune.lock >/dev/null 2>&1; do
