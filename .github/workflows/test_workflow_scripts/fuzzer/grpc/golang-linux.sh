@@ -158,6 +158,7 @@ if [ "$MODE" = "incoming" ]; then
  fi
 
  echo "Ensuring fuzzer server is stopped..."
+ sleep 10
  sudo pkill -f "$FUZZER_SERVER_BIN" || true
  sleep 2 # Give a moment for the port to be released
 
@@ -249,6 +250,7 @@ elif [ "$MODE" = "outgoing" ]; then
  sleep 5
 
  echo "Ensuring fuzzer client is stopped..."
+ sleep 10
  sudo pkill -f "$FUZZER_CLIENT_BIN" || true
  sleep 2 # Give a moment for the port to be released
 
