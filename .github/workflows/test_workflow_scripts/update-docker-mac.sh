@@ -22,15 +22,6 @@ ensure_dockerfile_syntax() {
   fi
 }
 
-has_ssh_agent() {
-  # Return success if an SSH agent socket is available and usable
-  if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
-    ssh-add -l >/dev/null 2>&1 || true
-    return 0
-  fi
-  return 1
-}
-
 add_race_flag() {
   echo "Ensuring -race in go build lines (idempotent)..."
   awk '
@@ -107,30 +98,18 @@ use_ssh_for_github_and_known_hosts() {
 }
 
 build_docker_image() {
-  echo "Building Docker image (with SSH forwarding)..."
+  echo "Building Docker image with BuildKit and SSH forwarding..."
   # On mac, Docker Desktop supports BuildKit and --ssh if enabled.
+  # Ensure you have an SSH agent running with your key loaded (ssh-add -l to verify).
   DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
-}
-
-build_docker_image_no_ssh() {
-  echo "Building Docker image (no SSH forwarding)..."
-  DOCKER_BUILDKIT=1 docker build -t ttl.sh/keploy/keploy:1h .
 }
 
 main() {
   ensure_dockerfile_syntax
   add_race_flag
-
-  if has_ssh_agent; then
-    enable_ssh_mount_for_go_mod
-    use_ssh_for_github_and_known_hosts
-    build_docker_image
-  else
-    echo "SSH agent not detected. Skipping SSH-dependent Dockerfile edits and build flags."
-    echo "- Will NOT rewrite github URLs to SSH"
-    echo "- Will NOT use --mount=type=ssh for go mod download"
-    build_docker_image_no_ssh
-  fi
+  enable_ssh_mount_for_go_mod
+  use_ssh_for_github_and_known_hosts
+  build_docker_image
 }
 
 main
