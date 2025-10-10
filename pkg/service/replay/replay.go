@@ -528,7 +528,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
-		return &InstrumentState{}, fmt.Errorf(stopReason)
+		return &InstrumentState{}, fmt.Errorf("%s", stopReason)
 	}
 	return &InstrumentState{}, nil
 }
