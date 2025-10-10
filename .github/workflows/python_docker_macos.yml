@@ -56,6 +56,7 @@ jobs:
         uses: ./.github/actions/download-image
         with:
           image_tag: ${{ inputs.image_tag }}
+          version: ${{ github.event.pull_request.number }}-${{ github.sha }}
 
       - id: record
         uses: ./.github/actions/download-binary

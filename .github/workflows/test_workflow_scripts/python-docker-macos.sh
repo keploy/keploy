@@ -133,20 +133,15 @@ for i in 1 2; do
     --record-timer=40s 2>&1 | tee "${container_name}.txt"
      
   
-  cat "${container_name}.txt"  # For visibility in logs
+  # cat "${container_name}.txt"  # For visibility in logs
   # The Keploy command will now exit naturally when the container stops. We don't need `|| true`.
   # If it fails, the script should fail.
 
-  # if grep -q "ERROR" "${container_name}.txt"; then
-  #   echo "Error found in pipeline during record (${container_name})"
-  #   cat "${container_name}.txt"
-  #   exit 1
-  # fi
-  # if grep -q "WARNING: DATA RACE" "${container_name}.txt"; then
-  #   echo "Race condition detected during record (${container_name})"
-  #   cat "${container_name}.txt"
-  #   exit 1
-  # fi
+  if grep -q "WARNING: DATA RACE" "${container_name}.txt"; then
+    echo "Race condition detected during record (${container_name})"
+    cat "${container_name}.txt"
+    exit 1
+  fi
 
   echo "Successfully recorded test case and mocks for iteration ${i}"
 done
@@ -169,6 +164,11 @@ echo "Starting test mode..."
   --generate-github-actions=false 2>&1 | tee "${test_container}.txt"
 
 
+if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected during test (${test_container})"
+    cat "${test_container}.txt"
+    exit 1
+fi
 
 # --- Verify reports ---
 all_passed=true

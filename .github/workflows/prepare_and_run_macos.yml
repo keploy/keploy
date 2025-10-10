@@ -5,10 +5,9 @@ on:
   # push:
   #   branches: [ main ]
 
-# Commenting out because making jobs parallel
-# concurrency:
-#   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-#   cancel-in-progress: true
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-upload:
@@ -37,7 +36,7 @@ jobs:
 
       - name: Build Keploy (PR) - macOS (darwin/arm64)
         run: |
-          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -o keploy
+          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.event.pull_request.number }}-${{ github.sha }}" -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
 
