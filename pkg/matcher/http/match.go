@@ -398,8 +398,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					currentCategories = append(currentCategories, assess.Category...)
 				} else {
 					// couldn't classify → conservative
-					currentRisk = matcherUtils.MaxRisk(currentRisk, models.Medium)
-					currentCategories = append(currentCategories, models.SchemaUnchanged)
+					currentRisk = models.High
+					currentCategories = append(currentCategories, models.InternalFailure)
 				}
 			} else {
 				// Non-JSON body mismatch: cannot noise-mask or classify precisely → treat as Broken

@@ -295,8 +295,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
 				currentCategories = append(currentCategories, assess.Category...)
 			} else {
-				currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
-				currentCategories = append(currentCategories, models.SchemaUnchanged)
+				currentRisk = models.High
+				currentCategories = append(currentCategories, models.InternalFailure)
 			}
 		} else {
 			// non-JSON payload mismatch → Broken
