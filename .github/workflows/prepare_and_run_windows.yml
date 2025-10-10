@@ -1,0 +1,106 @@
+name: Prepare Binary and Run Workflows (Windows)
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-upload:
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Aggressive Cleanup (Workspace + Keploy procs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        run: |
+          # Kill any lingering Keploy processes
+          $procs = 'keploy.exe','keploy-record.exe','keploy-replay.exe','keploy-record','keploy-replay'
+          foreach ($p in $procs) { cmd /c "taskkill /F /IM $p /T" 2>$null | Out-Null }
+
+          # Clean workspace artifacts that could affect the build
+          $paths = @('.\bin','.\\keploy.exe','.\\keploy','.\\keploy.yml','.\\record-bin','.\\replay-bin')
+          foreach ($p in $paths) {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          # Optional: clean Go caches to avoid stale behavior
+          go version 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            go clean -cache -modcache -testcache -fuzzcache 2>$null
+          }
+
+      - name: Clean up git config (ensure HTTPS for checkout)
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          git config --global --unset-all url."git@github.com:".insteadof  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
+          git config --global --list
+
+      - name: Configure Git EOL on Windows
+        shell: powershell
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          clean: true
+
+      - name: Build Keploy (PR) - Windows (windows/amd64)
+        shell: powershell
+        run: |
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          $env:CGO_ENABLED = "0"
+          go build -tags=viper_bind_struct -o keploy.exe ./main.go
+
+      - name: Upload build artifact (Windows CLI)
+        uses: actions/upload-artifact@v4
+        with: 
+          name: build
+          path: keploy.exe
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
+
+  docker-image-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set PR image tag
+        run: echo "PR_IMAGE_TAG=ghcr.io/${GITHUB_REPOSITORY}:pr-${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build PR Docker image (linux/amd64) -> tar
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: ${{ env.PR_IMAGE_TAG }}
+          outputs: type=docker,dest=keploy-image-pr.tar
+
+      - name: Upload PR Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-build
+          path: keploy-image-pr.tar
+
+  run_golang_docker_windows:
+    needs: [build-and-upload, docker-image-build]
+    uses: ./.github/workflows/golang_docker_windows.yml
