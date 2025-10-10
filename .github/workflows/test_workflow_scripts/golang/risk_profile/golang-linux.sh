@@ -107,13 +107,13 @@ check_report_for_risk_profiles() {
     # Define the expected categories for each API endpoint path (comma-separated)
     declare -A expected_categories
     expected_categories["/users-low-risk"]="SCHEMA_ADDED" # Body change is SCHEMA_ADDED, header change is implicit
-    expected_categories["/users-medium-risk"]="HEADER_CHANGE,SCHEMA_UNCHANGED"
-    expected_categories["/users-medium-risk-with-addition"]="HEADER_CHANGE,SCHEMA_ADDED"
-    expected_categories["/users-high-risk-type"]="HEADER_CHANGE,SCHEMA_BROKEN"
-    expected_categories["/users-high-risk-removal"]="HEADER_CHANGE,SCHEMA_BROKEN"
-    expected_categories["/status-change-high-risk"]="HEADER_CHANGE,STATUS_CODE_CHANGE,SCHEMA_BROKEN"
-    expected_categories["/content-type-change-high-risk"]="HEADER_CHANGE,SCHEMA_BROKEN"
-    expected_categories["/header-change-medium-risk"]="HEADER_CHANGE"
+    expected_categories["/users-medium-risk"]="HEADER_CHANGED,SCHEMA_UNCHANGED"
+    expected_categories["/users-medium-risk-with-addition"]="HEADER_CHANGED,SCHEMA_ADDED"
+    expected_categories["/users-high-risk-type"]="HEADER_CHANGED,SCHEMA_BROKEN"
+    expected_categories["/users-high-risk-removal"]="HEADER_CHANGED,SCHEMA_BROKEN"
+    expected_categories["/status-change-high-risk"]="HEADER_CHANGED,STATUS_CODE_CHANGED,SCHEMA_BROKEN"
+    expected_categories["/content-type-change-high-risk"]="HEADER_CHANGED,SCHEMA_BROKEN"
+    expected_categories["/header-change-medium-risk"]="HEADER_CHANGED"
 
     local latest_report
     latest_report=$(ls -t ./keploy/reports/test-run-*/test-set-0-report.yaml | head -n 1)

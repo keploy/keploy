@@ -302,7 +302,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 			if expVals, ok := expectedHeader["Content-Type"]; ok {
 				actVals := actualHeader["Content-Type"]
-				if len(expVals) != len(actVals) || !matcherUtils.CompareSlicesIgnoreOrder(expVals, actVals) {
+				if !matcherUtils.CompareSlicesIgnoreOrder(expVals, actVals) {
 					headerRisk = models.High
 				}
 			}
