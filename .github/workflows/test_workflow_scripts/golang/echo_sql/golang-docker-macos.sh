@@ -26,6 +26,7 @@ DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
 APP_CONTAINER="echoApp_${JOB_ID}"
 DB_CONTAINER="postgresDb_${JOB_ID}"
 KEPLOY_CONTAINER="keploy_${JOB_ID}"
+APP_IMAGE="go-app_${JOB_ID}:1.0"
 
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
@@ -57,6 +58,8 @@ for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -
         sed -i '' "s/postgresDb/${DB_CONTAINER}/g" "$file" 2>/dev/null || true
         # Replace 5432: with DB_PORT: in docker-compose files
         sed -i '' "s/5432:/${DB_PORT}:/g" "$file" 2>/dev/null || true
+        # Replace go-app with APP_IMAGE
+        sed -i '' "s/go-app/${APP_IMAGE}/g" "$file" 2>/dev/null || true
         echo "Updated $file"
     fi
 done
