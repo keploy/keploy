@@ -94,19 +94,6 @@ jobs:
           cd samples-go/${{ matrix.app.path }}
           bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-macos.sh
 
-      - name: Docker Image Prune (unused only, wait if locked)
-        if: always()
-        run: |
-          # Wait if another prune is running (lock file /var/lib/docker/tmp/docker-prune.lock may exist)
-          while lsof /var/lib/docker/tmp/docker-prune.lock >/dev/null 2>&1; do
-            echo "Waiting for existing docker prune operation to finish..."
-            sleep 5
-          done
-          # Prune only dangling (untagged) images not in use
-          docker image prune -a -f
-          # Prune dangling (unused) volumes as well
-          docker volume prune -a -f
-
       - name: Clean up git config
         if: always()
         continue-on-error: true
