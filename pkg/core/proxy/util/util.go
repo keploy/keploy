@@ -408,6 +408,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	// channels for writing messages from proxy to destination or client
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error, 1)
+	passthroughContext, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	go func() {
 		defer Recover(logger, clientConn, nil)
@@ -420,7 +422,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			}
 		}(destConn)
 
-		ReadBuffConn(ctx, logger, destConn, destBufferChannel, errChannel)
+		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
 	}()
 
 	select {
