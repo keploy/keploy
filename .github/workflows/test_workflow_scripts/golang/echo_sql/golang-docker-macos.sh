@@ -26,7 +26,7 @@ DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
 TIMESTAMP=$(date +%s)
 APP_CONTAINER="echoApp_${TIMESTAMP}"
 DB_CONTAINER="postgresDb_${TIMESTAMP}"
-KEPLOY_CONTAINER="keploy-v2"
+KEPLOY_CONTAINER="keploy_${TIMESTAMP}"
 
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
@@ -62,9 +62,6 @@ for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -
     fi
 done
 
-# for the below shource make it such a way that if the file is not present or already present it does not error
-# source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
-
 # Build Docker Image(s)
 docker compose build
 
@@ -73,15 +70,15 @@ rm -rf keploy/
 rm ./keploy.yml >/dev/null 2>&1 || true
 
 # Generate the keploy-config file.
-# $RECORD_BIN config --generate
+$RECORD_BIN config --generate
 
 # Update the global noise to ts in the config file.
-# config_file="./keploy.yml"
-# if [ -f "$config_file" ]; then
-#   sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
-# else
-#   echo "⚠️ Config file $config_file not found, skipping sed replace."
-# fi
+config_file="./keploy.yml"
+if [ -f "$config_file" ]; then
+  sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
 
 container_kill() {
     pid=$(pgrep -n keploy)
@@ -126,7 +123,8 @@ send_request(){
 for i in {1..2}; do
     container_name="$APP_CONTAINER"
     send_request &
-    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "25s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --container-name "$KEPLOY_CONTAINER" --debug 2>&1 | tee "${container_name}.txt"
+
+    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "40s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -150,7 +148,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="$APP_CONTAINER"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --container-name "$KEPLOY_CONTAINER" --debug 2>&1 | tee "${test_container}.txt"
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
