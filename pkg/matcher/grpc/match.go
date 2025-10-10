@@ -81,6 +81,67 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		result.HeadersResult = append(result.HeadersResult, headerResult)
 	}
 
+	// Compare 'content-type' in ordinary headers
+	if expectedContentType, ok := expectedResp.Headers.OrdinaryHeaders["content-type"]; ok {
+		actualContentType, exists := actualResp.Headers.OrdinaryHeaders["content-type"]
+		headerResult := models.HeaderResult{
+			Expected: models.Header{
+				Key:   "content-type",
+				Value: []string{expectedContentType},
+			},
+			Actual: models.Header{
+				Key:   "content-type",
+				Value: []string{},
+			},
+		}
+
+		if !exists {
+			differences["headers.ordinary_headers.:content-type"] = struct {
+				Expected string
+				Actual   string
+				Message  string
+			}{
+				Expected: expectedContentType,
+				Actual:   "",
+				Message:  "missing content-type header in response",
+			}
+			headerResult.Normal = false
+			currentRisk = matcher.MaxRisk(currentRisk, models.High)
+			currentCategories = append(currentCategories, models.HeaderChanged)
+		} else {
+			headerResult.Actual.Value = []string{actualContentType}
+
+			// Split the header strings by comma to handle potential multi-valued headers
+			// represented as a single string. This makes the order-ignoring comparison meaningful.
+			expectedParts := strings.Split(expectedContentType, ",")
+			for i := range expectedParts {
+				expectedParts[i] = strings.TrimSpace(expectedParts[i])
+			}
+
+			actualParts := strings.Split(actualContentType, ",")
+			for i := range actualParts {
+				actualParts[i] = strings.TrimSpace(actualParts[i])
+			}
+
+			headerResult.Normal = matcher.CompareSlicesIgnoreOrder(expectedParts, actualParts)
+
+			if !headerResult.Normal {
+				differences["headers.ordinary_headers.:content-type"] = struct {
+					Expected string
+					Actual   string
+					Message  string
+				}{
+					Expected: expectedContentType,
+					Actual:   actualContentType,
+					Message:  "content-type header value mismatch",
+				}
+				currentRisk = matcher.MaxRisk(currentRisk, models.High)
+				currentCategories = append(currentCategories, models.HeaderChanged)
+			}
+		}
+		result.HeadersResult = append(result.HeadersResult, headerResult)
+	}
+
 	// Compare Body - using specialized body types for gRPC
 	// Compare compression flag
 	compressionFlagNormal := expectedResp.Body.CompressionFlag == actualResp.Body.CompressionFlag

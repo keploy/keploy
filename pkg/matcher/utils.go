@@ -1513,3 +1513,29 @@ func ParseContentType(raw string) (typ string, params map[string]string, okStric
 	}
 	return token, map[string]string{}, false, e
 }
+
+// compareSlicesIgnoreOrder checks if two string slices contain the same elements,
+// regardless of their order. It returns true if they do, and false otherwise.
+func CompareSlicesIgnoreOrder(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	// Create a frequency map of elements in the first slice.
+	freq := make(map[string]int, len(a))
+	for _, item := range a {
+		freq[item]++
+	}
+
+	// Decrement the frequency for each element in the second slice.
+	for _, item := range b {
+		if freq[item] == 0 {
+			// If an element is not in the map or its count is already zero,
+			// the slices are not identical.
+			return false
+		}
+		freq[item]--
+	}
+
+	// If the loop completes, the slices have the same elements.
+	return true
+}

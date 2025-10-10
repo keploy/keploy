@@ -302,83 +302,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 			if expVals, ok := expectedHeader["Content-Type"]; ok {
 				actVals := actualHeader["Content-Type"]
-
-				// choose first values (or iterate pairs if you prefer)
-				var expCT, actCT string
-				if len(expVals) > 0 {
-					expCT = expVals[0]
-				}
-				if len(actVals) > 0 {
-					actCT = actVals[0]
-				}
-
-				expType, expParams, expStrict, expErr := matcherUtils.ParseContentType(expCT)
-				actType, actParams, actStrict, actErr := matcherUtils.ParseContentType(actCT)
-
-				// If either had parse errors, log them (don’t fail the test here)
-				if expErr != nil {
-					logger.Warn("malformed expected Content-Type", zap.String("value", expCT), zap.Error(expErr))
-				}
-				if actErr != nil {
-					logger.Warn("malformed actual Content-Type", zap.String("value", actCT), zap.Error(actErr))
-				}
-
-				switch {
-				case expType == "" && actType == "":
-					// Both unusable → keep Medium
-
-				case expType == "" || actType == "":
-					// One unusable → Medium (don’t escalate to High)
-
-				case !strings.EqualFold(expType, actType):
-					// Parsed types differ → High
+				if len(expVals) != len(actVals) || !matcherUtils.CompareSlicesIgnoreOrder(expVals, actVals) {
 					headerRisk = models.High
-
-				default:
-					// Same media type → compare params with calibrated risk
-					lowNoise := map[string]bool{"boundary": true}
-					highImpact := map[string]bool{"profile": true, "version": true, "schema": true, "v": true}
-
-					paramRisk := models.None
-
-					seen := map[string]struct{}{}
-					for k := range expParams {
-						seen[k] = struct{}{}
-					}
-					for k := range actParams {
-						seen[k] = struct{}{}
-					}
-
-					for k := range seen {
-						ev, eok := expParams[k]
-						av, aok := actParams[k]
-						if !eok || !aok || !strings.EqualFold(ev, av) {
-							switch {
-							case k == "charset":
-								if strings.EqualFold(ev, "utf-8") && strings.EqualFold(av, "utf-8") {
-									paramRisk = matcherUtils.MaxRisk(paramRisk, models.Low)
-								} else {
-									paramRisk = matcherUtils.MaxRisk(paramRisk, models.Medium)
-								}
-							case lowNoise[k]:
-								paramRisk = matcherUtils.MaxRisk(paramRisk, models.Low)
-							case highImpact[k]:
-								paramRisk = matcherUtils.MaxRisk(paramRisk, models.High)
-							default:
-								paramRisk = matcherUtils.MaxRisk(paramRisk, models.Medium)
-							}
-						}
-					}
-
-					if paramRisk != models.None {
-						headerRisk = matcherUtils.MaxRisk(headerRisk, paramRisk)
-					}
-
-					// If both were strictly parsed, your confidence is higher; if either was fallback,
-					// keep headerRisk capped at Medium to avoid false High due to odd formatting.
-					if !(expStrict && actStrict) && headerRisk == models.High {
-						headerRisk = models.Medium
-					}
 				}
 			}
 
