@@ -8,7 +8,7 @@ inputs:
   version:
     description: "Version string to tag the pulled image with"
     required: false
-    default: v2-dev
+    default: 2-dev
 runs:
   using: composite
   steps:
@@ -22,5 +22,5 @@ runs:
 
         # Retag to the name your stack expects
         # Works for both tag refs and digest refs
-        docker tag "${IMAGE_REF}" ghcr.io/keploy/keploy:${{ inputs.version }}
+        docker tag "${IMAGE_REF}" ghcr.io/keploy/keploy:v${{ inputs.version }}
         docker images | awk 'NR==1 || /keploy\/keploy/ {print}'
