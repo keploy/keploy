@@ -106,7 +106,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				Message:  "missing content-type header in response",
 			}
 			headerResult.Normal = false
-			currentRisk = matcher.MaxRisk(currentRisk, models.High)
+			currentRisk = models.High
 			currentCategories = append(currentCategories, models.HeaderChanged)
 		} else {
 			headerResult.Actual.Value = []string{actualContentType}
@@ -135,7 +135,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Actual:   actualContentType,
 					Message:  "content-type header value mismatch",
 				}
-				currentRisk = matcher.MaxRisk(currentRisk, models.High)
+				currentRisk = models.High
 				currentCategories = append(currentCategories, models.HeaderChanged)
 			}
 		}
