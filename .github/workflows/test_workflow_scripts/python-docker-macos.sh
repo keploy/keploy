@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # for the below shource make it such a way that if the file is not present or already present it does not error
-source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+# source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 # Function to find available port
 find_available_port() {
@@ -53,6 +53,8 @@ for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -
     if [ -f "$file" ] && [ "$file" != "./golang-docker-macos.sh" ]; then
         # Replace 6000 with APP_PORT
         sed -i '' "s/6000/${APP_PORT}/g" "$file" 2>/dev/null || true
+        # Replace mongo:27017 with $DB_CONTAINER:27017
+        sed -i '' "s/mongo:27017/${DB_CONTAINER}:27017/g" "$file" 2>/dev/null || true
         echo "Updated $file"
     fi
 done
@@ -74,7 +76,7 @@ docker build -t $APP_IMAGE .
 
 
 # Generate the keploy-config file.
-$RECORD_BIN config --generate
+keploy config --generate
 
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
@@ -121,14 +123,13 @@ for i in 1 2; do
   send_request_and_shutdown "$container_name" &
   
   # FIX #1: Added --generate-github-actions=false to prevent the read-only filesystem error.
-  "$RECORD_BIN" record \
+  keploy record \
     -c "docker run -p $APP_PORT:$APP_PORT --net keploy-network --rm --name $container_name $APP_IMAGE" \
     --container-name "$container_name" \
     --generate-github-actions=false \
     --proxy-port $PROXY_PORT \
     --dns-port $DNS_PORT \
     --keploy-container "$KEPLOY_CONTAINER" \
-    --debug \
     --record-timer=40s 2>&1 | tee "${container_name}.txt"
      
   
@@ -157,7 +158,7 @@ docker stop $DB_CONTAINER >/dev/null 2>&1 || true
 # --- Test phase ---
 test_container="${APP_CONTAINER}_1"
 echo "Starting test mode..."
-"$REPLAY_BIN" test \
+keploy test \
   -c "docker run -p $APP_PORT:$APP_PORT --net keploy-network --name $test_container $APP_IMAGE" \
   --container-name "$test_container" \
   --apiTimeout 60 \
