@@ -10,7 +10,6 @@ import (
 
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
-	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
@@ -40,12 +39,19 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Agent                 Agent        `json:"agent" yaml:"agent" mapstructure:"agent"`
+	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID        string       `json:"-" yaml:"-" mapstructure:"-"`
+	ServerPort            uint32       `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
+	Version               string       `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL          string       `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID        string       `json:"-" yaml:"-" mapstructure:"-"`
+}
 
-	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
-	Version        string `json:"-" yaml:"-" mapstructure:"-"`
-	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
-	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+type Agent struct {
+	IsDocker  bool   `json:"isDocker" yaml:"isDocker" mapstructure:"isDocker"`
+	Port      uint32 `json:"port" yaml:"port" mapstructure:"port"`
+	ProxyPort uint32 `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 }
 
 type UtGen struct {
@@ -74,7 +80,6 @@ type Record struct {
 	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	BigPayload        bool          `json:"bigPayload" yaml:"bigPayload" mapstructure:"bigPayload"`
 }
 
 type ReRecord struct {

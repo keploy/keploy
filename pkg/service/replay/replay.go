@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,7 +103,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
-	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
+	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
+
+	setupErrGrp, _ := errgroup.WithContext(ctx)
+	setupCtx := context.WithoutCancel(ctx)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
@@ -118,7 +124,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if hookCancel != nil {
 			hookCancel()
 		}
+		cancel()
 		err := g.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop replaying")
+		}
+
+		setupCtxCancel()
+		err = setupErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
@@ -238,55 +251,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 		utils.LogError(r.logger, err, stopReason)
 	}
 
-	// setting the appId for the first test-set.
-	inst.AppID = r.config.AppID
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
 
-		// Reload hooks before each test set if this is not the first test set
-		// This ensures fresh eBPF state and prevents issues between test runs
-		if i > 0 && r.instrument {
-
-			// Cancel the current hooks and wait for cleanup to complete
-			if hookCancel != nil {
-				hookCancel()
-				// Wait for hooks to be completely unloaded using the channel signal
-				// This ensures that all eBPF resources are properly released before we reload
-				r.logger.Debug("Waiting for hooks to be completely unloaded", zap.String("testSet", testSet))
-				<-inst.UnloadDone
-				r.logger.Debug("Hooks unload completed", zap.String("testSet", testSet))
-			}
-
-			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
-
-			// Reload hooks for the new test set with retry mechanism
-			newInst, err := r.reloadHooks(ctx, inst.AppID)
-			if err != nil {
-				stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
-				utils.LogError(r.logger, err, stopReason)
-				if ctx.Err() == context.Canceled {
-					return err
-				}
-				return fmt.Errorf("%s", stopReason)
-			}
-			hookCancel = newInst.HookCancel
-			// Update the inst with the new hook cancel function, app ID, and unload done channel
-			inst.HookCancel = newInst.HookCancel
-			inst.AppID = newInst.AppID
-			inst.UnloadDone = newInst.UnloadDone
-			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
-		}
-
-		err := HookImpl.BeforeTestSetRun(ctx, testSet)
-		if err != nil {
-			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
-			utils.LogError(r.logger, err, stopReason)
-			if ctx.Err() == context.Canceled {
-				return err
-			}
-			return fmt.Errorf("%s", stopReason)
-		}
+		// err := HookImpl.BeforeTestSetRun(ctx, testSet)
+		// if err != nil {
+		// 	stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
+		// 	utils.LogError(r.logger, err, stopReason)
+		// 	if ctx.Err() == context.Canceled {
+		// 		return err
+		// 	}
+		// 	return fmt.Errorf("%s", stopReason)
+		// }
 
 		if !r.config.Test.SkipCoverage {
 			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
@@ -334,7 +311,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, uint64(0), false)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
@@ -544,117 +521,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if !r.instrument {
-		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return &InstrumentState{}, err
-		}
-		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
+		stopReason := "failed setting up the environment"
+		utils.LogError(r.logger, err, stopReason)
+		return &InstrumentState{}, fmt.Errorf("%s", stopReason)
 	}
-	r.config.AppID = appID
-
-	var cancel context.CancelFunc
-	// starting the hooks and proxy
-	select {
-	case <-ctx.Done():
-		return &InstrumentState{}, context.Canceled
-	default:
-		hookCtx := context.WithoutCancel(ctx)
-		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
-		if err != nil {
-			cancel()
-			if errors.Is(err, context.Canceled) {
-				return &InstrumentState{}, err
-			}
-			return &InstrumentState{}, fmt.Errorf("failed to start the hooks and proxy: %w", err)
-		}
-	}
-	return &InstrumentState{AppID: appID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(appID)}, nil
-}
-
-// reloadHooks cancels existing hooks and reloads them for the next test set.
-// This ensures that any stale eBPF state is cleared and fresh hooks are loaded,
-// which can help with reliability and prevent issues between test set runs.
-// This method handles the app context preservation to avoid app deletion during reload.
-func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentState, error) {
-	if !r.instrument {
-		return &InstrumentState{}, nil
-	}
-
-	r.logger.Debug("Reloading eBPF hooks", zap.Uint64("appID", appID))
-
-	// The challenge is that calling Hook again will set up new cleanup that deletes the app
-	// when the context is canceled. We need to create a fresh setup.
-
-	// First, set up the app again since it might have been deleted during cleanup
-	newAppID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
-		Container:     r.config.ContainerName,
-		DockerNetwork: r.config.NetworkName,
-		DockerDelay:   r.config.BuildDelay,
-	})
-	if err != nil {
-		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
-	}
-
-	// Update the config with the new app ID
-	r.config.AppID = newAppID
-
-	// Create a retry mechanism in case of temporary race conditions
-	var lastErr error
-	maxRetries := 5
-	baseDelay := 200 * time.Millisecond
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			return &InstrumentState{}, context.Canceled
-		default:
-		}
-
-		// Add a small delay before each attempt to let any remaining cleanup finish
-		if attempt > 1 {
-			delay := baseDelay * time.Duration(attempt) // Linear backoff
-			r.logger.Debug("Retrying hook reload", zap.Int("attempt", attempt), zap.Duration("delay", delay))
-			time.Sleep(delay)
-		}
-
-		// Start fresh hooks with the new app ID
-		hookCtx := context.WithoutCancel(ctx)
-		hookCtx, cancel := context.WithCancel(hookCtx)
-
-		err := r.instrumentation.Hook(hookCtx, newAppID, models.HookOptions{
-			Mode:          models.MODE_TEST,
-			EnableTesting: r.config.EnableTesting,
-			Rules:         r.config.BypassRules,
-		})
-		if err != nil {
-			cancel()
-			lastErr = err
-			if errors.Is(err, context.Canceled) {
-				return &InstrumentState{}, err
-			}
-			// If this failed due to a race condition, wait and retry with exponential backoff
-			if attempt < maxRetries {
-				delay := baseDelay * time.Duration(attempt*attempt) // Quadratic backoff
-				r.logger.Debug("Hook reload failed, retrying", zap.Int("attempt", attempt), zap.Duration("delay", delay), zap.Error(err))
-				time.Sleep(delay)
-				continue
-			}
-			return &InstrumentState{}, fmt.Errorf("failed to reload hooks after %d attempts: %w", maxRetries, lastErr)
-		}
-
-		// Success - return the new hook state with the new app ID
-		r.logger.Debug("Successfully reloaded eBPF hooks", zap.Uint64("oldAppID", appID), zap.Uint64("newAppID", newAppID), zap.Int("attempt", attempt))
-		return &InstrumentState{AppID: newAppID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(newAppID)}, nil
-	}
-
-	// This should never be reached, but just in case
-	return &InstrumentState{}, fmt.Errorf("failed to reload hooks after %d attempts: %w", maxRetries, lastErr)
+	return &InstrumentState{}, nil
 }
 
 func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
@@ -786,76 +662,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
 	cmdType := utils.CmdType(r.config.CommandType)
-	var userIP string
-
-	// Get all mocks for mapping-based filtering
-	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
-	if err != nil {
-		return models.TestSetStatusFailed, err
-	}
-
+	// var userIP string
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
-	isMappingEnabled := !r.config.DisableMapping
+	var isMappingEnabled bool
 
-	if !isMappingEnabled {
-		r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
-	}
-
-	if r.mappingDB != nil && isMappingEnabled {
-		// Get mappings and check if meaningful mappings are present
-		var hasMeaningfulMappings bool
-		expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
-		if err != nil {
-			r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
-				zap.String("testSetID", testSetID),
-				zap.Error(err))
-			useMappingBased = false
-			expectedTestMockMappings = make(map[string][]string)
-		} else if hasMeaningfulMappings {
-			// Meaningful mappings are present, use mapping-based approach
-			r.logger.Info("Using mapping-based mock filtering strategy",
-				zap.String("testSetID", testSetID),
-				zap.Int("totalMappings", len(expectedTestMockMappings)))
-			useMappingBased = true
-		} else {
-			// No meaningful mappings present, use timestamp-based approach
-			r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
-				zap.String("testSetID", testSetID))
-			useMappingBased = false
-			expectedTestMockMappings = make(map[string][]string)
-		}
-	} else {
-		// No mapping DB available, use timestamp-based approach
-		r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
-		useMappingBased = false
-		expectedTestMockMappings = make(map[string][]string)
-	}
-
-	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
-
-	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
-		MongoPassword:  r.config.Test.MongoPassword,
-		SQLDelay:       time.Duration(r.config.Test.Delay),
-		FallBackOnMiss: r.config.Test.FallBackOnMiss,
-		Mocking:        r.config.Test.Mocking,
-		Backdate:       testCases[0].HTTPReq.Timestamp,
-	})
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to mock outgoing")
-		return models.TestSetStatusFailed, err
-	}
-
-	// Initial mock setup - use empty mapping for initial setup
-	// For the initial setup, we always use mapping-based with empty mapping to get all unfiltered mocks
-	err = r.FilterAndSetMocksWithFallback(ctx, appID, filteredMocks, unfilteredMocks, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
-	if err != nil {
-		return models.TestSetStatusFailed, err
-	}
-
-	if r.instrument {
+	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
@@ -898,18 +711,232 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
+		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		agentReadyCh := make(chan bool, 1)
+		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.Port), agentReadyCh, 1*time.Second)
+
+		select {
+		case <-agentCtx.Done():
+			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
+		case <-agentReadyCh:
+		}
+
+		containerIP, err := r.instrumentation.GetContainerIP4(ctx)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get container IP")
+			return models.TestSetStatusFailed, err
+		}
+		r.logger.Info("Obtained container IP", zap.String("containerIP", containerIP))
+		pkg.AgentIP = containerIP
+
+		err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+			Rules:          r.config.BypassRules,
+			MongoPassword:  r.config.Test.MongoPassword,
+			SQLDelay:       time.Duration(r.config.Test.Delay),
+			FallBackOnMiss: r.config.Test.FallBackOnMiss,
+			Mocking:        r.config.Test.Mocking,
+			Backdate:       testCases[0].HTTPReq.Timestamp,
+		})
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to mock outgoing")
+			return models.TestSetStatusFailed, err
+		}
+
+		// Get all mocks for mapping-based filtering
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+
+		err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to store mocks on agent")
+			return models.TestSetStatusFailed, err
+		}
+
+		var expectedTestMockMappings map[string][]string
+		var useMappingBased bool
+		isMappingEnabled := !r.config.DisableMapping
+
+		if !isMappingEnabled {
+			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+		}
+
+		if r.mappingDB != nil && isMappingEnabled {
+			// Get mappings and check if meaningful mappings are present
+			var hasMeaningfulMappings bool
+			expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
+			if err != nil {
+				r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
+					zap.String("testSetID", testSetID),
+					zap.Error(err))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
+			} else if hasMeaningfulMappings {
+				// Meaningful mappings are present, use mapping-based approach
+				r.logger.Info("Using mapping-based mock filtering strategy",
+					zap.String("testSetID", testSetID),
+					zap.Int("totalMappings", len(expectedTestMockMappings)))
+				useMappingBased = true
+			} else {
+				// No meaningful mappings present, use timestamp-based approach
+				r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+					zap.String("testSetID", testSetID))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
+			}
+		} else {
+			// No mapping DB available, use timestamp-based approach
+			r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
+			useMappingBased = false
+			expectedTestMockMappings = make(map[string][]string)
+		}
+
+		// Send initial filtering parameters to set up mocks for test set
+		err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+
 		// Delay for user application to run
 		select {
 		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
 		case <-runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
+	}
 
-		if utils.IsDockerCmd(cmdType) {
-			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
+	if cmdType != utils.DockerCompose {
+		// Get all mocks for mapping-based filtering
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+
+		err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to store mocks on agent")
+			return models.TestSetStatusFailed, err
+		}
+
+		isMappingEnabled := !r.config.DisableMapping
+
+		if !isMappingEnabled {
+			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+		}
+
+		if r.mappingDB != nil && isMappingEnabled {
+			// Get mappings and check if meaningful mappings are present
+			var hasMeaningfulMappings bool
+			expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
 			if err != nil {
+				r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
+					zap.String("testSetID", testSetID),
+					zap.Error(err))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
+			} else if hasMeaningfulMappings {
+				// Meaningful mappings are present, use mapping-based approach
+				r.logger.Info("Using mapping-based mock filtering strategy",
+					zap.String("testSetID", testSetID),
+					zap.Int("totalMappings", len(expectedTestMockMappings)))
+				useMappingBased = true
+			} else {
+				// No meaningful mappings present, use timestamp-based approach
+				r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+					zap.String("testSetID", testSetID))
+				useMappingBased = false
+				expectedTestMockMappings = make(map[string][]string)
+			}
+		} else {
+			// No mapping DB available, use timestamp-based approach
+			r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
+			useMappingBased = false
+			expectedTestMockMappings = make(map[string][]string)
+		}
+
+		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
+
+		if cmdType != utils.DockerCompose {
+			err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+				Rules:          r.config.BypassRules,
+				MongoPassword:  r.config.Test.MongoPassword,
+				SQLDelay:       time.Duration(r.config.Test.Delay),
+				FallBackOnMiss: r.config.Test.FallBackOnMiss,
+				Mocking:        r.config.Test.Mocking,
+				Backdate:       testCases[0].HTTPReq.Timestamp,
+			})
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to mock outgoing")
 				return models.TestSetStatusFailed, err
 			}
+		}
+
+		// Send initial filtering parameters to set up mocks for test set
+		err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+
+		if r.instrument && cmdType != utils.DockerCompose {
+			if !serveTest {
+				runTestSetErrGrp.Go(func() error {
+					defer utils.Recover(r.logger)
+					appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+						AppCommand: conf.AppCommand,
+					})
+					if appErr.AppErrorType == models.ErrCtxCanceled {
+						return nil
+					}
+					appErrChan <- appErr
+					return nil
+				})
+			}
+
+			// Checking for errors in the mocking and application
+			runTestSetErrGrp.Go(func() error {
+				defer utils.Recover(r.logger)
+				select {
+				case err := <-appErrChan:
+					switch err.AppErrorType {
+					case models.ErrCommandError:
+						testSetStatusByErrChan = models.TestSetStatusFaultUserApp
+					case models.ErrUnExpected:
+						testSetStatusByErrChan = models.TestSetStatusAppHalted
+					case models.ErrAppStopped:
+						testSetStatusByErrChan = models.TestSetStatusAppHalted
+					case models.ErrCtxCanceled:
+						return nil
+					case models.ErrInternal:
+						testSetStatusByErrChan = models.TestSetStatusInternalErr
+					default:
+						testSetStatusByErrChan = models.TestSetStatusAppHalted
+					}
+					utils.LogError(r.logger, err, "application failed to run")
+				case <-runTestSetCtx.Done():
+					testSetStatusByErrChan = models.TestSetStatusUserAbort
+				}
+				exitLoopChan <- true
+				runTestSetCtxCancel()
+				return nil
+			})
+
+			// Delay for user application to run
+			select {
+			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			case <-runTestSetCtx.Done():
+				return models.TestSetStatusUserAbort, context.Canceled
+			}
+
+			// if utils.IsDockerCmd(cmdType) {
+			// 	// userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
+			// 	// userIP = pkg.AgentIP;
+			// 	// if err != nil {
+			// 	// 	return models.TestSetStatusFailed, err
+			// 	// }
+			// }
 		}
 	}
 
@@ -1029,15 +1056,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			respTime = testCase.GrpcResp.Timestamp
 		}
 
-		err = r.FilterAndSetMocksWithFallback(runTestSetCtx, appID, filteredMocks, unfilteredMocks, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+		err = r.NewUpdateMockParams(runTestSetCtx, appID, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to filter and set mocks")
+			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
 		}
 
 		// Handle Docker environment IP replacement
-		if utils.IsDockerCmd(cmdType) {
-			err = r.replaceHostInTestCase(testCase, userIP, "docker container's IP")
+		if utils.IsDockerCmd(cmdType) && runtime.GOOS != "darwin" {
+			err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
 			if err != nil {
 				break
 			}
@@ -1532,6 +1559,37 @@ func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, appID uint
 		return r.FilterAndSetMocks(ctx, appID, filtered, unfiltered, afterTime, beforeTime, totalConsumedMocks)
 	}
 
+}
+
+// NewUpdateMockParams sends filtering parameters to agent instead of sending filtered mocks
+func (r *Replayer) NewUpdateMockParams(ctx context.Context, appID uint64, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+	if !r.instrument {
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		return nil
+	}
+
+	// Build filter parameters
+	params := models.MockFilterParams{
+		AfterTime:          afterTime,
+		BeforeTime:         beforeTime,
+		MockMapping:        expectedMockMapping,
+		UseMappingBased:    useMappingBased,
+		TotalConsumedMocks: totalConsumedMocks,
+	}
+
+	// Send parameters to agent for filtering and mock updates
+	err := r.instrumentation.UpdateMockParams(ctx, appID, params)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+		return err
+	}
+
+	r.logger.Debug("Successfully sent mock filter parameters to agent",
+		zap.Uint64("appID", appID),
+		zap.Bool("useMappingBased", useMappingBased),
+		zap.Int("mockMappingCount", len(expectedMockMapping)))
+
+	return nil
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {

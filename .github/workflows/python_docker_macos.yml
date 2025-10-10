@@ -37,6 +37,13 @@ jobs:
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: "keploy@123"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 

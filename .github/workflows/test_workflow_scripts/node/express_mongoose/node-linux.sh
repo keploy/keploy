@@ -14,6 +14,7 @@ die() {
   echo "== mongo logs (complete) =="; docker logs mongoDb || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
   echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
+  echo "== keploy_agent logs (complete) =="; for f in keploy_agent*; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
   echo "== *.txt logs (complete) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
   for f in test_logs*.txt; do [[ -f "$f" ]] && { echo "== $f (complete) =="; cat "$f"; }; done
   exit "$rc"
@@ -100,6 +101,11 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
+sudo "$RECORD_BIN" agent \
+ > keploy_agent_record.log 2>&1 &
+AGENT_PID=$!
+echo "Keploy Agent PID: $AGENT_PID"
+
 for i in 1 2; do
   section "Record iteration $i"
   app_name="nodeApp_${i}"
@@ -111,6 +117,8 @@ for i in 1 2; do
 
   # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
   send_request "$KEPLOY_PID"
+
+  cat "${app_name}.txt"
 
   # Wait + capture rc
   set +e

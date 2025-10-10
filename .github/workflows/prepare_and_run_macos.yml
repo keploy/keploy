@@ -17,7 +17,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
+          rm -rf ~/.gitconfig
       
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -67,13 +67,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Clear docker images and cache
+        run: |
+          docker builder prune --all -f
+          docker volume prune -f
+
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: "keploy@123"
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
       - name: Build image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+          
       - name: Push image
         run: |
           docker push ttl.sh/keploy/keploy:1h
@@ -86,10 +100,8 @@ jobs:
 
   run_python_docker_macos:
     needs: [build-and-upload, build-docker-image]
-    # needs: [upload-latest]
     uses: ./.github/workflows/python_docker_macos.yml
 
   run_golang_docker_macos:
     needs: [build-and-upload, build-docker-image]
-    # needs: [upload-latest]
     uses: ./.github/workflows/golang_docker_macos.yml

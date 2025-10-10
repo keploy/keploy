@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"time"
@@ -65,6 +66,18 @@ type MongoRequest struct {
 	Header    *MongoHeader `json:"header,omitempty" yaml:"header,omitempty" bson:"header,omitempty"`
 	Message   interface{}  `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
 	ReadDelay int64        `json:"read_delay,omitempty" yaml:"read_delay,omitempty" bson:"read_delay,omitempty"`
+}
+
+type MongoResponse struct {
+	Header    *MongoHeader `json:"header,omitempty" yaml:"header,omitempty" bson:"header,omitempty"`
+	Message   interface{}  `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
+	ReadDelay int64        `json:"read_delay,omitempty" yaml:"read_delay,omitempty" bson:"read_delay,omitempty"`
+}
+
+func init() {
+	gob.Register(&MongoOpMessage{})
+	gob.Register(&MongoOpQuery{})
+	gob.Register(&MongoOpReply{})
 }
 
 // UnmarshalBSON implements bson.Unmarshaler for mongoRequests because of interface typeof field
@@ -170,12 +183,6 @@ func (mr *MongoRequest) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(aux)
-}
-
-type MongoResponse struct {
-	Header    *MongoHeader `json:"header,omitempty" yaml:"header,omitempty" bson:"header,omitempty"`
-	Message   interface{}  `json:"message,omitempty" yaml:"message,omitempty" bson:"message,omitempty"`
-	ReadDelay int64        `json:"read_delay,omitempty" yaml:"read_delay,omitempty" bson:"read_delay,omitempty"`
 }
 
 // UnmarshalBSON implements bson.Unmarshaler for mongoResponses because of interface typeof field
