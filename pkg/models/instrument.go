@@ -51,9 +51,10 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	Container     string
-	DockerNetwork string
-	DockerDelay   uint64
+	Container       string
+	DockerNetwork   string
+	DockerDelay     uint64
+	KeployContainer string
 }
 
 type RunOptions struct {

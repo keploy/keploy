@@ -81,6 +81,8 @@ send_request() {
 # Load test scripts and start MongoDB container
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
+echo "Debug just to trigger"
+
 section "Start Mongo"
 docker run --name mongoDb --rm -p 27017:27017 -d mongo
 wait_for_mongo
