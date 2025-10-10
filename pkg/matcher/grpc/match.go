@@ -57,8 +57,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				Message:  "missing status header in response",
 			}
 			headerResult.Normal = false
-			currentRisk = matcher.MaxRisk(currentRisk, models.High)
-			currentCategories = append(currentCategories, models.StatusCodeChange, models.SchemaBroken)
+			currentRisk = models.High
+			currentCategories = append(currentCategories, models.StatusCodeChanged)
 		} else {
 			headerResult.Actual.Value = []string{actualStatus}
 			headerResult.Normal = expectedStatus == actualStatus
@@ -73,8 +73,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Actual:   actualStatus,
 					Message:  "status header value mismatch",
 				}
-				currentRisk = matcher.MaxRisk(currentRisk, models.High)
-				currentCategories = append(currentCategories, models.StatusCodeChange, models.SchemaBroken)
+				currentRisk = models.High
+				currentCategories = append(currentCategories, models.StatusCodeChanged)
 			}
 		}
 
@@ -300,7 +300,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			}
 		} else {
 			// non-JSON payload mismatch → Broken
-			currentRisk = matcher.MaxRisk(currentRisk, models.High)
+			currentRisk = models.High
 			currentCategories = append(currentCategories, models.SchemaBroken)
 		}
 	}

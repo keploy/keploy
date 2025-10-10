@@ -14,7 +14,6 @@ import (
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/v2/pkg"
-	matcher "go.keploy.io/server/v2/pkg/matcher"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/tools"
@@ -291,25 +290,103 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		// 1) Status code mismatch => HIGH & Broken (contract-level)
 		if isStatusMismatch {
 			currentRisk = models.High
-			currentCategories = append(currentCategories, models.StatusCodeChange, models.SchemaBroken)
+			currentCategories = append(currentCategories, models.StatusCodeChanged)
 		}
 
 		//  2. Header mismatches => MEDIUM normally (schema unchanged: value-only),
 		//     but Content-Type change => HIGH & Broken
 		if isHeaderMismatch {
-			currentCategories = append(currentCategories, models.HeaderChange)
-			ctHigh := false
-			for hk := range expectedHeader {
-				if strings.EqualFold(hk, "Content-Type") {
-					ctHigh = true
-					break
+			currentCategories = append(currentCategories, models.HeaderChanged)
+
+			headerRisk := models.Medium // default for header diffs
+
+			if expVals, ok := expectedHeader["Content-Type"]; ok {
+				actVals := actualHeader["Content-Type"]
+
+				// choose first values (or iterate pairs if you prefer)
+				var expCT, actCT string
+				if len(expVals) > 0 {
+					expCT = expVals[0]
+				}
+				if len(actVals) > 0 {
+					actCT = actVals[0]
+				}
+
+				expType, expParams, expStrict, expErr := matcherUtils.ParseContentType(expCT)
+				actType, actParams, actStrict, actErr := matcherUtils.ParseContentType(actCT)
+
+				// If either had parse errors, log them (don’t fail the test here)
+				if expErr != nil {
+					logger.Warn("malformed expected Content-Type", zap.String("value", expCT), zap.Error(expErr))
+				}
+				if actErr != nil {
+					logger.Warn("malformed actual Content-Type", zap.String("value", actCT), zap.Error(actErr))
+				}
+
+				switch {
+				case expType == "" && actType == "":
+					// Both unusable → keep Medium
+
+				case expType == "" || actType == "":
+					// One unusable → Medium (don’t escalate to High)
+
+				case !strings.EqualFold(expType, actType):
+					// Parsed types differ → High
+					headerRisk = models.High
+
+				default:
+					// Same media type → compare params with calibrated risk
+					lowNoise := map[string]bool{"boundary": true}
+					highImpact := map[string]bool{"profile": true, "version": true, "schema": true, "v": true}
+
+					paramRisk := models.None
+
+					seen := map[string]struct{}{}
+					for k := range expParams {
+						seen[k] = struct{}{}
+					}
+					for k := range actParams {
+						seen[k] = struct{}{}
+					}
+
+					for k := range seen {
+						ev, eok := expParams[k]
+						av, aok := actParams[k]
+						if !eok || !aok || !strings.EqualFold(ev, av) {
+							switch {
+							case k == "charset":
+								if strings.EqualFold(ev, "utf-8") && strings.EqualFold(av, "utf-8") {
+									paramRisk = matcherUtils.MaxRisk(paramRisk, models.Low)
+								} else {
+									paramRisk = matcherUtils.MaxRisk(paramRisk, models.Medium)
+								}
+							case lowNoise[k]:
+								paramRisk = matcherUtils.MaxRisk(paramRisk, models.Low)
+							case highImpact[k]:
+								paramRisk = matcherUtils.MaxRisk(paramRisk, models.High)
+							default:
+								paramRisk = matcherUtils.MaxRisk(paramRisk, models.Medium)
+							}
+						}
+					}
+
+					if paramRisk != models.None {
+						headerRisk = matcherUtils.MaxRisk(headerRisk, paramRisk)
+					}
+
+					// If both were strictly parsed, your confidence is higher; if either was fallback,
+					// keep headerRisk capped at Medium to avoid false High due to odd formatting.
+					if !(expStrict && actStrict) && headerRisk == models.High {
+						headerRisk = models.Medium
+					}
 				}
 			}
-			if ctHigh {
-				currentRisk = matcher.MaxRisk(currentRisk, models.High)
-				currentCategories = append(currentCategories, models.SchemaBroken)
-			} else {
-				currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+
+			currentRisk = matcherUtils.MaxRisk(currentRisk, headerRisk)
+
+			// keep your logging of header diffs as-is
+			for k, v := range expectedHeader {
+				logDiffs.PushHeaderDiff(fmtSprint234(v), fmtSprint234(actualHeader[k]), k, headerNoise)
 			}
 		}
 
@@ -317,16 +394,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if isBodyMismatch {
 			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
 				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
-					currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
+					currentRisk = matcherUtils.MaxRisk(currentRisk, assess.Risk)
 					currentCategories = append(currentCategories, assess.Category...)
 				} else {
 					// couldn't classify → conservative
-					currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+					currentRisk = matcherUtils.MaxRisk(currentRisk, models.Medium)
 					currentCategories = append(currentCategories, models.SchemaUnchanged)
 				}
 			} else {
 				// Non-JSON body mismatch: cannot noise-mask or classify precisely → treat as Broken
-				currentRisk = matcher.MaxRisk(currentRisk, models.High)
+				currentRisk = models.High
 				currentCategories = append(currentCategories, models.SchemaBroken)
 			}
 		}

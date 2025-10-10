@@ -115,11 +115,11 @@ const (
 type FailureCategory string
 
 const (
-	SchemaUnchanged  FailureCategory = "SCHEMA_UNCHANGED"   // schema is identical
-	SchemaAdded      FailureCategory = "SCHEMA_ADDED"       // only new fields added; backward compatible
-	SchemaBroken     FailureCategory = "SCHEMA_BROKEN"      // removed/changed fields, type mismatch, or entirely different schema
-	StatusCodeChange FailureCategory = "STATUS_CODE_CHANGE" // status code changed
-	HeaderChange     FailureCategory = "HEADER_CHANGE"      // header changed
+	SchemaUnchanged   FailureCategory = "SCHEMA_UNCHANGED"    // schema is identical
+	SchemaAdded       FailureCategory = "SCHEMA_ADDED"        // only new fields added; backward compatible
+	SchemaBroken      FailureCategory = "SCHEMA_BROKEN"       // removed/changed fields, type mismatch, or entirely different schema
+	StatusCodeChanged FailureCategory = "STATUS_CODE_CHANGED" // status code changed
+	HeaderChanged     FailureCategory = "HEADER_CHANGED"       // header changed
 )
 
 type FailureAssessment struct {

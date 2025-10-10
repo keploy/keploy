@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"reflect"
@@ -1483,4 +1484,32 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 		}
 	}
 	return true
+}
+
+// lowerMap returns a lower-cased copy of parameter keys.
+func lowerMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+// parseContentType tries strict parsing, then a tolerant fallback.
+// okStrict indicates whether strict parsing succeeded.
+func ParseContentType(raw string) (typ string, params map[string]string, okStrict bool, err error) {
+	if raw == "" {
+		return "", nil, false, nil
+	}
+	t, p, e := mime.ParseMediaType(raw)
+	if e == nil {
+		return strings.ToLower(t), lowerMap(p), true, nil
+	}
+	// tolerant fallback: take token before ';', trim, lowercase
+	token := strings.ToLower(strings.TrimSpace(strings.Split(raw, ";")[0]))
+	if token == "" || !strings.Contains(token, "/") {
+		// no usable fallback
+		return "", nil, false, e
+	}
+	return token, map[string]string{}, false, e
 }
