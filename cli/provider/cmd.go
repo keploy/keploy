@@ -320,7 +320,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test and rerecord mode")
+		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test and rerecord mode")
 		cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 		if cmd.Name() == "rerecord" {
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
@@ -407,6 +407,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"protoFile":             "proto-file",
 		"protoDir":              "proto-dir",
 		"protoInclude":          "proto-include",
+		"disableMapping":        "disable-mapping",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -908,6 +909,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
+
+			// get disable-mapping flag value
+			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+			if err != nil {
+				errMsg := "failed to get the disable-mapping flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.DisableMapping = disableMapping
+
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
 				host, err := cmd.Flags().GetString("host")
@@ -1140,7 +1151,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
+	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {

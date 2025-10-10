@@ -88,6 +88,15 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 }
 
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
+
+	//Get the correct keploy alias.
+	keployAlias, err := getAlias(ctx, logger)
+	if err != nil {
+		return err
+	}
+
+	logger.Debug("keployAlias", zap.String("keployAlias", keployAlias))
+
 	client, err := docker.New(logger)
 	if err != nil {
 		utils.LogError(logger, err, "failed to initialize docker")
@@ -101,19 +110,12 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			volumeName = strings.Split(volume, ":")[0]
 		}
 		logger.Debug("creating volume", zap.String("volume", volumeName))
-		err := client.CreateVolume(ctx, volumeName, true, nil)
+		err := client.CreateVolume(ctx, volumeName, false, nil)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create volume "+volumeName)
 			return err
 		}
 	}
-
-	//Get the correct keploy alias.
-	keployAlias, err := getAlias(ctx, logger)
-	if err != nil {
-		return err
-	}
-	logger.Debug("keployAlias", zap.String("keployAlias", keployAlias))
 
 	var quotedArgs []string
 
