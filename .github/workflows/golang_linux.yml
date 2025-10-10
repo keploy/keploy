@@ -17,6 +17,9 @@ jobs:
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
+          - name: risk-profile
+            path: risk-profile
+            script_dir: risk_profile
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -47,6 +50,7 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+          ref: risk-profile
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

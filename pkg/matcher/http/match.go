@@ -284,6 +284,70 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 
+		currentRisk := models.None
+		var currentCategories []models.FailureCategory
+
+		// 1) Status code mismatch => HIGH & Broken (contract-level)
+		if isStatusMismatch {
+			currentRisk = models.High
+			currentCategories = append(currentCategories, models.StatusCodeChanged)
+		}
+
+		//  2. Header mismatches => MEDIUM normally (schema unchanged: value-only),
+		//     but Content-Type change => HIGH & Broken
+		if isHeaderMismatch {
+			currentCategories = append(currentCategories, models.HeaderChanged)
+
+			headerRisk := models.Medium // default for header diffs
+
+			if expVals, ok := expectedHeader["Content-Type"]; ok {
+				actVals := actualHeader["Content-Type"]
+				if !matcherUtils.CompareSlicesIgnoreOrder(expVals, actVals) {
+					headerRisk = models.High
+				}
+			}
+
+			currentRisk = matcherUtils.MaxRisk(currentRisk, headerRisk)
+
+			// keep your logging of header diffs as-is
+			for k, v := range expectedHeader {
+				logDiffs.PushHeaderDiff(fmtSprint234(v), fmtSprint234(actualHeader[k]), k, headerNoise)
+			}
+		}
+
+		// 3) Body mismatches
+		if isBodyMismatch {
+			if actRespBodyType == models.JSON && expRespBodyType == models.JSON {
+				if assess, err := matcherUtils.ComputeFailureAssessmentJSON(cleanExp, cleanAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
+					currentRisk = matcherUtils.MaxRisk(currentRisk, assess.Risk)
+					currentCategories = append(currentCategories, assess.Category...)
+				} else {
+					// couldn't classify → conservative
+					currentRisk = models.High
+					currentCategories = append(currentCategories, models.InternalFailure)
+				}
+			} else {
+				// Non-JSON body mismatch: cannot noise-mask or classify precisely → treat as Broken
+				currentRisk = models.High
+				currentCategories = append(currentCategories, models.SchemaBroken)
+			}
+		}
+
+		// Remove duplicates
+		catMap := make(map[models.FailureCategory]bool)
+		uniqueCategories := []models.FailureCategory{}
+		for _, cat := range currentCategories {
+			if !catMap[cat] {
+				catMap[cat] = true
+				uniqueCategories = append(uniqueCategories, cat)
+			}
+		}
+
+		res.FailureInfo = models.FailureInfo{
+			Risk:     currentRisk,
+			Category: uniqueCategories,
+		}
+
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true
 			_, err := newLogger.Printf(logs)
