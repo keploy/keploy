@@ -592,8 +592,8 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 			return fmt.Errorf("volume %s exists with different options", volumeName)
 		}
 
-		// Remove the existing volume
-		err := idc.VolumeRemove(ctx, volumeName, true)
+		idc.logger.Debug("removing existing volume with different options", zap.String("volume", volumeName))
+		err := idc.VolumeRemove(ctx, volumeName, false)
 		if err != nil {
 			idc.logger.Error("failed to remove existing volume", zap.String("volume", volumeName), zap.Error(err))
 			cancel()
