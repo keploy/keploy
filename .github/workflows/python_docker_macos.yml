@@ -78,6 +78,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
         shell: bash
         run: |
           cd samples-python/flask-mongo

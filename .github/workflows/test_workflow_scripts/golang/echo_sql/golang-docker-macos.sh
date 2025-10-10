@@ -22,11 +22,10 @@ DB_PORT=$(find_available_port $((APP_PORT + 1)))
 PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
 DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
 
-# Generate unique container names with timestamp suffix
-TIMESTAMP=$(date +%s)
-APP_CONTAINER="echoApp_${TIMESTAMP}"
-DB_CONTAINER="postgresDb_${TIMESTAMP}"
-KEPLOY_CONTAINER="keploy_${TIMESTAMP}"
+# Generate unique container names with JOB_ID suffix
+APP_CONTAINER="echoApp_${JOB_ID}"
+DB_CONTAINER="postgresDb_${JOB_ID}"
+KEPLOY_CONTAINER="keploy_${JOB_ID}"
 
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
