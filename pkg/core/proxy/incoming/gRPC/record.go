@@ -288,15 +288,36 @@ func (p *grpcTestCaseProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod str
 	}
 
 	if !isResponse {
+		// :method
 		if _, ok := hdr.PseudoHeaders[":method"]; !ok {
 			hdr.PseudoHeaders[":method"] = "POST"
 		}
+
+		// :scheme (keep http as we dial over the provided net.Conn)
 		if _, ok := hdr.PseudoHeaders[":scheme"]; !ok {
 			hdr.PseudoHeaders[":scheme"] = "http"
 		}
-		if _, ok := hdr.PseudoHeaders[":path"]; !ok {
-			hdr.PseudoHeaders[":path"] = fullMethod
+
+		// :path — prefer fullMethod; ensure it's non-empty and starts with '/'
+		if _, ok := hdr.PseudoHeaders[":path"]; !ok || hdr.PseudoHeaders[":path"] == "" {
+			if fullMethod != "" {
+				if !strings.HasPrefix(fullMethod, "/") {
+					fullMethod = "/" + fullMethod
+				}
+				hdr.PseudoHeaders[":path"] = fullMethod
+			} else {
+				// absolute last resort to avoid "missing :path header"
+				hdr.PseudoHeaders[":path"] = "/"
+			}
 		}
+
+		// :authority — derive from Host header if present, else from destConn
+		if _, ok := hdr.PseudoHeaders[":authority"]; !ok || hdr.PseudoHeaders[":authority"] == "" {
+			if p.destConn != nil && p.destConn.RemoteAddr() != nil {
+				hdr.PseudoHeaders[":authority"] = p.destConn.RemoteAddr().String()
+			}
+		}
+
 		if _, ok := hdr.OrdinaryHeaders["te"]; !ok {
 			hdr.OrdinaryHeaders["te"] = "trailers"
 		}
