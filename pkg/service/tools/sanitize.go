@@ -103,6 +103,12 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
 
+	// Create Gitleaks detector once per test set (optimization)
+	detector, err := detect.NewDetectorDefaultConfig()
+	if err != nil {
+		return fmt.Errorf("failed to create gitleaks detector: %w", err)
+	}
+
 	testsDir := filepath.Join(testSetDir, "tests")
 	var files []string
 
@@ -141,7 +147,7 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		default:
 		}
 
-		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
+		if err := SanitizeFileInPlaceWithDetector(f, aggSecrets, detector); err != nil {
 			// Continue to next file
 			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
 			continue
@@ -167,11 +173,18 @@ type replacement struct {
 // - Writes placeholders into the YAML
 // - Handles JSON-in-string and curl header blobs
 func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) {
-	// 1) Detect secrets
+	// 1) Detect secrets (create detector each time - legacy for compatibility)
 	detector, err := detect.NewDetectorDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("gitleaks: %w", err)
 	}
+	return RedactYAMLWithDetector(yamlBytes, aggSecrets, detector)
+}
+
+// RedactYAMLWithDetector applies secret detection + redaction using provided detector.
+// This is the optimized version that reuses detector instances.
+func RedactYAMLWithDetector(yamlBytes []byte, aggSecrets map[string]string, detector *detect.Detector) ([]byte, error) {
+	// 1) Detect secrets using provided detector
 	findings := detector.DetectString(string(yamlBytes))
 	secretSet := collectSecrets(findings)
 
@@ -582,6 +595,28 @@ func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("redact %s: %w", path, err)
 	}
+
+	return writeRedactedFile(path, redacted)
+}
+
+// SanitizeFileInPlaceWithDetector reads a YAML file, redacts secrets using provided detector, and writes back in-place.
+// This is the optimized version that reuses detector instances.
+func SanitizeFileInPlaceWithDetector(path string, aggSecrets map[string]string, detector *detect.Detector) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	redacted, err := RedactYAMLWithDetector(raw, aggSecrets, detector)
+	if err != nil {
+		return fmt.Errorf("redact %s: %w", path, err)
+	}
+
+	return writeRedactedFile(path, redacted)
+}
+
+// writeRedactedFile handles the common file writing logic
+func writeRedactedFile(path string, redacted []byte) error {
 
 	// Normalize YAML formatting
 	var root yaml.Node
