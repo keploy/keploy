@@ -6,6 +6,8 @@ toolchain go1.24.6
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
+replace github.com/keploy/integrations v0.0.0-20251009171234-d034a74b8171 => /home/sarthak/projects/integrations
+
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cilium/ebpf v0.19.0
@@ -16,7 +18,7 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.18.0
 	github.com/k0kubun/pp/v3 v3.2.0
-	github.com/keploy/integrations v0.0.0-20251009143006-96238736bd45
+	github.com/keploy/integrations v0.0.0-20251009171234-d034a74b8171
 	github.com/miekg/dns v1.1.57
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5
@@ -128,16 +130,21 @@ require (
 
 require (
 	dario.cat/mergo v1.0.1 // indirect
+	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/BobuSumisu/aho-corasick v1.0.3 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
 	github.com/Masterminds/semver/v3 v3.3.0 // indirect
 	github.com/Masterminds/sprig/v3 v3.3.0 // indirect
 	github.com/STARRY-S/zip v0.2.1 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
+	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/lipgloss v0.5.0 // indirect
+	github.com/containerd/fifo v1.1.0 // indirect
+	github.com/docker/go-metrics v0.0.1 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/fatih/semgroup v1.2.0 // indirect
 	github.com/gitleaks/go-gitdiff v0.9.1 // indirect
@@ -153,11 +160,18 @@ require (
 	github.com/minio/minlz v1.0.0 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
+	github.com/moby/term v0.5.2 // indirect
+	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nwaples/rardecode/v2 v2.1.0 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20241121165744-79df5c4772f2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/prometheus/client_golang v1.22.0 // indirect
+	github.com/prometheus/client_model v0.6.1 // indirect
+	github.com/prometheus/common v0.63.0 // indirect
+	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/rootless-containers/rootlesskit v1.1.1 // indirect
 	github.com/rs/zerolog v1.33.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sorairolake/lzip-go v0.3.5 // indirect
@@ -172,6 +186,7 @@ require (
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
+	golang.org/x/time v0.11.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250313205543-e70fdf4c4cb4 // indirect
 )
 
