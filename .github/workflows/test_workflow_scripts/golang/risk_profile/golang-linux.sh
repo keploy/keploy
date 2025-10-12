@@ -132,10 +132,10 @@ check_report_for_risk_profiles() {
 
     # Assert the summary counts
     echo "Asserting summary counts..."
-    [ "$(yq '.success' "$latest_report")" == "1" ] || { echo "::error::Expected 1 successful test, found $(yq '.success' "$latest_report")"; exit 1; }
     [ "$(yq '.failure' "$latest_report")" == "11" ] || { echo "::error::Expected 11 failed tests, found $(yq '.failure' "$latest_report")"; exit 1; }
     [ "$(yq '.high-risk' "$latest_report")" == "6" ] || { echo "::error::Expected 6 high-risk failures, found $(yq '.high-risk' "$latest_report")"; exit 1; }
     [ "$(yq '.medium-risk' "$latest_report")" == "4" ] || { echo "::error::Expected 4 medium-risk failures, found $(yq '.medium-risk' "$latest_report")"; exit 1; }
+    [ "$(yq '.low-risk' "$latest_report")" == "1" ] || { echo "::error::Expected 1 low-risk failures, found $(yq '.low-risk' "$latest_report")"; exit 1; }
     echo "✅ Summary counts are correct."
 
     # Assert each test case individually
