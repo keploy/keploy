@@ -148,6 +148,7 @@ wait_for_port() {
 kill_keploy_process() {
     pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
     wait "$pid" 2>/dev/null || true
+    sleep 10
 }
 
 # --- Main Logic ---

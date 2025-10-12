@@ -99,6 +99,7 @@ check_report_for_risk_profiles() {
     expected_risks["/users-medium-risk-with-addition"]="MEDIUM"
     expected_risks["/users-high-risk-type"]="HIGH"
     expected_risks["/users-high-risk-removal"]="HIGH"
+    expected_risks["/schema-completely-changed"]="HIGH"
     expected_risks["/status-change-high-risk"]="HIGH"
     expected_risks["/content-type-change-high-risk"]="HIGH"
     expected_risks["/header-change-medium-risk"]="MEDIUM"
@@ -113,6 +114,7 @@ check_report_for_risk_profiles() {
     expected_categories["/users-medium-risk-with-addition"]="SCHEMA_ADDED"
     expected_categories["/users-high-risk-type"]="SCHEMA_BROKEN"
     expected_categories["/users-high-risk-removal"]="SCHEMA_BROKEN"
+    expected_categories["/schema-completely-changed"]="SCHEMA_BROKEN"
     expected_categories["/status-change-high-risk"]="STATUS_CODE_CHANGED"
     expected_categories["/content-type-change-high-risk"]="HEADER_CHANGED"
     expected_categories["/header-change-medium-risk"]="HEADER_CHANGED"
@@ -293,6 +295,7 @@ if [ -f "$config_file" ]; then
 else
   echo "⚠️ Config file $config_file not found, skipping sed replace."
 fi
+git checkout risk-profile
 echo "Cleaning up previous runs..."
 rm -rf keploy/ my-app *.log
 echo "Building the Go application..."
@@ -321,7 +324,7 @@ endsec
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout risk-profile-v2
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disable-mock-upload 2>&1 | tee test.log || true
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles
 endsec
@@ -342,7 +345,7 @@ endsec
 
 section "Run Final Validation Test"
 echo "Running final test run to confirm all tests now pass..."
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disable-mock-upload 2>&1 | tee final_test.log || true
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee final_test.log || true
 check_for_errors "final_test.log"
 endsec
 
