@@ -41,6 +41,39 @@ run_with_loader() {
     return $?
 }
 
+# Function to download with progress bar
+download_with_progress() {
+    local url=$1
+    local output=$2
+    local message=$3
+    local completion_message=$4
+    
+    # Hide cursor
+    tput civis
+    
+    # Download with progress
+    curl --silent --location --progress-bar "$url" -o "$output" 2>&1 | {
+        local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+        local i=0
+        while IFS= read -r line; do
+            # Extract percentage from progress bar if available
+            if [[ "$line" =~ ([0-9]+)% ]]; then
+                local percentage="${BASH_REMATCH[1]}"
+                printf "\r⠋ $message [$percentage%%]"
+            else
+                i=$(( (i+1) %10 ))
+                printf "\r${spin:$i:1} $message"
+            fi
+        done
+        printf "\r✓ $completion_message\n"
+    }
+    
+    # Show cursor
+    tput cnorm
+    
+    return 0
+}
+
 installKeploy (){
     version="latest"
     IS_CI=false
@@ -137,7 +170,13 @@ installKeploy (){
         # to avoid the "File exists" error
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
-        run_with_loader "Downloading Keploy binary..." "Downloaded binary" "curl --silent --location '$download_url' | tar xz -C /tmp/keploy/"
+        
+        # Download with progress
+        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
+        
+        # Extract with loader
+        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz -C /tmp/keploy/ && rm -f /tmp/keploy.tar.gz"
+        
         move_keploy_binary
         delete_keploy_alias
     }
@@ -148,7 +187,13 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        run_with_loader "Downloading Keploy binary..." "Downloaded binary" "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
+        
+        # Download with progress
+        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
+        
+        # Extract with loader
+        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp && rm -f /tmp/keploy.tar.gz"
+        
         move_keploy_binary
     }
 
@@ -159,7 +204,13 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        run_with_loader "Downloading Keploy binary..." "Downloaded binary" "curl --silent --location '$download_url' | tar xz --overwrite -C /tmp"
+        
+        # Download with progress
+        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
+        
+        # Extract with loader
+        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp && rm -f /tmp/keploy.tar.gz"
+        
         move_keploy_binary
     }
 
