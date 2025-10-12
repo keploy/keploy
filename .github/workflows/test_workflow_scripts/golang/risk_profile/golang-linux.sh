@@ -323,7 +323,9 @@ endsec
 
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
-git checkout risk-profile-v2
+git fetch origin
+git checkout origin/risk-profile-v2
+go build -o my-app
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles
