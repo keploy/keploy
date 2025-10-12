@@ -94,7 +94,7 @@ check_report_for_risk_profiles() {
     
     # Define the expected risk for each API endpoint path
     declare -A expected_risks
-    expected_risks["/users-low-risk"]="MEDIUM" # Medium risk due to header changes (Content-Length)
+    expected_risks["/users-low-risk"]="LOW"
     expected_risks["/users-medium-risk"]="MEDIUM"
     expected_risks["/users-medium-risk-with-addition"]="MEDIUM"
     expected_risks["/users-high-risk-type"]="HIGH"
@@ -102,18 +102,23 @@ check_report_for_risk_profiles() {
     expected_risks["/status-change-high-risk"]="HIGH"
     expected_risks["/content-type-change-high-risk"]="HIGH"
     expected_risks["/header-change-medium-risk"]="MEDIUM"
-    expected_risks["/noisy-header"]="PASSED"
+    expected_risks["/status-body-change"]="HIGH"
+    expected_risks["/header-body-change"]="MEDIUM"
+    expected_risks["/status-body-header-change"]="HIGH"
 
     # Define the expected categories for each API endpoint path (comma-separated)
     declare -A expected_categories
     expected_categories["/users-low-risk"]="SCHEMA_ADDED" # Body change is SCHEMA_ADDED, header change is implicit
-    expected_categories["/users-medium-risk"]="HEADER_CHANGED,SCHEMA_UNCHANGED"
-    expected_categories["/users-medium-risk-with-addition"]="HEADER_CHANGED,SCHEMA_ADDED"
-    expected_categories["/users-high-risk-type"]="HEADER_CHANGED,SCHEMA_BROKEN"
-    expected_categories["/users-high-risk-removal"]="HEADER_CHANGED,SCHEMA_BROKEN"
-    expected_categories["/status-change-high-risk"]="HEADER_CHANGED,STATUS_CODE_CHANGED,SCHEMA_BROKEN"
-    expected_categories["/content-type-change-high-risk"]="HEADER_CHANGED,SCHEMA_BROKEN"
+    expected_categories["/users-medium-risk"]="SCHEMA_UNCHANGED"
+    expected_categories["/users-medium-risk-with-addition"]="SCHEMA_ADDED"
+    expected_categories["/users-high-risk-type"]="SCHEMA_BROKEN"
+    expected_categories["/users-high-risk-removal"]="SCHEMA_BROKEN"
+    expected_categories["/status-change-high-risk"]="STATUS_CODE_CHANGED"
+    expected_categories["/content-type-change-high-risk"]="HEADER_CHANGED"
     expected_categories["/header-change-medium-risk"]="HEADER_CHANGED"
+    expected_categories["/status-body-change"]="STATUS_CODE_CHANGED,SCHEMA_UNCHANGED"
+    expected_categories["/header-body-change"]="HEADER_CHANGED,SCHEMA_UNCHANGED"
+    expected_categories["/status-body-header-change"]="STATUS_CODE_CHANGED,HEADER_CHANGED,SCHEMA_UNCHANGED"
 
     local latest_report
     latest_report=$(ls -t ./keploy/reports/test-run-*/test-set-0-report.yaml | head -n 1)
@@ -126,8 +131,8 @@ check_report_for_risk_profiles() {
     # Assert the summary counts
     echo "Asserting summary counts..."
     [ "$(yq '.success' "$latest_report")" == "1" ] || { echo "::error::Expected 1 successful test, found $(yq '.success' "$latest_report")"; exit 1; }
-    [ "$(yq '.failure' "$latest_report")" == "8" ] || { echo "::error::Expected 8 failed tests, found $(yq '.failure' "$latest_report")"; exit 1; }
-    [ "$(yq '.high-risk' "$latest_report")" == "4" ] || { echo "::error::Expected 4 high-risk failures, found $(yq '.high-risk' "$latest_report")"; exit 1; }
+    [ "$(yq '.failure' "$latest_report")" == "11" ] || { echo "::error::Expected 11 failed tests, found $(yq '.failure' "$latest_report")"; exit 1; }
+    [ "$(yq '.high-risk' "$latest_report")" == "6" ] || { echo "::error::Expected 6 high-risk failures, found $(yq '.high-risk' "$latest_report")"; exit 1; }
     [ "$(yq '.medium-risk' "$latest_report")" == "4" ] || { echo "::error::Expected 4 medium-risk failures, found $(yq '.medium-risk' "$latest_report")"; exit 1; }
     echo "✅ Summary counts are correct."
 
@@ -277,6 +282,17 @@ check_normalize_warnings() {
 command -v yq >/dev/null 2>&1 || { echo "::error::'yq' is not installed. Please install it to run this script (e.g., 'sudo apt-get install yq')."; exit 1; }
 
 section "Setup Environment"
+if [ -f "./keploy.yml" ]; then
+    rm ./keploy.yml
+fi
+
+sudo $RECORD_BIN config --generate
+config_file="./keploy.yml"
+if [ -f "$config_file" ]; then
+  sed -i 's/global: {}/global: {"body": {"timestamp":[]}, "header": {"Content-Length":[]}}/' "$config_file"
+else
+  echo "⚠️ Config file $config_file not found, skipping sed replace."
+fi
 echo "Cleaning up previous runs..."
 rm -rf keploy/ my-app *.log
 echo "Building the Go application..."
@@ -304,8 +320,8 @@ endsec
 
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
-export KEPLOY_MODE="test"
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --useLocalMock 2>&1 | tee test.log || true
+git checkout risk-profile-v2
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disable-mock-upload 2>&1 | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles
 endsec
@@ -326,7 +342,7 @@ endsec
 
 section "Run Final Validation Test"
 echo "Running final test run to confirm all tests now pass..."
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --useLocalMock 2>&1 | tee final_test.log || true
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disable-mock-upload 2>&1 | tee final_test.log || true
 check_for_errors "final_test.log"
 endsec
 
