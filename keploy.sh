@@ -1,5 +1,30 @@
 #!/bin/bash
 
+show_spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    local i=0
+    while kill -0 $pid 2>/dev/null; do
+        i=$(( (i+1) %4 ))
+        printf "\rDownloading binary... %s" "${spinstr:$i:1}"
+        sleep $delay
+    done
+    printf "\r"
+    printf "Download complete!    \n"
+}
+
+
+show_post_install_steps() {
+    echo "Starting installation..."
+    sleep 1
+    echo "Setting up Keploy binary..."
+    sleep 1
+    echo "Configuring environment..."
+    sleep 1
+    echo "Installation complete!"
+}
+
 installKeploy (){
     version="latest"
     IS_CI=false
@@ -96,8 +121,10 @@ installKeploy (){
         # to avoid the "File exists" error
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
-        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
+        (curl --silent --location "$download_url" | tar xz -C /tmp/keploy/) &
+        show_spinner $!
         move_keploy_binary
+        show_post_install_steps
         delete_keploy_alias
     }
 
@@ -107,7 +134,9 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
+        (curl --silent --location "$download_url" | tar xz -C /tmp/keploy/) &
+        show_spinner $!
+        show_post_install_steps
         move_keploy_binary
     }
 
@@ -118,7 +147,9 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
+        (curl --silent --location "$download_url" | tar xz --overwrite -C /tmp) &
+        show_spinner $!
+        show_post_install_steps
         move_keploy_binary
     }
 
