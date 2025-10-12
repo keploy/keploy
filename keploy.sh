@@ -51,22 +51,41 @@ download_with_progress() {
     # Hide cursor
     tput civis
     
-    # Download with progress
-    curl --silent --location --progress-bar "$url" -o "$output" 2>&1 | {
+    # Download file and show progress
+    {
+        # Start download in background
+        curl -L "$url" -o "$output" \
+            -# 2>&1 &
+        local curl_pid=$!
+        
         local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
         local i=0
-        while IFS= read -r line; do
-            # Extract percentage from progress bar if available
-            if [[ "$line" =~ ([0-9]+)% ]]; then
-                local percentage="${BASH_REMATCH[1]}"
-                printf "\r⠋ $message [$percentage%%]"
+        
+        # Monitor the download
+        while kill -0 $curl_pid 2>/dev/null; do
+            # Get current file size
+            if [ -f "$output" ]; then
+                local current_size=$(stat -c%s "$output" 2>/dev/null || stat -f%z "$output" 2>/dev/null || echo "0")
+                local size_mb=$((current_size / 1048576))
+                
+                i=$(( (i+1) %10 ))
+                if [ "$size_mb" -gt 0 ]; then
+                    printf "\r${spin:$i:1} $message [${size_mb}MB downloaded]"
+                else
+                    printf "\r${spin:$i:1} $message"
+                fi
             else
                 i=$(( (i+1) %10 ))
                 printf "\r${spin:$i:1} $message"
             fi
+            sleep 0.15
         done
-        printf "\r✓ $completion_message\n"
-    }
+        
+        # Wait for curl to finish
+        wait $curl_pid
+    } 2>/dev/null
+    
+    printf "\r✓ $completion_message                    \n"
     
     # Show cursor
     tput cnorm
