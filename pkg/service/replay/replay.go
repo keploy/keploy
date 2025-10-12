@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1052,6 +1053,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
+		}
+
+		// Handle Docker environment IP replacement
+		if utils.IsDockerCmd(cmdType) && runtime.GOOS != "darwin" {
+			err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
+			if err != nil {
+				break
+			}
 		}
 
 		// Handle user-provided host replacement
