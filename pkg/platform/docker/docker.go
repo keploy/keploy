@@ -555,7 +555,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
 		"--client-pid", strconv.Itoa(clientPid),
 		"--docker-network", opts.DockerNetwork,
-		"--agent-ip", opts.AgentIP,
 		"--mode", string(opts.Mode),
 		"--is-docker",
 	}

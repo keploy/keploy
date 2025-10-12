@@ -70,9 +70,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
-		DNSPort:           opts.DNSPort,   // default: 26789
-		IP4:               "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		DNSPort:           opts.DNSPort, // default: 26789
+		IP4:               "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
+		IP6:               "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:           &sync.Mutex{},
 		connMutex:         &sync.Mutex{},
 		DestInfo:          info,

@@ -55,7 +55,6 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 		return "", fmt.Errorf("failed to initialise docker: %w", err)
 	}
 
-	// addKeployNetwork(ctx, logger, client)
 	err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
 		"type":   "debugfs",
 		"device": "debugfs",
@@ -101,7 +100,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			" --privileged" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
 			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --docker-network " + opts.DockerNetwork + " --agent-ip " + opts.AgentIP + " --mode " + string(opts.Mode)
+			" --docker-network " + opts.DockerNetwork + " --mode " + string(opts.Mode)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -141,7 +140,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				" --privileged" + " -v " + pwd + ":" + dpwd + " -w " + dpwd +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
 				"\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --docker-network " + opts.DockerNetwork + " --agent-ip " + opts.AgentIP + " --mode " + string(opts.Mode)
+				" --docker-network " + opts.DockerNetwork + " --mode " + string(opts.Mode)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -159,7 +158,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			" --privileged" + " -v " + pwd + ":" + dpwd + " -w " + dpwd +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
 			"\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --docker-network " + opts.DockerNetwork + " --agent-ip " + opts.AgentIP + " --mode " + string(opts.Mode)
+			" --docker-network " + opts.DockerNetwork + " --mode " + string(opts.Mode)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -191,7 +190,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				" --privileged" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
 				"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --docker-network " + opts.DockerNetwork + " --agent-ip " + opts.AgentIP + " --mode " + string(opts.Mode)
+				" --docker-network " + opts.DockerNetwork + " --mode " + string(opts.Mode)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -210,7 +209,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			" --privileged" + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
 			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --docker-network " + opts.DockerNetwork + " --agent-ip " + opts.AgentIP + " --mode " + string(opts.Mode)
+			" --docker-network " + opts.DockerNetwork + " --mode " + string(opts.Mode)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -221,34 +220,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 	}
 	return "", errors.New("failed to get alias")
 }
-
-// func addKeployNetwork(ctx context.Context, logger *zap.Logger, client Client) {
-
-// 	// Check if the 'keploy-network' network exists
-// 	networks, err := client.NetworkList(ctx, types.NetworkListOptions{})
-// 	if err != nil {
-// 		logger.Debug("failed to list docker networks")
-// 		return
-// 	}
-
-// 	for _, network := range networks {
-// 		if network.Name == "keploy-network" {
-// 			logger.Debug("keploy network already exists")
-// 			return
-// 		}
-// 	}
-
-// 	// Create the 'keploy' network if it doesn't exist
-// 	_, err = client.NetworkCreate(ctx, "keploy-network", types.NetworkCreate{
-// 		CheckDuplicate: true,
-// 	})
-// 	if err != nil {
-// 		logger.Debug("failed to create keploy network")
-// 		return
-// 	}
-
-// 	logger.Debug("keploy network created")
-// }
 
 func convertPathToUnixStyle(path string) string {
 	// Replace backslashes with forward slashes

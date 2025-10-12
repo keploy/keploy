@@ -11,7 +11,7 @@ import (
 type Instrumentation interface {
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
-	
+
 	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error

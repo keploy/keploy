@@ -552,7 +552,6 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
 		"--docker-network", opts.DockerNetwork,
-		"--agent-ip", opts.AgentIP,
 		"--mode", string(opts.Mode),
 	}
 
@@ -655,7 +654,6 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 }
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
-
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
 
@@ -723,7 +721,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
-
 		opts.ClientNSPID = uint32(os.Getpid())
 		err = a.startAgent(ctx, isDockerCmd, opts)
 		if err != nil {
@@ -811,7 +808,6 @@ func (a *AgentClient) getApp() (*app.App, error) {
 }
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
-
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
 	}, opts)
@@ -836,7 +832,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, opt
 		} else {
 			stopCmd = exec.Command(args[0], args[1:]...)
 		}
-		
+
 		if output, err := stopCmd.CombinedOutput(); err != nil {
 			logger.Warn("Could not stop the docker container. It may have already stopped.",
 				zap.String("container", containerName),

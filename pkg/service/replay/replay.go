@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -255,15 +254,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 		var backupCreated bool
 		testSetResult = false
 
-		// err := HookImpl.BeforeTestSetRun(ctx, testSet)
-		// if err != nil {
-		// 	stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
-		// 	utils.LogError(r.logger, err, stopReason)
-		// 	if ctx.Err() == context.Canceled {
-		// 		return err
-		// 	}
-		// 	return fmt.Errorf("%s", stopReason)
-		// }
+		err := HookImpl.BeforeTestSetRun(ctx, testSet)
+		if err != nil {
+			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+			if ctx.Err() == context.Canceled {
+				return err
+			}
+			return fmt.Errorf("%s", stopReason)
+		}
 
 		if !r.config.Test.SkipCoverage {
 			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
@@ -1053,14 +1052,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
-		}
-
-		// Handle Docker environment IP replacement
-		if utils.IsDockerCmd(cmdType) && runtime.GOOS != "darwin" {
-			err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
-			if err != nil {
-				break
-			}
 		}
 
 		// Handle user-provided host replacement

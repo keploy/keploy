@@ -93,7 +93,6 @@ func (t *Tools) Update(ctx context.Context) error {
 	}
 
 	t.logger.Info("Updating to Version: " + latestVersion)
-
 	downloadURL := ""
 
 	if runtime.GOOS == "linux" {

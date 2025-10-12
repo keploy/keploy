@@ -20,7 +20,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
 func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	dstPort := 0
 	var err error

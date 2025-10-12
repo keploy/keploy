@@ -301,8 +301,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 
 		cmd.Flags().String("docker-network", "", "Name of the docker network the application is on")
-		cmd.Flags().String("agent-ip", "", "IP address of the Keploy agent container")
-		cmd.Flags().String("mode", "record", "Mode of operation for Keploy (record or test)")
+		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
 
 	default:
 		return errors.New("unknown command name")
@@ -1180,20 +1179,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.ClientNSPID = clientNSPid
 
-		agentIP, err := cmd.Flags().GetString("agent-ip")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get agent-ip flag")
-			return nil
-		}
-		c.cfg.Agent.AgentIP = agentIP
-
 		mode, err := cmd.Flags().GetString("mode")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get mode flag")
 			return nil
 		}
-		c.cfg.Agent.Mode = models.Mode(mode)
 
+		c.cfg.Agent.Mode = models.Mode(mode)
 		dockerNetwork, err := cmd.Flags().GetString("docker-network")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get client-nspid flag")

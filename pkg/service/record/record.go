@@ -450,7 +450,6 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	return assignedName, nil
 }
 
-
 func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID string) {
 	// Parse metadata from the config
 	metadata, err := utils.ParseMetadata(r.config.Record.Metadata)
