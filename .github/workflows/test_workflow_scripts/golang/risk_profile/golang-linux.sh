@@ -269,12 +269,12 @@ check_normalize_warnings() {
     local warning_count
     warning_count=$(grep -c "$warning_msg" "$logfile" || true)
     
-    if [ "$warning_count" -ne 4 ]; then
-        echo "::error::Expected 4 high-risk normalization warnings, but found $warning_count."
+    if [ "$warning_count" -ne 7 ]; then
+        echo "::error::Expected 7 high-risk normalization warnings, but found $warning_count."
         exit 1
     fi
     
-    echo "✅ Found exactly 4 high-risk normalization warnings, as expected."
+    echo "✅ Found exactly 7 high-risk normalization warnings, as expected."
     endsec
 }
 
