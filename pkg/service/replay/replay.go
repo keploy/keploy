@@ -158,7 +158,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	var language config.Language
+	var language models.Language
 	var executable string
 	// only find language to calculate coverage if instrument is true
 	if r.instrument {
@@ -311,7 +311,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, uint64(0), false)
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
@@ -552,7 +552,7 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
-func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -672,7 +672,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 					AppCommand: conf.AppCommand,
 				})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
@@ -715,7 +715,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.Port), agentReadyCh, 1*time.Second)
+		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.AgentPort), agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():
@@ -731,7 +731,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.logger.Info("Obtained container IP", zap.String("containerIP", containerIP))
 		pkg.AgentIP = containerIP
 
-		err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
 			SQLDelay:       time.Duration(r.config.Test.Delay),
@@ -750,7 +750,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
@@ -795,7 +795,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.NewUpdateMockParams(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -815,7 +815,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		err = r.instrumentation.StoreMocks(ctx, appID, filteredMocks, unfilteredMocks)
+		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
@@ -860,7 +860,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
 		if cmdType != utils.DockerCompose {
-			err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+			err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 				Rules:          r.config.BypassRules,
 				MongoPassword:  r.config.Test.MongoPassword,
 				SQLDelay:       time.Duration(r.config.Test.Delay),
@@ -875,7 +875,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.NewUpdateMockParams(ctx, appID, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.NewUpdateMockParams(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -884,7 +884,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !serveTest {
 				runTestSetErrGrp.Go(func() error {
 					defer utils.Recover(r.logger)
-					appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+					appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
 					if appErr.AppErrorType == models.ErrCtxCanceled {
@@ -930,13 +930,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
-			// if utils.IsDockerCmd(cmdType) {
-			// 	// userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
-			// 	// userIP = pkg.AgentIP;
-			// 	// if err != nil {
-			// 	// 	return models.TestSetStatusFailed, err
-			// 	// }
-			// }
 		}
 	}
 
@@ -980,7 +973,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	var actualTestMockMappings = make(map[string][]string)
 	var consumedMocks []models.MockState
-	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx, appID) // Getting mocks consumed during initial setup
+	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 	}
@@ -1056,7 +1049,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			respTime = testCase.GrpcResp.Timestamp
 		}
 
-		err = r.NewUpdateMockParams(runTestSetCtx, appID, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+		err = r.NewUpdateMockParams(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
@@ -1099,7 +1092,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
 		go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
 
-		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
 
 		// Stop monitoring for this specific test case
 		testCaseProxyErrCancel()
@@ -1118,7 +1111,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if r.instrument {
-			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx, appID)
+			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
@@ -1461,7 +1454,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState) error {
+func (r *Replayer) FilterAndSetMocks(ctx context.Context, filtered, unfiltered []*models.Mock, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -1494,7 +1487,7 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 	filtered = filterOutDeleted(filtered)
 	unfiltered = filterOutDeleted(unfiltered)
 
-	err := r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
+	err := r.instrumentation.SetMocks(ctx, filtered, unfiltered)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
 		return err
@@ -1503,7 +1496,7 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 	return nil
 }
 
-func (r *Replayer) FilterAndSetMocksMapping(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, mapping []string, totalConsumedMocks map[string]models.MockState) error {
+func (r *Replayer) FilterAndSetMocksMapping(ctx context.Context, filtered, unfiltered []*models.Mock, mapping []string, totalConsumedMocks map[string]models.MockState) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -1536,7 +1529,7 @@ func (r *Replayer) FilterAndSetMocksMapping(ctx context.Context, appID uint64, f
 	filtered = filterOutDeleted(filtered)
 	unfiltered = filterOutDeleted(unfiltered)
 
-	err := r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
+	err := r.instrumentation.SetMocks(ctx, filtered, unfiltered)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
 		return err
@@ -1545,7 +1538,7 @@ func (r *Replayer) FilterAndSetMocksMapping(ctx context.Context, appID uint64, f
 	return nil
 }
 
-func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, filtered, unfiltered []*models.Mock, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -1554,15 +1547,15 @@ func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, appID uint
 	if useMappingBased && len(expectedMockMapping) > 0 {
 		r.logger.Debug("Using mapping-based mock filtering",
 			zap.Strings("expectedMocks", expectedMockMapping))
-		return r.FilterAndSetMocksMapping(ctx, appID, filtered, unfiltered, expectedMockMapping, totalConsumedMocks)
+		return r.FilterAndSetMocksMapping(ctx, filtered, unfiltered, expectedMockMapping, totalConsumedMocks)
 	} else {
-		return r.FilterAndSetMocks(ctx, appID, filtered, unfiltered, afterTime, beforeTime, totalConsumedMocks)
+		return r.FilterAndSetMocks(ctx, filtered, unfiltered, afterTime, beforeTime, totalConsumedMocks)
 	}
 
 }
 
 // NewUpdateMockParams sends filtering parameters to agent instead of sending filtered mocks
-func (r *Replayer) NewUpdateMockParams(ctx context.Context, appID uint64, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+func (r *Replayer) NewUpdateMockParams(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -1578,14 +1571,13 @@ func (r *Replayer) NewUpdateMockParams(ctx context.Context, appID uint64, expect
 	}
 
 	// Send parameters to agent for filtering and mock updates
-	err := r.instrumentation.UpdateMockParams(ctx, appID, params)
+	err := r.instrumentation.UpdateMockParams(ctx, params)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 		return err
 	}
 
 	r.logger.Debug("Successfully sent mock filter parameters to agent",
-		zap.Uint64("appID", appID),
 		zap.Bool("useMappingBased", useMappingBased),
 		zap.Int("mockMappingCount", len(expectedMockMapping)))
 
@@ -1719,8 +1711,8 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	}
 }
 
-func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
-	return r.instrumentation.Run(ctx, appID, opts)
+func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) models.AppError {
+	return r.instrumentation.Run(ctx, opts)
 }
 
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {

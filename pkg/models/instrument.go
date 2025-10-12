@@ -4,15 +4,33 @@ import (
 	"context"
 	"crypto/tls"
 	"time"
-
-	"go.keploy.io/server/v2/config"
 )
 
 // TestCasePersister defines the function signature for saving a TestCase.
 type TestCasePersister func(ctx context.Context, testCase *TestCase) error
 
+type BypassRule struct {
+	Path string `json:"path" yaml:"path" mapstructure:"path"`
+	Host string `json:"host" yaml:"host" mapstructure:"host"`
+	Port uint   `json:"port" yaml:"port" mapstructure:"port"`
+}
+
+type Filter struct {
+	BypassRule `mapstructure:",squash"`
+	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
+	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
+	MatchType  MatchType         `json:"matchType"`
+}
+
+type MatchType string
+
+const (
+	OR  MatchType = "OR"
+	AND MatchType = "AND"
+)
+
 type HookOptions struct {
-	Rules         []config.BypassRule
+	Rules         []BypassRule
 	Mode          Mode
 	EnableTesting bool
 	E2E           bool
@@ -31,7 +49,7 @@ type IngressEvent struct {
 }
 
 type OutgoingOptions struct {
-	Rules         []config.BypassRule
+	Rules         []BypassRule
 	MongoPassword string
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay       time.Duration // This is the same as Application delay.
@@ -48,17 +66,17 @@ type ConditionalDstCfg struct {
 }
 
 type IncomingOptions struct {
-	Filters  []config.Filter
+	Filters  []Filter
 	BasePath string
 }
 
 type SetupOptions struct {
-	ClientNSPID       uint32
-	Container         string
-	KeployContainer   string
-	DockerNetwork     string
-	DockerDelay       uint64
-	Cmd               string
+	ClientNSPID     uint32
+	Container       string
+	KeployContainer string
+	DockerNetwork   string
+	DockerDelay     uint64
+	// Cmd               string
 	IsDocker          bool
 	CommandType       string
 	EnableTesting     bool

@@ -29,14 +29,14 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 
 // Load implements the Load method for non-Linux platforms.
 // Since eBPF is not available on non-Linux platforms, this returns an error.
-func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg, setupOpts models.SetupOptions) error {
+func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts models.SetupOptions) error {
 	h.Logger.Error("eBPF hooks are not supported on this platform")
 	return errors.New("eBPF hooks are not supported on non-Linux platforms")
 }
 
 // Record implements the Record method for non-Linux platforms.
 // Since hooks are not available, this returns an error.
-func (h *Hooks) Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	h.Logger.Error("Recording is not supported on this platform")
 	return nil, errors.New("recording is not supported on non-Linux platforms")
 }

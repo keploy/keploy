@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -93,7 +93,7 @@ func DetectCgroupPath(logger *zap.Logger) (string, error) {
 	return "", errors.New("cgroup2 not mounted")
 }
 
-func GetPortToSendToKernel(_ context.Context, rules []config.BypassRule) []uint {
+func GetPortToSendToKernel(_ context.Context, rules []models.BypassRule) []uint {
 	// if the rule only contains port, then it should be sent to kernel
 	ports := []uint{}
 	for _, rule := range rules {

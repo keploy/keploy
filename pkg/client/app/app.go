@@ -153,7 +153,6 @@ func (a *App) attachInitPid(_ context.Context) error {
 	}
 
 	// Modify the command to insert the pidMode
-	// a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], pidMode, parts[2])
 	a.cmd = fmt.Sprintf("%s %s %s %s %s", parts[0], parts[1], pidMode, networkMode, parts[2])
 	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
@@ -203,94 +202,6 @@ func (a *App) SetupCompose() error {
 
 	composeChanged := true
 
-	// compose, err := a.docker.ReadComposeFile(paths[0])
-	// if err != nil {
-	// 	utils.LogError(a.logger, err, "failed to read the compose file")
-	// 	return err
-	// }
-	// composeChanged := false
-
-	// // hook: allow compose mutation before further processing
-	// if HookImpl != nil {
-	// 	changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, err, "hook failed during compose mutation")
-	// 		return err
-	// 	}
-	// 	if changed {
-	// 		composeChanged = true
-	// 	}
-	// }
-
-	// // Check if docker compose file uses relative file names for bind mounts
-	// ok := a.docker.HasRelativePath(compose)
-	// if ok {
-	// 	err = a.docker.ForceAbsolutePath(compose, paths[0])
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
-	// 		return err
-	// 	}
-	// 	composeChanged = true
-	// }
-
-	// Checking info about the network and whether its external:true
-	// info := a.docker.GetNetworkInfo(compose)
-
-	// if info == nil {
-	// 	info, err = a.docker.SetKeployNetwork(compose)
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, nil, "failed to set default network in the compose file", zap.String("network", a.KeployNetwork))
-	// 		return err
-	// 	}
-	// 	composeChanged = true
-	// }
-
-	// if !info.External {
-	// 	err = a.docker.MakeNetworkExternal(compose)
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, nil, "failed to make the network external in the compose file", zap.String("network", info.Name))
-	// 		return fmt.Errorf("error while updating network to external: %v", err)
-	// 	}
-	// 	composeChanged = true
-	// }
-
-	// a.KeployNetwork = info.Name
-	// ok, err = a.docker.NetworkExists(a.KeployNetwork)
-	// if err != nil {
-	// 	utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.KeployNetwork))
-	// 	return err
-	// }
-
-	// //if keploy-network doesn't exist locally then create it
-	// if !ok {
-	// 	err = a.docker.CreateNetwork(a.KeployNetwork)
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, nil, "failed to create default network", zap.String("network", a.KeployNetwork))
-	// 		return err
-	// 	}
-	// }
-
-	//check if compose file has keploy-init container
-	// adding keploy init pid to the compose file
-	// err = a.docker.SetInitPid(compose, a.container)
-	// if err != nil {
-	// 	utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
-	// 	return err
-	// }
-	// composeChanged = true
-
-	// err = a.docker.SetPidContainer(compose, a.container, a.keployContainer)
-	// if err != nil {
-	// 	utils.LogError(a.logger, nil, "failed to set agent's pid namespace in the compose file")
-	// 	return err
-	// }
-	// composeChanged = true
-
-	// err = a.docker.SetAgentNamespacesInCompose(compose, a.container, a.keployContainer)
-	// if err != nil {
-	// 	utils.LogError(a.logger, nil, "failed to set agent's namespaces in the compose file")
-	// 	return err
-	// }
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {
@@ -306,11 +217,6 @@ func (a *App) SetupCompose() error {
 	if a.containerNetwork == "" {
 		a.containerNetwork = a.KeployNetwork
 	}
-	// err = a.injectNetwork(a.containerNetwork)
-	// if err != nil {
-	// 	utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
-	// 	return err
-	// }
 	return nil
 }
 
@@ -327,163 +233,7 @@ func (a *App) Kind(_ context.Context) utils.CmdType {
 	return a.kind
 }
 
-// injectNetwork attaches the given network to the keploy container
-// and also sends the keploy container ip of the new network interface to the kernel space
-func (a *App) injectNetwork(network string) error {
-	// inject the network to the keploy container
-	a.logger.Info(fmt.Sprintf("trying to inject network:%v to the keploy container", network))
-	err := a.docker.AttachNetwork(a.keployContainer, []string{network})
-	if err != nil {
-		utils.LogError(a.logger, nil, "failed to inject network to the keploy container")
-		return err
-	}
-
-	a.KeployNetwork = network
-
-	//sending new proxy ip to kernel, since dynamically injected new network has different ip for keploy.
-	inspect, err := a.docker.ContainerInspect(context.Background(), a.keployContainer)
-	if err != nil {
-		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-		return err
-	}
-
-	KeployNetworks := inspect.NetworkSettings.Networks
-	//Here we considering that the application would use only one custom network.
-	//TODO: handle for application having multiple custom networks
-	//TODO: check the logic for correctness
-	for n, settings := range KeployNetworks {
-		if n == network {
-			a.keployIPv4 = settings.IPAddress
-			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network), zap.String("keploy container ip", a.keployIPv4))
-			return nil
-		}
-		//if networkName != "bridge" {
-		//	network = networkName
-		//	newProxyIpString = networkSettings.IPAddress
-		//	a.logger.Debug(fmt.Sprintf("Network Name: %s, New Proxy IP: %s\n", networkName, networkSettings.IPAddress))
-		//}
-	}
-	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
-}
-
-// Commenting out for now as it might not be needed now after docker changes, will check this
-
-// func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
-
-// 	if e.Action != "start" {
-// 		return false, nil
-// 	}
-// 	// Fetch container details by inspecting using container ID to check if container is created
-// 	info, err := a.docker.ContainerInspect(ctx, e.ID)
-// 	if err != nil {
-// 		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
-// 		return false, err
-// 	}
-
-// 	// Check if the container's name matches the desired name
-// 	if info.Name != "/"+a.container {
-// 		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
-// 		return false, nil
-// 	}
-
-// 	// Set Docker Container ID
-// 	a.docker.SetContainerID(e.ID)
-// 	a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
-// 	if info.State.Pid == 0 {
-// 		return false, errors.New("failed to get the pid of the container")
-// 	}
-// 	a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
-// 	inode, err := getInode(info.State.Pid)
-// 	if err != nil {
-// 		return false, err
-// 	}
-
-// 	a.inodeChan <- inode
-// 	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
-// 	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
-// 		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
-// 		return false, nil
-// 	}
-
-// 	n, ok := info.NetworkSettings.Networks[a.containerNetwork]
-// 	if !ok || n == nil {
-// 		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
-// 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
-// 	}
-// 	a.SetContainerIPv4Addr(n.IPAddress)
-// 	return inode != 0 && n.IPAddress != "", nil
-// }
-
-// func (a *App) getDockerMeta(ctx context.Context) <-chan error {
-// 	// listen for the docker daemon events
-// 	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
-
-// 	errCh := make(chan error, 1)
-// 	timer := time.NewTimer(time.Duration(a.containerDelay) * time.Second)
-// 	logTicker := time.NewTicker(1 * time.Second)
-// 	defer logTicker.Stop()
-
-// 	eventFilter := filters.NewArgs(
-// 		filters.KeyValuePair{Key: "type", Value: "container"},
-// 		filters.KeyValuePair{Key: "type", Value: "network"},
-// 		filters.KeyValuePair{Key: "action", Value: "create"},
-// 		filters.KeyValuePair{Key: "action", Value: "connect"},
-// 		filters.KeyValuePair{Key: "action", Value: "start"},
-// 	)
-
-// 	messages, errCh2 := a.docker.Events(ctx, types.EventsOptions{
-// 		Filters: eventFilter,
-// 	})
-
-// 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-// 	if !ok {
-// 		errCh <- errors.New("failed to get the error group from the context")
-// 		return errCh
-// 	}
-
-// 	g.Go(func() error {
-// 		defer utils.Recover(a.logger)
-// 		// closing the channels in any case when returning.
-// 		defer func() {
-// 			a.logger.Debug("closing err, containerIPv4 and inode channels ")
-// 			close(errCh)
-// 			close(a.containerIPv4)
-// 			close(a.inodeChan)
-// 		}()
-// 		for {
-// 			select {
-// 			case <-timer.C:
-// 				errCh <- errors.New("timeout waiting for the container to start")
-// 				return nil
-// 			case <-ctx.Done():
-// 				a.logger.Debug("context cancelled, stopping the listener for container creation event.")
-// 				errCh <- ctx.Err()
-// 				return nil
-// 			case e := <-messages:
-// 				done, err := a.extractMeta(ctx, e)
-// 				if err != nil {
-// 					errCh <- err
-// 					return nil
-// 				}
-
-// 				if done {
-// 					return nil
-// 				}
-// 			// for debugging purposes
-// 			case <-logTicker.C:
-// 				a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
-// 				return nil
-// 			case err := <-errCh2:
-// 				errCh <- err
-// 				return nil
-// 			}
-// 		}
-// 	})
-// 	return errCh
-// }
-
 // Have commented out the code to extract docker meta data as it might not be needed now after docker changes, will check this
-
 func (a *App) runDocker(ctx context.Context) models.AppError {
 	// if a.cmd is empty, it means the user wants to run the application manually,
 	// so we don't need to run the application in a goroutine
@@ -506,9 +256,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 	errCh := make(chan error, 1)
 
-	// listen for the "create container" event in order to send the inode of the container to the kernel
-	// errCh2 := a.getDockerMeta(dockerMetaCtx)
-
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
 		defer close(errCh)
@@ -526,11 +273,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
-	// case err := <-errCh2:
-	// 	if err != nil && errors.Is(err, context.Canceled) {
-	// 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
-	// 	}
-	// 	return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	}
@@ -626,61 +368,6 @@ func (a *App) run(ctx context.Context) models.AppError {
 		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 	}
 }
-
-//if a.docker.GetContainerID() == "" {
-//	a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
-//	continue
-//}
-////Inspecting the application container again since the ip and pid takes some time to be linked to the container.
-//info, err := a.docker.ContainerInspect(ctx, a.container)
-//if err != nil {
-//	return err
-//}
-//
-//a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
-//if info.State.Pid == 0 {
-//	a.logger.Debug("container not yet started", zap.Any("containerDetails.State.Pid", info.State.Pid))
-//	continue
-//}
-//a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
-//a.inode,err = getInode(info.State.Pid)
-//if err != nil {
-//	return err
-//}
-//if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
-//	a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
-//	continue
-//}
-//
-//n, ok := info.NetworkSettings.Networks[a.containerNetwork]
-//if !ok || n == nil {
-//	return errors.New("container network not found")
-//}
-//a.keployIPv4 = n.IPAddress
-//a.logger.Info("container started successfully", zap.Any("", info.NetworkSettings.Networks))
-//return
-
-//case e := <-messages:
-//	if e.Type != events.ContainerEventType || e.Action != "start" {
-//		continue
-//	}
-//
-//	// Fetch container details by inspecting using container ID to check if container is created
-//	c, err := a.docker.ContainerInspect(ctx, e.ID)
-//	if err != nil {
-//		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
-//		return err
-//	}
-//
-//	// Check if the container's name matches the desired name
-//	if c.Name != "/"+a.container {
-//		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", c.Name))
-//		continue
-//	}
-//	// Set Docker Container ID
-//	a.docker.SetContainerID(e.ID)
-//
-//	a.logger.Debug("container created for desired app", zap.Any("ID", e.ID))
 
 func (a *App) GetKeployContainer() string {
 	return a.keployContainer

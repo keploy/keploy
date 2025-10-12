@@ -35,7 +35,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
@@ -1102,7 +1101,7 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 }
 
 // DetectLanguage detects the language of the test command and returns the executable
-func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+func DetectLanguage(logger *zap.Logger, cmd string) (models.Language, string) {
 	if cmd == "" {
 		return models.Unknown, ""
 	}

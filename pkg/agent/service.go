@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"go.keploy.io/server/v2/config"
-
 	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/utils"
 
@@ -15,7 +13,7 @@ import (
 type Hooks interface {
 	// AppInfo
 	DestInfo
-	Load(ctx context.Context, id uint64, cfg HookCfg, setupOpts models.SetupOptions) error
+	Load(ctx context.Context, cfg HookCfg, setupOpts models.SetupOptions) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 	GetUnloadDone() <-chan struct{}
 }
@@ -25,7 +23,7 @@ type HookCfg struct {
 	IsDocker   bool
 	KeployIPV4 string
 	Mode       models.Mode
-	Rules      []config.BypassRule
+	Rules      []models.BypassRule
 	E2E        bool
 	Port       uint32
 }
@@ -41,10 +39,10 @@ type App interface {
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
 	StartProxy(ctx context.Context, opts ProxyOptions) error
-	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
-	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
-	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
-	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
+	Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
+	Mock(ctx context.Context, opts models.OutgoingOptions) error
+	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
+	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
 }

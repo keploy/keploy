@@ -69,7 +69,7 @@ type Proxy struct {
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:            logger,
-		Port:              opts.ProxyPort, // default: 16789
+		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort,   // default: 26789
 		IP4:               "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
 		IP6:               "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
@@ -688,32 +688,26 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("proxy stopped...")
 }
 
-func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	p.sessions.Set(id, &agent.Session{
-		ID:              id,
+func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	p.sessions.Set(uint64(0), &agent.Session{
+		ID:              uint64(0),
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
 
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
-
-	////set the new proxy ip:port for a new session
-	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
-	//if err != nil {
-	//	return errors.New("failed to record the outgoing message")
-	//}
+	p.MockManagers.Store(uint64(0), NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	return nil
 }
 
-func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) error {
-	p.sessions.Set(id, &agent.Session{
-		ID:              id,
+func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	p.sessions.Set(uint64(0), &agent.Session{
+		ID:              uint64(0),
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	p.MockManagers.Store(uint64(0), NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
@@ -727,22 +721,11 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 			return errors.New("failed to mock the outgoing message")
 		}
 	}
-
-	////set the new proxy ip:port for a new session
-	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
-	//if err != nil {
-	//	return errors.New("failed to mock the outgoing message")
-	//}
-
 	return nil
 }
 
-func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	//session, ok := p.sessions.Get(id)
-	//if !ok {
-	//	return fmt.Errorf("session not found")
-	//}
-	m, ok := p.MockManagers.Load(id)
+func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	m, ok := p.MockManagers.Load(uint64(0))
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
@@ -752,8 +735,8 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 }
 
 // GetConsumedMocks returns the consumed filtered mocks for a given app id
-func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockState, error) {
-	m, ok := p.MockManagers.Load(id)
+func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
+	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}

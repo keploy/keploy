@@ -28,43 +28,37 @@ func (c *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	return 0, errUnsupported
 }
 
-func (c *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
+func (c *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	return errUnsupported
 }
 
-func (c *Agent) GetHookUnloadDone(id uint64) <-chan struct{} {
-	ch := make(chan struct{})
-	close(ch) // Immediately close since no actual hooks are loaded
-	return ch
-}
-
-func (c *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
+func (c *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
 	return errUnsupported
 }
 
-func (c *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (c *Agent) SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	return errUnsupported
 }
 
-func (c *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (c *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	return errUnsupported
 }
 
-func (c *Agent) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
+func (c *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	return errUnsupported
 }
 
-func (c *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
+func (c *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	return nil, errUnsupported
 }
 
-func (c *Agent) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
+func (c *Agent) Run(ctx context.Context, _ models.RunOptions) models.AppError {
 	return models.AppError{
 		Err: errUnsupported,
 	}
 }
 
-func (c *Agent) GetContainerIP(_ context.Context, id uint64) (string, error) {
+func (c *Agent) GetContainerIP(_ context.Context) (string, error) {
 	return "", errUnsupported
 }
 

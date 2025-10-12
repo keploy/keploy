@@ -67,7 +67,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	var appErrChan = make(chan models.AppError, 1)
 	var insertTestErrChan = make(chan error, 10)
 	var insertMockErrChan = make(chan error, 10)
-	var clientID uint64
 	var newTestSetID string
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
@@ -153,10 +152,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	if r.config.CommandType == "docker-compose" {
+	if r.config.CommandType == string(utils.DockerCompose) {
 
 		runAppErrGrp.Go(func() error {
-			runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
+			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
 			}
@@ -168,7 +167,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.Port), agentReadyCh, 1*time.Second)
+		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.AgentPort), agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():
@@ -178,7 +177,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(reqCtx, clientID)
+	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -239,9 +238,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return nil
 	})
 
-	if r.config.CommandType != "docker-compose" {
+	if r.config.CommandType != string(utils.DockerCompose) {
 		runAppErrGrp.Go(func() error {
-			runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
+			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
 			}
@@ -304,8 +303,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
-	clientID := appID
+func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
@@ -324,7 +322,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	g.Go(func() error {
 		defer close(incomingChan)
 
-		ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
+		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
 		if err != nil {
 			errChan <- err
 			return fmt.Errorf("failed to get incoming test cases: %w", err)
@@ -361,7 +359,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 			cancel()
 		}()
 
-		ch, err := r.instrumentation.GetOutgoing(mockCtx, clientID, models.OutgoingOptions{
+		ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
@@ -396,7 +394,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 }
 
 func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
-	return r.instrumentation.Run(ctx, appID, opts)
+	return r.instrumentation.Run(ctx, opts)
 }
 
 func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
@@ -452,9 +450,6 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	return assignedName, nil
 }
 
-func (r *Recorder) GetContainerIP(ctx context.Context) (string, error) {
-	return r.instrumentation.GetContainerIP(ctx)
-}
 
 func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID string) {
 	// Parse metadata from the config

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"strings"
 	"time"
@@ -292,8 +293,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
-		cmd.Flags().Uint32("port", c.cfg.Agent.Port, "Port used by the Keploy agent to communicate with Keploy's clients")
-		cmd.Flags().Uint32("client-pid", 0000, "must be provided (pgid of the keploy client)")
+		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
+		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().Bool("enable-testing", c.cfg.EnableTesting, "Enable testing keploy with keploy")
@@ -811,6 +812,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
+		if (c.cfg.CommandType == "native" || c.cfg.CommandType == "") && runtime.GOOS != "linux" { // need to check this one
+			return errors.New("non docker command not supported for os : " + runtime.GOOS)
+		}
+
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
 			c.cfg.CommandType = string(utils.Empty)
@@ -1146,6 +1151,63 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
+
+		isdocker, err := cmd.Flags().GetBool("is-docker")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get is-docker flag")
+			return nil
+		}
+		c.cfg.Agent.IsDocker = isdocker
+
+		enableTesting, err := cmd.Flags().GetBool("enable-testing")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get enable-testing flag")
+			return nil
+		}
+		c.cfg.Agent.EnableTesting = enableTesting
+
+		port, err := cmd.Flags().GetUint32("port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get port flag")
+			return nil
+		}
+		c.cfg.Agent.AgentPort = port
+
+		clientNSPid, err := cmd.Flags().GetUint32("client-pid")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get clientPID flag")
+			return nil
+		}
+		c.cfg.Agent.ClientNSPID = clientNSPid
+
+		agentIP, err := cmd.Flags().GetString("agent-ip")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get agent-ip flag")
+			return nil
+		}
+		c.cfg.Agent.AgentIP = agentIP
+
+		mode, err := cmd.Flags().GetString("mode")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get mode flag")
+			return nil
+		}
+		c.cfg.Agent.Mode = models.Mode(mode)
+
+		dockerNetwork, err := cmd.Flags().GetString("docker-network")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get client-nspid flag")
+			return nil
+		}
+		c.cfg.Agent.DockerNetwork = dockerNetwork
+
+		proxyPort, err := cmd.Flags().GetUint32("proxy-port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get proxyPort flag")
+			return nil
+		}
+		c.cfg.Agent.ProxyPort = proxyPort
+
 	}
 
 	return nil

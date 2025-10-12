@@ -12,37 +12,18 @@ import (
 type Client interface {
 	client.APIClient
 	ExtractNetworksForContainer(containerName string) (map[string]*network.EndpointSettings, error)
-	ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error
-	AttachNetwork(containerName string, networkName []string) error
-	StopAndRemoveDockerContainer() error
-	GetContainerID() string
-	SetContainerID(containerID string)
-	NetworkExists(network string) (bool, error)
 
-	HasRelativePath(c *Compose) bool
-	ForceAbsolutePath(c *Compose, basePath string) error
-
-	GetNetworkInfo(compose *Compose) *NetworkInfo
-
-	CreateNetwork(network string) error
-	MakeNetworkExternal(c *Compose) error
-	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
-	SetInitPid(c *Compose, containerName string) error
-	SetPidContainer(c *Compose, appContainerName string, agentContainerName string) error
-	SetAgentNamespacesInCompose(c *Compose, appContainerName string, agentContainerName string) error
 	IsContainerRunning(containerName string) (bool, error)
 	CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error
 
 	// New functions for finding containers in compose files
 	FindContainerInComposeFiles(composePaths []string, containerName string) (*ComposeServiceInfo, error)
-	FindContainerInComposeCommand(dockerComposeCmd, containerName string) (*ComposeServiceInfo, error)
 
 	// Function for generating keploy-agent service configuration
 	GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error)
 	AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error
-	CreateKeployComposeFile(opts models.SetupOptions, version string) (*Compose, error)
 	ModifyComposeForKeployIntegration(compose *Compose, opts models.SetupOptions, appContainerName string) error
 }
 

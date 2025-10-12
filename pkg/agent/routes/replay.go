@@ -29,7 +29,7 @@ func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.agent.MockOutgoing(r.Context(), uint64(0), OutgoingReq.OutgoingOptions)
+	err = a.agent.MockOutgoing(r.Context(), OutgoingReq.OutgoingOptions)
 	if err != nil {
 		mockRes.Error = err
 		mockRes.IsSuccess = false
@@ -60,7 +60,7 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.agent.SetMocks(r.Context(), uint64(0), SetMocksReq.Filtered, SetMocksReq.UnFiltered)
+	err = a.agent.SetMocks(r.Context(), SetMocksReq.Filtered, SetMocksReq.UnFiltered)
 	if err != nil {
 		setmockRes.Error = err
 		setmockRes.IsSuccess = false
@@ -77,7 +77,7 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), uint64(0))
+	consumedMocks, err := a.agent.GetConsumedMocks(r.Context())
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
@@ -102,7 +102,7 @@ func (a *AgentRequest) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := a.agent.StoreMocks(r.Context(), uint64(0), storeMocksReq.Filtered, storeMocksReq.UnFiltered)
+	err := a.agent.StoreMocks(r.Context(), storeMocksReq.Filtered, storeMocksReq.UnFiltered)
 
 	storeMocksRes := models.AgentResp{
 		Error:     err,
@@ -136,7 +136,7 @@ func (a *AgentRequest) UpdateMockParams(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err = a.agent.UpdateMockParams(r.Context(), uint64(0), updateParamsReq.FilterParams)
+	err = a.agent.UpdateMockParams(r.Context(), updateParamsReq.FilterParams)
 	if err != nil {
 		updateParamsRes.Error = err
 		updateParamsRes.IsSuccess = false

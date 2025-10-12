@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/docker/docker/api/types"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 
@@ -40,7 +39,7 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 	return strings.Join(envs, " ")
 }
 
-func GetDockerCommandAndSetup(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
+func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
 	// Preserves your environment variable setup
 	if DockerConfig.Envs == nil {
 		DockerConfig.Envs = map[string]string{
@@ -51,12 +50,12 @@ func GetDockerCommandAndSetup(ctx context.Context, logger *zap.Logger, conf *con
 	}
 
 	// Preserves your Docker client initialization and setup
-	client, err := New(logger)
+	client, err := New(logger, conf)
 	if err != nil {
 		return "", fmt.Errorf("failed to initialise docker: %w", err)
 	}
 
-	addKeployNetwork(ctx, logger, client)
+	// addKeployNetwork(ctx, logger, client)
 	err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
 		"type":   "debugfs",
 		"device": "debugfs",
@@ -71,12 +70,6 @@ func GetDockerCommandAndSetup(ctx context.Context, logger *zap.Logger, conf *con
 	if err != nil {
 		return "", err
 	}
-
-	// Split the alias into program and arguments for direct execution
-	// parts := strings.Fields(keployAlias)
-	// if len(parts) == 0 {
-	// 	return "", fmt.Errorf("generated docker command alias is empty")
-	// }
 
 	return keployalias, nil
 }
@@ -114,7 +107,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
-		// alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 
 		return alias, nil
 	case "windows":
@@ -154,6 +147,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				alias += " --enable-testing"
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
+			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 			return alias, nil
 		}
 		// if default docker context is used
@@ -171,6 +165,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
+		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 		return alias, nil
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -202,6 +197,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				alias += " --enable-testing"
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
+			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 			return alias, nil
 		}
 		// if default docker context is used
@@ -220,37 +216,39 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
+		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
 }
-func addKeployNetwork(ctx context.Context, logger *zap.Logger, client Client) {
 
-	// Check if the 'keploy-network' network exists
-	networks, err := client.NetworkList(ctx, types.NetworkListOptions{})
-	if err != nil {
-		logger.Debug("failed to list docker networks")
-		return
-	}
+// func addKeployNetwork(ctx context.Context, logger *zap.Logger, client Client) {
 
-	for _, network := range networks {
-		if network.Name == "keploy-network" {
-			logger.Debug("keploy network already exists")
-			return
-		}
-	}
+// 	// Check if the 'keploy-network' network exists
+// 	networks, err := client.NetworkList(ctx, types.NetworkListOptions{})
+// 	if err != nil {
+// 		logger.Debug("failed to list docker networks")
+// 		return
+// 	}
 
-	// Create the 'keploy' network if it doesn't exist
-	_, err = client.NetworkCreate(ctx, "keploy-network", types.NetworkCreate{
-		CheckDuplicate: true,
-	})
-	if err != nil {
-		logger.Debug("failed to create keploy network")
-		return
-	}
+// 	for _, network := range networks {
+// 		if network.Name == "keploy-network" {
+// 			logger.Debug("keploy network already exists")
+// 			return
+// 		}
+// 	}
 
-	logger.Debug("keploy network created")
-}
+// 	// Create the 'keploy' network if it doesn't exist
+// 	_, err = client.NetworkCreate(ctx, "keploy-network", types.NetworkCreate{
+// 		CheckDuplicate: true,
+// 	})
+// 	if err != nil {
+// 		logger.Debug("failed to create keploy network")
+// 		return
+// 	}
+
+// 	logger.Debug("keploy network created")
+// }
 
 func convertPathToUnixStyle(path string) string {
 	// Replace backslashes with forward slashes

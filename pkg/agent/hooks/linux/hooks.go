@@ -59,23 +59,17 @@ type Hooks struct {
 	tcpv6      link.Link
 	tcpv6Ret   link.Link
 	objects    bpfObjects
-	appID      uint64
 	cgBind4    link.Link
 	cgBind6    link.Link
 	bindEnter  link.Link
 	BindEvents *ebpf.Map
 }
 
-func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg, setupOpts models.SetupOptions) error {
+func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts models.SetupOptions) error {
 
-	h.Sess.Set(id, &agent.Session{
-		ID: id,
+	h.Sess.Set(uint64(0), &agent.Session{
+		ID: uint64(0), // need to check this one
 	})
-
-	// Set the app ID for this session with proper synchronization
-	h.M.Lock()
-	h.appID = id
-	h.M.Unlock()
 
 	// Reset the unload done channel for this new load
 	h.UnloadDoneMutex.Lock()
@@ -98,7 +92,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg, setupOp
 		h.unLoad(ctx, opts)
 
 		//deleting in order to free the memory in case of rerecord.
-		h.Sess.Delete(id)
+		h.Sess.Delete(uint64(0))
 
 		// Signal that unload is complete
 		h.UnloadDoneMutex.Lock()
@@ -338,10 +332,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		utils.LogError(h.Logger, err, "failed to close the socket")
 	}
 
-	h.M.Lock()
-	h.appID = 0
-	h.M.Unlock()
-
 	if !opts.E2E {
 		if err := h.udpp4.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the udpp4")
@@ -354,10 +344,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		if err := h.gp4.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the gp4")
 		}
-
-		// if err := h.tcppv4.Close(); err != nil {
-		// 	utils.LogError(h.Logger, err, "failed to close the tcppv4")
-		// }
 
 		if err := h.tcpv4.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the tcpv4")
@@ -373,9 +359,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		if err := h.gp6.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the gp6")
 		}
-		// if err := h.tcppv6.Close(); err != nil {
-		// 	utils.LogError(h.Logger, err, "failed to close the tcppv6")
-		// }
+
 		if err := h.tcpv6.Close(); err != nil {
 			utils.LogError(h.Logger, err, "failed to close the tcpv6")
 		}
@@ -411,7 +395,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	h.Logger.Info("eBPF resources released successfully...")
 }
 
-func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, rules []config.BypassRule) error {
+func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, rules []models.BypassRule) error {
 	h.Logger.Info("Registering the client Info with keploy")
 	// Register the client and start processing
 
@@ -452,7 +436,7 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts models.SetupOptions) (str
 
 		return proxyInfo, nil
 	}
-	opts.AgentIP, _ = GetContainerIP()
+	opts.AgentIP, _ = GetContainerIP() // in case of docker we will get the container's IP fron within the container
 	ipv4, err := IPv4ToUint32(opts.AgentIP)
 	if err != nil {
 		return structs.ProxyInfo{}, err
@@ -528,45 +512,4 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 	}
 
 	return result, nil
-}
-
-func GetContainerIP() (string, error) {
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	// Iterate over the interfaces
-	for _, i := range interfaces {
-		// Skip down or loopback interfaces
-		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		// Get the addresses for the current interface
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Iterate over the addresses
-		for _, addr := range addrs {
-			var ip net.IP
-			// The address can be of type *net.IPNet or *net.IPAddr
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				// Check if it's an IPv4 address
-				if ipnet.IP.To4() != nil {
-					ip = ipnet.IP
-				}
-			}
-
-			if ip != nil {
-				// Found a valid IPv4 address, return it
-				return ip.String(), nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("could not find a non-loopback IP for the container")
 }

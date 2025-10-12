@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package agent contains methods for setting up hooks and proxy along with registering keploy clients.
 package agent
 
@@ -9,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/models"
@@ -32,13 +31,14 @@ type Agent struct {
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	agent.IncomingProxy
 	proxyStarted bool
+	config       *config.Config
 	// activeClients sync.Map
 	// New field for storing client-specific mocks
 	clientMocks sync.Map // map[uint64]*ClientMockStorage
 	Ip          string
 }
 
-func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client, ip agent.IncomingProxy) *Agent {
+func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client, ip agent.IncomingProxy, config *config.Config) *Agent {
 	return &Agent{
 		logger:        logger,
 		Hooks:         hook,
@@ -46,26 +46,27 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.T
 		IncomingProxy: ip,
 		Tester:        tester,
 		dockerClient:  client,
+		config:        config,
 	}
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
-func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh chan struct{}) error {
-	a.logger.Info("Starting the agent in ", zap.String("mode", string(opts.Mode)))
+func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
+	a.logger.Info("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
-	err := a.Hook(ctx, 0, models.HookOptions{
-		Mode:          opts.Mode,
-		IsDocker:      opts.IsDocker,
-		EnableTesting: opts.EnableTesting,
-	}, opts)
+	err := a.Hook(ctx, models.HookOptions{
+		Mode:          a.config.Agent.Mode,
+		IsDocker:      a.config.Agent.IsDocker,
+		EnableTesting: a.config.Agent.EnableTesting,
+	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 		return err
 	}
 
-	startCh <- struct{}{}
+	startCh <- int(a.config.Agent.AgentPort)
 
 	<-ctx.Done()
 	errGrp.Wait()
@@ -74,20 +75,16 @@ func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions, startCh cha
 
 }
 
-// func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) error {
-// 	return nil
-// }
-
 func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
 	tc := a.IncomingProxy.Start(ctx, opts)
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
 }
 
-func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, 500)
 
-	err := a.Proxy.Record(ctx, id, m, opts)
+	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -95,10 +92,10 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 	return m, nil
 }
 
-func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
+func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
 	a.logger.Debug("Inside MockOutgoing of agent binary !!")
 
-	err := a.Proxy.Mock(ctx, id, opts)
+	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -106,7 +103,7 @@ func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.Outgoin
 	return nil
 }
 
-func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions, setupOpts models.SetupOptions) error {
+func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	hookErr := errors.New("failed to hook into the app")
 
 	parentErrGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -147,12 +144,12 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions, se
 	})
 
 	// load hooks if the mode changes ..
-	err := a.Hooks.Load(hookCtx, id, agent.HookCfg{
+	err := a.Hooks.Load(hookCtx, agent.HookCfg{
 		Pid:        0,
 		IsDocker:   opts.IsDocker,
 		KeployIPV4: "172.18.0.2",
 		Mode:       opts.Mode,
-	}, setupOpts)
+	}, a.config.Agent)
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
@@ -193,17 +190,17 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions, se
 	return nil
 }
 
-func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (a *Agent) SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	a.logger.Debug("Inside SetMocks of agent binary !!")
-	return a.Proxy.SetMocks(ctx, id, filtered, unFiltered)
+	return a.Proxy.SetMocks(ctx, filtered, unFiltered)
 }
 
-func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
-	return a.Proxy.GetConsumedMocks(ctx, id)
+func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	return a.Proxy.GetConsumedMocks(ctx)
 }
 
 // StoreMocks stores the filtered and unfiltered mocks for a client ID
-func (a *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mock, unfiltered []*models.Mock) error {
+func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
 	storage := &ClientMockStorage{
 		filtered:   make([]*models.Mock, len(filtered)),
 		unfiltered: make([]*models.Mock, len(unfiltered)),
@@ -213,19 +210,19 @@ func (a *Agent) StoreMocks(ctx context.Context, id uint64, filtered []*models.Mo
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
 
-	a.clientMocks.Store(id, storage)
+	a.clientMocks.Store(uint64(0), storage)
 
-	a.logger.Info("Successfully stored mocks for client", zap.Uint64("clientID", id))
+	a.logger.Info("Successfully stored mocks for client")
 	return nil
 }
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
-func (a *Agent) UpdateMockParams(ctx context.Context, id uint64, params models.MockFilterParams) error {
+func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 
 	// Get stored mocks for the
-	storageInterface, exists := a.clientMocks.Load(id)
+	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
-		return fmt.Errorf("no mocks stored for client ID %d", id)
+		return fmt.Errorf("no mocks stored for client ID")
 	}
 
 	storage := storageInterface.(*ClientMockStorage)
@@ -254,7 +251,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, id uint64, params models.M
 	}
 
 	// Set the filtered mocks to the proxy
-	err := a.Proxy.SetMocks(ctx, id, filteredMocks, unfilteredMocks)
+	err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to set mocks on proxy")
 		return err

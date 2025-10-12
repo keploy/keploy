@@ -14,25 +14,12 @@ import (
 	"strings"
 	"time"
 
-	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-var (
-	realTimeOffset uint64
-)
-
-// convertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
-func convertUnixNanoToTime(unixNano uint64) time.Time {
-	// Unix time is the number of seconds since January 1, 1970 UTC,
-	// so convert nanoseconds to seconds for time.Unix function
-	seconds := int64(unixNano / uint64(time.Second))
-	nanoRemainder := int64(unixNano % uint64(time.Second))
-	return time.Unix(seconds, nanoRemainder)
-}
 
 func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	dstPort := 0
@@ -59,7 +46,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			filter.BypassRule.Path == "" &&
 			filter.BypassRule.Port == 0)
 
-		opts := models.OutgoingOptions{Rules: []config.BypassRule{filter.BypassRule}}
+		opts := models.OutgoingOptions{Rules: []models.BypassRule{filter.BypassRule}}
 		byPassMatch := utils.IsPassThrough(logger, req, uint(dstPort), opts)
 
 		//  2. URL-method rule
@@ -103,7 +90,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 		}
 
 		switch filter.MatchType {
-		case config.AND:
+		case models.AND:
 			pass := true
 			seen := false
 			for _, c := range conds {
@@ -121,7 +108,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				return passThrough
 			}
 
-		case config.OR:
+		case models.OR:
 			fallthrough
 		default:
 			for _, c := range conds {
@@ -135,31 +122,6 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 
 	return passThrough
 }
-
-//// LogAny appends input of any type to a logs.txt file in the current directory
-//func LogAny(value string) error {
-//
-//	logMessage := value
-//
-//	// Add a timestamp to the log message
-//	timestamp := time.Now().Format("2006-01-02 15:04:05")
-//	logLine := fmt.Sprintf("%s - %s\n", timestamp, logMessage)
-//
-//	// Open logs.txt in append mode, create it if it doesn't exist
-//	file, err := os.OpenFile("logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-//	if err != nil {
-//		return err
-//	}
-//	defer file.Close()
-//
-//	// Write the log line to the file
-//	_, err = file.WriteString(logLine)
-//	if err != nil {
-//		return err
-//	}
-//
-//	return nil
-//}
 
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
 
