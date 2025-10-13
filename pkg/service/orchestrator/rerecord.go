@@ -394,14 +394,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 				}
 			}
 		}(tc.Name)
-		if utils.IsDockerCmd(cmdType) {
-			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, pkg.AgentIP)
-			if err != nil {
-				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
-				break
-			}
-			o.logger.Debug("", zap.String("replaced_url_in_docker_env", tc.HTTPReq.URL))
-		}
 
 		if o.config.ReRecord.Host != "" {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, o.config.ReRecord.Host)

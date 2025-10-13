@@ -785,8 +785,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}
 		}
 
-		pkg.AgentIP = keployIPv4
-		opts.AgentIP = keployIPv4
 	}
 	a.logger.Info("Client setup completed successfully")
 	return nil

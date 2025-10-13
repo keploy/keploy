@@ -728,7 +728,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 		r.logger.Info("Obtained container IP", zap.String("containerIP", containerIP))
-		pkg.AgentIP = containerIP
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,

@@ -436,19 +436,19 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts models.SetupOptions) (str
 
 		return proxyInfo, nil
 	}
-	opts.AgentIP, _ = GetContainerIP() // in case of docker we will get the container's IP fron within the container
-	ipv4, err := IPv4ToUint32(opts.AgentIP)
+	AgentIP, _ := GetContainerIP() // in case of docker we will get the container's IP fron within the container
+	ipv4, err := IPv4ToUint32(AgentIP)
 	if err != nil {
 		return structs.ProxyInfo{}, err
 	}
 
 	var ipv6 [4]uint32
 	if opts.IsDocker {
-		ipv6, err := ToIPv4MappedIPv6(opts.AgentIP)
+		ipv6, err := ToIPv4MappedIPv6(AgentIP)
 		if err != nil {
 			return structs.ProxyInfo{}, fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
 		}
-		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", opts.AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
 
 	}
 

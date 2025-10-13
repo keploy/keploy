@@ -83,7 +83,6 @@ type SetupOptions struct {
 	ProxyPort         uint32
 	DnsPort           uint32
 	Mode              Mode
-	AgentIP           string
 	GlobalPassthrough bool
 	AgentPort         uint32
 	AppPorts          []string

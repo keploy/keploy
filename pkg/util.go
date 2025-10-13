@@ -30,8 +30,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var AgentIP string
-var ClientPid uint32
 var Emoji = "\U0001F430" + " Keploy:"
 
 var SortCounter int64 = -1
