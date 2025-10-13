@@ -1052,14 +1052,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		// // Handle Docker environment IP replacement
-		// if utils.IsDockerCmd(cmdType) && runtime.GOOS != "darwin" {
-		// 	err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
-		// 	if err != nil {
-		// 		break
-		// 	}
-		// }
-
 		// Handle user-provided host replacement
 		if r.config.Test.Host != "" {
 			err = r.replaceHostInTestCase(testCase, r.config.Test.Host, "host provided by the user")

@@ -79,44 +79,44 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
 test_container="flashApp_test"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8080:8080 -p 6000:6000 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false --debug 
-# if grep "ERROR" "${test_container}.txt"; then
-#     echo "Error found in pipeline..."
-#     cat "${test_container}.txt"
-#     exit 1
-# fi
-# if grep "WARNING: DATA RACE" "${test_container}.txt"; then
-#     echo "Race condition detected in test, stopping pipeline..."
-#     cat "${test_container}.txt"
-#     exit 1
-# fi
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 6000:6000 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false --debug 
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
 
 all_passed=true
 
-# for i in {0..1}
-# do
-#     # Define the report file for each test set
-#     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
-#     # Extract the test status
-#     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
-#     # Print the status for debugging
-#     echo "Test status for test-set-$i: $test_status"
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
 
-#     # Check if any test set did not pass
-#     if [ "$test_status" != "PASSED" ]; then
-#         all_passed=false
-#         echo "Test-set-$i did not pass."
-#         break # Exit the loop early as all tests need to pass
-#     fi
-# done
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
+    fi
+done
 
-# # Check the overall test status and exit accordingly
-# if [ "$all_passed" = true ]; then
-#     echo "All tests passed"
-#     exit 0
-# else
-#     cat "${test_container}.txt"
-#     exit 1
-# fi
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
+    exit 0
+else
+    cat "${test_container}.txt"
+    exit 1
+fi
