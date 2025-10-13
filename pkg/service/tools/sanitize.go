@@ -11,9 +11,9 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/spf13/viper"
 	"github.com/zricethezav/gitleaks/v8/config"
 	"github.com/zricethezav/gitleaks/v8/detect"
-	"github.com/zricethezav/gitleaks/v8/regexp"
 	"github.com/zricethezav/gitleaks/v8/report"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -164,71 +164,63 @@ type replacement struct {
 	new string
 }
 
-// augmentDetector adds extra escape-aware rules to an existing Detector.
+// loadCustomRules parses the custom gitleaks configuration and returns a Config.
+func loadCustomRules() (config.Config, error) {
+	viper.SetConfigType("toml")
+	if err := viper.ReadConfig(strings.NewReader(GitleaksDefaultConfig)); err != nil {
+		return config.Config{}, fmt.Errorf("failed to read custom rules config: %w", err)
+	}
+
+	var viperConfig config.ViperConfig
+	if err := viper.Unmarshal(&viperConfig); err != nil {
+		return config.Config{}, fmt.Errorf("failed to unmarshal custom rules config: %w", err)
+	}
+
+	cfg, err := viperConfig.Translate()
+	if err != nil {
+		return config.Config{}, fmt.Errorf("failed to translate custom rules config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// augmentDetector adds custom rules from rules.go to an existing Detector.
+// This approach allows easy maintenance - just update the TOML config in rules.go to add/modify rules.
 func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
-	cfg := det.Config // copy current config
-	cfg.Extend.UseDefault = true
+	// Load custom rules from the TOML configuration
+	customCfg, err := loadCustomRules()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load custom rules: %w", err)
+	}
+
+	// Start with the base detector's config
+	cfg := det.Config
 	if cfg.Rules == nil {
 		cfg.Rules = make(map[string]config.Rule)
 	}
+	if cfg.Keywords == nil {
+		cfg.Keywords = make(map[string]struct{})
+	}
 
-	// helper to insert a rule into cfg
-	add := func(key string, rule config.Rule) {
-		cfg.Rules[key] = rule
-		cfg.OrderedRules = append(cfg.OrderedRules, key)
+	// Merge custom rules into the base config
+	for ruleID, rule := range customCfg.Rules {
+		// Add rule to config
+		cfg.Rules[ruleID] = rule
+		cfg.OrderedRules = append(cfg.OrderedRules, ruleID)
+
+		// Add keywords to the global keyword set
 		for _, kw := range rule.Keywords {
-			if cfg.Keywords == nil {
-				cfg.Keywords = make(map[string]struct{})
-			}
 			cfg.Keywords[strings.ToLower(kw)] = struct{}{}
 		}
 	}
 
-	// --- JWT in URL/JSON param: handles =, \u003d and &, \u0026, %26
-	add("jwt-in-param-escape-aware", config.Rule{
-		Description: "JWT in URL/JSON param (handles =, \\u003d and &, \\u0026, %26)",
-		Regex:       regexp.MustCompile(`(?i)(?:token|id_token|access_token|auth_token|jwt)(?:=|\\u003d)([A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})(?:&|\\u0026|%26|["'\s]|$)`),
-		Keywords:    []string{"token=", "access_token=", "\\u003d", "\\u0026", "%26"},
-		Tags:        []string{"jwt", "escape-aware"},
-	})
-
-	// --- Generic JWT fallback
-	add("jwt-generic", config.Rule{
-		Description: "Generic JWT (three base64url segments)",
-		Regex:       regexp.MustCompile(`[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-		Keywords:    []string{"eyJhbGciOi"},
-		Tags:        []string{"jwt"},
-	})
-
-	// --- Authorization: Bearer header with escaped separators
-	add("auth-bearer-header-escape-aware", config.Rule{
-		Description: "Authorization: Bearer <token> (handles :, \\u003a, =, \\u003d)",
-		Regex:       regexp.MustCompile(`(?i)authorization(?:\s*(?::|\\u003a|=|\\u003d))\s*bearer\s+([A-Za-z0-9._~-]{20,})`),
-		Keywords:    []string{"authorization", "bearer", "\\u003a", "\\u003d"},
-		Tags:        []string{"header", "escape-aware"},
-	})
-
-	// --- hdnts signed URLs
-	add("hdnts-hmac", config.Rule{
-		Description: "Signed URL (hdnts) HMAC parameter",
-		Regex:       regexp.MustCompile(`(?i)hdnts(?:=|\\u003d)[^"\s]{0,512}?~hmac=([A-Fa-f0-9]{32,64})`),
-		Keywords:    []string{"hdnts", "~hmac"},
-		Tags:        []string{"signed-url", "hmac"},
-	})
-
-	// --- Opaque access tokens in URL params
-	add("long-token-in-param-escape-aware", config.Rule{
-		Description: "Opaque token in URL/JSON param (handles =, \\u003d and &, \\u0026, %26)",
-		Regex:       regexp.MustCompile(`(?i)(?:token|access_token|auth_token|session_token|sig|signature|apikey|api_key)(?:=|\\u003d)([A-Za-z0-9._~%-]{32,})(?:&|\\u0026|%26|["'\s]|$)`),
-		Keywords:    []string{"access_token", "auth_token", "apikey", "\\u003d", "\\u0026", "%26"},
-		Tags:        []string{"token", "escape-aware"},
-	})
-
-	// ensure stable rule order
+	// Ensure stable rule order
 	sort.Strings(cfg.OrderedRules)
 
+	// Create new detector with augmented config
 	newDet := detect.NewDetector(cfg)
-	// preserve runtime knobs
+
+	// Preserve runtime knobs from original detector
 	newDet.Redact = det.Redact
 	newDet.Verbose = det.Verbose
 	newDet.MaxDecodeDepth = det.MaxDecodeDepth
