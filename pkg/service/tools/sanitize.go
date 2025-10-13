@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,9 @@ import (
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed custom_gitleaks_rules.toml
+var customGitleaksRules string
 
 func (t *Tools) Sanitize(ctx context.Context) error {
 	t.logger.Info("Starting sanitize process...")
@@ -164,10 +168,11 @@ type replacement struct {
 	new string
 }
 
-// loadCustomRules parses the custom gitleaks configuration and returns a Config.
+// loadCustomRules parses the custom gitleaks configuration from custom_gitleaks_rules.toml
+// and returns a Config. The TOML file is embedded at compile time for easy distribution.
 func loadCustomRules() (config.Config, error) {
 	viper.SetConfigType("toml")
-	if err := viper.ReadConfig(strings.NewReader(GitleaksDefaultConfig)); err != nil {
+	if err := viper.ReadConfig(strings.NewReader(customGitleaksRules)); err != nil {
 		return config.Config{}, fmt.Errorf("failed to read custom rules config: %w", err)
 	}
 
@@ -184,8 +189,8 @@ func loadCustomRules() (config.Config, error) {
 	return cfg, nil
 }
 
-// augmentDetector adds custom rules from rules.go to an existing Detector.
-// This approach allows easy maintenance - just update the TOML config in rules.go to add/modify rules.
+// augmentDetector adds custom rules from custom_gitleaks_rules.toml to an existing Detector.
+// This approach allows easy maintenance - just update the TOML file to add/modify rules.
 func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
 	// Load custom rules from the TOML configuration
 	customCfg, err := loadCustomRules()
