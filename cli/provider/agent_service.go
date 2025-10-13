@@ -38,8 +38,7 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	p := proxy.New(logger, h, cfg)
 	ip := incoming.New(logger, h)
 
-	// t := tester.New(logger, h)
-	instrumentation := agent.New(logger, h, p, nil, client, ip, cfg)
+	instrumentation := agent.New(logger, h, p, client, ip, cfg)
 	storage := storage.New(cfg.APIServerURL, logger)
 
 	commonServices := &CommonInternalServices{
@@ -51,7 +50,7 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 
 	switch cmd {
 	case "agent":
-		return agent.New(logger, commonServices.Instrumentation.Hooks, commonServices.Instrumentation.Proxy, commonServices.Instrumentation.Tester, client, commonServices.Instrumentation.IncomingProxy, cfg), nil
+		return agent.New(logger, commonServices.Instrumentation.Hooks, commonServices.Instrumentation.Proxy, client, commonServices.Instrumentation.IncomingProxy, cfg), nil
 	default:
 		return nil, errors.New("invalid command")
 	}

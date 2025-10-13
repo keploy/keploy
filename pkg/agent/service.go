@@ -63,11 +63,6 @@ type DestInfo interface {
 	Delete(ctx context.Context, srcPort uint16) error
 }
 
-// For keploy test bench
-
-type Tester interface {
-	Setup(ctx context.Context, opts models.TestingOptions) error
-}
 type TestBenchInfo interface {
 	// SendKeployPids(key models.ModeKey, pid uint32) error
 	// SendKeployPorts(key models.ModeKey, port uint32) error

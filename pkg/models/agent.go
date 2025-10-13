@@ -12,17 +12,9 @@ type IncomingReq struct {
 	IncomingOptions IncomingOptions `json:"incomingOptions"`
 }
 
-type RegisterReq struct {
-	SetupOptions SetupOptions `json:"setupOptions"`
-}
-
 type AgentResp struct {
 	Error     error `json:"error"`
 	IsSuccess bool  `json:"isSuccess"`
-}
-
-type RunReq struct {
-	RunOptions RunOptions `json:"runOptions"`
 }
 
 type SetMocksReq struct {
@@ -45,8 +37,4 @@ type MockFilterParams struct {
 
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
-}
-
-type UnregisterReq struct {
-	Mode Mode `json:"mode"`
 }

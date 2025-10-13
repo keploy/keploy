@@ -6,7 +6,6 @@ package utils
 import (
 	"os/exec"
 	"strconv"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -34,9 +33,6 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	if err := grace.Run(); err != nil {
 		logger.Warn("graceful taskkill failed; forcing", zap.Int("pid", pid), zap.Error(err))
 	}
-
-	// Small wait before forcing
-	time.Sleep(2 * time.Second)
 
 	// Force if still alive
 	force := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")

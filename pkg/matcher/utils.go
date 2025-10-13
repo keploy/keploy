@@ -912,7 +912,6 @@ func sprintDiffHeader(expect, actual map[string]string) string {
  * field: body, status...
  */
 func sprintDiff(expect, actual, field string) string {
-
 	diff := jsonDiff.Compare(expect, actual)
 
 	if len(expect) > maxLineLength || len(actual) > maxLineLength {

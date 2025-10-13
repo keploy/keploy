@@ -148,7 +148,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
-		// h.tbenchFilterPid = objs.TestbenchInfoMap
 		h.objects = objs
 
 		tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)

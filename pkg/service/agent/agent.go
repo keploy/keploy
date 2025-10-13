@@ -27,7 +27,6 @@ type Agent struct {
 	logger       *zap.Logger
 	agent.Proxy                 // embedding the Proxy interface to transfer the proxy methods to the core object
 	agent.Hooks                 // embedding the Hooks interface to transfer the hooks methods to the core object
-	agent.Tester                // embedding the Tester interface to transfer the tester methods to the core object
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	agent.IncomingProxy
 	proxyStarted bool
@@ -38,13 +37,12 @@ type Agent struct {
 	Ip          string
 }
 
-func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client, ip agent.IncomingProxy, config *config.Config) *Agent {
+func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker.Client, ip agent.IncomingProxy, config *config.Config) *Agent {
 	return &Agent{
 		logger:        logger,
 		Hooks:         hook,
 		Proxy:         proxy,
 		IncomingProxy: ip,
-		Tester:        tester,
 		dockerClient:  client,
 		config:        config,
 	}
@@ -178,15 +176,6 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	}
 
 	a.proxyStarted = true
-	// if opts.EnableTesting {
-	// 	// Setting up the test bench
-	// 	err := a.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
-	// 	if err != nil {
-	// 		utils.LogError(a.logger, err, "error while setting up the test bench environment")
-	// 		return errors.New("failed to setup the test bench")
-	// 	}
-	// }
-
 	return nil
 }
 
