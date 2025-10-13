@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -859,19 +858,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
-		if cmdType != utils.DockerCompose {
-			err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-				Rules:          r.config.BypassRules,
-				MongoPassword:  r.config.Test.MongoPassword,
-				SQLDelay:       time.Duration(r.config.Test.Delay),
-				FallBackOnMiss: r.config.Test.FallBackOnMiss,
-				Mocking:        r.config.Test.Mocking,
-				Backdate:       testCases[0].HTTPReq.Timestamp,
-			})
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to mock outgoing")
-				return models.TestSetStatusFailed, err
-			}
+		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
+			Rules:          r.config.BypassRules,
+			MongoPassword:  r.config.Test.MongoPassword,
+			SQLDelay:       time.Duration(r.config.Test.Delay),
+			FallBackOnMiss: r.config.Test.FallBackOnMiss,
+			Mocking:        r.config.Test.Mocking,
+			Backdate:       testCases[0].HTTPReq.Timestamp,
+		})
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to mock outgoing")
+			return models.TestSetStatusFailed, err
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
@@ -880,7 +877,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		if r.instrument && cmdType != utils.DockerCompose {
+		if r.instrument {
 			if !serveTest {
 				runTestSetErrGrp.Go(func() error {
 					defer utils.Recover(r.logger)
@@ -1055,13 +1052,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		// Handle Docker environment IP replacement
-		if utils.IsDockerCmd(cmdType) && runtime.GOOS != "darwin" {
-			err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
-			if err != nil {
-				break
-			}
-		}
+		// // Handle Docker environment IP replacement
+		// if utils.IsDockerCmd(cmdType) && runtime.GOOS != "darwin" {
+		// 	err = r.replaceHostInTestCase(testCase, pkg.AgentIP, "docker container's IP")
+		// 	if err != nil {
+		// 		break
+		// 	}
+		// }
 
 		// Handle user-provided host replacement
 		if r.config.Test.Host != "" {

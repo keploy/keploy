@@ -79,7 +79,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
 test_container="flashApp_test"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false 
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false --debug 
 # if grep "ERROR" "${test_container}.txt"; then
 #     echo "Error found in pipeline..."
 #     cat "${test_container}.txt"
