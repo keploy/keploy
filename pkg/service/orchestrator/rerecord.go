@@ -246,7 +246,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		return false, fmt.Errorf("%s", errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
-	// var userIP string
 	delay := o.config.Test.Delay
 	time.Sleep(time.Duration(delay) * time.Second)
 	if utils.IsDockerCmd(cmdType) {

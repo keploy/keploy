@@ -61,8 +61,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		responses = append(responses, result.resp...)
 
 		reqTimestamp := result.reqTimestamp
-
-		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, result.resTimestamp)
+		resTimestamp := result.resTimestamp
+		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, resTimestamp)
 
 		// reset the requests and responses
 		requests = []mysql.Request{}

@@ -17,11 +17,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type CommonInternalServices struct {
-	commonPlatformServices
-	Instrumentation *agent.Agent
-}
-
 func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, _ service.Auth) (interface{}, error) {
 
 	var client docker.Client
@@ -39,14 +34,9 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
 
-	commonServices := &CommonInternalServices{
-		commonPlatformServices{},
-		instrumentation,
-	}
-
 	switch cmd {
 	case "agent":
-		return agent.New(logger, commonServices.Instrumentation.Hooks, commonServices.Instrumentation.Proxy, client, commonServices.Instrumentation.IncomingProxy, cfg), nil
+		return agent.New(logger, instrumentation.Hooks, instrumentation.Proxy, client, instrumentation.IncomingProxy, cfg), nil
 	default:
 		return nil, errors.New("invalid command")
 	}
