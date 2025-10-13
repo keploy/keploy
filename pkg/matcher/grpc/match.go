@@ -123,7 +123,11 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				actualParts[i] = strings.TrimSpace(actualParts[i])
 			}
 
-			headerResult.Normal = matcher.CompareSlicesIgnoreOrder(expectedParts, actualParts)
+			normalize := func(s string) string {
+				return strings.TrimSpace(strings.Split(s, "+")[0])
+			}
+
+			headerResult.Normal = normalize(expectedContentType) == normalize(actualContentType)
 
 			if !headerResult.Normal {
 				differences["headers.ordinary_headers.:content-type"] = struct {
