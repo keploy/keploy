@@ -1,6 +1,15 @@
 name: Golang On Docker (macOS)
 on:
   workflow_call:
+    inputs:
+      image_tag:            
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
+    secrets:
+      MAC_RUNNER_USER_PASSWORD:
+        description: "Keychain password for macOS runner"
+        required: true
 
 jobs:
   golang_docker_macos:
@@ -18,26 +27,29 @@ jobs:
             record_src: build
             replay_src: build
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (macOS)
-    steps:
 
-      - name: Clear docker images and cache
+    steps:
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
         run: |
-          docker builder prune --all -f
-          docker volume prune -f
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
       - name: Clean up git config
         if: always()
         continue-on-error: true
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
+          rm -rf ~/.gitconfig
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - id: image
         uses: ./.github/actions/download-image
-        env:
-          DOCKER_HOST: ""
+        with:
+          image_tag: ${{ inputs.image_tag }}
+          version: ${{ github.event.pull_request.number }}-${{ github.sha }}
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -76,11 +88,11 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
         shell: bash
         run: |
           cd samples-go/${{ matrix.app.path }}
           bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-macos.sh
-
 
       - name: Clean up git config
         if: always()
