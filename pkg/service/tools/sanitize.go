@@ -11,7 +11,9 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/zricethezav/gitleaks/v8/config"
 	"github.com/zricethezav/gitleaks/v8/detect"
+	"github.com/zricethezav/gitleaks/v8/regexp"
 	"github.com/zricethezav/gitleaks/v8/report"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -162,6 +164,83 @@ type replacement struct {
 	new string
 }
 
+// augmentDetector adds extra escape-aware rules to an existing Detector.
+func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
+	cfg := det.Config // copy current config
+	cfg.Extend.UseDefault = true
+	if cfg.Rules == nil {
+		cfg.Rules = make(map[string]config.Rule)
+	}
+
+	// helper to insert a rule into cfg
+	add := func(key string, rule config.Rule) {
+		cfg.Rules[key] = rule
+		cfg.OrderedRules = append(cfg.OrderedRules, key)
+		for _, kw := range rule.Keywords {
+			if cfg.Keywords == nil {
+				cfg.Keywords = make(map[string]struct{})
+			}
+			cfg.Keywords[strings.ToLower(kw)] = struct{}{}
+		}
+	}
+
+	// --- JWT in URL/JSON param: handles =, \u003d and &, \u0026, %26
+	add("jwt-in-param-escape-aware", config.Rule{
+		Description: "JWT in URL/JSON param (handles =, \\u003d and &, \\u0026, %26)",
+		Regex:       regexp.MustCompile(`(?i)(?:token|id_token|access_token|auth_token|jwt)(?:=|\\u003d)([A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})(?:&|\\u0026|%26|["'\s]|$)`),
+		Keywords:    []string{"token=", "access_token=", "\\u003d", "\\u0026", "%26"},
+		Tags:        []string{"jwt", "escape-aware"},
+	})
+
+	// --- Generic JWT fallback
+	add("jwt-generic", config.Rule{
+		Description: "Generic JWT (three base64url segments)",
+		Regex:       regexp.MustCompile(`[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
+		Keywords:    []string{"eyJhbGciOi"},
+		Tags:        []string{"jwt"},
+	})
+
+	// --- Authorization: Bearer header with escaped separators
+	add("auth-bearer-header-escape-aware", config.Rule{
+		Description: "Authorization: Bearer <token> (handles :, \\u003a, =, \\u003d)",
+		Regex:       regexp.MustCompile(`(?i)authorization(?:\s*(?::|\\u003a|=|\\u003d))\s*bearer\s+([A-Za-z0-9._~-]{20,})`),
+		Keywords:    []string{"authorization", "bearer", "\\u003a", "\\u003d"},
+		Tags:        []string{"header", "escape-aware"},
+	})
+
+	// --- hdnts signed URLs
+	add("hdnts-hmac", config.Rule{
+		Description: "Signed URL (hdnts) HMAC parameter",
+		Regex:       regexp.MustCompile(`(?i)hdnts(?:=|\\u003d)[^"\s]{0,512}?~hmac=([A-Fa-f0-9]{32,64})`),
+		Keywords:    []string{"hdnts", "~hmac"},
+		Tags:        []string{"signed-url", "hmac"},
+	})
+
+	// --- Opaque access tokens in URL params
+	add("long-token-in-param-escape-aware", config.Rule{
+		Description: "Opaque token in URL/JSON param (handles =, \\u003d and &, \\u0026, %26)",
+		Regex:       regexp.MustCompile(`(?i)(?:token|access_token|auth_token|session_token|sig|signature|apikey|api_key)(?:=|\\u003d)([A-Za-z0-9._~%-]{32,})(?:&|\\u0026|%26|["'\s]|$)`),
+		Keywords:    []string{"access_token", "auth_token", "apikey", "\\u003d", "\\u0026", "%26"},
+		Tags:        []string{"token", "escape-aware"},
+	})
+
+	// ensure stable rule order
+	sort.Strings(cfg.OrderedRules)
+
+	newDet := detect.NewDetector(cfg)
+	// preserve runtime knobs
+	newDet.Redact = det.Redact
+	newDet.Verbose = det.Verbose
+	newDet.MaxDecodeDepth = det.MaxDecodeDepth
+	newDet.MaxArchiveDepth = det.MaxArchiveDepth
+	newDet.MaxTargetMegaBytes = det.MaxTargetMegaBytes
+	newDet.FollowSymlinks = det.FollowSymlinks
+	newDet.NoColor = det.NoColor
+	newDet.IgnoreGitleaksAllow = det.IgnoreGitleaksAllow
+
+	return newDet, nil
+}
+
 // RedactYAML applies secret detection + redaction to a YAML blob.
 // - Populates/extends aggSecrets (shared across files in a test-set)
 // - Writes placeholders into the YAML
@@ -172,6 +251,11 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("gitleaks: %w", err)
 	}
+	detector, err = augmentDetector(detector)
+	if err != nil {
+		return nil, fmt.Errorf("augment gitleaks rules: %w", err)
+	}
+
 	findings := detector.DetectString(string(yamlBytes))
 	secretSet := collectSecrets(findings)
 
