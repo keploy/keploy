@@ -92,7 +92,7 @@ func getCaPaths() ([]string, error) {
 }
 
 // to extract ca certificate to temp
-func ExtractCertToTemp() (string, error) {
+func extractCertToTemp() (string, error) {
 	tempFile, err := os.CreateTemp("", "ca.crt")
 
 	if err != nil {
@@ -331,7 +331,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 }
 
 func SetupCaCertEnv(logger *zap.Logger) error {
-	tempCertPath, err := ExtractCertToTemp()
+	tempCertPath, err := extractCertToTemp()
 	if err != nil {
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err

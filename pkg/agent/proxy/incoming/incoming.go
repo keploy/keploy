@@ -198,19 +198,3 @@ func (r *replayConn) Read(p []byte) (int, error) {
 	}
 	return r.Conn.Read(p)
 }
-
-func (pm *IngressProxyManager) persistTestCases(ctx context.Context, persister models.TestCasePersister) {
-	for {
-		select {
-		case <-ctx.Done():
-			pm.logger.Info("Stopping test case persister.")
-			return
-		case tc := <-pm.tcChan:
-			if err := persister(ctx, tc); err != nil {
-				pm.logger.Error("Failed to persist captured test case", zap.Error(err))
-			} else {
-				pm.logger.Debug("Successfully captured and persisted a test case.", zap.String("kind", string(tc.Kind)))
-			}
-		}
-	}
-}

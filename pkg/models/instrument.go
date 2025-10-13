@@ -1,13 +1,9 @@
 package models
 
 import (
-	"context"
 	"crypto/tls"
 	"time"
 )
-
-// TestCasePersister defines the function signature for saving a TestCase.
-type TestCasePersister func(ctx context.Context, testCase *TestCase) error
 
 type BypassRule struct {
 	Path string `json:"path" yaml:"path" mapstructure:"path"`

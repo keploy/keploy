@@ -10,7 +10,6 @@ import (
 	incoming "go.keploy.io/server/v2/pkg/agent/proxy/incoming"
 
 	"go.keploy.io/server/v2/pkg/platform/docker"
-	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/agent"
 	"go.keploy.io/server/v2/utils"
@@ -39,12 +38,9 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	ip := incoming.New(logger, h)
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
-	storage := storage.New(cfg.APIServerURL, logger)
 
 	commonServices := &CommonInternalServices{
-		commonPlatformServices{
-			Storage: storage,
-		},
+		commonPlatformServices{},
 		instrumentation,
 	}
 
