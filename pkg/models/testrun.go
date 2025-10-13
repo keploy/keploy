@@ -119,7 +119,7 @@ const (
 	SchemaAdded       FailureCategory = "SCHEMA_ADDED"        // only new fields added; backward compatible
 	SchemaBroken      FailureCategory = "SCHEMA_BROKEN"       // removed/changed fields, type mismatch, or entirely different schema
 	StatusCodeChanged FailureCategory = "STATUS_CODE_CHANGED" // status code changed
-	HeaderChanged     FailureCategory = "HEADER_CHANGED"       // header changed
+	HeaderChanged     FailureCategory = "HEADER_CHANGED"      // header changed
 	InternalFailure   FailureCategory = "INTERNAL_FAILURE"    // internal error in the tool
 )
 
