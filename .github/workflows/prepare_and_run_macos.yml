@@ -13,10 +13,11 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
-      - name: Neutralize global Git config for checkout
-        run: echo "disabled"
-        env:
-          GIT_CONFIG_GLOBAL: /dev/null
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          rm -rf ~/.gitconfig
       
       - name: Checkout Repository
         uses: actions/checkout@v4
