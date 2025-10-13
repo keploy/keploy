@@ -815,6 +815,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		fmt.Println("here is the command ", c.cfg.Command)
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 		fmt.Println("here is the command type ", c.cfg.CommandType)
+		c.cfg.CommandType = "docker-compose"
 		if (c.cfg.CommandType == "native" || c.cfg.CommandType == "") && runtime.GOOS != "linux" && runtime.GOOS != "windows" { // need to check this one
 			return errors.New("non docker command not supported for os : " + runtime.GOOS)
 		}

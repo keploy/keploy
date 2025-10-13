@@ -148,7 +148,8 @@ $recArgs = @(
   'record',
   '-c', $dockerCmd,
   '--container-name', $containerName,
-  '--generate-github-actions=false'
+  '--generate-github-actions=false',
+  '--debug'
 )
 
 Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
