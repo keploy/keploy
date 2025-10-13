@@ -201,13 +201,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, keployContainer string, p
 	}
 
 	Volumes := ""
-	for _, volume := range DockerConfig.VolumeMounts {
-		Volumes = Volumes + " -v " + volume
+	for i, volume := range DockerConfig.VolumeMounts {
+		if i != 0 {
+			Volumes = Volumes + "-v " + volume
+		} else {
+			Volumes = "-v " + volume
+		}
+		if i == len(DockerConfig.VolumeMounts)-1 {
+			Volumes = Volumes + " "
+		}
 	}
 
 	switch osName {
 	case "linux":
-		alias := "sudo docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias := "sudo docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "windows":
 		// Get the current working directory
@@ -230,12 +237,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, keployContainer string, p
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + " -v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
+			alias := "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + " -v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
+		alias := "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "darwin":
 		// Get the context and docker daemon endpoint.
@@ -275,12 +282,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, keployContainer string, p
 				return "", errors.New("failed to get alias")
 			}
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+			alias := "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias = "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias = "docker container run --name " + keployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + fmt.Sprintf("%d:%d", proxyPort, proxyPort) + " --privileged --pid=host" + ttyFlag + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
