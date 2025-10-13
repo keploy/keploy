@@ -123,7 +123,7 @@ send_request(){
 }
 
 for i in {1..2}; do
-    container_name="$APP_CONTAINER"
+    container_name="$APP_CONTAINER_${i}"
     send_request &
 
     $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "40s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${container_name}.txt"
@@ -149,7 +149,7 @@ docker compose down
 echo "Services stopped - Keploy should now use mocks for dependency interactions"
 
 # Start keploy in test mode.
-test_container="$APP_CONTAINER"
+test_container="${APP_CONTAINER}_test"
 $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
