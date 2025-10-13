@@ -48,6 +48,11 @@ jobs:
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
+      
+      - name: Neutralize global Git config for checkout
+        run: echo "disabled"
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
 
       - name: Checkout repository
         uses: actions/checkout@v4
