@@ -205,6 +205,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
 		cmd.Flags().String("tests", "", "Test Sets to be normalized")
+		cmd.Flags().Bool("allow-high-risk", false, "Allow normalization of high-risk test failures")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -408,6 +409,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"protoFile":             "proto-file",
 		"protoDir":              "proto-dir",
 		"protoInclude":          "proto-include",
+		"allowHighRisk":         "allow-high-risk",
 		"disableMapping":        "disable-mapping",
 	}
 
@@ -1125,6 +1127,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		err = config.SetSelectedTestsNormalize(c.cfg, tests)
 		if err != nil {
 			errMsg := "failed to normalize the selected tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		c.cfg.Normalize.AllowHighRisk, err = cmd.Flags().GetBool("allow-high-risk")
+		if err != nil {
+			errMsg := "failed to read allow-high-risk flag"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
