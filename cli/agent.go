@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
@@ -41,24 +39,16 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			}
 
 			startAgentCh := make(chan int)
-
 			router := chi.NewRouter()
 
 			routes.New(router, a, logger)
-			var port int
 			go func() {
 				select {
 				case <-ctx.Done():
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case p := <-startAgentCh:
-					port = p
-					logger.Info("Starting Agent's HTTP server on :", zap.Int("port", port))
-					if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
-						logger.Error("failed to start HTTP server", zap.Error(err))
-					} else {
-						logger.Info("HTTP server started successfully on port ", zap.Int("port", port))
-					}
+					routes.StartAgentServer(logger, p, router)
 				}
 			}()
 
