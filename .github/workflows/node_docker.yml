@@ -1,6 +1,11 @@
 name: Node on Docker
 on:
   workflow_call:
+    inputs:
+      image_tag:            
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
 jobs:
   node_docker:
     runs-on: ubuntu-latest
@@ -27,6 +32,8 @@ jobs:
         uses: actions/checkout@v4
 
       - id: image
+        with:
+          image_tag: ${{ inputs.image_tag }}
         uses: ./.github/actions/download-image
 
       - id: record
