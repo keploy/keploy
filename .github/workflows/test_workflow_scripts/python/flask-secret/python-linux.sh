@@ -14,30 +14,29 @@ sleep 5  # Allow time for configuration changes
 
 send_request(){
     mode="$1"  # "secrets" or "astro"
+
+    # wait for app to be ready
     sleep 10
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://127.0.0.1:8000/; then
-            app_started=true
-        fi
+    until curl -fsS http://127.0.0.1:8000/health >/dev/null; do
         sleep 3
     done
     echo "App started"
 
     if [ "$mode" = "astro" ]; then
-        curl -s http://localhost:8000/astro
+        curl -sS http://127.0.0.1:8000/astro >/dev/null
     else
-        curl -s http://localhost:8000/secret1
-        curl -s http://localhost:8000/secret2
-        curl -s http://localhost:8000/secret3
+        for ep in secret1 secret2 secret3 jwtlab curlmix cdn; do
+            echo "GET /$ep"
+            curl -sS "http://127.0.0.1:8000/$ep" >/dev/null
+        done
     fi
 
-    # Wait for keploy to record
+    # Wait for keploy to flush recordings, then stop it
     sleep 10
     pid=$(pgrep keploy | head -n 1)
     echo "$pid Keploy PID"
     echo "Killing keploy"
-    sudo kill $pid
+    sudo kill "$pid"
 }
 
 # --- Record cycles for secret endpoints (2 sets, unchanged behavior) ---
