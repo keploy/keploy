@@ -13,15 +13,10 @@ jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
     steps:
-      - name: Clean up git config
-        if: always()
-        continue-on-error: true
-        run: |
-          git config --global --unset url."git@github.com:".insteadOf
-
-      - name: Docker Host Env
-        run: |
-          echo "$DOCKER_HOST"
+      - name: Neutralize global Git config for checkout
+        run: echo "disabled"
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
       
       - name: Checkout Repository
         uses: actions/checkout@v4
