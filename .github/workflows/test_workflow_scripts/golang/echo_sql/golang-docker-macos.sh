@@ -123,7 +123,7 @@ send_request(){
 }
 
 for i in {1..2}; do
-    container_name="$APP_CONTAINER_${i}"
+    container_name="${APP_CONTAINER}_${i}"
     send_request &
 
     $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "40s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${container_name}.txt"
