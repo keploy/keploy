@@ -1,6 +1,11 @@
 name: Python On Docker
 on:
   workflow_call:
+    inputs:
+      image_tag:            
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
 jobs:
   python_docker_debian:
     runs-on: ubuntu-latest
@@ -25,6 +30,8 @@ jobs:
 
       - id: image
         uses: ./.github/actions/download-image
+        with:
+          image_tag: ${{ inputs.image_tag }}
 
       - id: record
         uses: ./.github/actions/download-binary

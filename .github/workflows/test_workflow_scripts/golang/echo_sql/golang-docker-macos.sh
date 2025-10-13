@@ -2,14 +2,66 @@
 # macOS variant for echo-sql (docker compose). Uses BSD sed.
 set -euo pipefail
 
-# Safely source (don’t fail if missing)
-IID_FILE="./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh"
-if [ -f "$IID_FILE" ]; then
-  # shellcheck source=/dev/null
-  source "$IID_FILE"
-else
-  echo "⚠️  $IID_FILE not found; continuing without it."
-fi
+# for the below source make it such a way that if the file is not present or already present it does not error
+source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
+
+# Function to find available port
+find_available_port() {
+    local start_port=${1:-6000}
+    local port=$start_port
+    while lsof -i:$port >/dev/null 2>&1; do
+        port=$((port + 1))
+    done
+    echo $port
+}
+
+# Find 4 available ports
+APP_PORT=$(find_available_port 6000)
+DB_PORT=$(find_available_port $((APP_PORT + 1)))
+PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
+DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
+
+# Generate unique container names with JOB_ID suffix
+APP_CONTAINER="echoApp_${JOB_ID}"
+DB_CONTAINER="postgresDb_${JOB_ID}"
+KEPLOY_CONTAINER="keploy_${JOB_ID}"
+APP_IMAGE="go-app-${JOB_ID}"
+
+echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
+echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
+
+# Cleanup function to remove containers
+cleanup() {
+    echo "Cleaning up containers and services..."
+    docker compose down >/dev/null 2>&1 || true
+    docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "echoApp" >/dev/null 2>&1 || true
+    docker rm -f "postgresDb" >/dev/null 2>&1 || true
+    echo "Cleanup completed"
+}
+
+# Set trap to run cleanup on script exit (success, failure, or interrupt)
+trap cleanup EXIT INT TERM
+
+# Replace ports and container names in all files in current directory
+echo "Updating configuration files with dynamic ports and container names..."
+for file in $(find . -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.go" -o -name "*.json" -o -name "*.sh" -o -name "*.env" -o -name "*.md" \)); do
+    if [ -f "$file" ] && [ "$file" != "./golang-docker-macos.sh" ]; then
+        # Replace 8082 with APP_PORT
+        sed -i '' "s/8082/${APP_PORT}/g" "$file" 2>/dev/null || true
+        # Replace echoApp with APP_CONTAINER
+        sed -i '' "s/echoApp/${APP_CONTAINER}/g" "$file" 2>/dev/null || true
+        # Replace postgresDb with DB_CONTAINER
+        sed -i '' "s/postgresDb/${DB_CONTAINER}/g" "$file" 2>/dev/null || true
+        # Replace 5432: with DB_PORT: in docker-compose files
+        sed -i '' "s/5432:/${DB_PORT}:/g" "$file" 2>/dev/null || true
+        # Replace go-app with APP_IMAGE
+        sed -i '' "s/go-app/${APP_IMAGE}/g" "$file" 2>/dev/null || true
+        echo "Updated $file"
+    fi
+done
 
 # Build Docker Image(s)
 docker compose build
@@ -29,53 +81,63 @@ else
   echo "⚠️  Config file $config_file not found, skipping sed replace."
 fi
 
+container_kill() {
+    pid=$(pgrep -n keploy)
+    echo "$pid Keploy PID"
+    echo "Killing keploy"
+    sudo kill $pid
+}
+
 send_request(){
-  echo "Sending requests to the application..."
-  sleep 10
-  local app_started=false
-  while [ "$app_started" = false ]; do
-    if curl -sS -X GET http://localhost:8082/health >/dev/null; then
-      app_started=true
-    else
-      sleep 3
-    fi
-  done
-  echo "App started"
+    echo "Sending requests to the application..."
+    sleep 10
+    app_started=false
+    while [ "$app_started" = false ]; do
+        if curl -X GET http://localhost:${APP_PORT}/health; then
+            app_started=true
+        fi
+        sleep 3
+    done
+    echo "App started"
+    # Make curl calls to record the test cases and mocks.
+    curl --request POST \
+      --url http://localhost:${APP_PORT}/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://google.com"
+    }'
 
-  curl -sS --request POST \
-    --url http://localhost:8082/url \
-    --header 'content-type: application/json' \
-    --data '{"url":"https://google.com"}' >/dev/null
+    curl --request POST \
+      --url http://localhost:${APP_PORT}/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://facebook.com"
+    }'
 
-  curl -sS --request POST \
-    --url http://localhost:8082/url \
-    --header 'content-type: application/json' \
-    --data '{"url":"https://facebook.com"}' >/dev/null
+    curl -X GET http://localhost:${APP_PORT}/health
 
-  curl -sS -X GET http://localhost:8082/health >/dev/null
-  sleep 3
-  echo "Requests sent successfully."
+    # Wait for 3 seconds for keploy to record the test cases and mocks.
+    sleep 3
+    echo "Requests sent successfully."
 }
 
 for i in {1..2}; do
-  container_name="echoApp"
-  send_request &
+    container_name="$APP_CONTAINER_${i}"
+    send_request &
 
-  # Stream + save logs; no need to cat later
-  ("$RECORD_BIN" record -c "docker compose up" \
-     --container-name "$container_name" \
-     --generateGithubActions=false \
-     --record-timer=16s) 2>&1 | tee "${container_name}.txt"
+    $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --record-timer "40s" --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${container_name}.txt"
 
-  if grep -q "WARNING: DATA RACE" "${container_name}.txt"; then
-    echo "❌ Data race detected in recording"; exit 1
-  fi
-  if grep -q "ERROR" "${container_name}.txt"; then
-    echo "❌ Error found in recording"; exit 1
-  fi
+    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        exit 1
+    fi
+    if grep "ERROR" "${container_name}.txt"; then
+        echo "Error found in pipeline..."
+        exit 1
+    fi
+    sleep 5
 
-  sleep 5
-  echo "✅ Recorded test case and mocks for iteration ${i}"
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Shutdown services before test mode - Keploy should use mocks for dependencies
@@ -83,23 +145,44 @@ echo "Shutting down docker compose services before test mode..."
 docker compose down
 echo "Services stopped - Keploy should now use mocks for dependency interactions"
 
-# Start keploy in test mode (stream + save logs)
-test_container="echoApp"
-("$REPLAY_BIN" test \
-   -c 'docker compose up' \
-   --containerName "$test_container" \
-   --apiTimeout 60 \
-   --delay 10 \
-   --generate-github-actions=false || true) 2>&1 | tee "${test_container}.txt"
+# Start keploy in test mode.
+test_container="${APP_CONTAINER}_test"
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 10 --generate-github-actions=false --proxy-port=$PROXY_PORT --dns-port=$DNS_PORT --keploy-container "$KEPLOY_CONTAINER" 2>&1 | tee "${test_container}.txt"
 
-if grep -q "ERROR" "${test_container}.txt"; then
-  echo "❌ Error found in test"; exit 1
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    exit 1
 fi
 if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
   echo "❌ Data race detected in test"; exit 1
 fi
 
 all_passed=true
-for i in {0..1}; do
-  report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-  i
+
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break
+    fi
+
+done
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
+else
+    echo "Some tests failed"
+    exit 1
+fi
