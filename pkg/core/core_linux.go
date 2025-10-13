@@ -45,10 +45,12 @@ func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client dock
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// create a new app and store it in the map
 	id := uint64(c.id.Next())
+	c.logger.Info("setting up app", zap.String("keployContainer", opts.KeployContainer))
 	a := app.NewApp(c.logger, id, cmd, c.dockerClient, app.Options{
-		DockerNetwork: opts.DockerNetwork,
-		Container:     opts.Container,
-		DockerDelay:   opts.DockerDelay,
+		DockerNetwork:   opts.DockerNetwork,
+		Container:       opts.Container,
+		DockerDelay:     opts.DockerDelay,
+		KeployContainer: opts.KeployContainer,
 	})
 	c.apps.Store(id, a)
 

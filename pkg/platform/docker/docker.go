@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
 )
 
@@ -341,7 +341,7 @@ func (idc *Impl) GetNetworkInfo(compose *Compose) *NetworkInfo {
 }
 
 // GetHostWorkingDirectory Inspects Keploy docker container to get bind mount for current directory
-func (idc *Impl) GetHostWorkingDirectory() (string, error) {
+func (idc *Impl) GetHostWorkingDirectory(keployContainer string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
@@ -351,7 +351,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		return "", err
 	}
 
-	container, err := idc.ContainerInspect(ctx, "keploy-v2")
+	container, err := idc.ContainerInspect(ctx, keployContainer)
 	if err != nil {
 		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")
 		return "", err
@@ -368,8 +368,8 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 }
 
 // ForceAbsolutePath replaces relative paths in bind mounts with absolute paths
-func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
-	hostWorkingDirectory, err := idc.GetHostWorkingDirectory()
+func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string, keployContainer string) error {
+	hostWorkingDirectory, err := idc.GetHostWorkingDirectory(keployContainer)
 	if err != nil {
 		return err
 	}
@@ -595,11 +595,12 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 		idc.logger.Debug("removing existing volume with different options", zap.String("volume", volumeName))
 		err := idc.VolumeRemove(ctx, volumeName, false)
 		if err != nil {
-			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+			idc.logger.Error("failed to remove existing volume", zap.String("volume", volumeName), zap.Error(err))
+			cancel()
 			return err
 		}
+		idc.logger.Info("removed existing volume", zap.String("volume", volumeName))
 	}
-
 	// Create the volume,
 	// Create volume with provided driver options or default
 	createOptions := volume.CreateOptions{

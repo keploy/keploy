@@ -30,7 +30,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		cmd:              cmd,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
-		keployContainer:  "keploy-v2",
+		keployContainer:  opts.KeployContainer,
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
@@ -59,9 +59,10 @@ type App struct {
 type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
-	Container     string
-	DockerDelay   uint64
-	DockerNetwork string
+	Container       string
+	DockerDelay     uint64
+	DockerNetwork   string
+	KeployContainer string
 }
 
 func (a *App) Setup(_ context.Context) error {
@@ -176,7 +177,7 @@ func (a *App) SetupCompose() error {
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)
 	if ok {
-		err = a.docker.ForceAbsolutePath(compose, path)
+		err = a.docker.ForceAbsolutePath(compose, path, a.keployContainer)
 		if err != nil {
 			utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
 			return err
