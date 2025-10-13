@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -20,7 +21,6 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
 )
 
@@ -185,11 +185,12 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 		idc.logger.Debug("removing existing volume with different options", zap.String("volume", volumeName))
 		err := idc.VolumeRemove(ctx, volumeName, false)
 		if err != nil {
-			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+			idc.logger.Error("failed to remove existing volume", zap.String("volume", volumeName), zap.Error(err))
+			cancel()
 			return err
 		}
+		idc.logger.Info("removed existing volume", zap.String("volume", volumeName))
 	}
-
 	// Create the volume,
 	// Create volume with provided driver options or default
 	createOptions := volume.CreateOptions{

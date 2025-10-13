@@ -257,6 +257,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 
 		//add rest of the uncommon flags for record, test, rerecord commands
