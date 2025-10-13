@@ -162,6 +162,12 @@ $recJob = Start-Job -ScriptBlock {
     & $using:env:RECORD_BIN @($using:recArgs) 2>&1 | Tee-Object -FilePath $using:logPath
 }
 
+Write-Host "`n=========================================================="
+Write-Host "Dumping full Keploy Record Logs from file: '$logPath'"
+Write-Host "=========================================================="
+Get-Content -Path $logPath -ErrorAction SilentlyContinue
+Write-Host "=========================================================="
+
 # This function will print any new logs from the background job
 function Sync-Logs {
     param($job)
