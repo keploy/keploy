@@ -547,7 +547,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, KeployContainer: r.config.KeployContainer})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return &InstrumentState{}, err
@@ -592,9 +592,10 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 
 	// First, set up the app again since it might have been deleted during cleanup
 	newAppID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
-		Container:     r.config.ContainerName,
-		DockerNetwork: r.config.NetworkName,
-		DockerDelay:   r.config.BuildDelay,
+		Container:       r.config.ContainerName,
+		DockerNetwork:   r.config.NetworkName,
+		DockerDelay:     r.config.BuildDelay,
+		KeployContainer: r.config.KeployContainer,
 	})
 	if err != nil {
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
