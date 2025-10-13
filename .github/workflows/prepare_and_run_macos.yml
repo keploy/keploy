@@ -133,9 +133,9 @@ jobs:
       MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
   
   clean_up_docker_macos:
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, macOS, native]
     needs: [run_python_docker_macos, run_golang_docker_macos]
-    if: always()
     steps:
       - name: Unlock keychain
         if: runner.os == 'macOS'
