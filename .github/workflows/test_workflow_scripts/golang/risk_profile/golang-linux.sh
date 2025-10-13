@@ -295,7 +295,8 @@ if [ -f "$config_file" ]; then
 else
   echo "⚠️ Config file $config_file not found, skipping sed replace."
 fi
-git checkout risk-profile
+git fetch origin
+git checkout origin/risk-profile
 echo "Cleaning up previous runs..."
 rm -rf keploy/ my-app *.log
 echo "Building the Go application..."
@@ -323,7 +324,6 @@ endsec
 
 section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
-git fetch origin
 git checkout origin/risk-profile-v2
 go build -o my-app
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee test.log || true
