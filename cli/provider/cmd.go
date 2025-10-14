@@ -297,9 +297,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
-		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
-		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
-		cmd.Flags().Bool("enable-testing", c.cfg.EnableTesting, "Enable testing keploy with keploy")
+		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 
 		cmd.Flags().String("docker-network", "", "Name of the docker network the application is on")
@@ -1195,12 +1195,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		c.cfg.Agent.Mode = models.Mode(mode)
-		dockerNetwork, err := cmd.Flags().GetString("docker-network")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get client-nspid flag")
-			return nil
-		}
-		c.cfg.Agent.DockerNetwork = dockerNetwork
 
 		proxyPort, err := cmd.Flags().GetUint32("proxy-port")
 		if err != nil {

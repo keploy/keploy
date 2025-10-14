@@ -21,15 +21,14 @@ import (
 
 func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.SetupOptions) *App {
 	app := &App{
-		logger:           logger,
-		cmd:              cmd,
-		docker:           client,
-		kind:             utils.FindDockerCmd(cmd),
-		opts:             opts,
-		keployContainer:  opts.KeployContainer,
-		container:        opts.Container,
-		containerDelay:   opts.DockerDelay,
-		containerNetwork: opts.DockerNetwork,
+		logger:          logger,
+		cmd:             cmd,
+		docker:          client,
+		kind:            utils.FindDockerCmd(cmd),
+		opts:            opts,
+		keployContainer: opts.KeployContainer,
+		container:       opts.Container,
+		containerDelay:  opts.DockerDelay,
 	}
 	return app
 }
@@ -120,13 +119,6 @@ func (a *App) SetupDocker() error {
 	}
 
 	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
-
-	// injecting appNetwork to keploy.
-	// err := a.injectNetwork(a.containerNetwork)
-	// if err != nil {
-	// 	utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
-	// 	return err
-	// }
 
 	// attaching the init container's PID namespace to the app container
 	err := a.attachInitPid(context.Background())

@@ -551,7 +551,6 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		"--proxy-port", strconv.Itoa(int(opts.ProxyPort)),
 		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
-		"--docker-network", opts.DockerNetwork,
 		"--mode", string(opts.Mode),
 	}
 

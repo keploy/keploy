@@ -70,7 +70,6 @@ type SetupOptions struct {
 	ClientNSPID     uint32
 	Container       string
 	KeployContainer string
-	DockerNetwork   string
 	DockerDelay     uint64
 	// Cmd               string
 	AgentURI          string
