@@ -87,6 +87,8 @@ check_test_report() {
     for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
         [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
         
+        cat $report_file
+
         local test_set_name
         test_set_name=$(basename "$report_file" -report.yaml)
         local test_status
