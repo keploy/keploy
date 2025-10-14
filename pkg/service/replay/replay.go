@@ -661,7 +661,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
 	cmdType := utils.CmdType(r.config.CommandType)
-	// var userIP string
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
@@ -752,6 +751,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
+		}
+
+		if filteredMocks == nil && unfilteredMocks == nil {
+			r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 
 		var expectedTestMockMappings map[string][]string
