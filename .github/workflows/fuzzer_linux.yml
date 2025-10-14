@@ -7,7 +7,7 @@ on:
         required: true
 
 jobs:
-  rerecord_fuzzer_linux:
+  rerecord_fuzzer:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -85,7 +85,7 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/rerecord/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/rerecord/golang-linux.sh
 
-  mysql_fuzzer_linux:
+  mysql_fuzzer:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -148,3 +148,71 @@ jobs:
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mysql/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mysql/golang-linux.sh
+
+  grpc_fuzzer:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [incoming, outgoing]
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+
+    name: gRPC Fuzzer ${{ matrix.mode }} (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Binary (for Record)
+        id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - name: Download Binary (for Replay)
+        id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - name: Download and Extract gRPC Fuzzer
+        id: fuzzer
+        run: |
+          set -euo pipefail
+          KEY="releases/grpc-fuzzer/latest/grpc-fuzzer-linux-amd64.tar.gz"
+          echo "Downloading fuzzer from s3://${{ vars.AWS_S3_BUCKET }}/${KEY}"
+          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          tar -xzf grpc-fuzzer-linux-amd64.tar.gz
+          chmod +x ./client ./server
+          echo "client=$(realpath ./client)" >> $GITHUB_OUTPUT
+          echo "server=$(realpath ./server)" >> $GITHUB_OUTPUT
+
+      - name: Run gRPC Fuzzer test
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          FUZZER_CLIENT_BIN: ${{ steps.fuzzer.outputs.client }}
+          FUZZER_SERVER_BIN: ${{ steps.fuzzer.outputs.server }}
+        run: |
+          chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
