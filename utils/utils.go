@@ -1021,31 +1021,18 @@ func isPortAvailable(port uint32) bool {
 // EnsureAvailablePorts checks if the proxy and DNS ports are available.
 // If they are available, it returns them unchanged.
 // If not, it allocates new available ports for them.
-func EnsureAvailablePorts(proxyPort, dnsPort uint32) (uint32, uint32, error) {
-	var newProxyPort, newDNSPort uint32
+func EnsureAvailablePorts(port uint32) (uint32, error) {
+	var newPort uint32
 	var err error
-
-	// Check if proxy port is available
-	if isPortAvailable(proxyPort) {
-		newProxyPort = proxyPort
+	if isPortAvailable(port) {
+		return port, nil
 	} else {
-		newProxyPort, err = GetAvailablePort()
+		newPort, err = GetAvailablePort()
 		if err != nil {
-			return 0, 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
+			return 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
 		}
 	}
-
-	// Check if DNS port is available
-	if isPortAvailable(dnsPort) {
-		newDNSPort = dnsPort
-	} else {
-		newDNSPort, err = GetAvailablePort()
-		if err != nil {
-			return 0, 0, fmt.Errorf("failed to allocate new DNS port: %w", err)
-		}
-	}
-
-	return newProxyPort, newDNSPort, nil
+	return newPort, nil
 }
 
 func EnsureRmBeforeName(cmd string) string {
