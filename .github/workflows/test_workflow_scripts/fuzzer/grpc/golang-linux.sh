@@ -153,13 +153,6 @@ echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 
-# Execute the kill command only if a PID was found
-if [ -n "$SMALLEST_PID" ]; then
-    sudo kill -INT "$SMALLEST_PID" 2>/dev/null || true
-else
-    echo "No keploy process found to kill."
-fi
-
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
  sudo pkill -f "$FUZZER_SERVER_BIN" || true
