@@ -69,7 +69,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("error marshaling request body for incoming request: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/incoming", a.conf.Agent.AgentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/incoming", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for incoming request")
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
@@ -144,7 +144,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.AgentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/outgoing", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return nil, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -216,7 +216,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	}
 
 	// mock outgoing request
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/mock", a.conf.Agent.AgentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/mock", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -256,7 +256,7 @@ func (a *AgentClient) SetMocks(ctx context.Context, filtered []*models.Mock, unF
 	}
 
 	// mock outgoing request
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/setmocks", a.conf.Agent.AgentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/setmocks", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for setmocks outgoing")
 		return fmt.Errorf("error creating request for set mocks: %s", err.Error())
@@ -298,7 +298,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		fmt.Sprintf("http://localhost:%d/agent/storemocks", a.conf.Agent.AgentPort),
+		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI),
 		&buf,
 	)
 	if err != nil {
@@ -349,7 +349,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 		return fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/updatemockparams", a.conf.Agent.AgentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
 		return fmt.Errorf("error creating request for update mock params: %s", err.Error())
@@ -376,7 +376,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	// Create the URL with query parameters
-	url := fmt.Sprintf("http://localhost:%d/agent/consumedmocks", a.conf.Agent.AgentPort)
+	url := fmt.Sprintf("%s/consumedmocks", a.conf.Agent.AgentURI)
 
 	// Create a new GET request with the query parameter
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -679,6 +679,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	opts.AgentPort = agentPort
 	opts.ProxyPort = proxyPort
 	opts.DnsPort = dnsPort
+	opts.AgentURI = fmt.Sprintf("http://localhost:%d", agentPort)
 
 	// Update the ports in the configuration
 	a.conf.Agent.AgentPort = agentPort
@@ -686,6 +687,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.Agent.DnsPort = dnsPort
 	a.conf.ProxyPort = proxyPort
 	a.conf.DNSPort = dnsPort
+	a.conf.Agent.AgentURI = opts.AgentURI
 
 	a.logger.Info("Using available ports",
 		zap.Uint32("agent-port", agentPort),
@@ -738,7 +740,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, int(opts.AgentPort), agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, a.conf.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():

@@ -794,7 +794,7 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
 // and signals on the provided channel when the agent becomes available or unavailable.
 // It respects the context timeout and returns when the context is cancelled.
-func AgentHealthTicker(ctx context.Context, agentPort int, agentReadyCh chan<- bool, checkInterval time.Duration) {
+func AgentHealthTicker(ctx context.Context, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 	defer close(agentReadyCh)
@@ -809,7 +809,7 @@ func AgentHealthTicker(ctx context.Context, agentPort int, agentReadyCh chan<- b
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			isHealthy := isAgentHealthy(ctx, client, agentPort)
+			isHealthy := isAgentHealthy(ctx, client, agentURI)
 
 			if isHealthy && !agentStarted {
 				// Agent became healthy
@@ -834,8 +834,8 @@ func AgentHealthTicker(ctx context.Context, agentPort int, agentReadyCh chan<- b
 }
 
 // isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
-func isAgentHealthy(ctx context.Context, client *http.Client, agentPort int) bool {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", agentPort), nil)
+func isAgentHealthy(ctx context.Context, client *http.Client, agentURI string) bool {
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/health", agentURI), nil)
 	if err != nil {
 		return false
 	}

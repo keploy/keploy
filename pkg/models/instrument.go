@@ -73,6 +73,7 @@ type SetupOptions struct {
 	DockerNetwork   string
 	DockerDelay     uint64
 	// Cmd               string
+	AgentURI          string
 	IsDocker          bool
 	CommandType       string
 	EnableTesting     bool
