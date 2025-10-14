@@ -217,12 +217,26 @@ do {
   Start-Sleep 3
 } while ((Get-Date) -lt $pollUntil -and $recJob.State -eq 'Running')
 
+
+$REC_PID = (Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%keploy record%'").ProcessId | Select-Object -Last 1
+
+if ($REC_PID -and $REC_PID -ne 0) {
+    Write-Host "Found Keploy PID: $REC_PID"
+    Write-Host "Killing keploy process tree..."
+    # /T: Kill the process and any child processes started by it (tree kill)
+    # /F: Forcefully terminate
+    cmd /c "taskkill /PID $REC_PID /T /F" 2>$null | Out-Null
+} else {
+    Write-Host "Keploy record process not found."
+}
+
+
 # Stop Keploy (and docker compose) deterministically
 # We get the process ID of the actual keploy.exe process started by the job
-$keployProcessId = (Get-Job -Id $recJob.Id).ChildJobs[0].ProcessId
-Kill-Tree -ProcessId $keployProcessId
-Stop-Job $recJob
-Remove-Job $recJob
+# $keployProcessId = (Get-Job -Id $recJob.Id).ChildJobs[0].ProcessId
+# Kill-Tree -ProcessId $keployProcessId
+# Stop-Job $recJob
+# Remove-Job $recJob
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
