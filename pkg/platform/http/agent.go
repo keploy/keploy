@@ -697,7 +697,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		uuidSuffix := hex.EncodeToString(randomBytes)
 
 		// Append the random string.
-		opts.KeployContainer = "keploy-v2-" + uuidSuffix
+		opts.KeployContainer = "keploy-v3-" + uuidSuffix
 		a.conf.KeployContainer = opts.KeployContainer
 
 		// Regex to find all port mapping flags (-p or --publish)
@@ -817,7 +817,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
 
 	cmd.Cancel = func() error {
-		logger.Info("Context cancelled. Explicitly stopping the 'keploy-v2' Docker container.")
+		logger.Info("Context cancelled. Explicitly stopping the 'keploy-v3' Docker container.")
 
 		containerName := opts.KeployContainer
 

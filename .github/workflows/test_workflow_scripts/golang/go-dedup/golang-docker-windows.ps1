@@ -143,7 +143,7 @@ $base = $env:APP_BASE_URL
 $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
 
 # 1. Correctly quote the docker command for Keploy
-$dockerCmd = '"docker compose up"'
+$dockerCmd = "docker compose up"
 $recArgs = @(
   'record',
   '-c', $dockerCmd,
