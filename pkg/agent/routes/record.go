@@ -16,15 +16,15 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type AgentRequest struct {
+type Agent struct {
 	logger *zap.Logger
-	agent  agent.Service
+	svc    agent.Service
 }
 
 func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
-	a := &AgentRequest{
+	a := &Agent{
 		logger: logger,
-		agent:  agent,
+		svc:    agent,
 	}
 
 	r.Route("/agent", func(r chi.Router) {
@@ -40,13 +40,13 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	})
 }
 
-func (a *AgentRequest) Health(w http.ResponseWriter, r *http.Request) {
+func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
 }
 
-func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
+func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -70,7 +70,7 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tc, err := a.agent.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
+	tc, err := a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
 		a.logger.Error(stopReason, zap.Error(err))
@@ -93,7 +93,7 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
+func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -114,7 +114,7 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mockChan, err := a.agent.GetOutgoing(ctx, outgoingReq.OutgoingOptions)
+	mockChan, err := a.svc.GetOutgoing(ctx, outgoingReq.OutgoingOptions)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to get outgoing: %v", err), http.StatusInternalServerError)
 		a.logger.Error("failed to get outgoing", zap.Error(err))
