@@ -156,10 +156,22 @@ if [ "$MODE" = "incoming" ]; then
 #    echo "Killing keploy"
 #    sudo kill "$pid" || true
 #  fi
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
+# Capture all PIDs matching 'keploy record' (not just the newest)
+REC_PIDS="$(pgrep -f 'keploy record' || true)"
+
+# Find the smallest PID from the list
+SMALLEST_PID="$(echo "$REC_PIDS" | tr ' ' '\n' | grep -v '^$' | sort -n | head -n 1)"
+
+echo "$REC_PIDS Keploy PID(s) found"
+echo "Targeting smallest PID: $SMALLEST_PID"
 echo "Killing keploy"
-sudo kill -INT $REC_PID 2>/dev/null || true
+
+# Execute the kill command only if a PID was found
+if [ -n "$SMALLEST_PID" ]; then
+    sudo kill -INT "$SMALLEST_PID" 2>/dev/null || true
+else
+    echo "No keploy process found to kill."
+fi
 
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
