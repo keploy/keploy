@@ -738,7 +738,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.ContinuouslyCheckAgent(agentCtx, int(opts.AgentPort), agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, int(opts.AgentPort), agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():

@@ -167,7 +167,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.ContinuouslyCheckAgent(agentCtx, int(r.config.Agent.AgentPort), agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, int(r.config.Agent.AgentPort), agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():

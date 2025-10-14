@@ -791,10 +791,10 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 	}
 }
 
-// ContinuouslyCheckAgent continuously monitors the agent health endpoint at specified intervals
+// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
 // and signals on the provided channel when the agent becomes available or unavailable.
 // It respects the context timeout and returns when the context is cancelled.
-func ContinuouslyCheckAgent(ctx context.Context, agentPort int, agentReadyCh chan<- bool, checkInterval time.Duration) {
+func AgentHealthTicker(ctx context.Context, agentPort int, agentReadyCh chan<- bool, checkInterval time.Duration) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 	defer close(agentReadyCh)
@@ -816,6 +816,7 @@ func ContinuouslyCheckAgent(ctx context.Context, agentPort int, agentReadyCh cha
 				agentStarted = true
 				select {
 				case agentReadyCh <- true:
+					return
 				case <-ctx.Done():
 					return
 				}
