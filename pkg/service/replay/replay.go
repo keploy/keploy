@@ -795,6 +795,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
+	if filteredMocks == nil && unfilteredMocks == nil {
+		r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
+	}
+
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
