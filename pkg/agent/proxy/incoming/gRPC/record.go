@@ -286,9 +286,12 @@ func (p *grpcTestCaseProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod str
 	}
 
 	if !isResponse {
+		// :method
 		if _, ok := hdr.PseudoHeaders[":method"]; !ok {
 			hdr.PseudoHeaders[":method"] = "POST"
 		}
+
+		// :scheme (keep http as we dial over the provided net.Conn)
 		if _, ok := hdr.PseudoHeaders[":scheme"]; !ok {
 			hdr.PseudoHeaders[":scheme"] = "http"
 		}
@@ -312,6 +315,7 @@ func (p *grpcTestCaseProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod str
 				hdr.PseudoHeaders[":authority"] = p.destConn.RemoteAddr().String()
 			}
 		}
+
 		if _, ok := hdr.OrdinaryHeaders["te"]; !ok {
 			hdr.OrdinaryHeaders["te"] = "trailers"
 		}

@@ -747,6 +747,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
+		if filteredMocks == nil && unfilteredMocks == nil {
+			r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
+		}
+
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
