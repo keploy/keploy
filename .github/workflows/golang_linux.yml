@@ -20,6 +20,9 @@ jobs:
           - name: tls-dadjoke
             path: tls-dadjoke
             script_dir: tls_dadjoke
+          - name: risk-profile
+            path: risk-profile
+            script_dir: risk_profile
         config:
           - job: record_latest_replay_build
             record_src: latest
