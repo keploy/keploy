@@ -334,7 +334,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
 		}
 	}
-
+	userCmd = "docker compose up"
 	var err error
 	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
 	if cmdErr.Err != nil {

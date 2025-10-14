@@ -42,6 +42,7 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 //	func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
 //		return CmdError{Type: Init, Err: errors.New("not implemented")}
 //	}
+
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
 	// On Windows, commands are typically executed via 'cmd /C' or 'powershell -Command'
 	// to handle complex shell-like logic in 'userCmd'. 'cmd /C' is the most robust default.
