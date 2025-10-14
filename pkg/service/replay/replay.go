@@ -547,7 +547,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, KeployContainer: r.config.KeployContainer})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return &InstrumentState{}, err
@@ -592,9 +592,10 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 
 	// First, set up the app again since it might have been deleted during cleanup
 	newAppID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
-		Container:     r.config.ContainerName,
-		DockerNetwork: r.config.NetworkName,
-		DockerDelay:   r.config.BuildDelay,
+		Container:       r.config.ContainerName,
+		DockerNetwork:   r.config.NetworkName,
+		DockerDelay:     r.config.BuildDelay,
+		KeployContainer: r.config.KeployContainer,
 	})
 	if err != nil {
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
@@ -1248,6 +1249,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if testCaseResult != nil {
+				if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
+					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
+					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
+				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
@@ -1288,6 +1293,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	riskHigh, riskMed, riskLow := 0, 0, 0
+	for _, tr := range testCaseResults {
+		if tr.Status == models.TestStatusFailed && tr.Result.FailureInfo.Risk != models.None {
+			switch tr.Result.FailureInfo.Risk {
+			case models.High:
+				riskHigh++
+			case models.Medium:
+				riskMed++
+			case models.Low:
+				riskLow++
+			}
+		}
+	}
+
 	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
@@ -1302,15 +1321,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testReport = &models.TestReport{
-		Version:   models.GetVersion(),
-		TestSet:   testSetID,
-		Status:    string(testSetStatus),
-		Total:     testCasesCount,
-		Success:   success,
-		Failure:   failure,
-		Ignored:   ignored,
-		Tests:     testCaseResults,
-		TimeTaken: timeTaken.String(),
+		Version:    models.GetVersion(),
+		TestSet:    testSetID,
+		Status:     string(testSetStatus),
+		Total:      testCasesCount,
+		Success:    success,
+		Failure:    failure,
+		Ignored:    ignored,
+		Tests:      testCaseResults,
+		TimeTaken:  timeTaken.String(),
+		HighRisk:   riskHigh,
+		MediumRisk: riskMed,
+		LowRisk:    riskLow,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1727,108 +1749,6 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 	return noiseParams, nil
 }
 
-func (r *Replayer) Normalize(ctx context.Context) error {
-
-	var testRun string
-	if r.config.Normalize.TestRun == "" {
-		testRunIDs, err := r.reportDB.GetAllTestRunIDs(ctx)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			return fmt.Errorf("failed to get all test run ids: %w", err)
-		}
-		testRun = pkg.LastID(testRunIDs, models.TestRunTemplateName)
-	}
-
-	if len(r.config.Normalize.SelectedTests) == 0 {
-		testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			return fmt.Errorf("failed to get all test set ids: %w", err)
-		}
-		for _, testSetID := range testSetIDs {
-			r.config.Normalize.SelectedTests = append(r.config.Normalize.SelectedTests, config.SelectedTests{TestSet: testSetID})
-		}
-	}
-
-	for _, testSet := range r.config.Normalize.SelectedTests {
-		testSetID := testSet.TestSet
-		testCases := testSet.Tests
-		err := r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
-		if err != nil {
-			return err
-		}
-	}
-	r.logger.Info("Normalized test cases successfully. Please run keploy tests to verify the changes.")
-	return nil
-}
-
-func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error {
-
-	if len(testCaseResults) == 0 {
-		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
-		if err != nil {
-			return fmt.Errorf("failed to get test report: %w", err)
-		}
-		testCaseResults = testReport.Tests
-	}
-
-	testCaseResultMap := make(map[string]models.TestResult)
-	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get test cases: %w", err)
-	}
-	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIDs))
-
-	if len(selectedTestCaseIDs) == 0 {
-		selectedTestCases = testCases
-	} else {
-		for _, testCase := range testCases {
-			if _, ok := matcherUtils.ArrayToMap(selectedTestCaseIDs)[testCase.Name]; ok {
-				selectedTestCases = append(selectedTestCases, testCase)
-			}
-		}
-	}
-
-	for _, testCaseResult := range testCaseResults {
-		testCaseResultMap[testCaseResult.TestCaseID] = testCaseResult
-	}
-
-	for _, testCase := range selectedTestCases {
-		if _, ok := testCaseResultMap[testCase.Name]; !ok {
-			r.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
-			continue
-		}
-		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
-			continue
-		}
-		// Handle normalization based on test case kind
-		switch testCase.Kind {
-		case models.HTTP:
-			// Store the original timestamp to preserve it during normalization
-			originalTimestamp := testCase.HTTPResp.Timestamp
-			testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
-			// Restore the original timestamp after normalization
-			testCase.HTTPResp.Timestamp = originalTimestamp
-
-		case models.GRPC_EXPORT:
-			// Store the original timestamp to preserve it during normalization
-			originalTimestamp := testCase.GrpcResp.Timestamp
-			testCase.GrpcResp = testCaseResultMap[testCase.Name].GrpcRes
-			// Restore the original timestamp after normalization
-			testCase.GrpcResp.Timestamp = originalTimestamp
-		}
-		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID, true)
-		if err != nil {
-			return fmt.Errorf("failed to update test case: %w", err)
-		}
-	}
-	return nil
-}
-
 func (r *Replayer) executeScript(ctx context.Context, script string) error {
 
 	if script == "" {
@@ -1960,6 +1880,11 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 	if result != nil {
 		testCaseResult.Result = *result
+	}
+
+	if result != nil && result.FailureInfo.Risk != models.None {
+		testCaseResult.FailureInfo.Risk = result.FailureInfo.Risk
+		testCaseResult.FailureInfo.Category = result.FailureInfo.Category
 	}
 
 	return testCaseResult
