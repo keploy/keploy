@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	txttmpl "text/template"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -62,6 +61,51 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 		header[i] = strings.Join(j, ",")
 	}
 	return header
+}
+
+// CompareMultiValueHeaders compares a mock header value (as a comma-separated string)
+// with an input header value (as a slice of strings). It normalizes whitespace,
+// splits the mock header value by commas, trims spaces, sorts both sets of values,
+// and returns true if they contain the same elements in any order.
+func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string) bool {
+	// early returns
+	if mockHeaderValue == "" && len(inputHeaderValue) == 0 {
+		return true
+	}
+
+	if mockHeaderValue == "" || len(inputHeaderValue) == 0 {
+		return false
+	}
+
+	mockValues := strings.Split(mockHeaderValue, ",")
+	normalizedMockValues := make([]string, len(mockValues))
+	for i, v := range mockValues {
+		normalizedMockValues[i] = strings.TrimSpace(v)
+	}
+
+	// Normalize input header values
+	normalizedInputValues := make([]string, len(inputHeaderValue))
+	for i, v := range inputHeaderValue {
+		normalizedInputValues[i] = strings.TrimSpace(v)
+	}
+
+	// Sort both slices for comparison
+	sort.Strings(normalizedMockValues)
+	sort.Strings(normalizedInputValues)
+
+	// Compare lengths first
+	if len(normalizedMockValues) != len(normalizedInputValues) {
+		return false
+	}
+
+	// Compare each value
+	for i, mockVal := range normalizedMockValues {
+		if mockVal != normalizedInputValues[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
@@ -107,46 +151,31 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Render any template values in the test case before simulation.
 	// Render any template values in the test case before simulation.
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
-		testCaseStr, err := json.Marshal(tc)
+		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
 			return nil, err
 		}
 
-		funcMap := txttmpl.FuncMap{
-			"int":    utils.ToInt,
-			"string": utils.ToString,
-			"float":  utils.ToFloat,
-		}
-		tmpl, err := txttmpl.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-		if err != nil || tmpl == nil {
-			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
-			return nil, err
-		}
-
-		// Prepare the data for template execution.
-		templateData := make(map[string]interface{})
+		// Build the template data
+		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
 		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
 			templateData[k] = v
 		}
 		if len(utils.SecretValues) > 0 {
 			templateData["secret"] = utils.SecretValues
 		}
 
-		var output bytes.Buffer
-		// Execute template with the populated templateData (previously an empty data map was passed here)
-		err = tmpl.Execute(&output, templateData)
-
-		if err != nil {
-			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
+		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
+		// ignoring LaTeX/HTML like {{\pi}}.
+		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
+		if rerr != nil {
+			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
 		}
 
-		// Unmarshal the rendered string back into the test case struct.
-		renderedBytes := output.Bytes()
-		err = json.Unmarshal(renderedBytes, &tc)
+		err = json.Unmarshal([]byte(renderedStr), &tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", string(renderedBytes)))
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
 			return nil, err
 		}
 	}
@@ -786,6 +815,30 @@ func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock
 	return append(filteredMocks, unfilteredMocks...)
 }
 
+func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	filteredMocks, _ := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return filteredMocks
+}
+
+func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
+		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return append(filteredMocks, unfilteredMocks...)
+}
+
 func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
@@ -827,6 +880,41 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
+	return filteredMocks, unfilteredMocks
+}
+
+func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	isNonKeploy := false
+
+	for _, mock := range m {
+
+		tmp := *mock
+		p := &tmp
+
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+
+		for _, name := range mocksPresentInMapping {
+			if p.Name == name {
+				p.TestModeInfo.IsFiltered = true
+				filteredMocks = append(filteredMocks, p)
+				break
+			}
+		}
+
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
+	}
+
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+		return filteredMocks, unfilteredMocks
+	}
+
 	return filteredMocks, unfilteredMocks
 }
 

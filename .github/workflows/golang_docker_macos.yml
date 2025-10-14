@@ -1,0 +1,101 @@
+name: Golang On Docker (macOS)
+on:
+  workflow_call:
+    inputs:
+      image_tag:            
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
+    secrets:
+      MAC_RUNNER_USER_PASSWORD:
+        description: "Keychain password for macOS runner"
+        required: true
+
+jobs:
+  golang_docker_macos:
+
+    runs-on: [self-hosted, macOS, native]
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: echo-sql
+            path: echo-sql
+            script_dir: echo_sql
+        config:
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (macOS)
+
+    steps:
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          rm -rf ~/.gitconfig
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          image_tag: ${{ inputs.image_tag }}
+          version: ${{ github.event.pull_request.number }}-${{ github.sha }}
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+        
+      - name: Ensure Docker Compose is available (macOS)
+        shell: bash
+        run: |
+          set -e
+          if docker compose version >/dev/null 2>&1; then
+            echo "Compose V2 plugin found."
+            exit 0
+          fi
+          if command -v docker-compose >/dev/null 2>&1; then
+            echo "docker-compose (v1) found."
+            exit 0
+          fi
+          # Install docker-compose (v1) via Homebrew as a fallback
+          brew update
+          brew install docker-compose
+          echo "Installed docker-compose."
+
+      - name: Run ${{ matrix.app.name }} application (macOS)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-macos.sh
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf

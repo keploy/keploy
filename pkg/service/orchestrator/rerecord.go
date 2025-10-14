@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"regexp"
@@ -22,6 +23,15 @@ import (
 )
 
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
+
+	o.mockCorrelationManager = NewMockCorrelationManager(ctx, o.globalMockCh, o.logger)
+
+	// Start the mock routing goroutine
+	go o.mockCorrelationManager.routeMocks()
+
+	// Set the global mock channel on the record service
+	o.record.SetGlobalMockChannel(o.GetGlobalMockChannel())
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	var stopReason string
 	var err error
@@ -52,8 +62,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return testSets[i] < testSets[j]
 	})
 
-	var SelectedTests []string
-
+	var SelectedTests, ReRecordedTests []string
 	for _, testSet := range testSets {
 		if ctx.Err() != nil {
 			break
@@ -76,14 +85,31 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
 
-		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
+		mappingTestSet := testSet // Test set to store the mapping , have to get a new test set id if we are creating a new test set
 
+		cfg := models.ReRecordCfg{
+			Rerecord: true,
+			TestSet:  testSet,
+		}
+
+		if !o.config.ReRecord.AmendTestSet {
+			cfg.TestSet = ""
+			mappingTestSet, err = o.record.GetNextTestSetID(recordCtx)
+			if err != nil {
+				errMsg := "failed to get next testset id"
+				utils.LogError(o.logger, err, errMsg)
+			}
+		}
+
+		isMappingEnabled := !o.config.DisableMapping
+
+		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
 		select {
 		case <-ctx.Done():
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				err := o.record.Start(recordCtx, true)
+				err := o.record.Start(recordCtx, cfg)
 				errCh <- err
 				return nil
 			})
@@ -94,9 +120,10 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				allRecorded, err := o.replayTests(recordCtx, testSet)
+				allRecorded, err := o.replayTests(recordCtx, testSet, mappingTestSet, isMappingEnabled)
 
 				if allRecorded && err == nil {
+					ReRecordedTests = append(ReRecordedTests, mappingTestSet)
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
 				}
 				if !allRecorded {
@@ -152,9 +179,15 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		o.logger.Warn("Re-record was cancelled, keploy might have not recorded few test cases")
 		return nil
 	}
-
 	stopReason = "Re-recorded all the selected testsets successfully"
-	if !o.config.InCi {
+
+	if !o.config.Test.DisableMockUpload {
+		o.replay.UploadMocks(ctx, ReRecordedTests)
+	} else {
+		o.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+	}
+
+	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
@@ -188,7 +221,10 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	return nil
 }
 
-func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
+func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingTestSet string, isMappingEnabled bool) (bool, error) {
+
+	var mappings = make(map[string][]string)
+
 	//replay the recorded testcases
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
@@ -328,6 +364,42 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
+
+		// Register test case with correlation manager
+		testCaseCtx := TestContext{
+			TestID:  tc.Name,
+			TestSet: testSet,
+		}
+
+		o.mockCorrelationManager.RegisterTest(testCaseCtx)
+
+		// Start mock collection for this test case in background
+		collectedMocks := make([]*models.Mock, 0)
+		mockCollectionDone := make(chan struct{})
+		var mockMutex sync.Mutex
+
+		go func(tcID string) {
+			defer close(mockCollectionDone)
+			mockCh := o.mockCorrelationManager.GetTestMocks(tcID)
+			if mockCh == nil {
+				return
+			}
+
+			for {
+				select {
+				case mock, ok := <-mockCh:
+					if !ok {
+						return // Channel closed
+					}
+					mockMutex.Lock()
+					collectedMocks = append(collectedMocks, mock)
+					mockMutex.Unlock()
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(tc.Name)
+
 		if utils.IsDockerCmd(cmdType) {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, userIP)
 			if err != nil {
@@ -467,6 +539,38 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		}
 
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
+
+		time.Sleep(100 * time.Millisecond)
+
+		// Unregister test case and collect mocks
+		o.mockCorrelationManager.UnregisterTest(tc.Name)
+
+		// Wait a bit for any remaining mocks to be collected
+		<-mockCollectionDone
+
+		// Store collected mocks for this test case
+		mockMutex.Lock()
+		finalMocks := make([]*models.Mock, len(collectedMocks))
+		copy(finalMocks, collectedMocks)
+		mockMutex.Unlock()
+		if len(finalMocks) > 0 {
+			mappings[tc.Name] = make([]string, 0)
+			for _, mock := range finalMocks {
+				mappings[tc.Name] = append(mappings[tc.Name], mock.Name)
+			}
+		}
+	}
+
+	// Save the test-mock mappings to YAML file
+	if len(mappings) > 0 && isMappingEnabled {
+		err := o.replay.StoreMappings(ctx, mappingTestSet, mappings)
+		if err != nil {
+			o.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
+		} else {
+			o.logger.Info("Successfully saved test-mock mappings",
+				zap.String("testSetID", mappingTestSet),
+				zap.Int("numTests", len(mappings)))
+		}
 	}
 
 	if simErr {
@@ -476,6 +580,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	return allTcRecorded, nil
 }
 
+// checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording
 // showResponseDiff compares the original test case response with the newly recorded response
 // and displays the differences using the existing replay service functions
 func (o *Orchestrator) showResponseDiff(originalTC *models.TestCase, newResp *models.HTTPResp, testSetID string) {

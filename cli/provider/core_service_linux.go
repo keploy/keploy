@@ -13,12 +13,14 @@ import (
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
+	incoming "go.keploy.io/server/v2/pkg/core/proxy/incoming"
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
+	"go.keploy.io/server/v2/pkg/platform/yaml/mapdb"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	openapidb "go.keploy.io/server/v2/pkg/platform/yaml/openapidb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
@@ -46,17 +48,17 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, cfg)
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
-	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
+	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, auth, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
 	case "record":
 		return recordSvc, nil
-	case "test", "normalize", "mock":
+	case "test", "mock":
 		return replaySvc, nil
-	case "templatize", "config", "update", "login", "export", "import", "sanitize":
+	case "templatize", "config", "update", "login", "export", "import", "sanitize", "normalize":
 		return toolsSvc, nil
 	case "contract":
 		return contractSvc, nil
@@ -68,10 +70,11 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 
 }
 
-func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
+func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
+	ip := incoming.New(logger, h)
 	//for keploy test bench
 	t := tester.New(logger, h)
 	app.HookImpl = app.NewHooks(logger)
@@ -106,10 +109,11 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 		}
 	}
 
-	instrumentation := core.New(logger, h, p, t, client)
+	instrumentation := core.New(logger, h, p, t, client, ip)
 
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
+	mapDB := mapdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
@@ -118,6 +122,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 		commonPlatformServices{
 			YamlTestDB:    testDB,
 			YamlMockDb:    mockDB,
+			YamlMappingDb: mapDB,
 			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,

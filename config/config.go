@@ -31,6 +31,7 @@ type Config struct {
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
+	DisableMapping        bool         `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	EnableTesting         bool         `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
@@ -68,10 +69,12 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath    string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata    string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	Filters           []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath          string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata          string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	BigPayload        bool          `json:"bigPayload" yaml:"bigPayload" mapstructure:"bigPayload"`
 }
 
 type ReRecord struct {
@@ -81,6 +84,10 @@ type ReRecord struct {
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
 	ShowDiff      bool     `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	APITimeout    uint64   `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	AmendTestSet  bool     `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
+	Branch        string   `json:"branch" yaml:"branch" mapstructure:"branch"`
+	Owner         string   `json:"owner" yaml:"owner" mapstructure:"owner"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
@@ -99,6 +106,7 @@ type Mappings struct {
 type Normalize struct {
 	SelectedTests []SelectedTests `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	TestRun       string          `json:"testReport" yaml:"testReport" mapstructure:"testReport"`
+	AllowHighRisk bool            `json:"allowHighRisk" yaml:"allowHighRisk" mapstructure:"allowHighRisk"`
 }
 
 type BypassRule struct {

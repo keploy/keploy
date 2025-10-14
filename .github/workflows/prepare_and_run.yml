@@ -2,6 +2,9 @@ name: Prepare Binary and Run Workflows
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
@@ -9,14 +12,32 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
 
-      - name: Build Keploy (PR)
-        run: go build -race -tags=viper_bind_struct -o keploy
+      - name: Build Keploy (non-race)
+        run: |
+          mkdir -p out/build-no-race
+          go build -tags=viper_bind_struct -o out/build-no-race/keploy
       - uses: actions/upload-artifact@v4
-        with: { name: build, path: keploy }
+        with:
+          name: build-no-race
+          path: out/build-no-race/keploy
+
+      - name: Build Keploy (race)
+        env:
+          CGO_ENABLED: "1"   # race requires cgo; on ubuntu-latest it's fine
+        run: |
+          mkdir -p out/build
+          go build -race -tags=viper_bind_struct -o out/build/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: out/build/keploy
+
 
   upload-latest:
     runs-on: ubuntu-latest
@@ -33,45 +54,76 @@ jobs:
 
   build-docker-image:
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+      image_digest: ${{ steps.digest.outputs.image_digest }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
 
       - name: Build image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker.sh
-
-      - name: Push image
+      
+      - name: Make unique tag for this run
+        id: tag
+        env:
+          PRNUM: ${{ github.event.pull_request.number }}
         run: |
-          docker push ttl.sh/keploy/keploy:1h
+          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_RUN_ID}-${GITHUB_SHA}-1h"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
+          docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
+
+      - name: Push unique tag
+        run: |
+          docker push "${{ steps.tag.outputs.image_tag }}"
 
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
+  run_golang_wsl:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/golang_wsl.yml
   run_java_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/java_linux.yml
   run_node_linux:
     needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/node_linux.yml  
+    uses: ./.github/workflows/node_linux.yml
   run_node_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
     uses: ./.github/workflows/node_docker.yml
   run_python_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
     uses: ./.github/workflows/python_docker.yml
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest,build-docker-image]
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
     uses: ./.github/workflows/golang_docker.yml
   run_fuzzer_linux:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
     secrets:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  run_node_mapping:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/node_mapping.yml
+  run_grpc_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/grpc_linux.yml

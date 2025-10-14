@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -29,17 +30,16 @@ import (
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
-		logger:            logger,
-		sess:              core.NewSessions(),
-		m:                 sync.Mutex{},
-		objectsMutex:      sync.RWMutex{},
-		proxyIP4:          "127.0.0.1",
-		proxyIP6:          [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort:         cfg.ProxyPort,
-		dnsPort:           cfg.DNSPort,
-		conf:              cfg,
-		retprobeMaxActive: 1024,
-		unloadDone:        make(chan struct{}),
+		logger:       logger,
+		sess:         core.NewSessions(),
+		m:            sync.Mutex{},
+		objectsMutex: sync.RWMutex{},
+		proxyIP4:     "127.0.0.1",
+		proxyIP6:     [4]uint32{0000, 0000, 0000, 0001},
+		proxyPort:    cfg.ProxyPort,
+		dnsPort:      cfg.DNSPort,
+		conf:         cfg,
+		unloadDone:   make(chan struct{}),
 	}
 }
 
@@ -82,27 +82,30 @@ type Hooks struct {
 	connect    link.Link
 	connectRet link.Link
 
-	accept            link.Link
-	acceptRet         link.Link
-	accept4           link.Link
-	accept4Ret        link.Link
-	read              link.Link
-	readRet           link.Link
-	write             link.Link
-	writeRet          link.Link
-	close             link.Link
-	closeRet          link.Link
-	sendto            link.Link
-	sendtoRet         link.Link
-	recvfrom          link.Link
-	recvfromRet       link.Link
-	objects           bpfObjects
-	writev            link.Link
-	writevRet         link.Link
-	readv             link.Link
-	readvRet          link.Link
-	retprobeMaxActive int
-	appID             uint64
+	accept      link.Link
+	acceptRet   link.Link
+	accept4     link.Link
+	accept4Ret  link.Link
+	read        link.Link
+	readRet     link.Link
+	write       link.Link
+	writeRet    link.Link
+	close       link.Link
+	closeRet    link.Link
+	sendto      link.Link
+	sendtoRet   link.Link
+	recvfrom    link.Link
+	recvfromRet link.Link
+	objects     bpfObjects
+	writev      link.Link
+	writevRet   link.Link
+	readv       link.Link
+	readvRet    link.Link
+	appID       uint64
+	cgBind4     link.Link
+	cgBind6     link.Link
+	bindEnter   link.Link
+	BindEvents  *ebpf.Map
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -183,7 +186,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
-
 	// ---------------
 
 	// ----- used in case of wsl -----
@@ -220,12 +222,16 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 		h.tcpv4 = tcpC4
 
-		tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+		tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{})
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
 			return err
 		}
 		h.tcpv4Ret = tcpRC4
+
+		//////////////////////////////////////////////////////////////////////////////
+		////////////////////    BIG PAYLOAD HOOKS START //////////////////////////////
+		//////////////////////////////////////////////////////////////////////////////
 
 		// Get the first-mounted cgroupv2 path.
 		cGroupPath, err := detectCgroupPath(h.logger)
@@ -234,6 +240,57 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 			return err
 		}
 
+		if opts.Mode != models.MODE_TEST && opts.BigPayload {
+
+			switch runtime.GOARCH {
+			case "amd64":
+				// Attach the kprobe for bind syscall entry on x86
+				h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
+				if err != nil {
+					utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
+					return err
+				}
+			case "arm64":
+				// Attach the kprobe for bind syscall entry on arm64
+				h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
+				if err != nil {
+					utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
+					return err
+				}
+
+			default:
+				err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+				utils.LogError(h.logger, err, "failed to attach bind hooks")
+				return err
+			}
+
+			h.BindEvents = objs.BindEvents
+			cg4, err := link.AttachCgroup(link.CgroupOptions{
+				Path:    cGroupPath,
+				Attach:  ebpf.AttachCGroupInet4Bind,
+				Program: objs.K_bind4,
+			})
+			if err != nil {
+				utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
+				return err
+			}
+			h.cgBind4 = cg4
+
+			cg6, err := link.AttachCgroup(link.CgroupOptions{
+				Path:    cGroupPath,
+				Attach:  ebpf.AttachCGroupInet6Bind,
+				Program: objs.K_bind6,
+			})
+			if err != nil {
+				utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
+				return err
+			}
+			h.cgBind6 = cg6
+		}
+
+		//////////////////////////////////////////////////////////////////////////////
+		////////////////////    BIG PAYLOAD HOOKS END ////////////////////////////////
+		//////////////////////////////////////////////////////////////////////////////
 		c4, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
 			Attach:  ebpf.AttachCGroupInet4Connect,
@@ -274,7 +331,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 		h.tcpv6 = tcpC6
 
-		tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+		tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{})
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
 			return err
@@ -318,7 +375,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.connect = cnt
 
 	//Opening a kretprobe at the exit of connect syscall
-	cntr, err := link.Kretprobe("sys_connect", objs.SyscallProbeRetConnect, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	cntr, err := link.Kretprobe("sys_connect", objs.SyscallProbeRetConnect, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_connect")
 		return err
@@ -336,7 +393,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.sendto = snd
 
 	//Opening a kretprobe at the exit of sendto syscall
-	sndr, err := link.Kretprobe("sys_sendto", objs.SyscallProbeRetSendto, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	sndr, err := link.Kretprobe("sys_sendto", objs.SyscallProbeRetSendto, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_sendto")
 		return err
@@ -354,7 +411,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	acRet, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	acRet, err := link.Kretprobe("sys_accept", objs.SyscallProbeRetAccept, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_accept")
 		return err
@@ -372,7 +429,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	ac4Ret, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	ac4Ret, err := link.Kretprobe("sys_accept4", objs.SyscallProbeRetAccept4, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_accept4")
 		return err
@@ -390,7 +447,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	rdRet, err := link.Kretprobe("sys_read", objs.SyscallProbeRetRead, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	rdRet, err := link.Kretprobe("sys_read", objs.SyscallProbeRetRead, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_read")
 		return err
@@ -408,7 +465,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	wtRet, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	wtRet, err := link.Kretprobe("sys_write", objs.SyscallProbeRetWrite, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_write")
 		return err
@@ -426,7 +483,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program for readv.
-	readvRet, err := link.Kretprobe("sys_readv", objs.SyscallProbeRetReadv, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	readvRet, err := link.Kretprobe("sys_readv", objs.SyscallProbeRetReadv, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_readv")
 		return err
@@ -444,7 +501,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program for writev.
-	wtvRet, err := link.Kretprobe("sys_writev", objs.SyscallProbeRetWritev, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	wtvRet, err := link.Kretprobe("sys_writev", objs.SyscallProbeRetWritev, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_writev")
 		return err
@@ -469,7 +526,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.recvfrom = rcv
 
 	//Attaching a kretprobe at the exit of recvfrom syscall
-	rcvr, err := link.Kretprobe("sys_recvfrom", objs.SyscallProbeRetRecvfrom, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	rcvr, err := link.Kretprobe("sys_recvfrom", objs.SyscallProbeRetRecvfrom, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_recvfrom")
 		return err
@@ -478,7 +535,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the exit point of the kernel function and attach the
 	// pre-compiled program.
-	clRet, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+	clRet, err := link.Kretprobe("sys_close", objs.SyscallProbeRetClose, &link.KprobeOptions{})
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_close")
 		return err
@@ -709,5 +766,22 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 		utils.LogError(h.logger, err, "failed to close the connectRet")
 	}
 
+	if opts.Mode != models.MODE_TEST && opts.BigPayload {
+		if h.cgBind4 != nil {
+			if err := h.cgBind4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgBind4")
+			}
+		}
+		if h.cgBind6 != nil {
+			if err := h.cgBind6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the cgBind6")
+			}
+		}
+		if h.bindEnter != nil {
+			if err := h.bindEnter.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
+			}
+		}
+	}
 	h.logger.Info("eBPF resources released successfully...")
 }

@@ -90,7 +90,7 @@ section "Start Rerecord"
 
 # Run rerecord non-interactively using the RERECORD binary
 printf 'y\ny\n' | sudo -E env PATH="$PATH" ASSERT_CHAINS_WITH="$ASSERT_CHAINS_WITH" \
-$RERECORD_KEPLOY_BIN rerecord -c $RERECORD_SERVER_BIN -t "test-set-0" --show-diff \
+$RERECORD_KEPLOY_BIN rerecord -c $RERECORD_SERVER_BIN -t "test-set-0" --show-diff --disableMockUpload \
   > rerecord.log 2>&1
 RERECORD_RC=$?
 cat rerecord.log
@@ -100,8 +100,10 @@ if [[ $RERECORD_RC -ne 0 ]]; then
   echo "::error::Keploy rerecord process exited with non-zero status: $RERECORD_RC"
   exit $RERECORD_RC
 fi
+
 if grep -i "ERROR" rerecord.log; then
     echo "::error::Error found in rerecord log."
+    grep -i "ERROR" rerecord.log
     exit 1
 fi
 

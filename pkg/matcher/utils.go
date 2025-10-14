@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"os"
 	"reflect"
@@ -104,11 +106,6 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
 	idx := buildNoiseIndex(noise)
 	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, ignoreOrdering)
-}
-
-// Back-compat shim used by a few spots internally (if any).
-func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
-	return matchJSONWithNoiseHandlingIndexed(key, expected, actual, buildNoiseIndex(noiseMap), ignoreOrdering)
 }
 
 // New optimized implementation.
@@ -723,6 +720,7 @@ func init() {
 var ansiResetCode = "\x1b[0m"
 
 type DiffsPrinter struct {
+	out                   io.Writer
 	testCase              string
 	statusExp             string
 	statusAct             string
@@ -743,8 +741,23 @@ func (d *DiffsPrinter) SetHasarrayIndexMismatch(has bool) {
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, "", "", ""}
+	return NewDiffsPrinterOut(os.Stdout, testCase)
 }
+
+func NewDiffsPrinterOut(out io.Writer, testCase string) DiffsPrinter {
+	if out == nil {
+		out = os.Stdout
+	}
+	return DiffsPrinter{
+		out:       out,
+		testCase:  testCase,
+		headerExp: map[string]string{},
+		headerAct: map[string]string{},
+		bodyNoise: map[string][]string{},
+		headNoise: map[string][]string{},
+	}
+}
+
 func (d *DiffsPrinter) PushTypeDiff(exp, act string) {
 	d.typeExp, d.typeAct = exp, act
 }
@@ -765,15 +778,24 @@ func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) 
 	d.bodyExp, d.bodyAct, d.bodyNoise = exp, act, noise
 }
 
-// Render will display and colorize diffs side-by-side
 func (d *DiffsPrinter) Render() error {
 	diffs := []string{}
 
+	// Status (only when actually different)
 	if d.statusExp != d.statusAct {
-		diffs = append(diffs, sprintDiff(d.statusExp, d.statusAct, "status"))
+		s := sprintDiff(d.statusExp, d.statusAct, "status")
+		if s != "" {
+			diffs = append(diffs, s)
+		}
 	}
 
-	diffs = append(diffs, sprintDiffHeader(d.headerExp, d.headerAct))
+	// Headers (skip when empty/identical)
+	s := sprintDiffHeader(d.headerExp, d.headerAct)
+	if s != "" {
+		diffs = append(diffs, s)
+	}
+
+	// Body (skip when empty/identical)
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
 		if json.Valid(bE) && json.Valid(bA) {
@@ -781,24 +803,35 @@ func (d *DiffsPrinter) Render() error {
 			if err != nil {
 				difference = sprintDiff(d.bodyExp, d.bodyAct, "body")
 			}
-			diffs = append(diffs, difference)
+			if difference != "" {
+				diffs = append(diffs, difference)
+			}
 		} else {
-			// If either body is not valid JSON, show expected as red and actual as green
-			difference := expectActualTableWithColors(d.bodyExp, d.bodyAct, "body", false)
-			diffs = append(diffs, difference)
+			// Non-JSON; only show when something exists to show
+			if !isBlankPair(d.bodyExp, d.bodyAct) {
+				difference := expectActualTableWithColors(d.bodyExp, d.bodyAct, "body", false)
+				diffs = append(diffs, difference)
+			}
 		}
-
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
+	// If nothing to show and no array-index warning, render nothing.
+	if len(diffs) == 0 && !d.hasarrayIndexMismatch {
+		return nil
+	}
+
+	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
 	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
 
 	for _, e := range diffs {
-		table.Append([]string{e})
+		if strings.TrimSpace(e) != "" {
+			table.Append([]string{e})
+		}
 	}
+
 	if d.hasarrayIndexMismatch {
 		yellowPaint := color.New(color.FgYellow).SprintFunc()
 		redPaint := color.New(color.FgRed).SprintFunc()
@@ -809,18 +842,19 @@ func (d *DiffsPrinter) Render() error {
 			startPart += " of "
 		}
 		initalPart := yellowPaint(utils.WarningSign + startPart)
-
 		endPaint := yellowPaint(" are in different order but have the same objects")
 		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
+
 	table.Render()
 	return nil
 }
+
 func (d *DiffsPrinter) TableWriter(diffs []string) error {
 
-	table := tablewriter.NewWriter(os.Stdout)
+	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
 	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
@@ -891,16 +925,35 @@ func (d *DiffsPrinter) RenderAppender() error {
 	return nil
 }
 
+// stripANSI removes ANSI escape sequences for accurate emptiness checks.
+func stripANSI(s string) string {
+	if s == "" {
+		return s
+	}
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// isBlankPair returns true when both strings are effectively empty (ignoring ANSI and whitespace).
+func isBlankPair(a, b string) bool {
+	ta := strings.TrimSpace(stripANSI(a))
+	tb := strings.TrimSpace(stripANSI(b))
+	return ta == "" && tb == ""
+}
+
 /*
  * Returns a nice diff table where the left is the expect and the right
  * is the actual. each entry in expect and actual will contain the key
  * and the corresponding value.
  */
 func sprintDiffHeader(expect, actual map[string]string) string {
-
 	diff := jsonDiff.CompareHeaders(expect, actual)
 
-	if len(expect) > maxLineLength || len(actual) > maxLineLength {
+	// If both sides render to nothing, skip the row entirely.
+	if isBlankPair(diff.Expected, diff.Actual) {
+		return ""
+	}
+
+	if len(diff.Expected) > maxLineLength || len(diff.Actual) > maxLineLength {
 		return expectActualTable(diff.Expected, diff.Actual, "header", false) // Don't centerize
 	}
 	return expectActualTable(diff.Expected, diff.Actual, "header", true)
@@ -912,8 +965,17 @@ func sprintDiffHeader(expect, actual map[string]string) string {
  * field: body, status...
  */
 func sprintDiff(expect, actual, field string) string {
+	// Fast skip if identical (including ANSI/whitespace-insensitive no-op)
+	if expect == actual || isBlankPair(expect, actual) {
+		return ""
+	}
 
 	diff := jsonDiff.Compare(expect, actual)
+
+	// If the computed diff is blank, also skip.
+	if isBlankPair(diff.Expected, diff.Actual) {
+		return ""
+	}
 
 	if len(expect) > maxLineLength || len(actual) > maxLineLength {
 		return expectActualTable(diff.Expected, diff.Actual, field, false)
@@ -932,6 +994,10 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 	diff, err := jsonDiff.CompareJSON(json1, json2, noise, false)
 	if err != nil {
 		return "", err
+	}
+	// Skip if both sides render blank
+	if isBlankPair(diff.Expected, diff.Actual) {
+		return "", nil
 	}
 	result := expectActualTable(diff.Expected, diff.Actual, field, false)
 	return result, nil
@@ -1417,5 +1483,59 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 			}
 		}
 	}
+	return true
+}
+
+// lowerMap returns a lower-cased copy of parameter keys.
+func lowerMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+// parseContentType tries strict parsing, then a tolerant fallback.
+// okStrict indicates whether strict parsing succeeded.
+func ParseContentType(raw string) (typ string, params map[string]string, okStrict bool, err error) {
+	if raw == "" {
+		return "", nil, false, nil
+	}
+	t, p, e := mime.ParseMediaType(raw)
+	if e == nil {
+		return strings.ToLower(t), lowerMap(p), true, nil
+	}
+	// tolerant fallback: take token before ';', trim, lowercase
+	token := strings.ToLower(strings.TrimSpace(strings.Split(raw, ";")[0]))
+	if token == "" || !strings.Contains(token, "/") {
+		// no usable fallback
+		return "", nil, false, e
+	}
+	return token, map[string]string{}, false, e
+}
+
+// compareSlicesIgnoreOrder checks if two string slices contain the same elements,
+// regardless of their order. It returns true if they do, and false otherwise.
+func CompareSlicesIgnoreOrder(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	// Create a frequency map of elements in the first slice.
+	freq := make(map[string]int, len(a))
+	for _, item := range a {
+		freq[item]++
+	}
+
+	// Decrement the frequency for each element in the second slice.
+	for _, item := range b {
+		if freq[item] == 0 {
+			// If an element is not in the map or its count is already zero,
+			// the slices are not identical.
+			return false
+		}
+		freq[item]--
+	}
+
+	// If the loop completes, the slices have the same elements.
 	return true
 }

@@ -1,0 +1,91 @@
+name: Python On Docker (macOS)
+on:
+  workflow_call:
+    inputs:
+      image_tag:            
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
+    secrets:
+      MAC_RUNNER_USER_PASSWORD:
+        description: "Keychain password for macOS runner"
+        required: true
+
+jobs:
+  python_docker_macos:
+    # concurrency:
+    #   group: macos-keploy-${{ github.ref }}
+    #   cancel-in-progress: false
+    runs-on: [self-hosted, macOS, native]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # - job: record_latest_replay_build
+          #   record_src: latest
+          #   replay_src: build
+          # - job: record_latest_replay_latest
+          #   record_src: latest
+          #   replay_src: latest
+
+
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+
+    name: ${{ matrix.job }} (macOS)
+
+    steps:
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          rm -rf ~/.gitconfig
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          image_tag: ${{ inputs.image_tag }}
+          version: ${{ github.event.pull_request.number }}-${{ github.sha }}
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
+
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-python
+          path: samples-python
+
+      - name: Run the flask-mongo application (macOS)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          cd samples-python/flask-mongo
+          bash ./../../.github/workflows/test_workflow_scripts/python-docker-macos.sh
+
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf

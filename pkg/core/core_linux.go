@@ -20,33 +20,37 @@ import (
 )
 
 type Core struct {
-	Proxy                      // embedding the Proxy interface to transfer the proxy methods to the core object
-	Hooks                      // embedding the Hooks interface to transfer the hooks methods to the core object
-	Tester                     // embedding the Tester interface to transfer the tester methods to the core object
-	dockerClient docker.Client //embedding the docker client to transfer the docker client methods to the core object
-	logger       *zap.Logger
-	id           utils.AutoInc
-	apps         sync.Map
-	proxyStarted bool
+	Proxy                       // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks                       // embedding the Hooks interface to transfer the hooks methods to the core object
+	IncomingProxy               // embedding the IncomingProxy interface to transfer the incoming proxy methods to the core object
+	Tester                      // embedding the Tester interface to transfer the tester methods to the core object
+	dockerClient  docker.Client //embedding the docker client to transfer the docker client methods to the core object
+	logger        *zap.Logger
+	id            utils.AutoInc
+	apps          sync.Map
+	proxyStarted  bool
 }
 
-func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
+func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client, ingressProxy IncomingProxy) *Core {
 	return &Core{
-		logger:       logger,
-		Hooks:        hook,
-		Proxy:        proxy,
-		Tester:       tester,
-		dockerClient: client,
+		logger:        logger,
+		Hooks:         hook,
+		IncomingProxy: ingressProxy,
+		Proxy:         proxy,
+		Tester:        tester,
+		dockerClient:  client,
 	}
 }
 
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// create a new app and store it in the map
 	id := uint64(c.id.Next())
+	c.logger.Info("setting up app", zap.String("keployContainer", opts.KeployContainer))
 	a := app.NewApp(c.logger, id, cmd, c.dockerClient, app.Options{
-		DockerNetwork: opts.DockerNetwork,
-		Container:     opts.Container,
-		DockerDelay:   opts.DockerDelay,
+		DockerNetwork:   opts.DockerNetwork,
+		Container:       opts.Container,
+		DockerDelay:     opts.DockerDelay,
+		KeployContainer: opts.KeployContainer,
 	})
 	c.apps.Store(id, a)
 
@@ -138,6 +142,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		Rules:      opts.Rules,
 		E2E:        opts.E2E,
 		Port:       opts.Port,
+		BigPayload: opts.BigPayload,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")
@@ -163,6 +168,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		DNSIPv4Addr: a.KeployIPv4Addr(),
 		//DnsIPv6Addr: ""
 	})
+
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to start proxy")
 		return hookErr

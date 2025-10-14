@@ -5,6 +5,10 @@ inputs:
   ssh-private-key:
     description: 'The private SSH deploy key for the integrations repository.'
     required: true
+  go-cache:
+    description: 'Whether to enable Go module caching (default: true).'
+    required: false
+    default: true
 
 runs:
   using: composite
@@ -13,6 +17,7 @@ runs:
       uses: actions/setup-go@v5
       with:
         go-version: ">=1.24"
+        cache: ${{ inputs.go-cache }}
 
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
@@ -38,3 +43,8 @@ runs:
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
         EOF
+    - name: Add any missing Go modules
+      shell: bash
+      run: |
+        echo "Tidying up Go modules..."
+        go mod tidy    
