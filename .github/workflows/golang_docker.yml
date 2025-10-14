@@ -57,7 +57,6 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
-          ref: add-tls-app
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
