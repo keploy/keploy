@@ -474,7 +474,7 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 				// Default Docker context on Windows
 				volumes = append(volumes,
 					"/sys/fs/cgroup:/sys/fs/cgroup",
-					"debugfs:/sys/kernel/debug:rw",
+					"/sys/kernel/debug:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
 					"/var/run/docker.sock:/var/run/docker.sock",
 				)
