@@ -679,7 +679,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	opts.AgentPort = agentPort
 	opts.ProxyPort = proxyPort
 	opts.DnsPort = dnsPort
-	opts.AgentURI = fmt.Sprintf("http://localhost:%d", agentPort)
+	opts.AgentURI = fmt.Sprintf("http://localhost:%d/agent", agentPort)
 
 	// Update the ports in the configuration
 	a.conf.Agent.AgentPort = agentPort

@@ -813,7 +813,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
-		if (c.cfg.CommandType == "native" || c.cfg.CommandType == "") && runtime.GOOS != "linux" { // need to check this one
+		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" { // need to check this one
 			return errors.New("non docker command not supported for os : " + runtime.GOOS)
 		}
 
@@ -1158,7 +1158,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Record.GlobalPassthrough = globalPassthrough
+		c.cfg.Agent.GlobalPassthrough = globalPassthrough
 
 		isdocker, err := cmd.Flags().GetBool("is-docker")
 		if err != nil {
