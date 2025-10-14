@@ -2,6 +2,27 @@
 
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
+# Function to cleanup any remaining keploy processes
+cleanup_keploy() {
+    echo "Cleaning up any remaining keploy processes..."
+    local pids=$(pgrep keploy)
+    if [ -n "$pids" ]; then
+        echo "Found keploy processes: $pids"
+        echo "$pids" | xargs -r sudo kill -9 2>/dev/null || true
+        sleep 1
+        if pgrep keploy >/dev/null; then
+            echo "Warning: Some keploy processes may still be running"
+        else
+            echo "All keploy processes cleaned up successfully"
+        fi
+    else
+        echo "No keploy processes found to cleanup"
+    fi
+}
+
+# Set trap to cleanup on script exit
+trap cleanup_keploy EXIT
+
 # Install dependencies
 pip3 install -r requirements.txt
 
@@ -39,16 +60,43 @@ send_request(){
     # Wait for keploy to flush recordings, then stop it
     sleep 10
     pid=$(pgrep keploy | head -n 1)
-    echo "$pid Keploy PID"
-    echo "Killing keploy"
-    kill "$pid"
+    if [ -n "$pid" ]; then
+        echo "$pid Keploy PID"
+        echo "Killing keploy"
+        
+        # Try graceful shutdown first
+        if ! kill "$pid" 2>/dev/null; then
+            echo "Graceful kill failed, trying with sudo..."
+            if ! sudo kill "$pid" 2>/dev/null; then
+                echo "Sudo kill failed, trying SIGKILL..."
+                if ! sudo kill -9 "$pid" 2>/dev/null; then
+                    echo "Warning: Could not kill keploy process $pid"
+                else
+                    echo "Successfully killed keploy with SIGKILL"
+                fi
+            else
+                echo "Successfully killed keploy with sudo"
+            fi
+        else
+            echo "Successfully killed keploy gracefully"
+        fi
+        
+        # Wait a bit and verify the process is gone
+        sleep 2
+        if pgrep keploy >/dev/null; then
+            echo "Warning: Keploy process may still be running"
+            pgrep keploy | xargs -r sudo kill -9 2>/dev/null || true
+        fi
+    else
+        echo "No keploy process found to kill"
+    fi
 }
 
 # --- Record cycles for secret endpoints (2 sets, unchanged behavior) ---
 for i in 1 2; do
     app_name="flaskSecret_${i}"
     send_request "secrets" &
-    $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5
@@ -64,7 +112,7 @@ sleep 5
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
 send_request "astro" &
-$RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
 sleep 5
@@ -86,7 +134,7 @@ else
 fi
 
 # Testing phase
-$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
 if grep "ERROR" "test_logs.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then exit 1; fi
 
@@ -118,14 +166,14 @@ echo "Removing astro test-set-2 to focus normalize on secret sets"
 rm -rf keploy/test-set-2
 
 echo "Running test again, this will fail as expected"
-$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_fail.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_fail.txt
 
 echo "Running the normalize command"
-$REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
 if grep "ERROR" "normalize_logs.txt"; then exit 1; fi
 
 echo "Running test again, this time it will pass"
-$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_pass.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_pass.txt
 if grep "ERROR" "test_logs_pass.txt"; then exit 1; fi
 
 all_passed=true
@@ -159,7 +207,7 @@ rm -rf keploy
 # Record the "misc" endpoints as a new test suite
 app_name="flaskMisc"
 send_request "misc" &
-$RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in misc recording..."
     cat "${app_name}.txt"
@@ -175,7 +223,7 @@ wait
 echo "Recorded misc test case and mocks"
 
 # Sanitize the newly created test cases
-$RECORD_BIN sanitize 2>&1 | tee sanitize_logs_misc.txt
+sudo -E env PATH="$PATH" $RECORD_BIN sanitize 2>&1 | tee sanitize_logs_misc.txt
 if grep "ERROR" "sanitize_logs_misc.txt"; then
     echo "Error found in misc sanitize..."
     cat "sanitize_logs_misc.txt"
@@ -184,7 +232,7 @@ fi
 
 # Final testing phase
 echo "Running test on the new 'misc' test suite..."
-$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs.txt
 if grep "ERROR" "final_test_logs.txt"; then
     echo "Error found in final test run..."
     cat "final_test_logs.txt"
