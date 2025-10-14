@@ -150,7 +150,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Stop keploy record
- pid=$(pgrep keploy || true)
+#  pid=$(pgrep keploy || true)
 #  echo "$pid Keploy PID"
 #  if [ -n "${pid:-}" ]; then
 #    echo "Killing keploy"
@@ -159,7 +159,7 @@ if [ "$MODE" = "incoming" ]; then
 REC_PID="$(pgrep -n -f 'keploy record' || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
+sudo kill -INT $REC_PID 2>/dev/null || true
 
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
