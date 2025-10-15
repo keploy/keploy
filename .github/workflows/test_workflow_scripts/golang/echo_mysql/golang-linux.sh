@@ -134,7 +134,7 @@ run_record_iteration() {
 
   # Start recording in background so we capture its PID explicitly
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
-    > "${app_name}.txt" 2>&1 & 
+    2>&1 | tee "${app_name}.txt" & 
   local KEPLOY_PID=$!
 
   # Drive traffic + stop keploy
@@ -193,7 +193,7 @@ section "Replay"
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
-  > test_logs.txt 2>&1
+  2>&1 | tee test_logs.txt || true
 REPLAY_RC=$?
 set -e
 echo "Replay exit code: $REPLAY_RC"
