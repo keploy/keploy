@@ -91,16 +91,16 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 
-		setupCtxCancel()
-		err = setupErrGrp.Wait()
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
-		}
-
 		reqCtxCancel()
 		err = reqErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
+		}
+
+		setupCtxCancel()
+		err = setupErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
 		err = errGrp.Wait()

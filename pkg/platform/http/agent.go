@@ -78,7 +78,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	// Make the HTTP request
 	res, err := a.client.Do(req)
-	if err != nil && err != io.EOF {
+	if err != nil {
 		return nil, fmt.Errorf("failed to get incoming: %s", err.Error())
 	}
 
@@ -152,7 +152,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 	// Make the HTTP request
 	res, err := a.client.Do(req)
-	if err != nil && err != io.EOF {
+	if err != nil {
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
