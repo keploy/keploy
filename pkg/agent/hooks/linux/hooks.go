@@ -295,7 +295,11 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	}
 
 	if opts.IsDocker {
-		h.ProxyIP4 = string(Uint32ToNetIP(proxyInfo.IP4))
+		h.ProxyIP4, err = GetContainerIP()
+		if err != nil {
+			h.Logger.Error("Failed to get the container IP", zap.Error(err))
+			return err
+		}
 		ipv6, err := ToIPv4MappedIPv6(h.ProxyIP4)
 		if err != nil {
 			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", h.ProxyIP4, err)

@@ -3,7 +3,6 @@
 package linux
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -66,13 +65,4 @@ func GetContainerIP() (string, error) {
 	}
 
 	return "", fmt.Errorf("could not find a non-loopback IP for the container")
-}
-
-// Uint32ToNetIP converts a uint32 to a net.IP type.
-func Uint32ToNetIP(ip_uint32 uint32) net.IP {
-	ip := make(net.IP, 4)
-	// Assuming the uint32 is Big Endian (Network Byte Order),
-	// which is the standard for IP addresses.
-	binary.BigEndian.PutUint32(ip, ip_uint32)
-	return ip
 }
