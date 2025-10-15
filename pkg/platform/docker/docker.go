@@ -736,9 +736,9 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 	return nil
 }
 
-// ModifyComposeForKeployIntegration modifies an existing Docker Compose file to integrate with Keploy agent
+// InjectAgentIntoCompose modifies an existing Docker Compose file to integrate with Keploy agent
 // It adds the keploy-agent service and modifies the specified app container to depend on it
-func (idc *Impl) ModifyComposeForKeployIntegration(compose *Compose, opts models.SetupOptions, appContainerName string) error {
+func (idc *Impl) InjectAgentIntoCompose(compose *Compose, opts models.SetupOptions, appContainerName string) error {
 	// First, add the keploy-agent service
 	err := idc.AddKeployAgentToCompose(compose, opts)
 	if err != nil {

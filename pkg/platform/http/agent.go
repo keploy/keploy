@@ -4,10 +4,8 @@ package http
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	_ "embed" // necessary for embedding
 	"encoding/gob"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,10 +13,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -623,40 +619,16 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if isDockerCmd {
 
 		a.logger.Info("Application command provided :", zap.String("cmd", cmd))
-		randomBytes := make([]byte, 2)
-		// Read cryptographically secure random bytes.
-		if _, err := rand.Read(randomBytes); err != nil {
-			a.logger.Fatal("Failed to generate random part for container name: ", zap.Error(err))
-		}
-		uuidSuffix := hex.EncodeToString(randomBytes)
 
-		// Append the random string.
-		opts.KeployContainer = "keploy-v3-" + uuidSuffix
+		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
 
-		// Regex to find all port mapping flags (-p or --publish)
-		portRegex := regexp.MustCompile(`\s+(-p|--publish)\s+[^\s]+`)
-		portArgs := portRegex.FindAllString(cmd, -1)
-		cleanedPorts := []string{}
-		for _, p := range portArgs {
-			cleanedPorts = append(cleanedPorts, strings.TrimSpace(p))
-		}
-		opts.AppPorts = cleanedPorts
-		cmd = portRegex.ReplaceAllString(cmd, "")
+		var appPorts, appNetworks []string
+		cmd, appPorts, appNetworks = agentUtils.ExtractDockerFlags(cmd)
 
-		networkRegex := regexp.MustCompile(`(--network|--net)\s+([^\s]+)`)
-		networkMatches := networkRegex.FindAllStringSubmatch(cmd, -1)
-
-		if len(networkMatches) > 0 {
-			opts.AppNetworks = []string{}
-			for _, match := range networkMatches {
-				// The network name is in the second capturing group (index 2)
-				if len(match) > 2 {
-					opts.AppNetworks = append(opts.AppNetworks, match[2])
-				}
-			}
-			cmd = networkRegex.ReplaceAllString(cmd, "")
-
+		opts.AppPorts = appPorts
+		if len(appNetworks) > 0 {
+			opts.AppNetworks = appNetworks
 			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
 

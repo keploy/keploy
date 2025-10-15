@@ -24,7 +24,7 @@ type Client interface {
 	// Function for generating keploy-agent service configuration
 	GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error)
 	AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error
-	ModifyComposeForKeployIntegration(compose *Compose, opts models.SetupOptions, appContainerName string) error
+	InjectAgentIntoCompose(compose *Compose, opts models.SetupOptions, appContainerName string) error
 }
 
 type NetworkInfo struct {

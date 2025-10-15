@@ -159,7 +159,7 @@ func (a *App) SetupCompose() error {
 	a.opts.AppNetworks = serviceInfo.Networks
 	compose := serviceInfo.Compose
 
-	err = a.docker.ModifyComposeForKeployIntegration(compose, a.opts, a.container)
+	err = a.docker.InjectAgentIntoCompose(compose, a.opts, a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
 		return err
