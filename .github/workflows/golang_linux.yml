@@ -32,7 +32,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }}) ssl-${{ matrix.app.enable_ssl || 'false' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

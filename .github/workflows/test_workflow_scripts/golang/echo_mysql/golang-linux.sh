@@ -2,6 +2,8 @@
 # safer bash, but we’ll locally disable -e around commands we want to inspect
 set -Eeuo pipefail
 
+git checkout add-ssl-mysql
+
 # ----- helpers -----
 section()  { echo "::group::$*"; }
 endsec()   { echo "::endgroup::"; }
