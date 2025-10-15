@@ -43,7 +43,6 @@ type Hooks struct {
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
 	redirectProxyMap      *ebpf.Map
-	e2eAppRegistrationMap *ebpf.Map
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
@@ -254,23 +253,13 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 
 	h.Logger.Debug("keploy initialized and probes added to the kernel.")
 
-	if opts.E2E {
-		pid, err := utils.GetPIDFromPort(ctx, h.Logger, int(opts.Port))
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get the keploy pid from the port in case of e2e")
-			return err
-		}
-		err = h.SendE2EInfo(pid)
-		if err != nil {
-			h.Logger.Error("failed to send e2e info to the ebpf program", zap.Error(err))
-		}
-	}
-
-	h.Logger.Debug("proxy ips", zap.String("ipv4", h.ProxyIP4), zap.Any("ipv6", h.ProxyIP6))
-
 	var agentInfo = structs.AgentInfo{}
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
-	agentInfo.KeployAgentInode, _ = GetSelfInodeNumber()
+	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	if err != nil {
+		h.Logger.Error("failed to get the inode number of the keploy process", zap.Error(err))
+		return err
+	}
 	agentInfo.IsDocker = 0
 	if opts.IsDocker {
 		agentInfo.IsDocker = 1
@@ -299,22 +288,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.ProxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
 		h.ProxyIP6 = ipv6
 	}
+	h.Logger.Debug("proxy ips", zap.String("ipv4", h.ProxyIP4), zap.Any("ipv6", h.ProxyIP6))
 
 	agentInfo.Proxy = proxyInfo
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.Logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
-		return err
-	}
-
-	return nil
-}
-
-func (h *Hooks) SendKeployClientInfo(clientInfo structs.ClientInfo) error {
-
-	err := h.SendClientInfo(clientInfo)
-	if err != nil {
-		h.Logger.Error("failed to send client info to the ebpf program", zap.Error(err))
 		return err
 	}
 
@@ -415,7 +394,7 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
-	return h.SendKeployClientInfo(clientInfo)
+	return h.SendClientInfo(clientInfo)
 }
 
 func (h *Hooks) GetProxyInfo(ctx context.Context, opts models.SetupOptions) (structs.ProxyInfo, error) {

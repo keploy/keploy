@@ -80,16 +80,6 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
-func (h *Hooks) SendE2EInfo(pid uint32) error {
-	key := 0
-	err := h.e2eAppRegistrationMap.Update(uint64(key), pid, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to send the E2E info to the ebpf program")
-		return err
-	}
-	return nil
-}
-
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
 	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
 	if err != nil {
