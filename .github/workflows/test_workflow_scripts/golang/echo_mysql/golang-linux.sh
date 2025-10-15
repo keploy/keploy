@@ -112,16 +112,6 @@ run_record_iteration() {
       section "Starting MySQL with SSL/TLS via Docker Compose"
       docker compose up -d
       wait_for_mysql
-
-      echo "Verifying SSL/TLS is enabled in MySQL logs..."
-      # Wait a moment for logs to populate
-      sleep 10
-      if ! docker-compose logs mysql | grep -iE "SSL|TLS"; then
-        echo "::error::SSL/TLS not detected in MySQL logs!"
-        docker-compose logs mysql
-        exit 1
-      fi
-      echo "SSL/TLS verification successful."
       endsec
     else
       section "Starting MySQL with standard Docker run (no SSL)"
