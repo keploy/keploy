@@ -646,12 +646,21 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		cmd = portRegex.ReplaceAllString(cmd, "")
 
 		networkRegex := regexp.MustCompile(`(--network|--net)\s+([^\s]+)`)
-		networkMatches := networkRegex.FindStringSubmatch(cmd)
+		networkMatches := networkRegex.FindAllStringSubmatch(cmd, -1)
 
-		if len(networkMatches) > 2 {
-			opts.AppNetwork = networkMatches[2]
+		if len(networkMatches) > 0 {
+			opts.AppNetworks = []string{}
+			for _, match := range networkMatches {
+				// The network name is in the second capturing group (index 2)
+				if len(match) > 2 {
+					opts.AppNetworks = append(opts.AppNetworks, match[2])
+				}
+			}
 			cmd = networkRegex.ReplaceAllString(cmd, "")
+			
+			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
+
 		a.logger.Info("Application command to execute :", zap.String("cmd", cmd))
 	}
 
