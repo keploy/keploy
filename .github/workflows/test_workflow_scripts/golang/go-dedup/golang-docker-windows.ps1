@@ -166,11 +166,11 @@ $logJob = Start-Job { Get-Content -Path $using:logPath -Wait -Tail 10 }
 Write-Host "Tailing Keploy logs from $logPath ..."
 
 # Wait for app readiness
-Write-Host "Waiting for app to respond on $base/timestamp …"
+Write-Host "Waiting for app to respond on $base/hello/keploy …"
 $deadline = (Get-Date).AddMinutes(5)
 do {
   try {
-    $r = Invoke-WebRequest -Method GET -Uri "$base/timestamp" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    $r = Invoke-WebRequest -Method GET -Uri "$base/hello/keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     if ($r.StatusCode -eq 200) { break }
   } catch { Start-Sleep 3 }
 } while ((Get-Date) -lt $deadline)
@@ -184,7 +184,6 @@ try {
   Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
   Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
   Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
-  Invoke-RestMethod -Method GET    -Uri "$base/timestamp";                                                                   $sent++
   Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
 } catch { Write-Warning "A request failed: $_" }
 
