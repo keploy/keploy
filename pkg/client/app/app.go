@@ -28,27 +28,20 @@ func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.Se
 		opts:            opts,
 		keployContainer: opts.KeployContainer,
 		container:       opts.Container,
-		containerDelay:  opts.DockerDelay,
 	}
 	return app
 }
 
 type App struct {
-	logger           *zap.Logger
-	docker           docker.Client
-	cmd              string
-	kind             utils.CmdType
-	opts             models.SetupOptions
-	containerDelay   uint64
-	container        string
-	containerNetwork string
-	containerIPv4    chan string
-	KeployNetwork    string
-	keployContainer  string
-	keployIPv4       string
-	inodeChan        chan uint64
-	EnableTesting    bool
-	Mode             models.Mode
+	logger          *zap.Logger
+	docker          docker.Client
+	cmd             string
+	kind            utils.CmdType
+	opts            models.SetupOptions
+	container       string
+	keployContainer string
+	EnableTesting   bool
+	Mode            models.Mode
 }
 
 func (a *App) Setup(_ context.Context) error {
@@ -183,9 +176,6 @@ func (a *App) SetupCompose() error {
 
 	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
 
-	if a.containerNetwork == "" {
-		a.containerNetwork = a.KeployNetwork
-	}
 	return nil
 }
 
@@ -247,9 +237,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}
 }
 
-func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
-	a.inodeChan = inodeChan
-	a.containerIPv4 = make(chan string, 1)
+func (a *App) Run(ctx context.Context) models.AppError {
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}
