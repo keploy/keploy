@@ -375,12 +375,9 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	}
 
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
-	inodeErrCh := make(chan error, 1)
 	appErrCh := make(chan models.AppError, 1)
-	inodeChan := make(chan uint64, 1) //send inode to the hook
 	defer func() {
 		err := runAppErrGrp.Wait()
-		defer close(inodeErrCh)
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to stop the app")
 		}
@@ -389,7 +386,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(a.logger)
 		defer close(appErrCh)
-		appErr := app.Run(runAppCtx, inodeChan)
+		appErr := app.Run(runAppCtx)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
 			appErrCh <- appErr
