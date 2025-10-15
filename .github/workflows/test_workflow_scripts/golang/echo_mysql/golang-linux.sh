@@ -97,14 +97,14 @@ send_request() {
   sudo kill "$kp_pid" 2>/dev/null || true
 }
 
+# Clean slate per run
+rm -rf keploy/ keploy.yml || true
+
 run_record_iteration() {
   local idx="$1"
   local app_name="urlShort_${idx}"
 
   section "Record iteration $idx"
-
-  # Clean slate per run
-  rm -rf keploy/ keploy.yml || true
 
   # Start mysql (once) only for first iteration
   if ! docker ps --format '{{.Names}}' | grep -q '^mysql-container$'; then
