@@ -42,13 +42,6 @@ jobs:
         run: |
           rm -rf ~/.gitconfig
 
-      - name: Unlock keychain
-        if: runner.os == 'macOS'
-        run: |
-          security unlock-keychain -p $KEYCHAIN_PASSWORD
-        env:
-          KEYCHAIN_PASSWORD: "keploy@123"
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -56,7 +49,7 @@ jobs:
         uses: ./.github/actions/download-image
         with:
           image_tag: ${{ inputs.image_tag }}
-          version: ${{ github.sha }}
+          version: ${{ github.event.pull_request.number }}-${{ github.sha }}
 
       - id: record
         uses: ./.github/actions/download-binary
