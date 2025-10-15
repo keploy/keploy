@@ -11,14 +11,17 @@ jobs:
           - name: echo-mysql
             path: echo-mysql
             script_dir: echo_mysql
-          - name: http-pokeapi
-            path: http-pokeapi
-            script_dir: http_pokeapi
+            enable_ssl: true
+          - name: echo-mysql
+            path: echo-mysql
+            script_dir: echo_mysql
             enable_ssl: false
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
-            enable_ssl: true
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http_pokeapi
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
@@ -32,7 +35,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.app.name }} (${{ matrix.config.job }}) ssl-${{ matrix.app.enable_ssl || 'false' }}
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})${{ contains(matrix.app, 'enable_ssl') && format(' ssl-{0}', matrix.app.enable_ssl) || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
