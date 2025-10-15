@@ -166,9 +166,13 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		return ctx.Err()
 	default:
 	}
-
+	DNSIPv4, err := utils.GetContainerIP()
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to get container IP")
+		return hookErr
+	}
 	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
-		DNSIPv4Addr: "172.18.0.2",
+		DNSIPv4Addr: DNSIPv4,
 		//DnsIPv6Addr: ""
 	})
 

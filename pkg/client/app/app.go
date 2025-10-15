@@ -51,15 +51,6 @@ type App struct {
 	Mode             models.Mode
 }
 
-type Options struct {
-	// canExit disables any error returned if the app exits by itself.
-	//CanExit       bool
-	Container       string
-	KeployContainer string
-	DockerDelay     uint64
-	DockerNetwork   string
-}
-
 func (a *App) Setup(_ context.Context) error {
 
 	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
