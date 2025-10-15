@@ -43,7 +43,6 @@ type Hooks struct {
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
 	redirectProxyMap      *ebpf.Map
-	proxyInfoMap          *ebpf.Map
 	e2eAppRegistrationMap *ebpf.Map
 
 	// eBPF C shared objectsobjects
@@ -102,13 +101,6 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	})
 
 	return nil
-}
-
-// GetUnloadDone returns a channel that will be closed when the hooks are completely unloaded
-func (h *Hooks) GetUnloadDone() <-chan struct{} {
-	h.UnloadDoneMutex.Lock()
-	defer h.UnloadDoneMutex.Unlock()
-	return h.UnloadDone
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.SetupOptions) error {
@@ -170,7 +162,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 			utils.LogError(h.Logger, err, "failed to detect the cgroup path")
 			return err
 		}
-		if opts.Mode != models.MODE_TEST {
+		if opts.Mode == models.MODE_RECORD {
 
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
@@ -379,7 +371,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	}
 	h.objectsMutex.Unlock()
 
-	if opts.Mode != models.MODE_TEST {
+	if opts.Mode == models.MODE_RECORD {
 		if h.cgBind4 != nil {
 			if err := h.cgBind4.Close(); err != nil {
 				utils.LogError(h.Logger, err, "failed to close the cgBind4")

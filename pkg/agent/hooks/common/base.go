@@ -42,24 +42,6 @@ func NewBaseHooks(logger *zap.Logger, cfg *config.Config) *BaseHooks {
 	}
 }
 
-// GetUnloadDone returns a channel that signals when unload is complete.
-func (b *BaseHooks) GetUnloadDone() <-chan struct{} {
-	return b.UnloadDone
-}
-
-// SignalUnloadDone signals that unload is complete.
-func (b *BaseHooks) SignalUnloadDone() {
-	b.UnloadDoneMutex.Lock()
-	defer b.UnloadDoneMutex.Unlock()
-
-	select {
-	case <-b.UnloadDone:
-		// Channel already closed
-	default:
-		close(b.UnloadDone)
-	}
-}
-
 // GetProxyAddress returns the formatted proxy address string.
 func (b *BaseHooks) GetProxyAddress() string {
 	return fmt.Sprintf("%s:%d", b.ProxyIP4, b.ProxyPort)
