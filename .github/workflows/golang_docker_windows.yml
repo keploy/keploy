@@ -2,10 +2,6 @@ name: Golang On Docker (Windows)
 on:
   workflow_call:
 
-concurrency:
-  group: windows-docker-runner
-  cancel-in-progress: false
-
 jobs:
   golang_docker_windows:
     runs-on: [self-hosted, Windows, X64]
