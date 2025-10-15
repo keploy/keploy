@@ -154,35 +154,23 @@ $recArgs = @(
 Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
-# 2. Start Keploy with output shown on screen and logged to file
-Write-Host "Starting Keploy record process with live output..."
+# 2. Start Keploy in the background, redirecting output to a log file
 $proc = Start-Process -FilePath $env:RECORD_BIN `
                       -ArgumentList $recArgs `
                       -PassThru `
                       -NoNewWindow `
-                      -RedirectStandardOutput $logPath `
-                      -RedirectStandardError "${logPath}.err"
+                      -RedirectStandardOutput $logPath
 
 # 3. Start a background job to stream the log file to the console in real-time
-$logJob = Start-Job -ScriptBlock {
-    param($LogPath)
-    try {
-        # Wait for log file to be created
-        while (-not (Test-Path $LogPath)) { Start-Sleep -Milliseconds 100 }
-        Get-Content -Path $LogPath -Wait -Tail 0 | ForEach-Object { Write-Host $_ }
-    } catch {
-        Write-Host "Log streaming error: $_"
-    }
-} -ArgumentList $logPath
-
-Write-Host "Streaming Keploy logs from $logPath to console..."
+$logJob = Start-Job { Get-Content -Path $using:logPath -Wait -Tail 10 }
+Write-Host "Tailing Keploy logs from $logPath ..."
 
 # Wait for app readiness
-Write-Host "Waiting for app to respond on $base/hello/Keploy …"
+Write-Host "Waiting for app to respond on $base/timestamp …"
 $deadline = (Get-Date).AddMinutes(5)
 do {
   try {
-    $r = Invoke-WebRequest -Method GET -Uri "$base/hello/Keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    $r = Invoke-WebRequest -Method GET -Uri "$base/timestamp" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     if ($r.StatusCode -eq 200) { break }
   } catch { Start-Sleep 3 }
 } while ((Get-Date) -lt $deadline)
@@ -194,6 +182,10 @@ try {
   Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy";                                                           $sent++
   Invoke-RestMethod -Method POST   -Uri "$base/user"           -Body (@{name="John Doe";email="john@keploy.io"} | ConvertTo-Json) -ContentType "application/json"; $sent++
   Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
+  Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
+  Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
+  Invoke-RestMethod -Method GET    -Uri "$base/timestamp";                                                                   $sent++
+  Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
 } catch { Write-Warning "A request failed: $_" }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
@@ -205,11 +197,7 @@ do {
 
 # Stop Keploy (and docker compose) deterministically
 Kill-Tree -ProcessId $proc.Id
-# Give the log job a moment to catch final output, then stop it
-Start-Sleep -Seconds 2
-Stop-Job $logJob -ErrorAction SilentlyContinue
-Receive-Job $logJob -ErrorAction SilentlyContinue
-Remove-Job $logJob -Force -ErrorAction SilentlyContinue
+Stop-Job $logJob
 # In case the root process already died, just continue
 try { Wait-Process -Id $proc.Id -Timeout 15 -ErrorAction SilentlyContinue } catch {}
 
