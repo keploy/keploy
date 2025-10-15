@@ -13,14 +13,13 @@ import (
 func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	var OutgoingReq models.OutgoingReq
-	err := json.NewDecoder(r.Body).Decode(&OutgoingReq)
-
 	mockRes := models.AgentResp{
 		Error:     nil,
 		IsSuccess: true,
 	}
 
+	var OutgoingReq models.OutgoingReq
+	err := json.NewDecoder(r.Body).Decode(&OutgoingReq)
 	if err != nil {
 		mockRes.Error = err
 		mockRes.IsSuccess = false
@@ -40,38 +39,6 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 
 	render.JSON(w, r, mockRes)
 	render.Status(r, http.StatusOK)
-}
-
-func (a *Agent) SetMocks(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	var SetMocksReq models.SetMocksReq
-	err := json.NewDecoder(r.Body).Decode(&SetMocksReq)
-
-	setmockRes := models.AgentResp{
-
-		Error: nil,
-	}
-	if err != nil {
-		setmockRes.Error = err
-		setmockRes.IsSuccess = false
-		render.JSON(w, r, err)
-		render.Status(r, http.StatusBadRequest)
-		return
-	}
-
-	err = a.svc.SetMocks(r.Context(), SetMocksReq.Filtered, SetMocksReq.UnFiltered)
-	if err != nil {
-		setmockRes.Error = err
-		setmockRes.IsSuccess = false
-		render.JSON(w, r, err)
-		render.Status(r, http.StatusInternalServerError)
-		return
-	}
-
-	render.JSON(w, r, setmockRes)
-	render.Status(r, http.StatusOK)
-
 }
 
 func (a *Agent) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {

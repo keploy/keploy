@@ -99,8 +99,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	go func() {
 		defer func() {
 			close(tcChan)
-		}()
-		defer func() {
+
 			err := res.Body.Close()
 			if err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for incoming request")
@@ -241,45 +240,6 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 
 	return nil
 
-}
-
-func (a *AgentClient) SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	requestBody := models.SetMocksReq{
-		Filtered:   filtered,
-		UnFiltered: unFiltered,
-	}
-
-	requestJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to marshal request body for setmocks")
-		return fmt.Errorf("error marshaling request body for setmocks: %s", err.Error())
-	}
-
-	// mock outgoing request
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/setmocks", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to create request for setmocks outgoing")
-		return fmt.Errorf("error creating request for set mocks: %s", err.Error())
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Make the HTTP request
-	res, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request for setmocks: %s", err.Error())
-	}
-
-	var mockResp models.AgentResp
-	err = json.NewDecoder(res.Body).Decode(&mockResp)
-	if err != nil {
-		return fmt.Errorf("failed to decode response body for setmocks: %s", err.Error())
-	}
-
-	if mockResp.Error != nil {
-		return mockResp.Error
-	}
-
-	return nil
 }
 
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
@@ -505,7 +465,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	keployBin, err := utils.GetCurrentBinaryPath()
 	if err != nil {
 		if logFile != nil {
-			_ = logFile.Close()
+			logFileCloseErr := logFile.Close()
+			if logFileCloseErr != nil {
+				utils.LogError(a.logger, logFileCloseErr, "failed to close log file")
+			}
+
 			utils.LogError(a.logger, err, "failed to get current keploy binary path")
 		}
 		return err
@@ -817,6 +781,8 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	return nil
 }
 
+// This function should be implemented such that we listen to the mock not found errors on the proxy side and send it back to the client from agent
+// Currently, we are sending the nil chan and it is handled for the nil check in the monitorProxyErrors function
 func (a *AgentClient) GetErrorChannel() <-chan error {
 	return nil
 }

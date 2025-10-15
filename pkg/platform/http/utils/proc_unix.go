@@ -49,7 +49,10 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	if err != nil {
 		logger.Warn("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
 		// Graceful
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		err = cmd.Process.Signal(syscall.SIGTERM)
+		if err != nil {
+			logger.Error("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
+		}
 		time.Sleep(3 * time.Second)
 		// Force
 		return cmd.Process.Kill()

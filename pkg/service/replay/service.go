@@ -13,8 +13,6 @@ type Instrumentation interface {
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 
 	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
-	// SetMocks Allows for setting mocks between test runs for better filtering and matching
-	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	// Run is blocking call and will execute until error

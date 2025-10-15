@@ -793,7 +793,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.NewUpdateMockParams(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -871,7 +871,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.NewUpdateMockParams(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -1045,7 +1045,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			respTime = testCase.GrpcResp.Timestamp
 		}
 
-		err = r.NewUpdateMockParams(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
@@ -1463,108 +1463,8 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) FilterAndSetMocks(ctx context.Context, filtered, unfiltered []*models.Mock, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState) error {
-	if !r.instrument {
-		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
-		return nil
-	}
-
-	filtered = pkg.FilterTcsMocks(ctx, r.logger, filtered, afterTime, beforeTime)
-	unfiltered = pkg.FilterConfigMocks(ctx, r.logger, unfiltered, afterTime, beforeTime)
-
-	filterOutDeleted := func(in []*models.Mock) []*models.Mock {
-		out := make([]*models.Mock, 0, len(in))
-		for _, m := range in {
-			// treat empty/missing names as never consumed
-			if m == nil || m.Name == "" {
-				out = append(out, m)
-				continue
-			}
-			// we are picking mocks that are not consumed till now (not present in map),
-			// and, mocks that are updated.
-			if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
-				if ok {
-					m.TestModeInfo.IsFiltered = k.IsFiltered
-					m.TestModeInfo.SortOrder = k.SortOrder
-				}
-				out = append(out, m)
-			}
-		}
-		return out
-	}
-
-	filtered = filterOutDeleted(filtered)
-	unfiltered = filterOutDeleted(unfiltered)
-
-	err := r.instrumentation.SetMocks(ctx, filtered, unfiltered)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to set mocks")
-		return err
-	}
-
-	return nil
-}
-
-func (r *Replayer) FilterAndSetMocksMapping(ctx context.Context, filtered, unfiltered []*models.Mock, mapping []string, totalConsumedMocks map[string]models.MockState) error {
-	if !r.instrument {
-		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
-		return nil
-	}
-
-	filtered = pkg.FilterTcsMocksMapping(ctx, r.logger, filtered, mapping)
-	unfiltered = pkg.FilterConfigMocksMapping(ctx, r.logger, unfiltered, mapping)
-
-	filterOutDeleted := func(in []*models.Mock) []*models.Mock {
-		out := make([]*models.Mock, 0, len(in))
-		for _, m := range in {
-			// treat empty/missing names as never consumed
-			if m == nil || m.Name == "" {
-				out = append(out, m)
-				continue
-			}
-			// we are picking mocks that are not consumed till now (not present in map),
-			// and, mocks that are updated.
-			if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
-				if ok {
-					m.TestModeInfo.IsFiltered = k.IsFiltered
-					m.TestModeInfo.SortOrder = k.SortOrder
-				}
-				out = append(out, m)
-			}
-		}
-		return out
-	}
-
-	filtered = filterOutDeleted(filtered)
-	unfiltered = filterOutDeleted(unfiltered)
-
-	err := r.instrumentation.SetMocks(ctx, filtered, unfiltered)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to set mocks")
-		return err
-	}
-
-	return nil
-}
-
-func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, filtered, unfiltered []*models.Mock, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
-	if !r.instrument {
-		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
-		return nil
-	}
-
-	if useMappingBased && len(expectedMockMapping) > 0 {
-		r.logger.Debug("Using mapping-based mock filtering",
-			zap.Strings("expectedMocks", expectedMockMapping))
-		return r.FilterAndSetMocksMapping(ctx, filtered, unfiltered, expectedMockMapping, totalConsumedMocks)
-	} else {
-		return r.FilterAndSetMocks(ctx, filtered, unfiltered, afterTime, beforeTime, totalConsumedMocks)
-	}
-
-}
-
-// NewUpdateMockParams sends filtering parameters to agent instead of sending filtered mocks
-func (r *Replayer) NewUpdateMockParams(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+// SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
