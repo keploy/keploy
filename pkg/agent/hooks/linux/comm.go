@@ -36,8 +36,8 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 
 // GetDestinationInfo retrieves destination information associated with a source port.
 func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
-	h.M.Lock()
-	defer h.M.Unlock()
+	h.m.Lock()
+	defer h.m.Unlock()
 	destInfo := structs.DestInfo{}
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
 		return nil, err
@@ -50,21 +50,21 @@ func (h *Hooks) Delete(_ context.Context, srcPort uint16) error {
 }
 
 func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
-	h.M.Lock()
-	defer h.M.Unlock()
+	h.m.Lock()
+	defer h.m.Unlock()
 	err := h.redirectProxyMap.Delete(srcPort)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to remove entry from redirect proxy map")
+		utils.LogError(h.logger, err, "failed to remove entry from redirect proxy map")
 		return err
 	}
-	h.Logger.Debug("successfully removed entry from redirect proxy map", zap.Uint16("(Key)/SourcePort", srcPort))
+	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Uint16("(Key)/SourcePort", srcPort))
 	return nil
 }
 
 func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
 	err := h.clientRegistrationMap.Update(uint64(0), clientInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to send the client info to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the client info to the ebpf program")
 		return err
 	}
 	return nil
@@ -74,7 +74,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	key := 0
 	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to send the agent info to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
 		return err
 	}
 	return nil
@@ -105,10 +105,10 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 
 			var e models.IngressEvent
 			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
-				utils.LogError(h.Logger, err, "failed to decode ingress event")
+				utils.LogError(h.logger, err, "failed to decode ingress event")
 				continue
 			}
-			h.Logger.Debug("Intercepted application bind event")
+			h.logger.Debug("Intercepted application bind event")
 			select {
 			case <-ctx.Done(): // Context was cancelled, so we shut down.
 				return

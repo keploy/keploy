@@ -98,6 +98,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 
 		reqCtxCancel()
+		err = reqErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop request processing")
+		}
+
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
