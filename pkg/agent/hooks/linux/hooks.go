@@ -294,7 +294,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 
 	if opts.IsDocker {
-		h.proxyIP4, err = utils.GetContainerIP()
+		h.proxyIP4, err = utils.GetContainerIPv4()
 		if err != nil {
 			h.logger.Error("Failed to get the container IP", zap.Error(err))
 			return err
@@ -427,7 +427,7 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent) (structs.Pr
 
 		return proxyInfo, nil
 	}
-	AgentIP, err := utils.GetContainerIP() // in case of docker we will get the container's IP fron within the container
+	AgentIP, err := utils.GetContainerIPv4() // in case of docker we will get the container's IP fron within the container
 	if err != nil {
 		return structs.ProxyInfo{}, err
 	}

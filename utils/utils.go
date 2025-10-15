@@ -1425,7 +1425,7 @@ func isValidGRPCIdentifier(name string) bool {
 	return true
 }
 
-func GetContainerIP() (string, error) {
+func GetContainerIPv4() (string, error) {
 	// Get all network interfaces
 	interfaces, err := net.Interfaces()
 	if err != nil {

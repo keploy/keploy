@@ -67,10 +67,15 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	case startCh <- int(a.config.Agent.AgentPort):
 	case <-ctx.Done():
 		a.logger.Info("Context cancelled before agent becomes healthy. Stopping the agent.")
+		return nil
 	}
 
 	<-ctx.Done()
-	errGrp.Wait()
+	err = errGrp.Wait()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		utils.LogError(a.logger, err, "error during agent setup")
+		return err
+	}
 	a.logger.Info("Context cancelled, stopping the agent")
 	return context.Canceled
 
@@ -166,7 +171,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		return ctx.Err()
 	default:
 	}
-	DNSIPv4, err := utils.GetContainerIP()
+	DNSIPv4, err := utils.GetContainerIPv4()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get container IP")
 		return hookErr

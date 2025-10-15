@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// TODO: Need to refactor this file
 type AgentClient struct {
 	logger       *zap.Logger
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object

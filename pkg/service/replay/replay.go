@@ -749,44 +749,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-
-		var expectedTestMockMappings map[string][]string
-		var useMappingBased bool
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
 			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
 
-		if r.mappingDB != nil && isMappingEnabled {
-			// Get mappings and check if meaningful mappings are present
-			var hasMeaningfulMappings bool
-			expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
-			if err != nil {
-				r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
-					zap.String("testSetID", testSetID),
-					zap.Error(err))
-				useMappingBased = false
-				expectedTestMockMappings = make(map[string][]string)
-			} else if hasMeaningfulMappings {
-				// Meaningful mappings are present, use mapping-based approach
-				r.logger.Info("Using mapping-based mock filtering strategy",
-					zap.String("testSetID", testSetID),
-					zap.Int("totalMappings", len(expectedTestMockMappings)))
-				useMappingBased = true
-			} else {
-				// No meaningful mappings present, use timestamp-based approach
-				r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
-					zap.String("testSetID", testSetID))
-				useMappingBased = false
-				expectedTestMockMappings = make(map[string][]string)
-			}
-		} else {
-			// No mapping DB available, use timestamp-based approach
-			r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
-			useMappingBased = false
-			expectedTestMockMappings = make(map[string][]string)
-		}
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
@@ -826,35 +795,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
 
-		if r.mappingDB != nil && isMappingEnabled {
-			// Get mappings and check if meaningful mappings are present
-			var hasMeaningfulMappings bool
-			expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
-			if err != nil {
-				r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
-					zap.String("testSetID", testSetID),
-					zap.Error(err))
-				useMappingBased = false
-				expectedTestMockMappings = make(map[string][]string)
-			} else if hasMeaningfulMappings {
-				// Meaningful mappings are present, use mapping-based approach
-				r.logger.Info("Using mapping-based mock filtering strategy",
-					zap.String("testSetID", testSetID),
-					zap.Int("totalMappings", len(expectedTestMockMappings)))
-				useMappingBased = true
-			} else {
-				// No meaningful mappings present, use timestamp-based approach
-				r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
-					zap.String("testSetID", testSetID))
-				useMappingBased = false
-				expectedTestMockMappings = make(map[string][]string)
-			}
-		} else {
-			// No mapping DB available, use timestamp-based approach
-			r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
-			useMappingBased = false
-			expectedTestMockMappings = make(map[string][]string)
-		}
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
@@ -2097,4 +2038,41 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 
 		}
 	}
+}
+
+func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]string) {
+	// Default to timestamp-based strategy with empty mappings.
+	defaultMappings := make(map[string][]string)
+
+	if r.mappingDB == nil {
+		r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
+		return false, defaultMappings
+	}
+
+	if !isMappingEnabled {
+		// The calling function already logs this, so we don't log it again here.
+		return false, defaultMappings
+	}
+
+	// Try to get mappings from the database.
+	expectedTestMockMappings, hasMeaningfulMappings, err := r.mappingDB.Get(ctx, testSetID)
+	if err != nil {
+		r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
+			zap.String("testSetID", testSetID),
+			zap.Error(err))
+		return false, defaultMappings
+	}
+
+	if hasMeaningfulMappings {
+		// Meaningful mappings were found, so use the mapping-based strategy.
+		r.logger.Info("Using mapping-based mock filtering strategy",
+			zap.String("testSetID", testSetID),
+			zap.Int("totalMappings", len(expectedTestMockMappings)))
+		return true, expectedTestMockMappings
+	}
+
+	// No meaningful mappings were found, so fall back to the timestamp-based strategy.
+	r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+		zap.String("testSetID", testSetID))
+	return false, defaultMappings
 }

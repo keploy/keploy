@@ -10,8 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/pkg/platform/docker"
@@ -159,7 +157,7 @@ func (a *App) SetupCompose() error {
 	a.opts.AppNetworks = serviceInfo.Networks
 	compose := serviceInfo.Compose
 
-	err = a.docker.InjectAgentIntoCompose(compose, a.opts, a.container)
+	err = a.docker.ModifyComposeForAgent(compose, a.opts, a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
 		return err
@@ -192,55 +190,7 @@ func (a *App) Kind(_ context.Context) utils.CmdType {
 	return a.kind
 }
 
-// Have commented out the code to extract docker meta data as it might not be needed now after docker changes, will check this
-func (a *App) runDocker(ctx context.Context) models.AppError {
-	// if a.cmd is empty, it means the user wants to run the application manually,
-	// so we don't need to run the application in a goroutine
-	if a.cmd == "" {
-		return models.AppError{}
-	}
-
-	g, ctx := errgroup.WithContext(ctx)
-	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
-
-	// dockerMetaCtx, cancel := context.WithCancel(ctx)
-
-	defer func() {
-		// cancel()
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to run dockerized app")
-		}
-	}()
-
-	errCh := make(chan error, 1)
-
-	g.Go(func() error {
-		defer utils.Recover(a.logger)
-		defer close(errCh)
-		err := a.run(ctx)
-		if err.Err != nil {
-			utils.LogError(a.logger, err.Err, "Application stopped with the error")
-			errCh <- err.Err
-		}
-		return nil
-	})
-
-	select {
-	case err := <-errCh:
-		if err != nil && errors.Is(err, context.Canceled) {
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
-		}
-		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
-	case <-ctx.Done():
-		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
-	}
-}
-
 func (a *App) Run(ctx context.Context) models.AppError {
-	if utils.IsDockerCmd(a.kind) {
-		return a.runDocker(ctx)
-	}
 	return a.run(ctx)
 }
 func (a *App) waitTillExit() {

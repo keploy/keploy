@@ -80,6 +80,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
+	// TODO: make a uniform implementation for both test and mock streaming channels
 	// Keep the connection alive and stream data
 	for t := range tc {
 		select {

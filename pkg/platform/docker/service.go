@@ -6,7 +6,6 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"go.keploy.io/server/v2/pkg/models"
-	"gopkg.in/yaml.v3"
 )
 
 type Client interface {
@@ -22,9 +21,7 @@ type Client interface {
 	FindContainerInComposeFiles(composePaths []string, containerName string) (*ComposeServiceInfo, error)
 
 	// Function for generating keploy-agent service configuration
-	GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error)
-	AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error
-	InjectAgentIntoCompose(compose *Compose, opts models.SetupOptions, appContainerName string) error
+	ModifyComposeForAgent(compose *Compose, opts models.SetupOptions, appContainerName string) error
 }
 
 type NetworkInfo struct {
