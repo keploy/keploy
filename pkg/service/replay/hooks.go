@@ -42,7 +42,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 	}
 }
 
-func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (interface{}, error) {
+func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
@@ -106,7 +106,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 	token, err := h.auth.GetToken(ctx)
 	if err != nil {
-		h.logger.Warn("Failed to Authenticate user, continuing with local mock if present", zap.Error(err))
+		h.logger.Warn("Failed to Authenticate user, continuing with local mock if present", zap.String("reason", err.Error()))
 		return nil
 	}
 	h.mock.setToken(token)
@@ -203,8 +203,8 @@ func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []s
 	return nil
 }
 
-func (h *Hooks) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
-	consumedMocks, err := h.instrumentation.GetConsumedMocks(ctx, id)
+func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	consumedMocks, err := h.instrumentation.GetConsumedMocks(ctx)
 	if err != nil {
 		h.logger.Error("failed to get consumed mocks", zap.Error(err))
 		return nil, err
