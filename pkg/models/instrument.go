@@ -81,7 +81,6 @@ type SetupOptions struct {
 	GlobalPassthrough bool
 	AgentPort         uint32
 	AppPorts          []string
-	AppNetwork        string
 	AppNetworks       []string
 }
 

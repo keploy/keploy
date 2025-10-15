@@ -12,6 +12,7 @@ import (
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
+	AppID                 uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
 	Command               string              `json:"command" yaml:"command" mapstructure:"command"`
 	Templatize            Templatize          `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
 	Port                  uint32              `json:"port" yaml:"port" mapstructure:"port"`
