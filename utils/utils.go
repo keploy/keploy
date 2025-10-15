@@ -30,7 +30,6 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
-	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -973,27 +972,6 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	return childPIDs, nil
 }
 
-func GetPIDFromPort(_ context.Context, logger *zap.Logger, port int) (uint32, error) {
-	logger.Debug("Getting pid using port", zap.Int("port", port))
-
-	connections, err := netLib.Connections("inet")
-	if err != nil {
-		return 0, err
-	}
-
-	for _, conn := range connections {
-		if conn.Status == "LISTEN" && conn.Laddr.Port == uint32(port) {
-			if conn.Pid > 0 {
-				return uint32(conn.Pid), nil
-			}
-			return 0, fmt.Errorf("pid %d is out of bounds", conn.Pid)
-		}
-	}
-
-	// If we get here, no process was found using the given port
-	return 0, fmt.Errorf("no process found using port %d", port)
-}
-
 // GetAvailablePort finds and returns an available port on the system
 func GetAvailablePort() (uint32, error) {
 	// Use port 0 to let the OS assign an available port
@@ -1446,4 +1424,45 @@ func isValidGRPCIdentifier(name string) bool {
 	}
 
 	return true
+}
+
+func GetContainerIP() (string, error) {
+	// Get all network interfaces
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	// Iterate over the interfaces
+	for _, i := range interfaces {
+		// Skip down or loopback interfaces
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		// Get the addresses for the current interface
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+
+		// Iterate over the addresses
+		for _, addr := range addrs {
+			var ip net.IP
+			// The address can be of type *net.IPNet or *net.IPAddr
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				// Check if it's an IPv4 address
+				if ipnet.IP.To4() != nil {
+					ip = ipnet.IP
+				}
+			}
+
+			if ip != nil {
+				// Found a valid IPv4 address, return it
+				return ip.String(), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not find a non-loopback IP for the container")
 }

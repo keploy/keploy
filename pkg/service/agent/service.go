@@ -17,20 +17,3 @@ type Service interface {
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 	// SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
 }
-
-type Options struct {
-	// Platform    Platform
-	Network     string
-	Container   string
-	SelfTesting bool
-	Mode        models.Mode
-}
-
-// type Platform string
-
-// var (
-// 	linux   Platform = "linux"
-// 	windows Platform = "windows"
-// 	mac     Platform = "mac"
-// 	docker  Platform = "docker"
-// )

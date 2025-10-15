@@ -72,11 +72,6 @@ func (b *BaseHooks) GetProxyInfo() (string, [4]uint32, uint32, uint32) {
 	return b.proxyIP4, b.proxyIP6, b.proxyPort, b.dnsPort
 }
 
-// GetUnloadDone returns a channel that signals when unload is complete.
-func (b *BaseHooks) GetUnloadDone() <-chan struct{} {
-	return b.unloadDone
-}
-
 // Lock provides thread-safe access to the hooks instance.
 func (b *BaseHooks) Lock() {
 	b.m.Lock()
@@ -85,17 +80,4 @@ func (b *BaseHooks) Lock() {
 // Unlock releases the lock on the hooks instance.
 func (b *BaseHooks) Unlock() {
 	b.m.Unlock()
-}
-
-// SignalUnloadDone signals that unload is complete.
-func (b *BaseHooks) SignalUnloadDone() {
-	b.unloadDoneMutex.Lock()
-	defer b.unloadDoneMutex.Unlock()
-
-	select {
-	case <-b.unloadDone:
-		// Channel already closed
-	default:
-		close(b.unloadDone)
-	}
 }

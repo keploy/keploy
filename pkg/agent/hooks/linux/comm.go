@@ -34,18 +34,6 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 	}, nil
 }
 
-// SendClientProxyInfo sends the network information to the kernel
-func (h *Hooks) SendClientProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
-	h.M.Lock()
-	defer h.M.Unlock()
-	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to send the proxy info to the ebpf program")
-		return err
-	}
-	return nil
-}
-
 // GetDestinationInfo retrieves destination information associated with a source port.
 func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	h.M.Lock()
@@ -92,16 +80,6 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
-func (h *Hooks) SendE2EInfo(pid uint32) error {
-	key := 0
-	err := h.e2eAppRegistrationMap.Update(uint64(key), pid, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.Logger, err, "failed to send the E2E info to the ebpf program")
-		return err
-	}
-	return nil
-}
-
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
 	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
 	if err != nil {
@@ -113,10 +91,6 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 	go func() {
 		defer rb.Close()
 		defer close(eventChan)
-		go func() {
-			<-ctx.Done()
-			rb.Close()
-		}()
 
 		for {
 			// Read raw data from the ring buffer

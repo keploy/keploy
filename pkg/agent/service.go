@@ -12,7 +12,6 @@ type Hooks interface {
 	DestInfo
 	Load(ctx context.Context, cfg HookCfg, setupOpts models.SetupOptions) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
-	GetUnloadDone() <-chan struct{}
 }
 
 type HookCfg struct {

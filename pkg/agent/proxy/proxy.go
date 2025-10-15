@@ -199,6 +199,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		}
 	})
 
+	// Wait for the proxy server to be ready or fail
 	if err := <-readyChan; err != nil {
 		return err
 	}
@@ -306,7 +307,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
-
 	defer func(start time.Time) {
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
@@ -336,6 +336,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//get the session rule
+	// TODO: to remove this sessions concept because it was meant for multiple clients-apps.
 	rule, ok := p.sessions.Get(uint64(0))
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
@@ -431,6 +432,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return nil
 		}
 
+		// TODO: We have to remove the 0 key maps, since it was meant for appID keys maps for multiple clients-apps.
 		m, ok := p.MockManagers.Load(uint64(0))
 		if !ok {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
@@ -481,13 +483,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
+	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
+	if !ok {
+		utils.LogError(p.logger, err, "failed to fetch the client connection id")
+		return err
+	}
+
 	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
 	if !ok {
 		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
 		return err
 	}
 
-	logger := p.logger.With(zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
+	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
 	// attempt to read conn until buffer is either filled or conn is closed
