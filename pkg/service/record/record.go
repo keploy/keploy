@@ -192,6 +192,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
+	if r.config.CommandType == string(utils.DockerCompose) {
+		err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
+		if err != nil {
+			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
+		}
+	}
+
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {

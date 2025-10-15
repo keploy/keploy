@@ -750,10 +750,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		if filteredMocks == nil && unfilteredMocks == nil {
-			r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
-		}
-
 		var expectedTestMockMappings map[string][]string
 		var useMappingBased bool
 		isMappingEnabled := !r.config.DisableMapping
@@ -796,6 +792,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {
 			return models.TestSetStatusFailed, err
+		}
+
+		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
+		if err != nil {
+			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
 
 		// Delay for user application to run
