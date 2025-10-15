@@ -89,8 +89,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		appPortsStr = " " + strings.Join(opts.AppPorts, " ")
 	}
 	appNetworkStr := ""
-	if opts.AppNetwork != "" {
-		appNetworkStr = " --network " + opts.AppNetwork
+	if len(opts.AppNetworks) > 0 {
+		for _, network := range opts.AppNetworks {
+			appNetworkStr += " --network " + network
+		}
 	}
 
 	Volumes := ""
