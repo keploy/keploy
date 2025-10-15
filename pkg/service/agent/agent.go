@@ -63,8 +63,11 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 		return err
 	}
-
-	startCh <- int(a.config.Agent.AgentPort)
+	select {
+	case startCh <- int(a.config.Agent.AgentPort):
+	case <-ctx.Done():
+		a.logger.Info("Context cancelled before agent becomes healthy. Stopping the agent.")
+	}
 
 	<-ctx.Done()
 	errGrp.Wait()
@@ -143,10 +146,9 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, agent.HookCfg{
-		Pid:        0,
-		IsDocker:   opts.IsDocker,
-		KeployIPV4: "172.18.0.2",
-		Mode:       opts.Mode,
+		Pid:      0,
+		IsDocker: opts.IsDocker,
+		Mode:     opts.Mode,
 	}, a.config.Agent)
 
 	if err != nil {
