@@ -50,7 +50,7 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 		}
 	} else {
 		// Config file exists, unmarshal it
-		err := yamlLib.Unmarshal(data, &config); 
+		err := yamlLib.Unmarshal(data, &config)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
 			// Don't return early - continue with secret loading even if config is malformed
