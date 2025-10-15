@@ -669,6 +669,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 	}()
 
+	// TODO : Proxy or TLS should not be importes in the agent
+	// This is done because to set env variable for TLS
 	err = ptls.SetupCaCertEnv(a.logger)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to set TLS environment")
