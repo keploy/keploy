@@ -13,6 +13,7 @@ type Instrumentation interface {
 	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
+	MakeAgentReadyForDockerCompose(ctx context.Context) error
 }
 
 type Service interface {

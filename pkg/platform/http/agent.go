@@ -763,3 +763,18 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 func (a *AgentClient) GetErrorChannel() <-chan error {
 	return nil
 }
+
+func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI), nil)
+	if err != nil {
+		return err
+	}
+
+	_, err = a.client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}

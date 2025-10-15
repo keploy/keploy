@@ -23,6 +23,7 @@ type Instrumentation interface {
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
+	MakeAgentReadyForDockerCompose(ctx context.Context) error
 }
 
 type Service interface {

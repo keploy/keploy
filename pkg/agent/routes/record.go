@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
@@ -36,6 +38,7 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		r.Post("/updatemockparams", a.UpdateMockParams)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
+		r.Post("/agent/ready", a.MakeAgentReady)
 	})
 }
 
@@ -138,4 +141,27 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// MakeAgentReady marks the agent as ready by creating a readiness file.
+// This file can be used by Docker Compose healthchecks to verify the agent's readiness.
+//
+// Example usage in docker-compose.yml:
+//
+//	healthcheck:
+//	  test: ["CMD", "cat", "/tmp/agent.ready"]
+func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
+	const readyFile = "/tmp/agent.ready"
+
+	// Create or overwrite the readiness file with a timestamp
+	content := []byte(time.Now().Format(time.RFC3339) + "\n")
+	if err := os.WriteFile(readyFile, content, 0644); err != nil {
+		a.logger.Error("failed to create readiness file", zap.String("file", readyFile), zap.Error(err))
+		http.Error(w, "failed to mark agent as ready", http.StatusInternalServerError)
+		return
+	}
+
+	a.logger.Info("Agent marked as ready", zap.String("file", readyFile))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("Agent is now ready\n"))
 }

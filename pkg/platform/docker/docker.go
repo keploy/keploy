@@ -672,7 +672,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "test"},
 			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "CMD-SHELL"},
-				{Kind: yaml.ScalarNode, Value: fmt.Sprintf("ss -tuln | grep :%d || exit 1", opts.AgentPort)},
+				{Kind: yaml.ScalarNode, Value: "cat /tmp/agent.ready"},
 			}},
 
 			// interval
@@ -689,7 +689,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},
-			{Kind: yaml.ScalarNode, Value: "30s"},
+			{Kind: yaml.ScalarNode, Value: "10s"},
 		},
 	}
 
