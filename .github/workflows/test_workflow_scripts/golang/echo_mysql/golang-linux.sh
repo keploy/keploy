@@ -8,18 +8,19 @@ git checkout origin/add-ssl-mysql
 # ----- helpers -----
 section()  { echo "::group::$*"; }
 endsec()   { echo "::endgroup::"; }
-die() {
+dump_logs() {
   rc=$?
-  echo "::error::Pipeline failed (exit=$rc). Dumping context…"
-  echo "== docker ps =="; docker ps || true
-  echo "== mysql logs (complete) =="; docker logs mysql-container || true
-  echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
-  echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
-  echo "== *.txt logs (complete) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
-  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (complete) =="; cat test_logs.txt; }
+  echo "Dumping logs and artifacts (exit code: $rc)"
+  section "Record logs"
+  cat urlShort_*.txt || true
+  endsec
+  section "Replay logs"
+  cat test_logs.txt || true
+  endsec
+
   exit "$rc"
 }
-trap die ERR
+trap dump_logs EXIT
 
 wait_for_mysql() {
   section "Wait for MySQL readiness"
@@ -89,39 +90,13 @@ send_request() {
 
   echo "== List all seeded date rows =="
   curl -sS http://localhost:9090/query/dates || true
-
-  # Give Keploy a moment to persist artifacts, then stop it cleanly
-  sleep 10
-  echo "$kp_pid Keploy PID"
-  echo "Killing Keploy"
-  sudo kill "$kp_pid" 2>/dev/null || true
 }
 
 run_record_iteration() {
   local idx="$1"
   local app_name="urlShort_${idx}"
 
-  section "Record iteration $idx"
-
-  # Start mysql (once) only for first iteration
-  if ! docker ps --format '{{.Names}}' | grep -q '^mysql-container$'; then
-    if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
-      section "Starting MySQL with SSL/TLS via Docker Compose"
-      docker compose up -d
-      wait_for_mysql
-      endsec
-    else
-      section "Starting MySQL with standard Docker run (no SSL)"
-      echo "Modifying .env for test mode (disabling strict SSL verification)"
-      sed -i 's/MYSQL_SSL_MODE=production/MYSQL_SSL_MODE=false/' .env
-      cat .env
-      docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
-        -p 3306:3306 --rm -d mysql:latest
-      wait_for_mysql
-      endsec
-    fi
-  fi
-
+  echo "Record iteration $idx"
   # Start recording in background so we capture its PID explicitly
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
     2>&1 | tee "${app_name}.txt" & 
@@ -136,7 +111,7 @@ run_record_iteration() {
   echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
   pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
   wait "$pid" 2>/dev/null || true
-  sleep 5
+  sleep 30
   echo "Recording stopped."
   endsec
 
@@ -170,9 +145,24 @@ rm -rf keploy/ keploy.yml || true
  # Generate config
 sudo "$RECORD_BIN" config --generate
 sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
-
-# Build app
 go build -o urlShort
+endsec
+
+section "Start MySQL"
+if ! docker ps --format '{{.Names}}' | grep -q '^mysql-container$'; then
+  if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
+    echo "Starting MySQL with SSL/TLS via Docker Compose"
+    docker compose up -d
+    wait_for_mysql
+  else
+    echo "Starting MySQL with standard Docker run (no SSL)"
+    sed -i 's/MYSQL_SSL_MODE=production/MYSQL_SSL_MODE=false/' .env
+    cat .env
+    docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
+      -p 3306:3306 --rm -d mysql:latest
+    wait_for_mysql
+  fi
+fi
 endsec
 
 for i in 1 2; do
