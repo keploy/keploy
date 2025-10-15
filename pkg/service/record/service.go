@@ -29,6 +29,7 @@ type Service interface {
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error
+	CheckForTests(ctx context.Context, testSetID string) (bool, error)
 	// GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 }
 
@@ -54,4 +55,8 @@ type Telemetry interface {
 type FrameChan struct {
 	Incoming <-chan *models.TestCase
 	Outgoing <-chan *models.Mock
+}
+
+type ToolsSvc interface {
+	Templatize(ctx context.Context) error
 }
