@@ -30,32 +30,28 @@ import (
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
-		logger:          logger,
-		sess:            agent.NewSessions(),
-		m:               sync.Mutex{},
-		proxyIP4:        "127.0.0.1",
-		proxyIP6:        [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort:       cfg.ProxyPort,
-		dnsPort:         cfg.DNSPort,
-		conf:            cfg,
-		unloadDone:      make(chan struct{}),
-		unloadDoneMutex: sync.Mutex{},
-		objectsMutex:    sync.RWMutex{},
+		logger:       logger,
+		sess:         agent.NewSessions(),
+		m:            sync.Mutex{},
+		proxyIP4:     "127.0.0.1",
+		proxyIP6:     [4]uint32{0000, 0000, 0000, 0001},
+		proxyPort:    cfg.ProxyPort,
+		dnsPort:      cfg.DNSPort,
+		conf:         cfg,
+		objectsMutex: sync.RWMutex{},
 	}
 }
 
 type Hooks struct {
 	// Common fields shared across all platforms
-	logger          *zap.Logger
-	sess            *agent.Sessions
-	proxyIP4        string
-	proxyIP6        [4]uint32
-	proxyPort       uint32
-	dnsPort         uint32
-	conf            *config.Config
-	m               sync.Mutex
-	unloadDone      chan struct{}
-	unloadDoneMutex sync.Mutex
+	logger    *zap.Logger
+	sess      *agent.Sessions
+	proxyIP4  string
+	proxyIP6  [4]uint32
+	proxyPort uint32
+	dnsPort   uint32
+	conf      *config.Config
+	m         sync.Mutex
 
 	// Linux-specific fields
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
@@ -88,12 +84,6 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.sess.Set(uint64(0), &agent.Session{
 		ID: uint64(0), // need to check this one
 	})
-
-	// Reset the unload done channel for this new load
-	h.unloadDoneMutex.Lock()
-	h.unloadDone = make(chan struct{})
-	h.unloadDoneMutex.Unlock()
-
 	err := h.load(ctx, opts, setupOpts)
 	if err != nil {
 		return err
@@ -111,11 +101,6 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 		//deleting in order to free the memory in case of rerecord.
 		h.sess.Delete(uint64(0))
-
-		// Signal that unload is complete
-		h.unloadDoneMutex.Lock()
-		close(h.unloadDone)
-		h.unloadDoneMutex.Unlock()
 		return nil
 	})
 

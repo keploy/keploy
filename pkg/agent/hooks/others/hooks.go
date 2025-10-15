@@ -17,31 +17,27 @@ import (
 // Hooks implements the agent.Hooks interface for non-Linux platforms.
 type Hooks struct {
 	// Common fields shared across all platforms
-	logger          *zap.Logger
-	sess            *agent.Sessions
-	proxyIP4        string
-	proxyIP6        [4]uint32
-	proxyPort       uint32
-	dnsPort         uint32
-	conf            *config.Config
-	m               sync.Mutex
-	unloadDone      chan struct{}
-	unloadDoneMutex sync.Mutex
+	logger    *zap.Logger
+	sess      *agent.Sessions
+	proxyIP4  string
+	proxyIP6  [4]uint32
+	proxyPort uint32
+	dnsPort   uint32
+	conf      *config.Config
+	m         sync.Mutex
 }
 
 // NewHooks creates a new hooks instance for non-Linux platforms.
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
-		logger:          logger,
-		sess:            agent.NewSessions(),
-		m:               sync.Mutex{},
-		proxyIP4:        "127.0.0.1",
-		proxyIP6:        [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort:       cfg.ProxyPort,
-		dnsPort:         cfg.DNSPort,
-		conf:            cfg,
-		unloadDone:      make(chan struct{}),
-		unloadDoneMutex: sync.Mutex{},
+		logger:    logger,
+		sess:      agent.NewSessions(),
+		m:         sync.Mutex{},
+		proxyIP4:  "127.0.0.1",
+		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
+		proxyPort: cfg.ProxyPort,
+		dnsPort:   cfg.DNSPort,
+		conf:      cfg,
 	}
 }
 

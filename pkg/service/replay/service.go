@@ -108,7 +108,6 @@ type Storage interface {
 
 type InstrumentState struct {
 	HookCancel context.CancelFunc
-	UnloadDone <-chan struct{} // Channel that will be closed when hooks are completely unloaded
 }
 
 type MappingDB interface {
