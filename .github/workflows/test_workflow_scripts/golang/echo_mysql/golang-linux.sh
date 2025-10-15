@@ -105,9 +105,31 @@ run_record_iteration() {
 
   # Start mysql (once) only for first iteration
   if ! docker ps --format '{{.Names}}' | grep -q '^mysql-container$'; then
-    docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
-      -p 3306:3306 --rm -d mysql:latest
-    wait_for_mysql
+    if [[ "${ENABLE_SSL:-false}" == "true" ]]; then
+      section "Starting MySQL with SSL/TLS via Docker Compose"
+      docker compose up -d
+      wait_for_mysql
+
+      echo "Verifying SSL/TLS is enabled in MySQL logs..."
+      # Wait a moment for logs to populate
+      sleep 10
+      if ! docker-compose logs mysql | grep -iE "SSL|TLS"; then
+        echo "::error::SSL/TLS not detected in MySQL logs!"
+        docker-compose logs mysql
+        exit 1
+      fi
+      echo "SSL/TLS verification successful."
+      endsec
+    else
+      section "Starting MySQL with standard Docker run (no SSL)"
+      echo "Modifying .env for test mode (disabling strict SSL verification)"
+      sed -i 's/MYSQL_SSL_MODE=production/MYSQL_SSL_MODE=test/' .env
+      cat .env
+      docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
+        -p 3306:3306 --rm -d mysql:latest
+      wait_for_mysql
+      endsec
+    fi
   fi
 
   # Generate config

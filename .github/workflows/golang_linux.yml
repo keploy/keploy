@@ -14,6 +14,11 @@ jobs:
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
+            enable_ssl: false
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http_pokeapi
+            enable_ssl: true
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
@@ -52,6 +57,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          ENABLE_SSL: ${{ matrix.app.enable_ssl || 'false' }}
         run: |
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
