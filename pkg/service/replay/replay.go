@@ -721,13 +721,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-agentReadyCh:
 		}
 
-		containerIP, err := r.instrumentation.GetContainerIP4(ctx)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to get container IP")
-			return models.TestSetStatusFailed, err
-		}
-		r.logger.Info("Obtained container IP", zap.String("containerIP", containerIP))
-
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,

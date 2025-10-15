@@ -4,9 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"go.keploy.io/server/v2/pkg/client/app"
-	"go.keploy.io/server/v2/utils"
-
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -26,14 +23,6 @@ type HookCfg struct {
 	Rules      []models.BypassRule
 	E2E        bool
 	Port       uint32
-}
-
-// TODO: should not be in the agent package
-type App interface {
-	Setup(ctx context.Context, opts app.Options) error
-	Run(ctx context.Context, inodeChan chan uint64, opts app.Options) error
-	Kind(ctx context.Context) utils.CmdType
-	KeployIPv4Addr() string
 }
 
 // Proxy listens on all available interfaces and forwards traffic to the destination

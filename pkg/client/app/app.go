@@ -83,18 +83,6 @@ func (a *App) Setup(_ context.Context) error {
 	return nil
 }
 
-func (a *App) KeployIPv4Addr() string {
-	return a.keployIPv4
-}
-
-func (a *App) ContainerIPv4Addr() string {
-	return <-a.containerIPv4
-}
-func (a *App) SetContainerIPv4Addr(ipAddr string) {
-	a.logger.Debug("setting container IPv4 address", zap.String("ipAddr", ipAddr))
-	a.containerIPv4 <- ipAddr
-}
-
 func (a *App) SetupDocker() error {
 
 	if a.kind == utils.DockerStart {
@@ -134,7 +122,9 @@ func (a *App) attachInitPid(_ context.Context) error {
 	if a.cmd == "" {
 		return fmt.Errorf("no command provided to modify")
 	}
-
+	// Attach the keploy agent container's PID namespace and network namespace to the app container
+	// Sharing network namespace so that the docker container IPs of both agent and app remain same
+	// sharing pid namespace so that they share the same process tree (common ancestor) in docker
 	pidMode := fmt.Sprintf("--pid=container:%s", a.keployContainer)
 	networkMode := fmt.Sprintf("--network=container:%s", a.keployContainer)
 
@@ -155,12 +145,11 @@ func (a *App) SetupCompose() error {
 		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
 		return errors.New("container name not found")
 	}
-	a.logger.Info("keploy requires docker compose containers to be run with external network")
-	//finding the user docker-compose file in the current directory.
-	// TODO currently we just return the first default docker-compose file found in the current directory
-	// we should add support for multiple docker-compose files by either parsing cmd for path
-	// or by asking the user to provide the path
-	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
+
+	// In SetupCompose, first we try to find all the docker compose file paths in the current context.
+	// Then, we find the compose file which contains the user app container.
+	// After that, we add the keploy agent service in a copy of the found user app compose file (by creating docker-compose-tmp.yaml).
+	// Finally, we use this modified docker compose file in place of the user's original compose file to run the application with keploy integration.
 
 	paths := findComposeFile(a.cmd)
 	if len(paths) == 0 {
@@ -192,17 +181,14 @@ func (a *App) SetupCompose() error {
 		return err
 	}
 
-	composeChanged := true
-
-	if composeChanged {
-		err = a.docker.WriteComposeFile(compose, newPath)
-		if err != nil {
-			utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
-		}
-		a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
-		//Now replace the running command to run the kdocker-compose.yaml file instead of user docker compose file.
-		a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath)
+	err = a.docker.WriteComposeFile(compose, newPath)
+	if err != nil {
+		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
+	a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
+
+	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
+	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath)
 
 	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
 
@@ -359,8 +345,4 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 	}
-}
-
-func (a *App) GetKeployContainer() string {
-	return a.keployContainer
 }
