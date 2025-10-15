@@ -178,13 +178,13 @@ function Sync-Logs {
 }
 
 # Wait for app readiness, periodically printing logs
-Write-Host "Waiting for app to respond on $base/timestamp …"
+Write-Host "Waiting for app to respond on $base/hello/Keploy …"
 $deadline = (Get-Date).AddMinutes(5)
 $ready = $false
 do {
   Sync-Logs -job $recJob # <-- Print Keploy logs here
   try {
-    $r = Invoke-WebRequest -Method GET -Uri "$base/timestamp" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    $r = Invoke-WebRequest -Method GET -Uri "$base/hello/Keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     if ($r.StatusCode -eq 200) { $ready = $true; break }
   } catch { Start-Sleep 3 }
 } while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
