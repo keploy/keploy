@@ -177,38 +177,32 @@ function Sync-Logs {
     } catch {}
 }
 
-# Wait for app readiness, periodically printing logs
-Write-Host "Waiting for app to respond on $base/timestamp …"
+# Wait for app readiness
+Write-Host "Waiting for app to respond on $base/hello/keploy …"
 $deadline = (Get-Date).AddMinutes(5)
 $ready = $false
 do {
   Sync-Logs -job $recJob # <-- Print Keploy logs here
   try {
-    $r = Invoke-WebRequest -Method GET -Uri "$base/timestamp" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-    if ($r.StatusCode -eq 200) { $ready = $true; break }
+    $r = Invoke-WebRequest -Method GET -Uri "$base/hello/keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    if ($r.StatusCode -eq 200) { break }
   } catch { Start-Sleep 3 }
 } while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
 
-Sync-Logs -job $recJob # <-- Print any final logs before sending traffic
+# Send traffic to generate tests
+Write-Host "Sending HTTP requests to generate tests…"
+$sent = 0
+try {
+  Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy";                                                           $sent++
+  Invoke-RestMethod -Method POST   -Uri "$base/user"           -Body (@{name="John Doe";email="john@keploy.io"} | ConvertTo-Json) -ContentType "application/json"; $sent++
+  Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
+  Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
+  Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
+  Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
+} catch { Write-Warning "A request failed: $_" }
 
-# Send traffic to generate tests if the app is ready
-if ($ready) {
-    Write-Host "Application is ready. Sending HTTP requests to generate tests…"
-    $sent = 0
-    try {
-      Invoke-RestMethod -Method GET    -Uri "$base/hello/Keploy";                                                           $sent++
-      Invoke-RestMethod -Method POST   -Uri "$base/user"           -Body (@{name="John Doe";email="john@keploy.io"} | ConvertTo-Json) -ContentType "application/json"; $sent++
-      Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
-      Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
-      Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
-      Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
-    } catch { Write-Warning "A request failed: $_" }
-    Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
-} else {
-    Write-Error "Application did not become ready in time. Check the logs above for errors."
-}
+Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
 
-# Wait for tests to flush
 $pollUntil = (Get-Date).AddSeconds(60)
 do {
   Sync-Logs -job $recJob # <-- Print logs while waiting

@@ -33,9 +33,9 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: false
 
-      - name: Build Keploy (PR) - macOS (darwin/arm64)
+      - name: Build Keploy - macOS (darwin/arm64)
         run: |
-          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.event.pull_request.number }}-${{ github.sha }}" -o keploy
+          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
 
@@ -93,10 +93,8 @@ jobs:
 
       - name: Make unique tag for this run
         id: tag
-        env:
-          PRNUM: ${{ github.event.pull_request.number }}
         run: |
-          IMAGE_TAG="ttl.sh/keploy/keploy:${PRNUM}-${GITHUB_SHA}-1h"
+          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_SHA}-1h"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
           docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
