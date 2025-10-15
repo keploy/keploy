@@ -141,12 +141,14 @@ jobs:
           echo "image=keploy:record" >> $env:GITHUB_OUTPUT
 
       - name: Download Replay Docker image (${{ matrix.config.replay_src }})
+        if: matrix.config.record_src != matrix.config.replay_src
         uses: actions/download-artifact@v4
         with:
           name: docker-${{ matrix.config.replay_src }}
           path: replay-image
 
       - name: Load & Tag Replay Docker image
+        if: matrix.config.record_src != matrix.config.replay_src
         id: replay_img
         shell: pwsh
         run: |
@@ -175,13 +177,12 @@ jobs:
           path: samples-go
           clean: true
 
-      # Your existing run step
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
-          REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
+          REPLAY_BIN:  ${{ (matrix.config.record_src == matrix.config.replay_src && steps.setup_record.outputs.bin_name) || steps.setup_replay.outputs.bin_name }}
           DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
-          DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
+          DOCKER_IMAGE_REPLAY: ${{ (matrix.config.record_src == matrix.config.replay_src && steps.record_img.outputs.image) || steps.replay_img.outputs.image }}
         shell: pwsh
         run: |
           cd samples-go/${{ matrix.app.path }}
