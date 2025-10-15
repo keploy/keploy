@@ -80,7 +80,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		MockManagers:      sync.Map{},
 		clientClose:       make(chan bool, 1),
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough: opts.Record.GlobalPassthrough,
+		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 	}
 }
