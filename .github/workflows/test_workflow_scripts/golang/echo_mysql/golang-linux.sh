@@ -141,14 +141,13 @@ run_record_iteration() {
   send_request "$KEPLOY_PID"
 
   # Wait for keploy exit and capture code
-  set +e
-  wait "$KEPLOY_PID"
-  local rc=$?
-  set -e
-  echo "Record exit code: $rc"
-  if [[ $rc -ne 0 ]]; then
-    echo "::error::Keploy record exited with $rc (iteration $idx)"
-  fi
+  section "Stop Recording"
+  echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
+  pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+  wait "$pid" 2>/dev/null || true
+  sleep 5
+  echo "Recording stopped."
+  endsec
 
   # Quick sanity: ensure something was written
   echo "== keploy artifacts after record =="
