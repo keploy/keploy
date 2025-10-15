@@ -2,6 +2,8 @@ name: Prepare Binary and Run Workflows (Windows)
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
 
 jobs:
   build-and-upload:

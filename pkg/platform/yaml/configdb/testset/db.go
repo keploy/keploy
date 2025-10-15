@@ -30,28 +30,56 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	filePath := filepath.Join(db.path, testSetID)
 
 	var config T
+
+	// Try to read config.yaml, but continue if it doesn't exist
 	data, err := yaml.ReadFile(ctx, db.logger, filePath, "config")
 	if err != nil {
-		return config, err
-	}
-	if err := yamlLib.Unmarshal(data, &config); err != nil {
-		utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
-		return config, err
+		// Config file missing, create default config and continue with secret loading
+		db.logger.Debug("Config file not found, using default config", zap.String("testSet", testSetID), zap.String("filePath", filePath), zap.Error(err))
+
+		// Since T is *models.TestSet, initialize a new TestSet instance
+		// Use type assertion to ensure we're working with the right type
+		emptyTestSet := &models.TestSet{}
+		testSetPtr, ok := any(emptyTestSet).(T)
+		if ok {
+			config = testSetPtr
+			db.logger.Debug("Initialized empty TestSet for missing config", zap.String("testSet", testSetID))
+		} else {
+			// If T is not *models.TestSet, log warning but continue with zero value
+			db.logger.Warn("Generic type T is not *models.TestSet, using zero value", zap.String("testSet", testSetID))
+		}
+	} else {
+		// Config file exists, unmarshal it
+		err := yamlLib.Unmarshal(data, &config)
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
+			// Don't return early - continue with secret loading even if config is malformed
+			// Use default config instead
+			emptyTestSet := &models.TestSet{}
+			testSetPtr, ok := any(emptyTestSet).(T)
+			if ok {
+				config = testSetPtr
+				db.logger.Warn("Using default config due to unmarshal error, continuing with secret loading", zap.String("testSet", testSetID))
+			}
+		}
 	}
 
-	secretConfig, ok := any(config).(models.Secret)
-
-	if !ok {
-		return config, nil
-	}
-
+	// Always try to load secrets, regardless of whether config.yaml existed
 	secretValues, err := db.ReadSecret(ctx, testSetID)
 	if err != nil {
 		db.logger.Warn("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
-		return config, err
+		// Don't return error here - missing secrets shouldn't fail the config loading
+		return config, nil
 	}
 
-	secretConfig.SetSecrets(secretValues)
+	// Set secrets into the config struct if supported
+	secretConfig, ok := any(config).(models.Secret)
+	if ok && len(secretValues) > 0 {
+		db.logger.Debug("Setting secrets into config", zap.String("testSet", testSetID), zap.Int("secretCount", len(secretValues)))
+		secretConfig.SetSecrets(secretValues)
+	} else {
+		db.logger.Debug("Not setting secrets", zap.String("testSet", testSetID), zap.Bool("configSupportsSecrets", ok), zap.Int("secretCount", len(secretValues)))
+	}
 
 	return config, nil
 }
