@@ -77,38 +77,6 @@ function Remove-KeployDirs {
   }
 }
 
-# --- Helper: cleanup log files and handles ---
-function Remove-LogFiles {
-  param([string[]]$LogFiles)
-  
-  foreach ($logFile in $LogFiles) {
-    if (-not $logFile -or -not (Test-Path -LiteralPath $logFile)) { continue }
-    Write-Host "Cleaning log file: $logFile"
-    
-    # Wait a bit for file handles to be released
-    Start-Sleep -Seconds 2
-    
-    # Try multiple approaches to remove the file
-    $attempts = 0
-    $maxAttempts = 5
-    while ($attempts -lt $maxAttempts) {
-      try {
-        Remove-Item -LiteralPath $logFile -Force -ErrorAction Stop
-        Write-Host "Successfully removed $logFile"
-        break
-      } catch {
-        $attempts++
-        if ($attempts -eq $maxAttempts) {
-          Write-Warning "Could not remove $logFile after $maxAttempts attempts: $_"
-        } else {
-          Write-Host "Attempt $attempts to remove $logFile failed, retrying in 2 seconds..."
-          Start-Sleep -Seconds 2
-        }
-      }
-    }
-  }
-}
-
 # --- Build docker images from compose ---
 Write-Host "Building Docker image(s) with docker compose..."
 docker compose build
@@ -118,11 +86,6 @@ $candidates = @(".\keploy")
 if ($env:GITHUB_WORKSPACE) { $candidates += (Join-Path $env:GITHUB_WORKSPACE 'keploy') }
 Remove-KeployDirs -Candidates $candidates
 Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
-
-# Clean up any existing log files
-$logFiles = @(".\keploy-logs.txt", ".\dedup-go.record.txt", ".\dedup-go.test.txt")
-Remove-LogFiles -LogFiles $logFiles
-
 Write-Host "Pre-clean complete."
 
 # --- Generate keploy.yml and add noise for timestamp endpoint ---
@@ -165,58 +128,6 @@ function Kill-Tree {
   } catch {
     Write-Warning "taskkill failed for $ProcessId : $_"
   }
-}
-
-# --- Helper: comprehensive process cleanup ---
-function Stop-AllKeployProcesses {
-  Write-Host "Performing comprehensive Keploy process cleanup..."
-  
-  # First, try to find and kill all Keploy-related processes
-  try {
-    $keployProcesses = Get-Process -ErrorAction SilentlyContinue |
-      Where-Object {
-        $_.ProcessName -in @('keploy','keploy-record','keploy-replay') -or
-        $_.Path -like '*\keploy*.exe' -or
-        ($_.CommandLine -and $_.CommandLine -like '*keploy*')
-      }
-    
-    if ($keployProcesses) {
-      Write-Host "Found $($keployProcesses.Count) Keploy process(es) to terminate"
-      $keployProcesses | Sort-Object StartTime -Descending | ForEach-Object {
-        Write-Host "Terminating process: $($_.ProcessName) (PID: $($_.Id))"
-        try {
-          taskkill /PID $_.Id /T /F | Out-Null 2>$null
-        } catch {
-          Write-Warning "Failed to kill process $($_.Id): $_"
-        }
-      }
-    } else {
-      Write-Host "No Keploy processes found to terminate"
-    }
-  } catch {
-    Write-Warning "Error during process enumeration: $_"
-  }
-  
-  # Wait a moment for processes to fully terminate
-  Start-Sleep -Seconds 3
-  
-  # Double-check and force kill any remaining processes
-  try {
-    $remainingProcesses = Get-Process -ErrorAction SilentlyContinue |
-      Where-Object {
-        $_.ProcessName -in @('keploy','keploy-record','keploy-replay') -or
-        $_.Path -like '*\keploy*.exe'
-      }
-    
-    if ($remainingProcesses) {
-      Write-Host "Found $($remainingProcesses.Count) remaining Keploy process(es), force killing..."
-      $remainingProcesses | ForEach-Object {
-        try {
-          Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        } catch {}
-      }
-    }
-  } catch {}
 }
 
 # =========================
@@ -300,34 +211,31 @@ do {
 } while ((Get-Date) -lt $pollUntil -and $recJob.State -eq 'Running')
 
 
-# Stop all Keploy processes comprehensively
-Stop-AllKeployProcesses
+$REC_PID = (Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%keploy record%'").ProcessId | Select-Object -Last 1
 
-# Clean up the background job
-try {
-  if ($recJob -and $recJob.State -eq 'Running') {
-    Stop-Job $recJob -ErrorAction SilentlyContinue
-  }
-  if ($recJob) {
-    Remove-Job $recJob -Force -ErrorAction SilentlyContinue
-  }
-} catch {
-  Write-Warning "Error cleaning up background job: $_"
+if ($REC_PID -and $REC_PID -ne 0) {
+    Write-Host "Found Keploy PID: $REC_PID"
+    Write-Host "Killing keploy process tree..."
+    # /T: Kill the process and any child processes started by it (tree kill)
+    # /F: Forcefully terminate
+    cmd /c "taskkill /PID $REC_PID /T /F" 2>$null | Out-Null
+} else {
+    Write-Host "Keploy record process not found."
 }
+
+
+# Stop Keploy (and docker compose) deterministically
+# We get the process ID of the actual keploy.exe process started by the job
+# $keployProcessId = (Get-Job -Id $recJob.Id).ChildJobs[0].ProcessId
+# Kill-Tree -ProcessId $keployProcessId
+# Stop-Job $recJob
+# Remove-Job $recJob
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
-if (-not (Test-Path $testSetPath)) { 
-  Write-Error "Test directory not found at $testSetPath"
-  Stop-AllKeployProcesses
-  exit 1 
-}
+if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; exit 1 }
 $testCount = (Get-ChildItem -Path $testSetPath -Filter "test-*.yaml").Count
-if ($testCount -eq 0) { 
-  Write-Error "No test files were created. Review the full logs in the file '$logPath'"
-  Stop-AllKeployProcesses
-  exit 1 
-}
+if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
 
@@ -364,7 +272,6 @@ $report = ".\keploy\reports\test-run-0\test-set-0-report.yaml"
 if (-not (Test-Path $report)) {
   Write-Error "Missing report file: $report"
   Get-Content $testLog -ErrorAction SilentlyContinue | Select-Object -Last 200
-  Stop-AllKeployProcesses
   exit 1
 }
 
@@ -375,24 +282,8 @@ Write-Host "Test status for test-set-0: $status"
 if ($status -ne 'PASSED') {
   Write-Error "Replay failed (status: $status). See logs below:"
   Get-Content $testLog -ErrorAction SilentlyContinue | Select-Object -Last 200
-  Stop-AllKeployProcesses
   exit 1
 }
 
 Write-Host "All tests passed successfully!"
-
-# Final cleanup to prevent file handle issues
-Write-Host "Performing final cleanup..."
-Stop-AllKeployProcesses
-
-# Clean up log files that might still have open handles
-$finalLogFiles = @(".\keploy-logs.txt", $logPath, $testLog)
-Remove-LogFiles -LogFiles $finalLogFiles
-
-# Ensure docker compose is fully stopped
-try {
-  docker compose down --remove-orphans 2>$null | Out-Null
-} catch {}
-
-Write-Host "Cleanup complete."
 exit 0
