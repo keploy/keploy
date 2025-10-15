@@ -4,13 +4,14 @@ import (
 	"context"
 	"sync"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
 type Hooks interface {
 	// AppInfo
 	DestInfo
-	Load(ctx context.Context, cfg HookCfg, setupOpts models.SetupOptions) error
+	Load(ctx context.Context, cfg HookCfg, setupOpts config.Agent) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 }
 

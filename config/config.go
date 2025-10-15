@@ -41,13 +41,17 @@ type Config struct {
 	KeployNetwork         string              `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string              `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract            `json:"contract" yaml:"contract" mapstructure:"contract"`
-	Agent                 models.SetupOptions `json:"agent" yaml:"agent" mapstructure:"agent"`
+	Agent                 Agent               `json:"agent" yaml:"agent" mapstructure:"agent"`
 	InCi                  bool                `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID        string              `json:"-" yaml:"-" mapstructure:"-"`
 	ServerPort            uint32              `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
 	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
+}
+
+type Agent struct {
+	models.SetupOptions
 }
 
 type UtGen struct {

@@ -83,7 +83,7 @@ type Hooks struct {
 	BindEvents *ebpf.Map
 }
 
-func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts models.SetupOptions) error {
+func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
 
 	h.sess.Set(uint64(0), &agent.Session{
 		ID: uint64(0), // need to check this one
@@ -122,7 +122,7 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	return nil
 }
 
-func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.SetupOptions) error {
+func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
@@ -386,7 +386,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	h.logger.Info("eBPF resources released successfully...")
 }
 
-func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, rules []models.BypassRule) error {
+func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
 	h.logger.Info("Registering the client Info with keploy")
 	// Register the client and start processing
 
@@ -413,7 +413,7 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts models.SetupOptions, ru
 	return h.SendClientInfo(clientInfo)
 }
 
-func (h *Hooks) GetProxyInfo(ctx context.Context, opts models.SetupOptions) (structs.ProxyInfo, error) {
+func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent) (structs.ProxyInfo, error) {
 	if !opts.IsDocker {
 		proxyIP, err := IPv4ToUint32("127.0.0.1")
 		if err != nil {

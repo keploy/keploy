@@ -1004,11 +1004,10 @@ func EnsureAvailablePorts(port uint32) (uint32, error) {
 	var err error
 	if isPortAvailable(port) {
 		return port, nil
-	} else {
-		newPort, err = GetAvailablePort()
-		if err != nil {
-			return 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
-		}
+	}
+	newPort, err = GetAvailablePort()
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
 	}
 	return newPort, nil
 }
