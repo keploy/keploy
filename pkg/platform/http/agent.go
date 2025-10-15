@@ -78,7 +78,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	// Make the HTTP request
 	res, err := a.client.Do(req)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("failed to get incoming: %s", err.Error())
 	}
 
@@ -152,7 +152,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 	// Make the HTTP request
 	res, err := a.client.Do(req)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
@@ -166,8 +166,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	grp.Go(func() error {
 		defer func() {
 			close(mockChan)
-		}()
-		defer func() {
+
 			err := res.Body.Close()
 			if err != nil {
 				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
@@ -657,7 +656,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				}
 			}
 			cmd = networkRegex.ReplaceAllString(cmd, "")
-			
+
 			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
 
