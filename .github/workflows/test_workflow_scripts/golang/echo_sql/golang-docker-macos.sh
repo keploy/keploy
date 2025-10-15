@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 # macOS variant for echo-sql (docker compose). Uses BSD sed.
 set -euo pipefail
 
@@ -72,14 +71,14 @@ rm -rf keploy/
 rm ./keploy.yml >/dev/null 2>&1 || true
 
 # Generate the keploy-config file.
-$RECORD_BIN config --generate
+"$RECORD_BIN" config --generate
 
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
 if [ -f "$config_file" ]; then
   sed -i '' 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file" || true
 else
-  echo "⚠️ Config file $config_file not found, skipping sed replace."
+  echo "⚠️  Config file $config_file not found, skipping sed replace."
 fi
 
 container_kill() {
@@ -142,8 +141,6 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-
-
 # Shutdown services before test mode - Keploy should use mocks for dependencies
 echo "Shutting down docker compose services before test mode..."
 docker compose down
@@ -157,10 +154,8 @@ if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     exit 1
 fi
-
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
-    exit 1
+if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
+  echo "❌ Data race detected in test"; exit 1
 fi
 
 all_passed=true

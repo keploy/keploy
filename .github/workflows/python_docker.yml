@@ -13,7 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        codename: [bullseye, bookworm, trixie]
+        config:
           - job: record_latest_replay_build
             record_src: latest
             replay_src: build
@@ -23,7 +24,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.job }}
+    name: Debian ${{ matrix.codename }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,12 +37,64 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.record_src }}
+          src: ${{ matrix.config.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.replay_src }}
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-python
+          path: samples-python
+          ref: parametize-debian-version
+      - name: Run the flask-mongo application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          DEBIAN_CODENAME: ${{ matrix.codename }}
+        run: |
+          cd samples-python/flask-mongo
+          source ./../../.github/workflows/test_workflow_scripts/python/flask-mongo/python-docker.sh
+
+  python_docker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: flask-mongo
+            path: flask-mongo
+            script_dir: flask-mongo
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: image
+        uses: ./.github/actions/download-image
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
@@ -53,5 +106,5 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          cd samples-python/flask-mongo
-          source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
+          cd samples-python/${{ matrix.app.path }}
+          source ./../../.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-docker.sh

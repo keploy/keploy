@@ -69,6 +69,7 @@ docker run --name $DB_CONTAINER --rm --net keploy-network -p $DB_PORT:27017 -d m
 
 # --- Prepare app image & keploy config ---
 rm -rf keploy/  # Clean up old test data
+
 rm ./keploy.yml >/dev/null 2>&1 || true
 
 docker build -t $APP_IMAGE .
