@@ -11,6 +11,7 @@ import (
 func TestProtoWireToJSONWithAnyTypes(t *testing.T) {
 	// This test verifies that the Any type resolution works correctly
 	logger := zap.NewNop()
+	
 
 	// Test with a proto that includes Any fields
 	pc := ProtoConfig{
