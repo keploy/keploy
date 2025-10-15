@@ -274,16 +274,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 		}
 	}
 
-	if opts.IsDocker {
-		h.ProxyIP4 = opts.KeployIPV4
-		ipv6, err := agent.ToIPv4MappedIPv6(opts.KeployIPV4)
-		if err != nil {
-			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", opts.KeployIPV4, err)
-		}
-		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.ProxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-		h.ProxyIP6 = ipv6
-	}
-
 	h.Logger.Debug("proxy ips", zap.String("ipv4", h.ProxyIP4), zap.Any("ipv6", h.ProxyIP6))
 
 	var agentInfo = structs.AgentInfo{}
@@ -303,6 +293,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts models.S
 	if err != nil {
 		return err
 	}
+
+	if opts.IsDocker {
+		h.ProxyIP4 = string(Uint32ToNetIP(proxyInfo.IP4))
+		ipv6, err := ToIPv4MappedIPv6(h.ProxyIP4)
+		if err != nil {
+			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", h.ProxyIP4, err)
+		}
+		h.Logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.ProxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+		h.ProxyIP6 = ipv6
+	}
+
 	agentInfo.Proxy = proxyInfo
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {

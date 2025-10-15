@@ -16,13 +16,12 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	Pid        uint32
-	IsDocker   bool
-	KeployIPV4 string
-	Mode       models.Mode
-	Rules      []models.BypassRule
-	E2E        bool
-	Port       uint32
+	Pid      uint32
+	IsDocker bool
+	Mode     models.Mode
+	Rules    []models.BypassRule
+	E2E      bool
+	Port     uint32
 }
 
 // Proxy listens on all available interfaces and forwards traffic to the destination

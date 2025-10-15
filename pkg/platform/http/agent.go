@@ -739,27 +739,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return err
 	}
 
-	if isDockerCmd && opts.CommandType != string(utils.DockerCompose) {
-		inspect, err := a.dockerClient.ContainerInspect(ctx, opts.KeployContainer)
-		if err != nil {
-			utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
-			return err
-		}
-		var keployIPv4 string
-		keployIPv4 = inspect.NetworkSettings.IPAddress
-
-		// Check if the Networks map is not empty
-		if len(inspect.NetworkSettings.Networks) > 0 && keployIPv4 == "" {
-			// Iterate over the map to get the first available IP
-			for _, network := range inspect.NetworkSettings.Networks {
-				keployIPv4 = network.IPAddress
-				if keployIPv4 != "" {
-					break // Exit the loop once we've found an IP
-				}
-			}
-		}
-
-	}
 	a.logger.Info("Client setup completed successfully")
 	return nil
 }
