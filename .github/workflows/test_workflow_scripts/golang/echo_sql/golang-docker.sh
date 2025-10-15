@@ -55,32 +55,6 @@ send_request(){
     wait
 }
 
-# get_container_health() {
-#     while true; do
-#         container_name="$(docker ps --filter "ancestor=ghcr.io/keploy/keploy:v2-dev" --format "{{.Names}}")"
-
-#         if [ -z "$container_name" ]; then
-#             echo "$(date '+%Y-%m-%d %H:%M:%S') - No running container found for the image ghcr.io/keploy/keploy:v2-dev"
-#         else
-#             echo "$(date '+%Y-%m-%d %H:%M:%S') - Found running container: $container_name"
-            
-#             # Get and print the health status
-#             health_status=$(docker inspect "$container_name" | grep -A 10 Health)
-#             echo "$(date '+%Y-%m-%d %H:%M:%S') - Health status for $container_name:"
-#             echo "$health_status"
-            
-#             if [[ "$health_status" == *"healthy"* ]]; then
-#                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Container $container_name is healthy"
-#             else
-#                 echo "$(date '+%Y-%m-%d %H:%M:%S') - Container $container_name is not healthy"
-#             fi
-#         fi
-        
-#         # Wait before the next check
-#         sleep 2
-#     done
-# }
-
 
 for i in {1..2}; do
     container_name="echoApp"
@@ -116,7 +90,6 @@ sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
-    cat "docker-compose-tmp.yaml"
     exit 1
 fi
 

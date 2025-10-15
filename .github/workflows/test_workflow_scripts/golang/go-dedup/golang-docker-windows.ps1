@@ -201,7 +201,6 @@ if ($ready) {
       Invoke-RestMethod -Method PUT    -Uri "$base/item/item123"   -Body (@{id="item123";name="Updated Item";price=99.99} | ConvertTo-Json) -ContentType "application/json"; $sent++
       Invoke-RestMethod -Method GET    -Uri "$base/products";                                                                     $sent++
       Invoke-RestMethod -Method DELETE -Uri "$base/products/prod001";                                                            $sent++
-      # Invoke-RestMethod -Method GET    -Uri "$base/timestamp";                                                                   $sent++
       Invoke-RestMethod -Method GET    -Uri "$base/api/v2/users";                                                                $sent++
     } catch { Write-Warning "A request failed: $_" }
     Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
