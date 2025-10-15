@@ -97,9 +97,6 @@ send_request() {
   sudo kill "$kp_pid" 2>/dev/null || true
 }
 
-# Clean slate per run
-rm -rf keploy/ keploy.yml || true
-
 run_record_iteration() {
   local idx="$1"
   local app_name="urlShort_${idx}"
@@ -124,13 +121,6 @@ run_record_iteration() {
       endsec
     fi
   fi
-
-  # Generate config
-  sudo "$RECORD_BIN" config --generate
-  sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
-
-  # Build app
-  go build -o urlShort
 
   # Start recording in background so we capture its PID explicitly
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
@@ -175,6 +165,14 @@ echo "RECORD_BIN: $RECORD_BIN"
 echo "REPLAY_BIN : $REPLAY_BIN"
 "$RECORD_BIN" version 2>/dev/null || true
 "$REPLAY_BIN" version  2>/dev/null || true
+# Clean slate per run
+rm -rf keploy/ keploy.yml || true
+ # Generate config
+sudo "$RECORD_BIN" config --generate
+sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
+
+# Build app
+go build -o urlShort
 endsec
 
 for i in 1 2; do
