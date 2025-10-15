@@ -14,8 +14,8 @@ linters:
   exclusions:
     rules: []
     paths-except:
-      - pkg/core/hooks/bpf_arm64_bpfel.go
-      - pkg/core/hooks/bpf_x86_bpfel.go
+      - pkg/agent/hooks/bpf_arm64_bpfel.go
+      - pkg/agent/hooks/bpf_x86_bpfel.go
       - pkg/service/utgen
 
 formatters:

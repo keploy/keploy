@@ -316,8 +316,10 @@ sleep 5
 endsec
 
 section "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-wait "$pid" 2>/dev/null || true
+REC_PID="$(pgrep -n -f 'keploy record' || true)"
+echo "$REC_PID Keploy PID"
+echo "Killing keploy"
+sudo kill -INT "$REC_PID" 2>/dev/null || true
 sleep 5
 check_for_errors "record.log"
 endsec

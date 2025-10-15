@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"debug/elf"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,11 +30,9 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
-	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
@@ -678,6 +677,21 @@ func GetAbsPath(path string) (string, error) {
 	return absPath, nil
 }
 
+func GetCurrentBinaryPath() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Resolve the full path (to avoid issues with symbolic links)
+	executablePath, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+
+	return executablePath, nil
+}
+
 func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	path := originalPath
 	//if user provides relative path
@@ -958,25 +972,44 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	return childPIDs, nil
 }
 
-func GetPIDFromPort(_ context.Context, logger *zap.Logger, port int) (uint32, error) {
-	logger.Debug("Getting pid using port", zap.Int("port", port))
-
-	connections, err := netLib.Connections("inet")
+// GetAvailablePort finds and returns an available port on the system
+func GetAvailablePort() (uint32, error) {
+	// Use port 0 to let the OS assign an available port
+	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}
+	defer listener.Close()
 
-	for _, conn := range connections {
-		if conn.Status == "LISTEN" && conn.Laddr.Port == uint32(port) {
-			if conn.Pid > 0 {
-				return uint32(conn.Pid), nil
-			}
-			return 0, fmt.Errorf("pid %d is out of bounds", conn.Pid)
-		}
+	// Extract the port from the listener's address
+	addr := listener.Addr().(*net.TCPAddr)
+	return uint32(addr.Port), nil
+}
+
+// isPortAvailable checks if a specific port is available on the system
+func isPortAvailable(port uint32) bool {
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
 	}
+	defer listener.Close()
+	return true
+}
 
-	// If we get here, no process was found using the given port
-	return 0, fmt.Errorf("no process found using port %d", port)
+// EnsureAvailablePorts checks if the proxy and DNS ports are available.
+// If they are available, it returns them unchanged.
+// If not, it allocates new available ports for them.
+func EnsureAvailablePorts(port uint32) (uint32, error) {
+	var newPort uint32
+	var err error
+	if isPortAvailable(port) {
+		return port, nil
+	}
+	newPort, err = GetAvailablePort()
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate new proxy port: %w", err)
+	}
+	return newPort, nil
 }
 
 func EnsureRmBeforeName(cmd string) string {
@@ -1021,7 +1054,7 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 }
 
 // DetectLanguage detects the language of the test command and returns the executable
-func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+func DetectLanguage(logger *zap.Logger, cmd string) (models.Language, string) {
 	if cmd == "" {
 		return models.Unknown, ""
 	}
@@ -1301,6 +1334,12 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 // 	return string(xmlBytes), nil
 // }
 
+func NetworkToHostShort(net uint16) uint16 {
+	b := make([]byte, 2)
+	binary.BigEndian.PutUint16(b, net)
+	return binary.LittleEndian.Uint16(b)
+}
+
 func ParseGRPCPath(p string) (serviceFull, method string, err error) {
 	// Trim whitespace and validate input
 	p = strings.TrimSpace(p)
@@ -1384,4 +1423,45 @@ func isValidGRPCIdentifier(name string) bool {
 	}
 
 	return true
+}
+
+func GetContainerIPv4() (string, error) {
+	// Get all network interfaces
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	// Iterate over the interfaces
+	for _, i := range interfaces {
+		// Skip down or loopback interfaces
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		// Get the addresses for the current interface
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+
+		// Iterate over the addresses
+		for _, addr := range addrs {
+			var ip net.IP
+			// The address can be of type *net.IPNet or *net.IPAddr
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				// Check if it's an IPv4 address
+				if ipnet.IP.To4() != nil {
+					ip = ipnet.IP
+				}
+			}
+
+			if ip != nil {
+				// Found a valid IPv4 address, return it
+				return ip.String(), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not find a non-loopback IP for the container")
 }
