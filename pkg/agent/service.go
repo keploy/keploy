@@ -19,7 +19,6 @@ type HookCfg struct {
 	IsDocker bool
 	Mode     models.Mode
 	Rules    []models.BypassRule
-	E2E      bool
 	Port     uint32
 }
 

@@ -81,6 +81,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	for t := range tc {
 		select {
 		case <-r.Context().Done():
+			a.logger.Debug("Client closed the connection or context was cancelled")
 			// Client closed the connection or context was cancelled
 			return
 		default:

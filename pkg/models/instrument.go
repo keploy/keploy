@@ -29,7 +29,6 @@ type HookOptions struct {
 	Rules         []BypassRule
 	Mode          Mode
 	EnableTesting bool
-	E2E           bool
 	Port          uint32 // used for e2e filtering
 	IsDocker      bool
 	ProxyPort     uint32
