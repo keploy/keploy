@@ -116,7 +116,7 @@ run_record_iteration() {
     else
       section "Starting MySQL with standard Docker run (no SSL)"
       echo "Modifying .env for test mode (disabling strict SSL verification)"
-      sed -i 's/MYSQL_SSL_MODE=production/MYSQL_SSL_MODE=test/' .env
+      sed -i 's/MYSQL_SSL_MODE=production/MYSQL_SSL_MODE=false/' .env
       cat .env
       docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss \
         -p 3306:3306 --rm -d mysql:latest
