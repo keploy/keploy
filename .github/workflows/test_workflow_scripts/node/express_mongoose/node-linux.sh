@@ -228,6 +228,26 @@ run_replay() {
     return 1
   fi
 
+  # ✅ Extract and validate coverage percentage from log
+  local coverage_line coverage_percent
+  coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "$logfile" | tail -n1 || true)
+
+  if [[ -z "$coverage_line" ]]; then
+    echo "::error::No coverage percentage found in $logfile"
+    return 1
+  fi
+
+  coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
+  echo "📊 Extracted coverage: ${coverage_percent}%"
+
+  # Compare coverage with threshold (50%)
+  if (( $(echo "$coverage_percent < 50" | bc -l) )); then
+    echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
+    return 1
+  else
+    echo "✅ Coverage meets threshold (>= 50%)"
+  fi
+
   shopt -u nullglob
 
   if ! $any_seen; then
