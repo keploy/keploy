@@ -6,8 +6,15 @@ source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 git fetch origin
 git checkout native-linux
 
-# Start the postgres database
-docker compose up -d
+if [[ "${ENABLE_SSL:-false}" == "false" ]]; then
+    echo "Starting Postgres without SSL/TLS"
+    docker compose up postgres -d
+  else
+    echo "Starting postgres with SSL/TLS"
+    git checkout enable-ssl-postgres
+    docker compose up postgres_ssl -d
+    sleep 10
+fi
 
 # Install dependencies
 pip3 install -r requirements.txt
@@ -62,7 +69,7 @@ send_request(){
 for i in {1..2}; do
     app_name="flaskApp_${i}"
     send_request &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver"   &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" 2>&1 | tee "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -80,11 +87,11 @@ done
 
 # Shutdown postgres before test mode - Keploy should use mocks for database interactions
 echo "Shutting down postgres before test mode..."
-docker compose down
+docker compose down -v
 echo "Postgres stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10    &> test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10 2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
         echo "Error found in pipeline..."
