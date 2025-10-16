@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# Function to show a spinner while a command is running
+show_spinner() {
+    local pid=$!
+    local delay=0.1
+    local spinstr='|/\-'
+    while [ -d "/proc/$pid" ]; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%$temp}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
+
 installKeploy (){
     version="latest"
     IS_CI=false
@@ -80,51 +95,6 @@ installKeploy (){
             OS_NAME=$(uname)  # Get the operating system name
             if [ "$OS_NAME" = "Darwin" ]; then
                 source_dir="/tmp/keploy/keploy"  # Set source directory to the binary inside the extracted folder
-            fi
-            sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy
-        fi
-        set_alias
-    }
-
-    install_keploy_darwin_all() {
-        if [ "$version" != "latest" ]; then
-            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_darwin_all.tar.gz"
-        else
-            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
-        fi
-        # macOS tar does not support --overwrite option so we need to remove the directory first
-        # to avoid the "File exists" error
-        rm -rf /tmp/keploy
-        mkdir -p /tmp/keploy
-        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
-        move_keploy_binary
-        delete_keploy_alias
-    }
-
-    install_keploy_arm() {
-        if [ "$version" != "latest" ]; then
-            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_arm64.tar.gz"
-        else
-            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
-        fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
-        move_keploy_binary
-    }
-
-
-    install_keploy_amd() {        
-        if [ "$version" != "latest" ]; then
-            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_amd64.tar.gz"
-        else
-            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-        fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
-        move_keploy_binary
-    }
-
-    append_to_rc() {
-        last_byte=$(tail -c 1 $2)
-        if [[ "$last_byte" != "" ]]; then
             echo -e "\n$1" >> $2
         else
             echo "$1" >> $2
