@@ -157,6 +157,8 @@ if [ "$MODE" = "incoming" ]; then
    sudo kill "$pid" || true
  fi
 
+ sleep 10
+
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
  sudo pkill -f "$FUZZER_SERVER_BIN" || true
@@ -247,7 +249,7 @@ elif [ "$MODE" = "outgoing" ]; then
    echo "Killing keploy"
    sudo kill "$pid" || true
  fi
- sleep 5
+ sleep 10
 
  echo "Ensuring fuzzer client is stopped..."
  sleep 10

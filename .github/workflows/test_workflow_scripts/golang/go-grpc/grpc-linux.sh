@@ -170,6 +170,8 @@ if [ "$MODE" = "incoming" ]; then
     
     kill_keploy_process
 
+    sleep 10
+
     check_for_errors record_incoming.log
 
     # Test: Keploy replays the captured gRPC calls against the server.
@@ -194,6 +196,8 @@ elif [ "$MODE" = "outgoing" ]; then
     sleep 15 # Allow time for traces to be recorded
 
     kill_keploy_process
+    
+    sleep 10
     
     check_for_errors record_outgoing.log
 
