@@ -1,13 +1,36 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/k0kubun/pp/v3"
-	"go.keploy.io/server/v2/config"
 )
+
+type Language string
+
+// String is used both by fmt.Print and by Cobra in help text
+func (e *Language) String() string {
+	return string(*e)
+}
+
+// Set must have pointer receiver so it doesn't change the value of a copy
+func (e *Language) Set(v string) error {
+	switch v {
+	case "go", "java", "python", "javascript":
+		*e = Language(v)
+		return nil
+	default:
+		return errors.New(`must be one of "go", "java", "python" or "javascript"`)
+	}
+}
+
+// Type is only used in help text
+func (e *Language) Type() string {
+	return "myEnum"
+}
 
 // Patterns for different usecases in keploy
 const (
@@ -21,11 +44,11 @@ const (
 )
 
 const (
-	Unknown    config.Language = "Unknown"    // Unknown language
-	Go         config.Language = "go"         // Go language
-	Java       config.Language = "java"       // Java language
-	Python     config.Language = "python"     // Python language
-	Javascript config.Language = "javascript" // Javascript language
+	Unknown    Language = "Unknown"    // Unknown language
+	Go         Language = "go"         // Go language
+	Java       Language = "java"       // Java language
+	Python     Language = "python"     // Python language
+	Javascript Language = "javascript" // Javascript language
 )
 
 var (

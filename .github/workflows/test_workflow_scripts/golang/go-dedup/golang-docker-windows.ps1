@@ -143,37 +143,51 @@ $base = $env:APP_BASE_URL
 $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
 
 # 1. Correctly quote the docker command for Keploy
-$dockerCmd = '"docker compose up"'
+$dockerCmd = "docker compose up"
 $recArgs = @(
   'record',
   '-c', $dockerCmd,
   '--container-name', $containerName,
-  '--generate-github-actions=false'
+  '--generate-github-actions=false',
+  '--debug'
 )
 
 Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
-# 2. Start Keploy in the background, redirecting output to a log file
-$proc = Start-Process -FilePath $env:RECORD_BIN `
-                      -ArgumentList $recArgs `
-                      -PassThru `
-                      -NoNewWindow `
-                      -RedirectStandardOutput $logPath
+# 2. Start Keploy in a background job.
+# This allows the script to continue while Keploy runs.
+# We use Tee-Object to send output to BOTH the log file and the job's output stream.
+$recJob = Start-Job -ScriptBlock {
+    # Use the $using: scope to access variables from the parent script
+    & $using:env:RECORD_BIN @($using:recArgs) 2>&1 | Tee-Object -FilePath $using:logPath
+}
 
-# 3. Start a background job to stream the log file to the console in real-time
-$logJob = Start-Job { Get-Content -Path $using:logPath -Wait -Tail 10 }
-Write-Host "Tailing Keploy logs from $logPath ..."
+Write-Host "`n=========================================================="
+Write-Host "Dumping full Keploy Record Logs from file: '$logPath'"
+Write-Host "=========================================================="
+Get-Content -Path $logPath -ErrorAction SilentlyContinue
+Write-Host "=========================================================="
+
+# This function will print any new logs from the background job
+function Sync-Logs {
+    param($job)
+    try {
+        Receive-Job -Job $job -ErrorAction SilentlyContinue
+    } catch {}
+}
 
 # Wait for app readiness
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
 $deadline = (Get-Date).AddMinutes(5)
+$ready = $false
 do {
+  Sync-Logs -job $recJob # <-- Print Keploy logs here
   try {
     $r = Invoke-WebRequest -Method GET -Uri "$base/hello/keploy" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
     if ($r.StatusCode -eq 200) { break }
   } catch { Start-Sleep 3 }
-} while ((Get-Date) -lt $deadline)
+} while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
 
 # Send traffic to generate tests
 Write-Host "Sending HTTP requests to generate tests…"
@@ -188,23 +202,40 @@ try {
 } catch { Write-Warning "A request failed: $_" }
 
 Write-Host "Sent $sent request(s). Waiting for tests to flush to disk…"
+
 $pollUntil = (Get-Date).AddSeconds(60)
 do {
+  Sync-Logs -job $recJob # <-- Print logs while waiting
   if (Test-RecordingComplete -root $workDir -idx $expectedTestSetIndex -minFiles 7) { break }
   Start-Sleep 3
-} while ((Get-Date) -lt $pollUntil)
+} while ((Get-Date) -lt $pollUntil -and $recJob.State -eq 'Running')
+
+
+$REC_PID = (Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%keploy record%'").ProcessId | Select-Object -Last 1
+
+if ($REC_PID -and $REC_PID -ne 0) {
+    Write-Host "Found Keploy PID: $REC_PID"
+    Write-Host "Killing keploy process tree..."
+    # /T: Kill the process and any child processes started by it (tree kill)
+    # /F: Forcefully terminate
+    cmd /c "taskkill /PID $REC_PID /T /F" 2>$null | Out-Null
+} else {
+    Write-Host "Keploy record process not found."
+}
+
 
 # Stop Keploy (and docker compose) deterministically
-Kill-Tree -ProcessId $proc.Id
-Stop-Job $logJob
-# In case the root process already died, just continue
-try { Wait-Process -Id $proc.Id -Timeout 15 -ErrorAction SilentlyContinue } catch {}
+# We get the process ID of the actual keploy.exe process started by the job
+# $keployProcessId = (Get-Job -Id $recJob.Id).ChildJobs[0].ProcessId
+# Kill-Tree -ProcessId $keployProcessId
+# Stop-Job $recJob
+# Remove-Job $recJob
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
 if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; exit 1 }
 $testCount = (Get-ChildItem -Path $testSetPath -Filter "test-*.yaml").Count
-if ($testCount -eq 0) { Write-Error "No test files were created"; Get-Content $logPath -ErrorAction SilentlyContinue | Select-Object -Last 200; exit 1 }
+if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
 
 Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
 
