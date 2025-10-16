@@ -109,7 +109,7 @@ run_record_iteration() {
   section "Stop Recording"
   sleep 10
   echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-  pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+  pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill $pid
   wait "$pid" 2>/dev/null || true
   sleep 30
   echo "Recording stopped."
