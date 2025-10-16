@@ -219,6 +219,15 @@ run_replay() {
       any_fail=true
     fi
   done
+
+  local coverage_file="$RUN_DIR/coverage.yaml"
+  if [[ -f "$coverage_file" ]]; then
+    echo "✅ Coverage file found: $coverage_file"
+  else
+    echo "::error::Coverage file not found in $RUN_DIR"
+    return 1
+  fi
+
   shopt -u nullglob
 
   if ! $any_seen; then
