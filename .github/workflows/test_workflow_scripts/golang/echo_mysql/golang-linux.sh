@@ -115,10 +115,10 @@ run_record_iteration() {
   sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
 
   # Build app
-  go build -o urlShort
+  go build -cover
 
   # Start recording in background so we capture its PID explicitly
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./echo-mysql" --generateGithubActions=false \
     > "${app_name}.txt" 2>&1 & 
   local KEPLOY_PID=$!
 
@@ -177,7 +177,7 @@ endsec
 section "Replay"
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./echo-mysql" --delay 7 --generateGithubActions=false \
   > test_logs.txt 2>&1
 REPLAY_RC=$?
 set -e
@@ -193,6 +193,34 @@ if [[ -z "${RUN_DIR:-}" ]]; then
   echo "::error::No test-run directory found under ./keploy/reports"
   [[ $REPLAY_RC -ne 0 ]] && exit "$REPLAY_RC" || exit 1
 fi
+
+local coverage_file="$RUN_DIR/coverage.yaml"
+  if [[ -f "$coverage_file" ]]; then
+    echo "✅ Coverage file found: $coverage_file"
+  else
+    echo "::error::Coverage file not found in $RUN_DIR"
+    return 1
+  fi
+
+  # ✅ Extract and validate coverage percentage from log
+  local coverage_line coverage_percent
+  coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "$logfile" | tail -n1 || true)
+
+  if [[ -z "$coverage_line" ]]; then
+    echo "::error::No coverage percentage found in $logfile"
+    return 1
+  fi
+
+  coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
+  echo "📊 Extracted coverage: ${coverage_percent}%"
+
+  # Compare coverage with threshold (50%)
+  if (( $(echo "$coverage_percent < 30" | bc -l) )); then
+    echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
+    return 1
+  else
+    echo "✅ Coverage meets threshold (>= 50%)"
+  fi
 
 echo "Using reports from: $RUN_DIR"
 all_passed=true
