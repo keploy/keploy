@@ -203,10 +203,10 @@ else
 fi
 
 # ✅ Extract and validate coverage percentage from log
-coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "$logfile" | tail -n1 || true)
+coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
 
 if [[ -z "$coverage_line" ]]; then
-  echo "::error::No coverage percentage found in $logfile"
+  echo "::error::No coverage percentage found in test_logs.txt"
   return 1
 fi
 
