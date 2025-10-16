@@ -14,7 +14,6 @@ if [[ "${ENABLE_SSL:-false}" == "false" ]]; then
     git checkout enable-ssl-postgres
     docker compose up postgres_ssl -d
     sleep 10
-    git checkout native-linux
 fi
 
 # Install dependencies
