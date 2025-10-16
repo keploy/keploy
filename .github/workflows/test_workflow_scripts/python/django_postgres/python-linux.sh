@@ -6,8 +6,16 @@ source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 git fetch origin
 git checkout native-linux
 
-# Start the postgres database
-docker compose up -d
+if [[ "${ENABLE_SSL:-false}" == "false" ]]; then
+    echo "Starting Postgres without SSL/TLS"
+    docker compose up postgres -d
+  else
+    echo "Starting postgres with SSL/TLS"
+    git checkout enable-ssl-postgres
+    docker compose up postgres_ssl -d
+    sleep 10
+    git checkout native-linux
+fi
 
 # Install dependencies
 pip3 install -r requirements.txt
@@ -80,7 +88,7 @@ done
 
 # Shutdown postgres before test mode - Keploy should use mocks for database interactions
 echo "Shutting down postgres before test mode..."
-docker compose down
+docker compose down -v
 echo "Postgres stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
