@@ -70,7 +70,7 @@ send_request(){
 for i in {1..2}; do
     app_name="flaskApp_${i}"
     send_request &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver"   &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" 2>&1 | tee "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -92,7 +92,7 @@ docker compose down -v
 echo "Postgres stopped - Keploy should now use mocks for database interactions"
 
 # Testing phase
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10    &> test_logs.txt
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10 2>&1 | tee test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
         echo "Error found in pipeline..."
