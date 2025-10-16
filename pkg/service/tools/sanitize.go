@@ -660,34 +660,6 @@ func uniqueKeyForValue(base, val string, existing map[string]string) string {
 	}
 }
 
-// SanitizeFileInPlace reads a YAML file, redacts secrets, and writes back in-place.
-// aggSecrets is a shared map across the entire test-set (key -> original value).
-func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
-	// Create detector for legacy compatibility - this function creates its own detector
-	detector, err := detect.NewDetectorDefaultConfig()
-	if err != nil {
-		return fmt.Errorf("failed to create gitleaks detector: %w", err)
-	}
-
-	// Augment with custom rules
-	detector, err = augmentDetector(detector)
-	if err != nil {
-		return fmt.Errorf("failed to augment detector with custom rules: %w", err)
-	}
-
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-
-	redacted, err := RedactYAML(raw, aggSecrets, detector)
-	if err != nil {
-		return fmt.Errorf("redact %s: %w", path, err)
-	}
-
-	return writeRedactedFile(path, redacted)
-}
-
 // SanitizeFileInPlaceWithDetector reads a YAML file, redacts secrets using provided detector, and writes back in-place.
 // This is the optimized version that reuses detector instances.
 func SanitizeFileInPlaceWithDetector(path string, aggSecrets map[string]string, detector *detect.Detector) error {
