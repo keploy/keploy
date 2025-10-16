@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"encoding/gob"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -58,4 +59,59 @@ type Packet struct {
 type Header struct {
 	PayloadLength uint32 `json:"payload_length" yaml:"payload_length"`
 	SequenceID    uint8  `json:"sequence_id" yaml:"sequence_id"`
+}
+
+func init() {
+	// Register all struct types from mysql.go
+	gob.Register(&Spec{})
+	gob.Register(&RequestYaml{})
+	gob.Register(&ResponseYaml{})
+	gob.Register(&PacketInfo{})
+	gob.Register(&Request{})
+	gob.Register(&Response{})
+	gob.Register(&PacketBundle{})
+	gob.Register(&Packet{})
+	gob.Register(&Header{})
+
+	// Register all struct types from comm.go
+	gob.Register(&QueryPacket{})
+	gob.Register(&LocalInFileRequestPacket{})
+	gob.Register(&TextResultSet{})
+	gob.Register(&BinaryProtocolResultSet{})
+	gob.Register(&GenericResponse{})
+	gob.Register(&ColumnCount{})
+	gob.Register(&ColumnDefinition41{})
+	gob.Register(&TextRow{})
+	gob.Register(&BinaryRow{})
+	gob.Register(&ColumnEntry{})
+	gob.Register(&StmtPreparePacket{})
+	gob.Register(&StmtPrepareOkPacket{})
+	gob.Register(&StmtExecutePacket{})
+	gob.Register(&Parameter{})
+	gob.Register(&StmtFetchPacket{})
+	gob.Register(&StmtClosePacket{})
+	gob.Register(&StmtResetPacket{})
+	gob.Register(&StmtSendLongDataPacket{})
+	gob.Register(&QuitPacket{})
+	gob.Register(&InitDBPacket{})
+	gob.Register(&StatisticsPacket{})
+	gob.Register(&DebugPacket{})
+	gob.Register(&PingPacket{})
+	gob.Register(&ResetConnectionPacket{})
+	gob.Register(&SetOptionPacket{})
+	gob.Register(&ChangeUserPacket{})
+
+	// Register all struct types from generic.go
+	gob.Register(&OKPacket{})
+	gob.Register(&ERRPacket{})
+	gob.Register(&EOFPacket{})
+
+	// Register all struct types from conn.go
+	gob.Register(&HandshakeV10Packet{})
+	gob.Register(&HandshakeResponse41Packet{})
+	gob.Register(&SSLRequestPacket{})
+	gob.Register(&AuthSwitchRequestPacket{})
+	gob.Register(&AuthSwitchResponsePacket{})
+	gob.Register(&AuthMoreDataPacket{})
+	gob.Register(&AuthNextFactorPacket{})
 }

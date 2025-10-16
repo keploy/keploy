@@ -10,22 +10,20 @@ import (
 
 type Instrumentation interface {
 	//Setup prepares the environment for the recording
-	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
-	//Hook will load hooks and start the proxy server.
-	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
-	// GetHookUnloadDone returns a channel that signals when hooks are completely unloaded
-	GetHookUnloadDone(id uint64) <-chan struct{}
-	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
-	// SetMocks Allows for setting mocks between test runs for better filtering and matching
-	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
+	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
+
+	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
 	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
-	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
+	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	// Run is blocking call and will execute until error
-	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
 	GetErrorChannel() <-chan error
 
-	GetContainerIP(ctx context.Context, id uint64) (string, error)
+	// New methods for improved mock management
+	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
+	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
+	MakeAgentReadyForDockerCompose(ctx context.Context) error
 }
 
 type Service interface {
@@ -33,7 +31,7 @@ type Service interface {
 	Instrument(ctx context.Context) (*InstrumentState, error)
 	GetNextTestRunID(ctx context.Context) (string, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
@@ -42,10 +40,8 @@ type Service interface {
 	// their producing API responses are observed, so subsequent test cases use the
 	// latest values rather than stale ones from the previous run.
 	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
-	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
-	Normalize(ctx context.Context) error
+	RunApplication(ctx context.Context, opts models.RunOptions) models.AppError
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
-	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testResult []models.TestResult) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
 
@@ -97,8 +93,8 @@ type Telemetry interface {
 }
 
 type TestHooks interface {
-	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (interface{}, error)
-	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
+	SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error)
+	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	BeforeTestRun(ctx context.Context, testRunID string) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
@@ -111,9 +107,7 @@ type Storage interface {
 }
 
 type InstrumentState struct {
-	AppID      uint64
 	HookCancel context.CancelFunc
-	UnloadDone <-chan struct{} // Channel that will be closed when hooks are completely unloaded
 }
 
 type MappingDB interface {

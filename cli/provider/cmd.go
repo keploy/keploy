@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"strings"
 	"time"
@@ -205,6 +206,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
 		cmd.Flags().String("tests", "", "Test Sets to be normalized")
+		cmd.Flags().Bool("allow-high-risk", false, "Allow normalization of high-risk test failures")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -243,10 +245,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
-		cmd.Flags().Bool("bigPayload", false, "Enable the instrumentation hook to capture test cases and mocks.")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
@@ -254,16 +256,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
-		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
+		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
-		err := cmd.Flags().MarkHidden("bigPayload")
-		if err != nil {
-			errMsg := "failed to mark bigPayload as hidden flag"
-			utils.LogError(c.logger, err, errMsg)
-			return err
-		}
 
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
@@ -297,6 +294,16 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "agent":
+		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
+		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
+		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
+		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
+
 	default:
 		return errors.New("unknown command name")
 	}
@@ -320,7 +327,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test and rerecord mode")
+		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test and rerecord mode")
 		cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 		if cmd.Name() == "rerecord" {
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
@@ -407,6 +414,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"protoFile":             "proto-file",
 		"protoDir":              "proto-dir",
 		"protoInclude":          "proto-include",
+		"allowHighRisk":         "allow-high-risk",
+		"disableMapping":        "disable-mapping",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -803,6 +812,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" { // need to check this one
+			return errors.New("non docker command not supported for os : " + runtime.GOOS)
+		}
 
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
@@ -855,10 +867,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
-		if err != nil {
-			return err
-		}
 
 		absPath, err := utils.GetAbsPath(c.cfg.Path)
 		if err != nil {
@@ -908,6 +916,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
+
+			// get disable-mapping flag value
+			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+			if err != nil {
+				errMsg := "failed to get the disable-mapping flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.DisableMapping = disableMapping
+
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
 				host, err := cmd.Flags().GetString("host")
@@ -1086,14 +1104,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		bigPayload, err := cmd.Flags().GetBool("bigPayload")
-		if err != nil {
-			errMsg := "failed to read the big payload flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Record.BigPayload = bigPayload
-
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
 			errMsg := "failed to read the global passthrough flag"
@@ -1117,6 +1127,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 
+		c.cfg.Normalize.AllowHighRisk, err = cmd.Flags().GetBool("allow-high-risk")
+		if err != nil {
+			errMsg := "failed to read allow-high-risk flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
 	case "templatize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 	case "gen":
@@ -1133,6 +1150,58 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New("TestDir is not set")
 			}
 		}
+	case "agent":
+		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
+		if err != nil {
+			errMsg := "failed to read the global passthrough flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.GlobalPassthrough = globalPassthrough
+
+		isdocker, err := cmd.Flags().GetBool("is-docker")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get is-docker flag")
+			return nil
+		}
+		c.cfg.Agent.IsDocker = isdocker
+
+		enableTesting, err := cmd.Flags().GetBool("enable-testing")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get enable-testing flag")
+			return nil
+		}
+		c.cfg.Agent.EnableTesting = enableTesting
+
+		port, err := cmd.Flags().GetUint32("port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get port flag")
+			return nil
+		}
+		c.cfg.Agent.AgentPort = port
+
+		clientNSPid, err := cmd.Flags().GetUint32("client-pid")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get clientPID flag")
+			return nil
+		}
+		c.cfg.Agent.ClientNSPID = clientNSPid
+
+		mode, err := cmd.Flags().GetString("mode")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get mode flag")
+			return nil
+		}
+
+		c.cfg.Agent.Mode = models.Mode(mode)
+
+		proxyPort, err := cmd.Flags().GetUint32("proxy-port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get proxyPort flag")
+			return nil
+		}
+		c.cfg.Agent.ProxyPort = proxyPort
+
 	}
 
 	return nil
@@ -1140,7 +1209,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
+	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {

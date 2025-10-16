@@ -26,13 +26,14 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
 	return &Tools{
 		logger:      logger,
 		telemetry:   telemetry,
 		auth:        auth,
 		testSetConf: testsetConfig,
 		testDB:      testDB,
+		reportDB:    reportDB,
 		config:      config,
 	}
 }
@@ -42,6 +43,7 @@ type Tools struct {
 	telemetry   teleDB
 	testSetConf TestSetConfig
 	testDB      TestDB
+	reportDB    ReportDB
 	config      *config.Config
 	auth        service.Auth
 }
@@ -91,7 +93,6 @@ func (t *Tools) Update(ctx context.Context) error {
 	}
 
 	t.logger.Info("Updating to Version: " + latestVersion)
-
 	downloadURL := ""
 
 	if runtime.GOOS == "linux" {
