@@ -565,6 +565,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.EnableTesting {
 		command = append(command, "--enable-testing")
 	}
+	if opts.GlobalPassthrough {
+		command = append(command, "--global-passthrough")
+	}
 
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
