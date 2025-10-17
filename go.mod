@@ -146,6 +146,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
+	github.com/keploy/integrations v0.0.0-20251013183731-df6aa0c741ae // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/mholt/archives v0.1.2 // indirect
 	github.com/minio/minlz v1.0.0 // indirect
