@@ -445,6 +445,16 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 				c.logger.Info(LogExample(RootExamples))
 			}
 		}
+		
+		// Check if this is a Docker Compose command and exit cleanly to prevent usage display
+		// Note: We check the command directly since CommandType is set later in validation
+		if utils.FindDockerCmd(c.cfg.Command) == utils.DockerCompose {
+			// Log the error and exit cleanly without returning error to Cobra
+			c.logger.Error("failed to validate flags", zap.Error(err))
+			utils.ErrCode = 1
+			os.Exit(1) // Clean exit - prevents Cobra usage display
+		}
+		
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
