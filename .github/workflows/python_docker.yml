@@ -8,7 +8,7 @@ on:
         type: string
 jobs:
   python_docker:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

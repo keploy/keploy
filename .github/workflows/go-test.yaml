@@ -3,7 +3,7 @@ name: Go-Test
 on:
   push:
     branches:
-      - main
+      - v2
   pull_request:
 
 permissions:

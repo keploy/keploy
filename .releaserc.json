@@ -1,5 +1,5 @@
 {
-  "branches": ["main"],
+  "branches": ["v2"],
   "repositoryUrl": "git@github.com:keploy/keploy.git",
   "plugins": [
     "@semantic-release/commit-analyzer",
