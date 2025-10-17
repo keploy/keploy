@@ -21,6 +21,11 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Short:   "record the keploy testcases from the API calls",
 		Example: `keploy record -c "/path/to/user/app"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Check if this is a Docker Compose command and suppress usage on validation errors
+			commandFlag, _ := cmd.Flags().GetString("command")
+			if utils.FindDockerCmd(commandFlag) == utils.DockerCompose {
+				cmd.SilenceUsage = true
+			}
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
