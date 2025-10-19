@@ -1,5 +1,45 @@
 #!/bin/bash
 
+# Function to show a loading spinner
+show_loader() {
+    local pid=$1
+    local message=$2
+    local spinstr='|/-\'
+    local temp
+    tput civis  # Hide cursor
+    while kill -0 "$pid" 2>/dev/null; do
+        temp="${spinstr#?}"
+        printf "\r[%c] %s" "$spinstr" "$message"
+        spinstr=$temp${spinstr%"$temp"}
+        sleep 0.1
+    done
+    tput cnorm  # Show cursor
+    printf "\r✓ %s\n" "$message"
+}
+
+# Function to download with loader
+download_with_loader() {
+    local url=$1
+    local message=$2
+    local output_dir=$3
+    
+    # Start download in background
+    if [ -n "$output_dir" ]; then
+        curl --silent --location "$url" | tar xz --overwrite -C "$output_dir" &
+    else
+        curl --silent --location "$url" | tar xz -C /tmp/keploy/ &
+    fi
+    
+    local download_pid=$!
+    
+    # Show loader while downloading
+    show_loader "$download_pid" "$message"
+    
+    # Wait for download to complete
+    wait "$download_pid"
+    return $?
+}
+
 installKeploy (){
     version="latest"
     IS_CI=false
@@ -96,7 +136,7 @@ installKeploy (){
         # to avoid the "File exists" error
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
-        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
+        download_with_loader "$download_url" "Downloading Keploy binary for macOS..." ""
         move_keploy_binary
         delete_keploy_alias
     }
@@ -107,7 +147,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
+        download_with_loader "$download_url" "Downloading Keploy binary for Linux ARM64..." "/tmp"
         move_keploy_binary
     }
 
@@ -118,7 +158,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
+        download_with_loader "$download_url" "Downloading Keploy binary for Linux AMD64..." "/tmp"
         move_keploy_binary
     }
 
