@@ -13,6 +13,7 @@ if [[ "${ENABLE_SSL:-false}" == "false" ]]; then
     echo "Starting postgres with SSL/TLS"
     git checkout enable-ssl-postgres
     docker compose up postgres_ssl -d
+    export DB_SSLMODE="require"
     sleep 10
 fi
 
