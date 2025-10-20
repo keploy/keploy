@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/agent/hooks"
-	"go.keploy.io/server/v2/pkg/agent/proxy"
-	incoming "go.keploy.io/server/v2/pkg/agent/proxy/incoming"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/hooks"
+	"go.keploy.io/server/v3/pkg/agent/proxy"
+	incoming "go.keploy.io/server/v3/pkg/agent/proxy/incoming"
 
-	"go.keploy.io/server/v2/pkg/platform/docker"
-	"go.keploy.io/server/v2/pkg/service"
-	"go.keploy.io/server/v2/pkg/service/agent"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/service"
+	"go.keploy.io/server/v3/pkg/service/agent"
+	"go.keploy.io/server/v3/utils"
 
 	"go.uber.org/zap"
 )

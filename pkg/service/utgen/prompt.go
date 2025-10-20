@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
+	settings "go.keploy.io/server/v3/pkg/service/utgen/assets"
 	"go.uber.org/zap"
 )
 

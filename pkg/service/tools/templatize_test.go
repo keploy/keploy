@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/utils"
 )
 
 // TestRenderIfTemplatized_NonTemplateString_002 tests the RenderIfTemplatized function for non-template strings.
