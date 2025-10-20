@@ -147,10 +147,11 @@ for i in {1..2}; do
 
     section "Sending Requests for iteration ${i}..."
     send_request
+    # allow some time for testcases to be formed
+    sleep 10
     endsec
 
     section "Stop Recording for iteration ${i}..."
-    sleep 10
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
