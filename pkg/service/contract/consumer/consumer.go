@@ -7,10 +7,10 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
-	"go.keploy.io/server/v2/config"
-	schemaMatcher "go.keploy.io/server/v2/pkg/matcher/schema"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	schemaMatcher "go.keploy.io/server/v3/pkg/matcher/schema"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 

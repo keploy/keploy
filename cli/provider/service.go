@@ -5,12 +5,12 @@ import (
 	"errors"
 	"sync"
 
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/platform/telemetry"
-	"go.keploy.io/server/v2/pkg/service"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/service"
+	"go.keploy.io/server/v3/utils"
 
-	"go.keploy.io/server/v2/pkg/service/utgen"
+	"go.keploy.io/server/v3/pkg/service/utgen"
 	"go.uber.org/zap"
 )
 
