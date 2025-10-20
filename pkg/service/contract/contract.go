@@ -10,12 +10,12 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
-	"go.keploy.io/server/v2/pkg/service/contract/consumer"
-	"go.keploy.io/server/v2/pkg/service/contract/provider"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/service/contract/consumer"
+	"go.keploy.io/server/v3/pkg/service/contract/provider"
+	"go.keploy.io/server/v3/utils"
 
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"

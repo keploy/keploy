@@ -6,16 +6,16 @@ import (
 	"fmt"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/utils"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase"
-	connection "go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/query"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/query/preparedstmt"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/query/utility"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
+	connection "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/preparedstmt"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/utility"
 
-	itgUtils "go.keploy.io/server/v2/pkg/agent/proxy/integrations/util"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/models/mysql"
+	itgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 

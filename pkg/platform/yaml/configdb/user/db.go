@@ -7,8 +7,8 @@ import (
 	"runtime"
 
 	"github.com/denisbrodbeck/machineid"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 	yamlLib "gopkg.in/yaml.v3"

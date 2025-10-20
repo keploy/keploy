@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 type Hooks interface {

@@ -6,13 +6,13 @@ import (
 	"io"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/recorder"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/replayer"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/recorder"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/utils"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

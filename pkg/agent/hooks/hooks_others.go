@@ -3,9 +3,9 @@
 package hooks
 
 import (
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/agent"
-	"go.keploy.io/server/v2/pkg/agent/hooks/others"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/others"
 	"go.uber.org/zap"
 )
 

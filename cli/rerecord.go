@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/service/orchestrator"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/service/orchestrator"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 

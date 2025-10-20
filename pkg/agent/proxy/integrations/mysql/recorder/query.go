@@ -7,12 +7,12 @@ import (
 	"net"
 	"time"
 
-	mysqlUtils "go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/utils"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/models/mysql"
-	"go.keploy.io/server/v2/utils"
+	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 

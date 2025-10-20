@@ -11,7 +11,7 @@ import (
 	"github.com/bufbuild/protocompile"
 	"github.com/bufbuild/protocompile/reporter"
 	"github.com/protocolbuffers/protoscope"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"

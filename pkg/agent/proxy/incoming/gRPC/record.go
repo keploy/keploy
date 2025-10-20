@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/protocolbuffers/protoscope"
-	"go.keploy.io/server/v2/pkg"
-	Utils "go.keploy.io/server/v2/pkg/agent/hooks/conn"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg"
+	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/protocolbuffers/protoscope"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"

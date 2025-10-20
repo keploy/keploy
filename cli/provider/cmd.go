@@ -18,12 +18,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/tools"
-	"go.keploy.io/server/v2/utils"
-	"go.keploy.io/server/v2/utils/log"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 

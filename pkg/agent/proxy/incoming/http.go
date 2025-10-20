@@ -10,10 +10,10 @@ import (
 	"net/http/httputil"
 	"time"
 
-	"go.keploy.io/server/v2/pkg"
-	hooksUtils "go.keploy.io/server/v2/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg"
+	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

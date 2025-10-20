@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/v2/config"
-	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	replaySvc "go.keploy.io/server/v3/pkg/service/replay"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 

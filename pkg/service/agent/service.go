@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 type Service interface {

@@ -1,4 +1,13 @@
 # GoReleaser configuration
+
+release:
+  # If the tag has a pre-release part (e.g. -beta1), this becomes a GitHub pre-release.
+  prerelease: auto
+  # Optional but useful; avoids accumulating duplicate draft releases.
+  mode: replace
+  # You probably want published releases rather than drafts.
+  draft: false
+
 archives:
  -
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 type Config struct {

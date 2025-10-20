@@ -3,7 +3,7 @@ package models
 import (
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
 type Kind string

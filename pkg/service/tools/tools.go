@@ -17,11 +17,11 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/glamour"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/service"
-	"go.keploy.io/server/v2/pkg/service/export"
-	postmanimport "go.keploy.io/server/v2/pkg/service/import"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/service"
+	"go.keploy.io/server/v3/pkg/service/export"
+	postmanimport "go.keploy.io/server/v3/pkg/service/import"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )

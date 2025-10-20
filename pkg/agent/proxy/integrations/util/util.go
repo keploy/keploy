@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"unicode"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 func IsASCII(s string) bool {
