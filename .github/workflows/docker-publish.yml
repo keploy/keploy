@@ -70,12 +70,17 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # always the exact version (works for v2.x.y and v3.0.0-betaN)
             type=semver,pattern={{version}}
-            # only for stable (no hyphen in tag)
             type=semver,pattern={{major}},enable=${{ !contains(github.ref_name, '-') }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Show generated tags 
+        run: |
+          echo "Tags:"
+          echo "${{ steps.meta.outputs.tags }}"
+          echo "Labels:"
+          echo "${{ steps.meta.outputs.labels }}"
 
       - name: Set version
         shell: bash
