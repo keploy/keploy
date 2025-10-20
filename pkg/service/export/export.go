@@ -16,10 +16,10 @@ import (
 	"github.com/google/uuid"
 	yamlLib "gopkg.in/yaml.v3"
 
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
-	postmanimport "go.keploy.io/server/v2/pkg/service/import"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
+	postmanimport "go.keploy.io/server/v3/pkg/service/import"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
