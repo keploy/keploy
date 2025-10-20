@@ -42,7 +42,7 @@ sleep 5  # Allow time for configuration changes
 wait_for_http() {
   local host="localhost" # Assuming localhost
   local port="$1"
-  section "Waiting for application on port $port..."
+  echo "Waiting for application on port $port..."
   for i in {1..120}; do
     # Use netcat (nc) to check if the port is open without sending app-level data
     if nc -z "$host" "$port" >/dev/null 2>&1; then
@@ -53,7 +53,6 @@ wait_for_http() {
     sleep 1
   done
   echo "::error::Application did not become available on port $port in time."
-  endsec
   return 1
 }
 
@@ -151,14 +150,12 @@ for i in {1..2}; do
     endsec
 
     section "Stop Recording for iteration ${i}..."
-    echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-
+    sleep 10
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     sudo kill -INT $REC_PID 2>/dev/null || true
-
-    sleep 5
+    sleep 10
     check_for_errors "${app_name}.txt"
     echo "Recording stopped."
     endsec
