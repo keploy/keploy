@@ -517,7 +517,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
 		lastDir, err := utils.GetLastDirectory()
 		if err != nil {
-			errMsg := "failed to get last directory name"
+			errMsg := fmt.Sprintf("failed to get last directory name for override config file in path '%s'", configPath)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
