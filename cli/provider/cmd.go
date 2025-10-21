@@ -527,7 +527,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		if _, statErr := os.Stat(overridePath); statErr == nil {
 			viper.SetConfigFile(overridePath)
 			if err := viper.MergeInConfig(); err != nil {
-				errMsg := "failed to merge override config file"
+				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
