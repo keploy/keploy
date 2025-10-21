@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

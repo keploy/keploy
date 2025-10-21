@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/coverage"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/coverage"
 	"go.uber.org/zap"
 )
 

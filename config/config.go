@@ -2,50 +2,56 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 type Config struct {
-	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
-	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
-	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
-	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
-	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
-	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
-	E2E                   bool         `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
-	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
-	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DisableTele           bool         `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
-	InDocker              bool         `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
-	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
-	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
-	Report                Report       `json:"report" yaml:"report" mapstructure:"report"`
-	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
-	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
-	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
-	DisableMapping        bool         `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
-	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
-	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	EnableTesting         bool         `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
-	GenerateGithubActions bool         `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
-	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
-	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
-	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
+	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
+	AppID                 uint64              `json:"appId" yaml:"appId" mapstructure:"appId"` // deprecated field
+	Command               string              `json:"command" yaml:"command" mapstructure:"command"`
+	Templatize            Templatize          `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
+	Port                  uint32              `json:"port" yaml:"port" mapstructure:"port"`
+	E2E                   bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
+	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
+	ContainerName         string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	NetworkName           string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay            uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test                  Test                `json:"test" yaml:"test" mapstructure:"test"`
+	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
+	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
+	Gen                   UtGen               `json:"gen" yaml:"-" mapstructure:"gen"`
+	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
+	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
+	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
+	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
+	GenerateGithubActions bool                `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
+	KeployContainer       string              `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork         string              `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	CommandType           string              `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	Contract              Contract            `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Agent                 Agent               `json:"agent" yaml:"agent" mapstructure:"agent"`
+	InCi                  bool                `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID        string              `json:"-" yaml:"-" mapstructure:"-"`
+	ServerPort            uint32              `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
+	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
+}
 
-	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
-	Version        string `json:"-" yaml:"-" mapstructure:"-"`
-	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
-	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+type Agent struct {
+	models.SetupOptions
 }
 
 type UtGen struct {
@@ -69,25 +75,24 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters           []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath          string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata          string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
-	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	BigPayload        bool          `json:"bigPayload" yaml:"bigPayload" mapstructure:"bigPayload"`
+	Filters           []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 
 type ReRecord struct {
-	SelectedTests []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
-	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
-	ShowDiff      bool     `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
-	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	APITimeout    uint64   `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	AmendTestSet  bool     `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
-	Branch        string   `json:"branch" yaml:"branch" mapstructure:"branch"`
-	Owner         string   `json:"owner" yaml:"owner" mapstructure:"owner"`
+	SelectedTests []string        `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	Filters       []models.Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	Host          string          `json:"host" yaml:"host" mapstructure:"host"`
+	Port          uint32          `json:"port" yaml:"port" mapstructure:"port"`
+	ShowDiff      bool            `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
+	GRPCPort      uint32          `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	APITimeout    uint64          `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	AmendTestSet  bool            `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
+	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
+	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
@@ -109,24 +114,6 @@ type Normalize struct {
 	AllowHighRisk bool            `json:"allowHighRisk" yaml:"allowHighRisk" mapstructure:"allowHighRisk"`
 }
 
-type BypassRule struct {
-	Path string `json:"path" yaml:"path" mapstructure:"path"`
-	Host string `json:"host" yaml:"host" mapstructure:"host"`
-	Port uint   `json:"port" yaml:"port" mapstructure:"port"`
-}
-type MatchType string
-
-const (
-	OR  MatchType = "OR"
-	AND MatchType = "AND"
-)
-
-type Filter struct {
-	BypassRule `mapstructure:",squash"`
-	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
-	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
-	MatchType  MatchType         `json:"matchType"`
-}
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
@@ -139,7 +126,7 @@ type Test struct {
 	CoverageReportPath  string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering      bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
 	MongoPassword       string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
-	Language            Language            `json:"language" yaml:"language" mapstructure:"language"`
+	Language            models.Language     `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks   bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
 	FallBackOnMiss      bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
 	JacocoAgentPath     string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
@@ -166,29 +153,6 @@ type Report struct {
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
 }
 
-type Language string
-
-// String is used both by fmt.Print and by Cobra in help text
-func (e *Language) String() string {
-	return string(*e)
-}
-
-// Set must have pointer receiver so it doesn't change the value of a copy
-func (e *Language) Set(v string) error {
-	switch v {
-	case "go", "java", "python", "javascript":
-		*e = Language(v)
-		return nil
-	default:
-		return errors.New(`must be one of "go", "java", "python" or "javascript"`)
-	}
-}
-
-// Type is only used in help text
-func (e *Language) Type() string {
-	return "myEnum"
-}
-
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
 	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
@@ -207,7 +171,7 @@ type (
 
 func SetByPassPorts(conf *Config, ports []uint) {
 	for _, port := range ports {
-		conf.BypassRules = append(conf.BypassRules, BypassRule{
+		conf.BypassRules = append(conf.BypassRules, models.BypassRule{
 			Path: "",
 			Host: "",
 			Port: port,

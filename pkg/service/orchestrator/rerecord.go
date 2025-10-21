@@ -15,9 +15,9 @@ import (
 	"regexp"
 	"strings"
 
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -246,16 +246,10 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		return false, fmt.Errorf("%s", errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
-	var userIP string
 	delay := o.config.Test.Delay
 	time.Sleep(time.Duration(delay) * time.Second)
 	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
-		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
-		if err != nil {
-			utils.LogError(o.logger, err, "failed to get the app ip")
-			return false, err
-		}
 	}
 	timeout := time.Duration(120+delay) * time.Second
 
@@ -399,15 +393,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 				}
 			}
 		}(tc.Name)
-
-		if utils.IsDockerCmd(cmdType) {
-			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, userIP)
-			if err != nil {
-				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
-				break
-			}
-			o.logger.Debug("", zap.String("replaced_url_in_docker_env", tc.HTTPReq.URL))
-		}
 
 		if o.config.ReRecord.Host != "" {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, o.config.ReRecord.Host)
