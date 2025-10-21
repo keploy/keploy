@@ -67,21 +67,6 @@ check_for_errors() {
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
-wait_for_mysql() {
-  section "Waiting for MySQL to become ready..."
-  for i in {1..90}; do
-    if docker exec mysql-container mysql -uroot -ppassword -e "SELECT 1;" >/dev/null 2>&1; then
-      echo "✅ MySQL is ready."
-      endsec
-      return 0
-    fi
-    echo "Waiting for MySQL... (attempt $i/90)"
-    sleep 1
-  done
-  echo "::error::MySQL did not become ready in the allotted time."
-  endsec
-  return 1
-}
 
 container_kill() {
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
@@ -91,4 +76,4 @@ container_kill() {
 }
 
 # Export functions for use in sourced scripts
-export -f check_test_report check_for_errors section endsec wait_for_mysql container_kill
+export -f check_test_report check_for_errors section endsec container_kill
