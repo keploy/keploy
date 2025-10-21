@@ -8,7 +8,7 @@
 #   FUZZER_SERVER_BIN   -> path to downloaded server bin (env)
 
 set -Eeuo pipefail
-
+source "$(dirname "$0")/../../common.sh"
 MODE=${1:-incoming}
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
@@ -43,66 +43,9 @@ fi
 SUCCESS_PHRASE="all 1000 unary RPCs validated successfully"
 
 # Validates the Keploy test report to ensure all test sets passed
-check_test_report() {
-    echo "Checking test reports..."
-    if [ ! -d "./keploy/reports" ]; then
-        echo "Test report directory not found!"
-        return 1
-    fi
+check_test_report
 
-    local latest_report_dir
-    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
-    if [ -z "$latest_report_dir" ]; then
-        echo "No test run directory found in ./keploy/reports/"
-        return 1
-    fi
-    
-    local all_passed=true
-    # Loop through all generated report files
-    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
-        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
-
-        local test_set_name
-        test_set_name=$(basename "$report_file" -report.yaml)
-        local test_status
-        test_status=$(grep -m 1 'status:' "$report_file" | awk '{print $2}')        
-        echo "Status for ${test_set_name}: $test_status"
-        if [ "$test_status" != "PASSED" ]; then
-            all_passed=false
-            echo "Test set ${test_set_name} did not pass."
-        fi
-    done
-
-    if [ "$all_passed" = false ]; then
-        echo "One or more test sets failed."
-        return 1
-    fi
-
-    echo "All tests passed in reports."
-    return 0
-}
-
-check_for_errors() {
-  local logfile=$1
-  echo "Checking for errors in $logfile..."
-  if [ -f "$logfile" ]; then
-    # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
-      echo "::error::Critical error found in $logfile. Failing the build."
-      # Print the specific errors that caused the failure
-      echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
-      echo "----------------------"
-      exit 1
-    fi
-    if grep -q "WARNING: DATA RACE" "$logfile"; then
-      echo "::error::Race condition detected in $logfile"
-      exit 1
-    fi
-  fi
-  echo "No critical errors found in $logfile."
-}
-
+check_for_errors
 ensure_success_phrase() {
  for f in "$@"; do
    if [ -f "$f" ] && grep -qiF "$SUCCESS_PHRASE" "$f"; then
