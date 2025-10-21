@@ -533,7 +533,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 			}
 			c.logger.Info("merged override config file", zap.String("file", overridePath))
 		} else if !errors.Is(statErr, os.ErrNotExist) {
-			errMsg := "failed to stat override config file"
+			errMsg := fmt.Sprintf("failed to stat override config file: %s", overridePath)
 			utils.LogError(c.logger, statErr, errMsg)
 			return errors.New(errMsg)
 		}
