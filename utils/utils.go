@@ -33,7 +33,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
