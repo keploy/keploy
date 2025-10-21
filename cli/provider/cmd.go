@@ -540,7 +540,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		IsConfigFileFound = true
 	}
 
-	// 7) Unmarshal with duration hook so "5s"/"10m" -> time.Duration for Record.RecordTimer (special case)
+	// 7) Unmarshal
 	if err := viper.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
