@@ -8,7 +8,8 @@
 #   FUZZER_SERVER_BIN   -> path to downloaded server bin (env)
 
 set -Eeuo pipefail
-source "$(dirname "$0")/../../common.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 MODE=${1:-incoming}
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers

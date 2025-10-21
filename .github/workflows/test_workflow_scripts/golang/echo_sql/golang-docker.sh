@@ -4,7 +4,8 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Build Docker Image
 docker compose build
-source "$(dirname "$0")/../../common.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 

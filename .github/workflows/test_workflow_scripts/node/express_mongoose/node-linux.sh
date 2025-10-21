@@ -3,7 +3,8 @@
 
 set -Eeuo pipefail
 set -o errtrace
-source "$(dirname "$0")/../../common.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 section
 endsec
 
