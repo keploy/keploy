@@ -33,8 +33,8 @@ runs:
         GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@df6aa0c741aee8cb0574157c1166f4f55fa174c6
         
         echo "Creating extraparsers.go..."
-        mkdir -p pkg/core/proxy
-        cat <<'EOF' > pkg/core/proxy/extraparsers.go
+        mkdir -p pkg/agent/proxy
+        cat <<'EOF' > pkg/agent/proxy/extraparsers.go
         //go:build linux
 
         package proxy

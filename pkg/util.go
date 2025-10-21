@@ -24,9 +24,9 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -789,6 +789,64 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
 		}
 	}
+}
+
+// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
+// and signals on the provided channel when the agent becomes available or unavailable.
+// It respects the context timeout and returns when the context is cancelled.
+func AgentHealthTicker(ctx context.Context, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+	defer close(agentReadyCh)
+
+	client := &http.Client{
+		Timeout: 500 * time.Millisecond, // short timeout for health checks
+	}
+	agentStarted := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			isHealthy := isAgentHealthy(ctx, client, agentURI)
+
+			if isHealthy && !agentStarted {
+				// Agent became healthy
+				agentStarted = true
+				select {
+				case agentReadyCh <- true:
+					return
+				case <-ctx.Done():
+					return
+				}
+			} else if !isHealthy && agentStarted {
+				// Agent became unhealthy
+				agentStarted = false
+				select {
+				case agentReadyCh <- false:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}
+}
+
+// isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
+func isAgentHealthy(ctx context.Context, client *http.Client, agentURI string) bool {
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/health", agentURI), nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusOK
 }
 
 func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
