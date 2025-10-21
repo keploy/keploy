@@ -473,53 +473,85 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 }
 
 func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
+	// 1) Bind flags (highest precedence in Viper)
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
-	err := viper.BindPFlags(cmd.Flags())
-	if err != nil {
+	if err := viper.BindPFlags(cmd.Flags()); err != nil {
 		errMsg := "failed to bind flags to config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 
-	// used to bind flags with environment variables
+	// 2) Env: KEPLOY_*
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("KEPLOY")
 
-	//used to bind flags specific to the command for eg: testsets, delay, recordTimer etc. (nested flags)
-	err = utils.BindFlagsToViper(c.logger, cmd, "")
-	if err != nil {
+	// 3) Nested flag binding (your existing util)
+	if err := utils.BindFlagsToViper(c.logger, cmd, ""); err != nil {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
+	// 4) Use provided configPath as-is (your default is already ".")
 	configPath, err := cmd.Flags().GetString("configPath")
 	if err != nil {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
 	}
+
+	// 5) Read base keploy.yml exactly like before
 	viper.SetConfigName("keploy")
 	viper.SetConfigType("yml")
 	viper.AddConfigPath(configPath)
+
 	if err := viper.ReadInConfig(); err != nil {
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		IsConfigFileFound = false
 		c.logger.Info("config file not found; proceeding with flags only")
+	} else {
+		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
+		lastDir, err := utils.GetLastDirectory()
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to get last directory name for override config file in path '%s'", configPath)
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		// overridePath is <configPath>/<lastDir>.keploy.yml
+		overridePath := filepath.Join(configPath, fmt.Sprintf("%s.keploy.yml", lastDir))
+
+		if _, statErr := os.Stat(overridePath); statErr == nil {
+			viper.SetConfigFile(overridePath)
+			if err := viper.MergeInConfig(); err != nil {
+				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.logger.Info("merged override config file", zap.String("file", overridePath))
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			errMsg := fmt.Sprintf("failed to stat override config file: %s", overridePath)
+			utils.LogError(c.logger, statErr, errMsg)
+			return errors.New(errMsg)
+		}
+		IsConfigFileFound = true
 	}
 
+	// 7) Unmarshal
 	if err := viper.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 
+	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
 	return nil
 }
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
