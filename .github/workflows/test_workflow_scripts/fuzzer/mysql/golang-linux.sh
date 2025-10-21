@@ -6,12 +6,12 @@
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
-
+source "$(dirname "$0")/../../common.sh"
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
+section
+endsec
 
 dump_logs() {
   section "Record Log"
@@ -109,21 +109,7 @@ check_test_report() {
 }
 
 # Waits for the MySQL container to become ready and accept connections
-wait_for_mysql() {
-  section "Waiting for MySQL to become ready..."
-  for i in {1..90}; do
-    if docker exec mysql-container mysql -uroot -ppassword -e "SELECT 1;" >/dev/null 2>&1; then
-      echo "✅ MySQL is ready."
-      endsec
-      return 0
-    fi
-    echo "Waiting for MySQL... (attempt $i/90)"
-    sleep 1
-  done
-  echo "::error::MySQL did not become ready in the allotted time."
-  endsec
-  return 1
-}
+wait_for_mysql
 
 # Waits for an HTTP endpoint to become available
 wait_for_http() {

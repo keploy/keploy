@@ -3,9 +3,9 @@
 
 set -Eeuo pipefail
 set -o errtrace
-
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
+source "$(dirname "$0")/../../common.sh"
+section
+endsec
 
 die() {
   rc=$?
