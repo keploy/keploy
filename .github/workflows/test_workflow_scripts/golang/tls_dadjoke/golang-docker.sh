@@ -121,14 +121,35 @@ check_test_report() {
 }
 
 container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    sudo kill $pid
-    echo "Cleaning up Keploy's internal container before testing..."
-    docker stop keploy-v2 &>/dev/null || true
-    docker rm -f keploy-v2 &>/dev/null || true
+  section "Stopping Keploy processes..."
 
+  # Collect all keploy-related PIDs (agent/record) robustly
+  mapfile -t pids < <(pgrep -f "[k]eploy" || true)
+
+  if ((${#pids[@]})); then
+    echo "Found Keploy PIDs: ${pids[*]}"
+    # Send TERM to each; don't die if one fails
+    for p in "${pids[@]}"; do
+      [[ "$p" =~ ^[0-9]+$ ]] || continue
+      sudo kill -TERM "$p" 2>/dev/null || true
+    done
+    # Wait a bit; KILL if any are stubborn
+    for p in "${pids[@]}"; do
+      [[ "$p" =~ ^[0-9]+$ ]] || continue
+      timeout 5s bash -c "while kill -0 $p 2>/dev/null; do sleep 0.2; done" \
+        || sudo kill -KILL "$p" 2>/dev/null || true
+    done
+  else
+    echo "No Keploy PIDs found."
+  fi
+
+  echo "Cleaning up Keploy containers..."
+  # Stop both app containers if present
+  docker ps -q --filter "name=go-joke-app" | xargs -r docker stop >/dev/null 2>&1 || true
+  # Clean the internal keploy container
+  docker rm -f keploy-v2 >/dev/null 2>&1 || true
+
+  endsec
 }
 
 # --- Main Execution ---
