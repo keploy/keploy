@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/query"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/query/preparedstmt"
-	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/preparedstmt"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 

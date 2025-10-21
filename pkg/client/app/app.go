@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 
-	"go.keploy.io/server/v2/pkg/platform/docker"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
