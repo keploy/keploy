@@ -152,6 +152,9 @@ func (r *Report) printTests(tests []models.TestResult) error {
 // printSummary prints the grand summary + per test-set table.
 func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	var total, passed, failed int
+	var highRisk, mediumRisk, lowRisk int
+	categoryCounts := make(map[models.FailureCategory]int)
+
 	type row struct {
 		name              string
 		total, pass, fail int
@@ -163,6 +166,24 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		total += rep.Total
 		passed += rep.Success
 		failed += rep.Failure
+
+		// Count risk levels and categories for failed tests
+		for _, test := range rep.Tests {
+			if test.Status == models.TestStatusFailed && test.FailureInfo.Risk != "" {
+				switch test.FailureInfo.Risk {
+				case models.High:
+					highRisk++
+				case models.Medium:
+					mediumRisk++
+				case models.Low:
+					lowRisk++
+				}
+
+				for _, category := range test.FailureInfo.Category {
+					categoryCounts[category]++
+				}
+			}
+		}
 
 		// Use TimeTaken from TestReport if available, otherwise estimate from tests
 		var dur time.Duration
@@ -191,10 +212,39 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintf(r.out, "\tTotal tests: %d\n", total)
 	fmt.Fprintf(r.out, "\tTotal test passed: %d\n", passed)
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
+
+	// Add risk level statistics
+	if failed > 0 {
+		fmt.Fprintln(r.out, "\n\tFAILURE RISK DISTRIBUTION:")
+		fmt.Fprintf(r.out, "\t\tHigh Risk: %d\n", highRisk)
+		fmt.Fprintf(r.out, "\t\tMedium Risk: %d\n", mediumRisk)
+		fmt.Fprintf(r.out, "\t\tLow Risk: %d\n", lowRisk)
+
+		// Add failure category statistics
+		fmt.Fprintln(r.out, "\n\tFAILURE CATEGORIES:")
+		if len(categoryCounts) == 0 {
+			fmt.Fprintln(r.out, "\t\tNo specific categories identified")
+		} else {
+			// Sort categories alphabetically for consistent output
+			categories := make([]models.FailureCategory, 0, len(categoryCounts))
+			for cat := range categoryCounts {
+				categories = append(categories, cat)
+			}
+			sort.Slice(categories, func(i, j int) bool {
+				return string(categories[i]) < string(categories[j])
+			})
+
+			for _, category := range categories {
+				count := categoryCounts[category]
+				fmt.Fprintf(r.out, "\t\t%s: %d\n", category, count)
+			}
+		}
+	}
+
 	if grandDur > 0 {
-		fmt.Fprintf(r.out, "\tTotal time taken: %q\n", fmtDuration(grandDur))
+		fmt.Fprintf(r.out, "\n\tTotal time taken: %q\n", fmtDuration(grandDur))
 	} else {
-		fmt.Fprintf(r.out, "\tTotal time taken: %q\n", "N/A")
+		fmt.Fprintf(r.out, "\n\tTotal time taken: %q\n", "N/A")
 	}
 
 	// Tabwriter over the same buffered writer.
@@ -222,6 +272,21 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 			for _, t := range rep.Tests {
 				if t.Status == models.TestStatusFailed {
 					label := fmt.Sprintf("%s", t.TestCaseID)
+
+					// Add risk level if available and not NONE
+					if t.FailureInfo.Risk != "" && t.FailureInfo.Risk != models.None {
+						label += fmt.Sprintf(" [%s]", t.FailureInfo.Risk)
+					}
+
+					// Add categories if available
+					if len(t.FailureInfo.Category) > 0 {
+						categories := make([]string, len(t.FailureInfo.Category))
+						for i, cat := range t.FailureInfo.Category {
+							categories[i] = string(cat)
+						}
+						label += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
+					}
+
 					failedList = append(failedList, label)
 				}
 			}
@@ -242,7 +307,6 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	}
 	return nil
 }
-
 func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []models.TestResult {
 	set := map[string]struct{}{}
 	for _, id := range ids {
@@ -632,15 +696,30 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
 func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestResult) error {
-	// Header (keep same text)
-	fmt.Fprintf(sb, "Testrun failed for %s/%s\n\n", test.Name, test.TestCaseID)
+	// Header with risk level and categories
+	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+
+	// Add risk level if available and not NONE
+	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
+		header += fmt.Sprintf(" [%s]", test.FailureInfo.Risk)
+	}
+
+	// Add categories if available
+	if len(test.FailureInfo.Category) > 0 {
+		categories := make([]string, len(test.FailureInfo.Category))
+		for i, cat := range test.FailureInfo.Category {
+			categories[i] = string(cat)
+		}
+		header += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
+	}
+
+	sb.WriteString(header + "\n")
 
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
 	sb.WriteString(applyCliColorsToDiff(metaDiff))
-	sb.WriteString("\n\n")
-
-	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n\n")
+	sb.WriteString("\n")
+	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
 	// Body diffs
 	for _, bodyResult := range test.Result.BodyResult {
@@ -736,7 +815,23 @@ func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models
 
 // createFormattedPrinter: use r.printer (initialized in New)
 func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPrinter) string {
-	return printer.Sprintf("Testrun failed for %s/%s\n\n", test.Name, test.TestCaseID)
+	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+
+	// Add risk level if available and not NONE
+	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
+		header += fmt.Sprintf(" [%s]", test.FailureInfo.Risk)
+	}
+
+	// Add categories if available
+	if len(test.FailureInfo.Category) > 0 {
+		categories := make([]string, len(test.FailureInfo.Category))
+		for i, cat := range test.FailureInfo.Category {
+			categories[i] = string(cat)
+		}
+		header += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
+	}
+
+	return printer.Sprintf(header + "\n")
 }
 
 // addStatusCodeDiffs adds status code differences to the diff printer
