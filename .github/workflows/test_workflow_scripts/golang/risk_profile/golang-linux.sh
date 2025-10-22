@@ -12,8 +12,6 @@ source "$SCRIPT_DIR/../../common.sh"
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
-section
-endsec
 
 dump_logs() {
   section "Record Log"

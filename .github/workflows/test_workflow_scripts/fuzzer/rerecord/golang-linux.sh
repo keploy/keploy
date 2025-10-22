@@ -2,10 +2,9 @@
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # --- Helper Functions for Logging ---
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
 
 # Error handler for logging context on failure
 die() {
