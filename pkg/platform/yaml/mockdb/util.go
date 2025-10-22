@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -105,8 +106,6 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.Postgres:
-		// case models.PostgresV2:
-
 		postgresSpec := models.PostgresSpec{
 			Metadata:          mock.Spec.Metadata,
 			PostgresRequests:  mock.Spec.PostgresRequests,
@@ -118,6 +117,48 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		err := yamlDoc.Spec.Encode(postgresSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the postgres input-output as yaml")
+			return nil, err
+		}
+	case models.PostgresV2:
+		requests := []postgres.RequestYaml{}
+		for _, v := range mock.Spec.PostgresRequestsV2 {
+
+			req := postgres.RequestYaml{
+				// Header: v.Header,
+				// Meta:   v.Meta,
+			}
+			err := req.Message.Encode(v.PacketBundle)
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode mysql request wiremessage into yaml")
+				return nil, err
+			}
+			requests = append(requests, req)
+		}
+		responses := []postgres.ResponseYaml{}
+		for _, v := range mock.Spec.PostgresResponsesV2 {
+			resp := postgres.ResponseYaml{
+				// Header: v.Header,
+				// Meta:   v.Meta,
+			}
+			err := resp.Message.Encode(v.PacketBundle)
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode mysql response wiremessage into yaml")
+				return nil, err
+			}
+			responses = append(responses, resp)
+		}
+
+		sqlSpec := postgres.Spec{
+			Metadata:         mock.Spec.Metadata,
+			Requests:         requests,
+			Response:         responses,
+			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(sqlSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the MySQL input-output as yaml")
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
