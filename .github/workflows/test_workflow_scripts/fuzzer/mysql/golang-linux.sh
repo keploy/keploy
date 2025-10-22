@@ -6,12 +6,11 @@
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
 
 dump_logs() {
   section "Record Log"
@@ -68,45 +67,6 @@ check_for_errors() {
 }
 
 # Validates the Keploy test report to ensure all test sets passed
-check_test_report() {
-    echo "Checking test reports..."
-    if [ ! -d "./keploy/reports" ]; then
-        echo "Test report directory not found!"
-        return 1
-    fi
-
-    local latest_report_dir
-    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
-    if [ -z "$latest_report_dir" ]; then
-        echo "No test run directory found in ./keploy/reports/"
-        return 1
-    fi
-    
-    local all_passed=true
-    # Loop through all generated report files
-    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
-        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
-        
-        local test_set_name
-        test_set_name=$(basename "$report_file" -report.yaml)
-        local test_status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-        
-        echo "Status for ${test_set_name}: $test_status"
-        if [ "$test_status" != "PASSED" ]; then
-            all_passed=false
-            echo "Test set ${test_set_name} did not pass."
-        fi
-    done
-
-    if [ "$all_passed" = false ]; then
-        echo "One or more test sets failed."
-        return 1
-    fi
-
-    echo "All tests passed in reports."
-    return 0
-}
 
 # Waits for the MySQL container to become ready and accept connections
 wait_for_mysql() {
@@ -125,31 +85,12 @@ wait_for_mysql() {
   return 1
 }
 
-# Waits for an HTTP endpoint to become available
-wait_for_http() {
-  local host="localhost" # Assuming localhost
-  local port="$2"
-  section "Waiting for application on port $port..."
-  for i in {1..120}; do
-    # Use netcat (nc) to check if the port is open without sending app-level data
-    if nc -z "$host" "$port" >/dev/null 2>&1; then
-      echo "✅ Application port $port is open."
-      endsec
-      return 0
-    fi
-    sleep 1
-  done
-  echo "::error::Application did not become available on port $port in time."
-  endsec
-  return 1
-}
-
 # Triggers the fuzzer, lets it run for a short time, and then kills the Keploy process.
 send_requests() {
   local kp_pid="$1"
 
   # Wait for the fuzzer's API to be ready
-  wait_for_http "http://localhost:18080/run" 18080
+  wait_for_http 120 18080 "localhost"
 
   echo "Triggering the fuzzer to generate traffic..."
   curl -sS --request POST 'http://localhost:18080/run' \
