@@ -275,7 +275,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 
 					// Add risk level if available and not NONE
 					if t.FailureInfo.Risk != "" && t.FailureInfo.Risk != models.None {
-						label += fmt.Sprintf(" [%s]", t.FailureInfo.Risk)
+						label += fmt.Sprintf(" [%s-RISK]", t.FailureInfo.Risk)
 					}
 
 					// Add categories if available
@@ -702,7 +702,7 @@ func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestRes
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
-		header += fmt.Sprintf(" [%s]", test.FailureInfo.Risk)
+		header += fmt.Sprintf(" [%s-RISK]", test.FailureInfo.Risk)
 	}
 
 	// Add categories if available
@@ -820,7 +820,7 @@ func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPr
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
-		header += fmt.Sprintf(" [%s]", test.FailureInfo.Risk)
+		header += fmt.Sprintf(" [%s-RISK]", test.FailureInfo.Risk)
 	}
 
 	// Add categories if available
