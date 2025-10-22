@@ -5,10 +5,10 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/v2/cli/provider"
-	"go.keploy.io/server/v2/config"
-	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/cli/provider"
+	"go.keploy.io/server/v3/config"
+	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 

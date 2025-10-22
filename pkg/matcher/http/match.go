@@ -13,11 +13,11 @@ import (
 
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
-	"go.keploy.io/server/v2/pkg"
-	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/tools"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg"
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 )
 
 // Assignable global variables for system and utility functions

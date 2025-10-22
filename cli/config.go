@@ -5,10 +5,10 @@ import (
 	"errors"
 	"path/filepath"
 
-	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v3/config"
 
-	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
-	"go.keploy.io/server/v2/utils"
+	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"

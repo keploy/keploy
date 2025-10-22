@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // estimateDuration tries to compute sum of TimeTaken across tests if those fields exist.

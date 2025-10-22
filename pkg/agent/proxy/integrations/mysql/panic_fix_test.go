@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/utils"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.uber.org/zap"
 )
 
