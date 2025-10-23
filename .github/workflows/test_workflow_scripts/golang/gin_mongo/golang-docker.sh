@@ -6,6 +6,9 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 docker network create keploy-network
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
+
 # Generate the keploy-config file.
 sudo -E env PATH=$PATH $RECORD_BIN config --generate
 
@@ -20,13 +23,6 @@ docker logs mongoDb &
 # Start keploy in record mode.
 docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
-
-container_kill() {
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
-}
 
 send_request(){
     sleep 30

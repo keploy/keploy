@@ -16,8 +16,6 @@ sudo -E env PATH=$PATH $RECORD_BIN config --generate
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
-container_kill
-
 send_request(){
     sleep 10
     app_started=false

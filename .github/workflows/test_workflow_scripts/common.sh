@@ -75,5 +75,38 @@ container_kill() {
     sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
+wait_for_http2() {
+  local url="$1" tries="${2:-60}"
+  for _ in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >/dev/null; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_http() {
+  local timeout="$1"   
+  local port="$2"     
+  local host="${3:-localhost}" 
+
+  section "Waiting for application on port $port for up to $timeout seconds..."
+
+  for ((i = 1; i <= timeout; i++)); do
+    if nc -z "$host" "$port" >/dev/null 2>&1; then
+      echo "Application port $port is open."
+      endsec
+      return 0
+    fi
+    echo "Waiting for app... (attempt $i/$timeout)"
+    sleep 1
+  done
+
+  echo "::error::Application did not become available on port $port in $timeout seconds."
+  endsec
+  return 1
+}
+
+
+
 # Export functions for use in sourced scripts
-export -f check_test_report check_for_errors section endsec container_kill
+export -f check_test_report check_for_errors section endsec container_kill wait_for_http2 

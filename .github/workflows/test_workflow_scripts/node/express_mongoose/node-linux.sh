@@ -38,19 +38,10 @@ wait_for_mongo() {
   return 1
 }
 
-wait_for_http() {
-  local url="$1" tries="${2:-60}"
-  for _ in $(seq 1 "$tries"); do
-    if curl -fsS "$url" >/dev/null; then return 0; fi
-    sleep 1
-  done
-  return 1
-}
-
 send_request() {
   local kp_pid="$1"
 
-  if ! wait_for_http "http://localhost:8000/students" 120; then
+  if ! wait_for_http2 "http://localhost:8000/students" 120; then
     echo "::error::App did not become healthy at /students"
     # Let the pipeline fail by returning non-zero
     return 1

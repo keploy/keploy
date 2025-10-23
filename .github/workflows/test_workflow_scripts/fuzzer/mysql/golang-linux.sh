@@ -85,31 +85,12 @@ wait_for_mysql() {
   return 1
 }
 
-# Waits for an HTTP endpoint to become available
-wait_for_http() {
-  local host="localhost" # Assuming localhost
-  local port="$2"
-  section "Waiting for application on port $port..."
-  for i in {1..120}; do
-    # Use netcat (nc) to check if the port is open without sending app-level data
-    if nc -z "$host" "$port" >/dev/null 2>&1; then
-      echo "✅ Application port $port is open."
-      endsec
-      return 0
-    fi
-    sleep 1
-  done
-  echo "::error::Application did not become available on port $port in time."
-  endsec
-  return 1
-}
-
 # Triggers the fuzzer, lets it run for a short time, and then kills the Keploy process.
 send_requests() {
   local kp_pid="$1"
 
   # Wait for the fuzzer's API to be ready
-  wait_for_http "http://localhost:18080/run" 18080
+  wait_for_http 120 18080 "localhost"
 
   echo "Triggering the fuzzer to generate traffic..."
   curl -sS --request POST 'http://localhost:18080/run' \

@@ -72,21 +72,7 @@ check_for_errors() {
 }
 
 # Waits for the Go application's HTTP endpoint to become available
-wait_for_http() {
-  local port="$1"
-  section "Waiting for application on port $port..."
-  for i in {1..60}; do
-    if nc -z "localhost" "$port" >/dev/null 2>&1; then
-      echo "✅ Application port $port is open."
-      endsec
-      return 0
-    fi
-    sleep 1
-  done
-  echo "::error::Application did not become available on port $port in time."
-  endsec
-  return 1
-}
+
 
 check_report_for_risk_profiles() {
     echo "validating the Keploy test report against expected risk profiles and categories"
@@ -265,7 +251,7 @@ section "Record Test Cases"
 echo "Starting Keploy in record mode..."
 sudo -E env PATH="$PATH" $RECORD_BIN record -c "./my-app" 2>&1 | tee record.log &
 KEPLOY_PID=$!
-wait_for_http 8080
+wait_for_http 60 8080
 endsec
 
 section "Generating traffic using curl.sh..."
