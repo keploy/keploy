@@ -122,6 +122,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+
 		return alias, nil
 	case "windows":
 
@@ -161,6 +165,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -179,6 +186,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
 		return alias, nil
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -211,6 +221,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -230,6 +243,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
