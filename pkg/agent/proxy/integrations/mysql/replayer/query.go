@@ -7,11 +7,11 @@ import (
 	"net"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )

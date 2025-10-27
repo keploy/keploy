@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"go.keploy.io/server/v3/pkg/models/mysql"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 )
 
 // COM_STMT_SEND_LONG_DATA: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_send_long_data.html

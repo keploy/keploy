@@ -13,8 +13,8 @@ import (
 
 	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"

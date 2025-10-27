@@ -5,8 +5,8 @@ import (
 	"errors"
 	"strings"
 
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/models/mysql"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"

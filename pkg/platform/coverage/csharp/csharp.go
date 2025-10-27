@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"

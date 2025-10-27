@@ -12,10 +12,10 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations"
+	pUtil "github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/util"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )

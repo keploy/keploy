@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"

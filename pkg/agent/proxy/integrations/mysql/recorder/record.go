@@ -10,10 +10,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	pUtil "github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/util"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )

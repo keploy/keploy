@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
-	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_auth_next_factor_request.html

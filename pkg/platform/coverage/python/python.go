@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage"
 	"go.uber.org/zap"
 )

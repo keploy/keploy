@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.uber.org/zap"
 )
 

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
-	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 

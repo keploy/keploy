@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"path/filepath"
 
+	models "github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
-	models "go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

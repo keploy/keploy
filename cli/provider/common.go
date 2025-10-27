@@ -1,7 +1,7 @@
 package provider
 
 import (
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/storage"
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	mapdb "go.keploy.io/server/v3/pkg/platform/yaml/mapdb"

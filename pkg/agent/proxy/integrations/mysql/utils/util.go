@@ -10,8 +10,8 @@ import (
 	"io"
 	"net"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/pkg/models/mysql"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/util"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )

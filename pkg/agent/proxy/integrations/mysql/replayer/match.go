@@ -9,12 +9,11 @@ import (
 	"strings"
 	"sync"
 
-	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
+	"github.com/keploy/keploy-integrations-shared/pkg/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/models/mysql"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"vitess.io/vitess/go/vt/sqlparser"
 )
@@ -687,7 +686,7 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
 	originalMatchedMock := *matchedMock
 	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	matchedMock.TestModeInfo.SortOrder = utils.GetNextSortNum()
 	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 	if !updated {
 		logger.Debug("failed to update matched mock")

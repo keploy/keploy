@@ -8,9 +8,9 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

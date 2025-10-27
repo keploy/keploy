@@ -12,8 +12,8 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 	// "encoding/json"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
 )
 
 type TestReportVerdict struct {

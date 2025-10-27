@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 )
 
 func TestGetTestCases_SortingLogic(t *testing.T) {

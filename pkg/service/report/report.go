@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/k0kubun/pp/v3"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"

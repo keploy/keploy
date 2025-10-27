@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations"
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations/util"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/utils"
 )
 
 // fuzzyMatch performs a fuzzy matching algorithm to find the best matching mock for the given request.
@@ -63,7 +63,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				copy(responseMock, filteredMocks[index].Spec.GenericResponses)
 				originalFilteredMock := *filteredMocks[index]
 				filteredMocks[index].TestModeInfo.IsFiltered = false
-				filteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				filteredMocks[index].TestModeInfo.SortOrder = utils.GetNextSortNum()
 				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
 				if !isUpdated {
 					continue
@@ -82,7 +82,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
 				originalFilteredMock := *unfilteredMocks[index]
 				unfilteredMocks[index].TestModeInfo.IsFiltered = false
-				unfilteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				unfilteredMocks[index].TestModeInfo.SortOrder = utils.GetNextSortNum()
 				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, unfilteredMocks[index])
 				if !isUpdated {
 					continue
