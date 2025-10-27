@@ -12,7 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          repository: ${{ github.repository }}
+          
       - name: Add Private Parsers
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
@@ -62,6 +64,8 @@ jobs:
       image_digest: ${{ steps.digest.outputs.image_digest }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
 
       - name: Add Private Parsers
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
