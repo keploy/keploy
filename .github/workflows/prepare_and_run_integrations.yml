@@ -1,12 +1,12 @@
 name: Prepare Binary and Run Workflows
 on:
   workflow_call:
-  inputs:
-    integration-ref:
-      description: 'The git ref (branch, tag, or commit) of the integrations repo to use.'
-      required: false
-      type: string
-      default: 'main' # Use main branch if nothing is sent**
+    inputs:
+      integration-ref:
+        description: 'The git ref (branch, tag, or commit) of the integrations repo to use.'
+        required: false
+        type: string
+        default: 'main' # Use main branch if nothing is sent**
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
