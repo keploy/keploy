@@ -9,6 +9,10 @@ inputs:
     description: 'Whether to enable Go module caching (default: true).'
     required: false
     default: true
+  integration-ref:
+    description: 'The git ref (branch, tag, or commit) of the integrations repo.'
+    required: true
+    default: 'main'
 
 runs:
   using: composite
@@ -26,11 +30,13 @@ runs:
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
+      env:
+        INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
         
         echo "Creating extraparsers.go..."
         mkdir -p pkg/agent/proxy
