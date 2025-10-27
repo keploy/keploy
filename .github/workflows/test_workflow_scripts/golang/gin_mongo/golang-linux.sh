@@ -2,9 +2,9 @@
 
 # source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
  
-# Checkout a different branch
+# Checkout the gin-mongo-mail-server branch
 git fetch origin
-git checkout native-linux
+git checkout gin-mongo-mail-server
 
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
@@ -62,6 +62,15 @@ send_request(){
     }'
 
     curl -X GET http://localhost:8080/CJBKJd92
+
+    # Test email verification endpoint
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
+      --header 'Accept: application/json'
+
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
+      --header 'Accept: application/json'
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
@@ -121,7 +130,7 @@ all_passed=true
 
 
 # Get the test results from the testReport file.
-for i in {0..1}
+for i in {0..2}
 do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
