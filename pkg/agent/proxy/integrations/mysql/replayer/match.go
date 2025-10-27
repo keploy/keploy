@@ -9,12 +9,12 @@ import (
 	"strings"
 	"sync"
 
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/models/mysql"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"vitess.io/vitess/go/vt/sqlparser"
 )

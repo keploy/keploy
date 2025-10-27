@@ -10,10 +10,10 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
-	"go.keploy.io/server/v2/pkg/agent"
-	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
