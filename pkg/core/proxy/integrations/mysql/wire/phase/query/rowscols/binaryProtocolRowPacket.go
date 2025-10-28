@@ -290,6 +290,9 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 			}
 
 		case mysql.FieldTypeDate, mysql.FieldTypeNewDate, mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime, mysql.FieldTypeTime:
+			if ce.Value == nil {
+				continue
+			}
 			dt, err := encodeBinaryDateTime(ce.Type, ce.Value)
 			if err != nil {
 				return nil, err
@@ -333,8 +336,6 @@ func coerceToString(v interface{}) (string, error) {
 		return t, nil
 	case []byte:
 		return string(t), nil
-	case fmt.Stringer:
-		return t.String(), nil
 	case time.Time:
 		// MySQL DATETIME has microsecond precision max; drop to microseconds if needed.
 		ts := t.Round(time.Microsecond)
@@ -344,6 +345,8 @@ func coerceToString(v interface{}) (string, error) {
 			return base, nil
 		}
 		return fmt.Sprintf("%s.%06d", base, usec), nil
+	case fmt.Stringer:
+		return t.String(), nil
 	default:
 		return "", fmt.Errorf("cannot coerce %T to string", v)
 	}
