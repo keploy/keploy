@@ -114,11 +114,11 @@ run_record_iteration() {
   sudo "$RECORD_BIN" config --generate
   sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
 
-  # Build app with runtime coverage instrumentation
-  go build -cover -coverpkg=./... -o echo-mysql
+  # Build app
+  go build -o urlShort
 
   # Start recording in background so we capture its PID explicitly
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./echo-mysql" --generateGithubActions=false \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
     > "${app_name}.txt" 2>&1 & 
   local KEPLOY_PID=$!
 
@@ -153,15 +153,6 @@ run_record_iteration() {
   endsec
 }
 
-section "Coverage setup"
-COVER_DIR="$PWD/coverage-reports"
-rm -rf "$COVER_DIR"; mkdir -p "$COVER_DIR"
-# make sure both root (sudo) and the runner user can write/read
-chmod -R a+rwx "$COVER_DIR"
-export GOCOVERDIR="$COVER_DIR"
-echo "GOCOVERDIR=$GOCOVERDIR"
-endsec
-
 # ----- main flow -----
 
 section "Environment"
@@ -183,23 +174,14 @@ docker rm mysql-container || true
 echo "MySQL stopped - Keploy should now use mocks for database interactions"
 endsec
 
-sed -i '73i\
-\tgocovVal := os.Getenv("GOCOVERDIR")\
-\
-\tfmt.Printf("Shutting down server... GOCOVERDIR=%s\\n", gocovVal)\
-' main.go
-
-go build -cover -coverpkg=./... -o echo-mysql
-
+section "Replay"
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./echo-mysql" --delay 7 --generateGithubActions=false \
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
   > test_logs.txt 2>&1
 REPLAY_RC=$?
 set -e
 echo "Replay exit code: $REPLAY_RC"
-echo "== Raw files =="
-find "$GOCOVERDIR" -maxdepth 1 -type f -printf "%f\n" | sort
 cat test_logs.txt || true
 endsec
 
