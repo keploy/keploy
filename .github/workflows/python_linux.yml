@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -72,6 +74,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
 
       - id: record
         uses: ./.github/actions/download-binary
