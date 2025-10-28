@@ -142,7 +142,6 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			return res, fmt.Errorf("no mysql mocks matched the SSL request")
 		}
 
-		// In any case, per your rule, we consider SSL "matched true" for progression and will do reqIdx++ and proceed.
 		reqIdx++ // matched (logically) with the mock so increment the index
 
 		// Upgrade the client connection to TLS
