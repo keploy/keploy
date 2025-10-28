@@ -101,11 +101,6 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	exp := expected.Message.(*mysql.HandshakeResponse41Packet)
 	act := actual.Message.(*mysql.HandshakeResponse41Packet)
 
-	// // Match the CapabilityFlags
-	// if exp.CapabilityFlags != act.CapabilityFlags {
-	// 	return fmt.Errorf("capability flags mismatch for handshake response, expected: %d, actual: %d", exp.CapabilityFlags, act.CapabilityFlags)
-	// }
-
 	// Match the MaxPacketSize
 	if exp.MaxPacketSize != act.MaxPacketSize {
 		return fmt.Errorf("max packet size mismatch for handshake response, expected: %d, actual: %d", exp.MaxPacketSize, act.MaxPacketSize)
@@ -126,10 +121,10 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 		return fmt.Errorf("username mismatch for handshake response, expected: %s, actual: %s", exp.Username, act.Username)
 	}
 
-	// Match the AuthResponse
-	if !bytes.Equal(exp.AuthResponse, act.AuthResponse) {
-		return fmt.Errorf("auth response mismatch for handshake response, expected: %v, actual: %v", exp.AuthResponse, act.AuthResponse)
-	}
+	// DO NOT compare AuthResponse (salt-dependent)
+	// if !bytes.Equal(exp.AuthResponse, act.AuthResponse) {
+	// 	return fmt.Errorf("auth response mismatch for handshake response, expected: %v, actual: %v", exp.AuthResponse, act.AuthResponse)
+	// }
 
 	// Match the Database (backward-compatible: ignore old mocks with junk bytes / off-by-one)
 	if !dbEqualCompat(exp.Database, act.Database) {
@@ -140,17 +135,6 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	if !pluginEqualCompat(exp.AuthPluginName, act.AuthPluginName) {
 		return fmt.Errorf("auth plugin name mismatch for handshake response, expected: %s, actual: %s", printable(exp.AuthPluginName), printable(act.AuthPluginName))
 	}
-
-	// // Match the ConnectionAttributes
-	// if len(exp.ConnectionAttributes) != len(act.ConnectionAttributes) {
-	// 	return fmt.Errorf("connection attributes length mismatch for handshake response, expected: %d, actual: %d", len(exp.ConnectionAttributes), len(act.ConnectionAttributes))
-	// }
-
-	// for key, value := range exp.ConnectionAttributes {
-	// 	if act.ConnectionAttributes[key] != value && key != "_pid" {
-	// 		return fmt.Errorf("connection attributes mismatch for handshake response, expected: %s, actual: %s", value, act.ConnectionAttributes[key])
-	// 	}
-	// }
 
 	// Match the ZstdCompressionLevel
 	if exp.ZstdCompressionLevel != act.ZstdCompressionLevel {
