@@ -227,243 +227,69 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
-	var flakyTestSets []string
 	var previousCmd string
 
-	for _, testSetID := range testSetIDs {
+	for i, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-		testSets = append(testSets, testSetID)
-	}
-	if len(testSets) == 0 {
-		testSets = testSetIDs
-	}
 
-	// Sort the testsets.
-	natsort.Sort(testSets)
-
-	err = HookImpl.BeforeTestRun(ctx, testRunID)
-	if err != nil {
-		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-	}
-
-	// setting the appId for the first test-set.
-	inst.AppID = r.config.AppID
-	for i, testSet := range testSets {
-		var backupCreated bool
-		testSetResult = false
-
-		// Reload hooks before each test set if this is not the first test set
-		// This ensures fresh eBPF state and prevents issues between test runs
-		if i > 0 && r.instrument {
-
-			// Cancel the current hooks and wait for cleanup to complete
-			if hookCancel != nil {
-				hookCancel()
-				// Wait for hooks to be completely unloaded using the channel signal
-				// This ensures that all eBPF resources are properly released before we reload
-				r.logger.Debug("Waiting for hooks to be completely unloaded", zap.String("testSet", testSet))
-				<-inst.UnloadDone
-				r.logger.Debug("Hooks unload completed", zap.String("testSet", testSet))
-			}
-
-			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
-
-			// Reload hooks for the new test set with retry mechanism
-			newInst, err := r.reloadHooks(ctx, inst.AppID)
+		if !r.config.Test.SkipCoverage {
+			r.config.Command, err = cov.PreProcess(testSets[testSetID].AppCommand, testSetID)
 			if err != nil {
-				stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
-				utils.LogError(r.logger, err, stopReason)
-				if ctx.Err() == context.Canceled {
-					return err
-				}
-				return fmt.Errorf("%s", stopReason)
+				r.config.Test.SkipCoverage = true
 			}
-			hookCancel = newInst.HookCancel
-			// Update the inst with the new hook cancel function, app ID, and unload done channel
-			inst.HookCancel = newInst.HookCancel
-			inst.AppID = newInst.AppID
-			inst.UnloadDone = newInst.UnloadDone
-			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
 		}
 
-		err := HookImpl.BeforeTestSetRun(ctx, testSet)
+		requestMockemulator.ProcessMockFile(ctx, testSetID)
+
+		var runApp bool
+		if previousCmd != testSets[testSetID].AppCommand || previousCmd == "" {
+			if previousCmd != "" {
+				r.appCtxCancel()
+				err := r.appErrGrp.Wait()
+				if err != nil {
+					utils.LogError(r.logger, err, "error in cancelling the test set run")
+				}
+			}
+			runApp = true
+			previousCmd = testSets[testSetID].AppCommand
+		}
+
+		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, runApp)
 		if err != nil {
-			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
+			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
 			if ctx.Err() == context.Canceled {
 				return err
 			}
-			return fmt.Errorf("%s", stopReason)
+			return fmt.Errorf(stopReason)
 		}
 
-		if !r.config.Test.SkipCoverage {
-			r.config.Command, err = cov.PreProcess(testSets[testSetID].AppCommand, testSet)
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
-			}
+		switch testSetStatus {
+		case models.TestSetStatusAppHalted:
+			testSetResult = false
+			testSetResult = false
+			abortTestRun = true
+		case models.TestSetStatusUserAbort:
+			return nil
+		case models.TestSetStatusFailed:
+			testSetResult = false
+		case models.TestSetStatusPassed:
+			testSetResult = true
+			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
+		case models.TestSetStatusIgnored:
+			testSetResult = true
 		}
-
-		// check if its the last testset running -
-
-		if i == len(testSets)-1 {
-			r.isLastTestSet = true
-		}
-
-		var (
-			initTotal, initPassed, initFailed, initIgnored int
-			initTimeTaken                                  time.Duration
-		)
-
-		initTotal = totalTests
-		initPassed = totalTestPassed
-		initFailed = totalTestFailed
-		initIgnored = totalTestIgnored
-		initTimeTaken = totalTestTimeTaken
-
-		var initialFailedTCs map[string]bool
-		flaky := false // only be changed during replay with --must-pass flag set
-		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
-
-			// clearing testcase from map is required for 2 reasons:
-			// 1st: in next attempt, we need to append results in a fresh array,
-			// rather than appending in the old array which would contain outdated tc results.
-			// 2nd: in must-pass mode, we delete the failed testcases from the map
-			// if the array has some failed testcases, which has already been removed, then not cleaning
-			// the array would mean deleting the already deleted failed testcases again (error).
-			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
-
-			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
-			// gathered from rerunning, instead only metrics from the last rerun would get added to the variables.
-			totalTests = initTotal
-			totalTestPassed = initPassed
-			totalTestFailed = initFailed
-			totalTestIgnored = initIgnored
-			totalTestTimeTaken = initTimeTaken
-
-			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
-			if err != nil {
-				stopReason = fmt.Sprintf("failed to run test set: %v", err)
-				utils.LogError(r.logger, err, stopReason)
-				if ctx.Err() == context.Canceled {
-					return err
-				}
-				return fmt.Errorf("%s", stopReason)
-			}
-			switch testSetStatus {
-			case models.TestSetStatusAppHalted:
-				testSetResult = false
-				abortTestRun = true
-			case models.TestSetStatusInternalErr:
-				testSetResult = false
-				abortTestRun = true
-			case models.TestSetStatusFaultUserApp:
-				testSetResult = false
-				abortTestRun = true
-			case models.TestSetStatusUserAbort:
-				return nil
-			case models.TestSetStatusFailed:
-				testSetResult = false
-			case models.TestSetStatusPassed:
-				testSetResult = true
-			case models.TestSetStatusIgnored:
-				testSetResult = false
-			case models.TestSetStatusNoTestsToRun:
-				testSetResult = false
-			}
-
-			if testSetStatus != models.TestSetStatusIgnored {
-				testRunResult = testRunResult && testSetResult
-				if abortTestRun {
-					break
-				}
-			}
-
-			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
-			if err != nil {
-				if testSetStatus != models.TestSetStatusNoTestsToRun {
-					utils.LogError(r.logger, err, "failed to get testcase results")
-				}
-				break
-			}
-			failedTcIDs := getFailedTCs(tcResults)
-			failedTCsBySetID[testSet] = failedTcIDs
-
-			// checking for flakiness when --must-pass flag is not set
-			// else if --must-pass is set, delete the failed testcases and rerun
-			if !r.config.Test.MustPass {
-				// populate the map only once at first iteration for flakiness test
-				if attempt == 1 {
-					initialFailedTCs = make(map[string]bool)
-					for _, id := range failedTcIDs {
-						initialFailedTCs[id] = true
-					}
-					continue
-				}
-				// checking if there is no mismatch in failed testcases across max retries
-				// check both length and value
-				if len(failedTcIDs) != len(initialFailedTCs) {
-					utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases", zap.String("testSet", testSet))
-					// don't run more attempts if the testset is flaky
-					flakyTestSets = append(flakyTestSets, testSet)
-					break
-				}
-				for _, id := range failedTcIDs {
-					if _, ok := initialFailedTCs[id]; !ok {
-						flaky = true
-						utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases", zap.String("testSet", testSet))
-						break
-					}
-				}
-				if flaky {
-					// don't run more attempts if the testset is flaky
-					flakyTestSets = append(flakyTestSets, testSet)
-					break
-				}
-				continue
-			}
-
-			// this would be executed only when --must-pass flag is set
-			// we would be removing failed testcases
-			if r.config.Test.MaxFailAttempts == 0 {
-				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
-				break
-			}
-			if len(failedTcIDs) == 0 {
-				// if no testcase failed in this attempt move to next attempt
-				continue
-			}
-
-			if !backupCreated {
-				if err := r.createBackup(testSet); err != nil {
-					utils.LogError(r.logger, err, "failed to create backup, proceeding with test case deletion", zap.String("testSet", testSet))
-				}
-				backupCreated = true
-			}
-
-			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
-
-			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
-				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
-				break
-			}
-			// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
-			// and if it does then delete those failing testcases and rerun it again maxFlakyChecks times
-			r.config.Test.MaxFailAttempts--
-			attempt = 0
-		}
-
+		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
 			break
 		}
-
-		err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
+		if !(!r.config.Test.SkipCoverage && i == len(testSetIDs)-1) {
+			_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs))
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get after test hook")
+			}
 		}
 	}
 
@@ -474,85 +300,372 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if err != nil {
 				utils.LogError(r.logger, err, "error in context cancellation of test set")
 			}
-			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
-			if err != nil {
-				utils.LogError(r.logger, err, "error in context cancellation of test set")
-			}
 		}
 	}
+
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
 			r.config.Test.SkipCoverage = true
 		}
 	}
-
-	if len(flakyTestSets) > 0 {
-		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
-	}
-
 	testRunStatus := "fail"
 	if testRunResult {
 		testRunStatus = "pass"
 	}
-
-	if testRunResult && r.config.Test.DisableMockUpload {
-		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
-	}
-
-	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSets), testRunStatus)
-
+	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
-
-		if !testRunResult && len(mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
-			failuresByTestSet := make(map[string]bool)
-			for _, failure := range mockMismatchFailures.GetFailures() {
-				failuresByTestSet[failure.TestSetID] = true
-			}
-
-			var testSetIDs []string
-			for testSetID := range failuresByTestSet {
-				testSetIDs = append(testSetIDs, testSetID)
-			}
-			testSets := strings.Join(testSetIDs, ", ")
-			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
-
-			if r.config.Debug {
-				mockMismatchFailures.PrintFailuresTable()
-			}
-		}
-		coverageData := models.TestCoverage{}
-		var err error
 		if !r.config.Test.SkipCoverage {
 			r.logger.Info("calculating coverage for the test run and inserting it into the report")
-			coverageData, err = cov.GetCoverage()
+			coverageData, err := cov.GetCoverage()
 			if err == nil {
 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
 				err := r.reportDB.UpdateReport(ctx, testRunID, coverageData)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-
+				_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs))
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get after test hook")
+				}
 			} else {
-				r.logger.Warn("failed to calculate coverage for the test run", zap.Error(err))
+				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
 			}
 		}
-
-		//executing afterTestRun hook, executed after running all the test-sets
-		err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to execute after test run hook")
-		}
 	}
-
 	// return non-zero error code so that pipeline processes
 	// know that there is a failure in tests
-	if !testRunResult {
+	if !testSetResult {
 		utils.ErrCode = 1
 	}
 	return nil
 }
+// 	var previousCmd string
+
+// 	for _, testSetID := range testSetIDs {
+// 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
+// 			continue
+// 		}
+// 		testSets = append(testSets, testSetID)
+// 	}
+// 	if len(testSets) == 0 {
+// 		testSets = testSetIDs
+// 	}
+
+// 	// Sort the testsets.
+// 	natsort.Sort(testSets)
+
+// 	err = HookImpl.BeforeTestRun(ctx, testRunID)
+// 	if err != nil {
+// 		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
+// 		utils.LogError(r.logger, err, stopReason)
+// 	}
+
+// 	// setting the appId for the first test-set.
+// 	inst.AppID = r.config.AppID
+// 	for i, testSet := range testSets {
+// 		var backupCreated bool
+// 		testSetResult = false
+
+// 		// Reload hooks before each test set if this is not the first test set
+// 		// This ensures fresh eBPF state and prevents issues between test runs
+// 		if i > 0 && r.instrument {
+
+// 			// Cancel the current hooks and wait for cleanup to complete
+// 			if hookCancel != nil {
+// 				hookCancel()
+// 				// Wait for hooks to be completely unloaded using the channel signal
+// 				// This ensures that all eBPF resources are properly released before we reload
+// 				r.logger.Debug("Waiting for hooks to be completely unloaded", zap.String("testSet", testSet))
+// 				<-inst.UnloadDone
+// 				r.logger.Debug("Hooks unload completed", zap.String("testSet", testSet))
+// 			}
+
+// 			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
+
+// 			// Reload hooks for the new test set with retry mechanism
+// 			newInst, err := r.reloadHooks(ctx, inst.AppID)
+// 			if err != nil {
+// 				stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
+// 				utils.LogError(r.logger, err, stopReason)
+// 				if ctx.Err() == context.Canceled {
+// 					return err
+// 				}
+// 				return fmt.Errorf("%s", stopReason)
+// 			}
+// 			hookCancel = newInst.HookCancel
+// 			// Update the inst with the new hook cancel function, app ID, and unload done channel
+// 			inst.HookCancel = newInst.HookCancel
+// 			inst.AppID = newInst.AppID
+// 			inst.UnloadDone = newInst.UnloadDone
+// 			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
+// 		}
+
+// 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
+// 		if err != nil {
+// 			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
+// 			utils.LogError(r.logger, err, stopReason)
+// 			if ctx.Err() == context.Canceled {
+// 				return err
+// 			}
+// 			return fmt.Errorf("%s", stopReason)
+// 		}
+
+// 		if !r.config.Test.SkipCoverage {
+// 			r.config.Command, err = cov.PreProcess(testSets[testSetID].AppCommand, testSet)
+// 			if err != nil {
+// 				r.config.Test.SkipCoverage = true
+// 				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
+// 			}
+// 		}
+
+// 		// check if its the last testset running -
+
+// 		if i == len(testSets)-1 {
+// 			r.isLastTestSet = true
+// 		}
+
+// 		var (
+// 			initTotal, initPassed, initFailed, initIgnored int
+// 			initTimeTaken                                  time.Duration
+// 		)
+
+// 		initTotal = totalTests
+// 		initPassed = totalTestPassed
+// 		initFailed = totalTestFailed
+// 		initIgnored = totalTestIgnored
+// 		initTimeTaken = totalTestTimeTaken
+
+// 		var initialFailedTCs map[string]bool
+// 		flaky := false // only be changed during replay with --must-pass flag set
+// 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
+
+// 			// clearing testcase from map is required for 2 reasons:
+// 			// 1st: in next attempt, we need to append results in a fresh array,
+// 			// rather than appending in the old array which would contain outdated tc results.
+// 			// 2nd: in must-pass mode, we delete the failed testcases from the map
+// 			// if the array has some failed testcases, which has already been removed, then not cleaning
+// 			// the array would mean deleting the already deleted failed testcases again (error).
+// 			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
+
+// 			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
+// 			// gathered from rerunning, instead only metrics from the last rerun would get added to the variables.
+// 			totalTests = initTotal
+// 			totalTestPassed = initPassed
+// 			totalTestFailed = initFailed
+// 			totalTestIgnored = initIgnored
+// 			totalTestTimeTaken = initTimeTaken
+
+// 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
+// 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
+// 			if err != nil {
+// 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
+// 				utils.LogError(r.logger, err, stopReason)
+// 				if ctx.Err() == context.Canceled {
+// 					return err
+// 				}
+// 				return fmt.Errorf("%s", stopReason)
+// 			}
+// 			switch testSetStatus {
+// 			case models.TestSetStatusAppHalted:
+// 				testSetResult = false
+// 				abortTestRun = true
+// 			case models.TestSetStatusInternalErr:
+// 				testSetResult = false
+// 				abortTestRun = true
+// 			case models.TestSetStatusFaultUserApp:
+// 				testSetResult = false
+// 				abortTestRun = true
+// 			case models.TestSetStatusUserAbort:
+// 				return nil
+// 			case models.TestSetStatusFailed:
+// 				testSetResult = false
+// 			case models.TestSetStatusPassed:
+// 				testSetResult = true
+// 			case models.TestSetStatusIgnored:
+// 				testSetResult = false
+// 			case models.TestSetStatusNoTestsToRun:
+// 				testSetResult = false
+// 			}
+
+// 			if testSetStatus != models.TestSetStatusIgnored {
+// 				testRunResult = testRunResult && testSetResult
+// 				if abortTestRun {
+// 					break
+// 				}
+// 			}
+
+// 			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
+// 			if err != nil {
+// 				if testSetStatus != models.TestSetStatusNoTestsToRun {
+// 					utils.LogError(r.logger, err, "failed to get testcase results")
+// 				}
+// 				break
+// 			}
+// 			failedTcIDs := getFailedTCs(tcResults)
+// 			failedTCsBySetID[testSet] = failedTcIDs
+
+// 			// checking for flakiness when --must-pass flag is not set
+// 			// else if --must-pass is set, delete the failed testcases and rerun
+// 			if !r.config.Test.MustPass {
+// 				// populate the map only once at first iteration for flakiness test
+// 				if attempt == 1 {
+// 					initialFailedTCs = make(map[string]bool)
+// 					for _, id := range failedTcIDs {
+// 						initialFailedTCs[id] = true
+// 					}
+// 					continue
+// 				}
+// 				// checking if there is no mismatch in failed testcases across max retries
+// 				// check both length and value
+// 				if len(failedTcIDs) != len(initialFailedTCs) {
+// 					utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases", zap.String("testSet", testSet))
+// 					// don't run more attempts if the testset is flaky
+// 					flakyTestSets = append(flakyTestSets, testSet)
+// 					break
+// 				}
+// 				for _, id := range failedTcIDs {
+// 					if _, ok := initialFailedTCs[id]; !ok {
+// 						flaky = true
+// 						utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases", zap.String("testSet", testSet))
+// 						break
+// 					}
+// 				}
+// 				if flaky {
+// 					// don't run more attempts if the testset is flaky
+// 					flakyTestSets = append(flakyTestSets, testSet)
+// 					break
+// 				}
+// 				continue
+// 			}
+
+// 			// this would be executed only when --must-pass flag is set
+// 			// we would be removing failed testcases
+// 			if r.config.Test.MaxFailAttempts == 0 {
+// 				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
+// 				break
+// 			}
+// 			if len(failedTcIDs) == 0 {
+// 				// if no testcase failed in this attempt move to next attempt
+// 				continue
+// 			}
+
+// 			if !backupCreated {
+// 				if err := r.createBackup(testSet); err != nil {
+// 					utils.LogError(r.logger, err, "failed to create backup, proceeding with test case deletion", zap.String("testSet", testSet))
+// 				}
+// 				backupCreated = true
+// 			}
+
+// 			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
+
+// 			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
+// 				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
+// 				break
+// 			}
+// 			// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
+// 			// and if it does then delete those failing testcases and rerun it again maxFlakyChecks times
+// 			r.config.Test.MaxFailAttempts--
+// 			attempt = 0
+// 		}
+
+// 		if abortTestRun {
+// 			break
+// 		}
+
+// 		err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
+// 		if err != nil {
+// 			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
+// 		}
+// 	}
+
+// 	if r.appCtxCancel != nil {
+// 		r.appCtxCancel()
+// 		if r.appErrGrp != nil {
+// 			err := r.appErrGrp.Wait()
+// 			if err != nil {
+// 				utils.LogError(r.logger, err, "error in context cancellation of test set")
+// 			}
+// 			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
+// 			if err != nil {
+// 				utils.LogError(r.logger, err, "error in context cancellation of test set")
+// 			}
+// 		}
+// 	}
+// 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
+// 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
+// 		if err != nil {
+// 			r.config.Test.SkipCoverage = true
+// 		}
+// 	}
+
+// 	if len(flakyTestSets) > 0 {
+// 		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
+// 	}
+
+// 	testRunStatus := "fail"
+// 	if testRunResult {
+// 		testRunStatus = "pass"
+// 	}
+
+// 	if testRunResult && r.config.Test.DisableMockUpload {
+// 		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+// 	}
+
+// 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSets), testRunStatus)
+
+// 	if !abortTestRun {
+// 		r.printSummary(ctx, testRunResult)
+
+// 		if !testRunResult && len(mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
+// 			failuresByTestSet := make(map[string]bool)
+// 			for _, failure := range mockMismatchFailures.GetFailures() {
+// 				failuresByTestSet[failure.TestSetID] = true
+// 			}
+
+// 			var testSetIDs []string
+// 			for testSetID := range failuresByTestSet {
+// 				testSetIDs = append(testSetIDs, testSetID)
+// 			}
+// 			testSets := strings.Join(testSetIDs, ", ")
+// 			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+
+// 			if r.config.Debug {
+// 				mockMismatchFailures.PrintFailuresTable()
+// 			}
+// 		}
+// 		coverageData := models.TestCoverage{}
+// 		var err error
+// 		if !r.config.Test.SkipCoverage {
+// 			r.logger.Info("calculating coverage for the test run and inserting it into the report")
+// 			coverageData, err = cov.GetCoverage()
+// 			if err == nil {
+// 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
+// 				err := r.reportDB.UpdateReport(ctx, testRunID, coverageData)
+// 				if err != nil {
+// 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+// 				}
+
+// 			} else {
+// 				r.logger.Warn("failed to calculate coverage for the test run", zap.Error(err))
+// 			}
+// 		}
+
+// 		//executing afterTestRun hook, executed after running all the test-sets
+// 		err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+// 		if err != nil {
+// 			utils.LogError(r.logger, err, "failed to execute after test run hook")
+// 		}
+// 	}
+
+// 	// return non-zero error code so that pipeline processes
+// 	// know that there is a failure in tests
+// 	if !testRunResult {
+// 		utils.ErrCode = 1
+// 	}
+// 	return nil
+// }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if !r.instrument {
