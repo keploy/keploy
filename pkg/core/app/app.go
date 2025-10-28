@@ -35,6 +35,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
+		mutex:            &sync.Mutex{},
 	}
 	return app
 }
