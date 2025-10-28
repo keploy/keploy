@@ -115,10 +115,10 @@ run_record_iteration() {
   sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
 
   # Build app
-  go build -o urlShort
+  go build -cover
 
   # Start recording in background so we capture its PID explicitly
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./echo-mysql" --generateGithubActions=false \
     > "${app_name}.txt" 2>&1 & 
   local KEPLOY_PID=$!
 
@@ -177,7 +177,7 @@ endsec
 section "Replay"
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./echo-mysql" --delay 7 --generateGithubActions=false \
   > test_logs.txt 2>&1
 REPLAY_RC=$?
 set -e
