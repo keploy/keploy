@@ -45,9 +45,11 @@ var totalTestTimeTaken time.Duration
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
 var requestMockemulator RequestMockHandler
+
 func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
 	requestMockemulator = emulatorInstance
 }
+
 const UNKNOWN_TEST = "UNKNOWN_TEST"
 
 var HookImpl TestHooks
@@ -196,12 +198,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.config.Test.Language = language
 		}
 
-
 		switch r.config.Test.Language {
 		case models.Go:
 			cov = golang.New(ctx, r.logger, r.config.Test.CoverageReportPath, r.config)
 		case models.Python:
-		cov = python.New(ctx, r.logger, r.config)
+			cov = python.New(ctx, r.logger, r.config)
 		case models.Javascript:
 			cov = javascript.New(ctx, r.logger, r.config)
 		case models.Java:
