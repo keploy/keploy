@@ -87,11 +87,16 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 		return testCov, err
 	}
 
+	g.logger.Info("Parsing coverage data from go coverage files...", zap.String("coverageDir", coverageDir), zap.String("command", generateCovTxtCmd.String()))
+
 	coveragePerFileTmp := make(map[string][]int) // filename -> [noOfLines, coveredLines]
 	covdata, err := os.ReadFile(os.Getenv("GOCOVERDIR") + "/total-coverage.txt")
 	if err != nil {
 		return testCov, err
 	}
+
+	fmt.Println(string(covdata))
+
 	// a line is of the form: <filename>:<startLineRow>.<startLineCol>,<endLineRow>.<endLineCol> <noOfLines> <coveredOrNot>
 	for idx, line := range strings.Split(string(covdata), "\n") {
 		line = strings.TrimSpace(line)
