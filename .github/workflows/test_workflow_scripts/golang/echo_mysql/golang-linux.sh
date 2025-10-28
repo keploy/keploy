@@ -192,7 +192,7 @@ command -v go && go version
 "$REPLAY_BIN" version || true
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "env GOCOVERDIR=$GOCOVERDIR ./echo-mysql" --delay 7 --generateGithubActions=false \
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./echo-mysql" --delay 7 --generateGithubActions=false \
   > test_logs.txt 2>&1
 REPLAY_RC=$?
 set -e
