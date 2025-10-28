@@ -254,6 +254,9 @@ func (a *App) SetupCompose() error {
 }
 
 func (a *App) SetAppCommand(appCommand string) {
+	a.mutex.Lock()   // Acquire the write lock
+    defer a.mutex.Unlock() // Release it when the function returns
+
 	a.logger.Debug("Setting App Command", zap.String("cmd", appCommand))
 	a.cmd = appCommand
 }
@@ -508,7 +511,9 @@ func (a *App) waitTillExit() {
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
-	userCmd := a.cmd
+	a.mutex.Lock() // <-- ADD READ LOCK
+    userCmd := a.cmd
+    a.mutex.Unlock()
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
