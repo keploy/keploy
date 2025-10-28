@@ -183,7 +183,13 @@ docker rm mysql-container || true
 echo "MySQL stopped - Keploy should now use mocks for database interactions"
 endsec
 
+go build -cover -coverpkg=./... -o echo-mysql
+
 section "Replay"
+echo "REPLAY_BIN=$REPLAY_BIN"
+echo "GOCOVERDIR=$GOCOVERDIR"
+command -v go && go version
+"$REPLAY_BIN" version || true
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./echo-mysql" --delay 7 --generateGithubActions=false \
@@ -191,6 +197,8 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./echo-mysql" --delay 7 --genera
 REPLAY_RC=$?
 set -e
 echo "Replay exit code: $REPLAY_RC"
+echo "== Raw files =="
+find "$GOCOVERDIR" -maxdepth 1 -type f -printf "%f\n" | sort
 cat test_logs.txt || true
 endsec
 
