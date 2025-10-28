@@ -106,7 +106,7 @@ func (a *App) ContainerIPv4Addr() string {
 
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
 	a.logger.Debug("setting container IPv4 address", zap.String("ipAddr", ipAddr))
-	a.containerIPv4 <- ipAddr
+	a.containerIPV4Chan <- ipAddr
 }
 
 func (a *App) SetupDocker() error {
@@ -383,7 +383,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		defer func() {
 			a.logger.Debug("closing err, containerIPv4 and inode channels ")
 			close(errCh)
-			close(a.containerIPv4)
+			close(a.containerIPV4Chan)
 			close(a.inodeChan)
 		}()
 		for {
@@ -472,7 +472,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
-	a.containerIPv4 = make(chan string, 1)
+	a.containerIPV4Chan = make(chan string, 1)
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}

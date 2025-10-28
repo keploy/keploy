@@ -1039,7 +1039,7 @@ func DetectLanguage(logger *zap.Logger, cmd string) config.Language {
 	}
 
 	if executable == "" {
-		return models.Unknown, ""
+		return models.Unknown
 	}
 
 	// Check for Python
@@ -1060,10 +1060,10 @@ func DetectLanguage(logger *zap.Logger, cmd string) config.Language {
 
 	// Check for Go
 	if executable == "go" || (isGoBinary(logger, executable)) {
-		return models.Go, executable
+		return models.Go
 	}
 
-	return models.Unknown, executable
+	return models.Unknown
 }
 
 // FileExists checks if a file exists and is not a directory at the given path.

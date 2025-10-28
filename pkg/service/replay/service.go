@@ -118,3 +118,11 @@ type MappingDB interface {
 	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
 	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
 }
+
+type RequestMockHandler interface {
+	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
+	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
+	FetchMockName() string
+	ProcessMockFile(ctx context.Context, testSetID string)
+	AfterTestHook(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int) (*models.TestReport, error)
+}

@@ -44,7 +44,10 @@ var totalTestIgnored int
 var totalTestTimeTaken time.Duration
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
-
+var requestMockemulator RequestMockHandler
+func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
+	requestMockemulator = emulatorInstance
+}
 const UNKNOWN_TEST = "UNKNOWN_TEST"
 
 var HookImpl TestHooks
@@ -71,7 +74,9 @@ type Replayer struct {
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
-
+	if requestMockemulator == nil {
+		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
+	}
 	// TODO: add some comment.
 	mock := &mock{
 		cfg:        config,
@@ -155,7 +160,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	for _, testSetID := range testSetIDs {
 		tsconfig, err := r.testSetConf.Read(ctx, testSetID)
 		if err != nil {
-			testSets[testSetID] = &models.TestSet{AppCmd: r.config.Command}
+			testSets[testSetID] = &models.TestSet{AppCommand: r.config.Command}
 		} else {
 			testSets[testSetID] = tsconfig
 		}
@@ -165,7 +170,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		r.logger.Warn("command type mismatch in test-sets, using command provided in the cli/config for all test-sets", zap.Error(err))
 		for _, testSetID := range testSetIDs {
-			testSets[testSetID].AppCmd = r.config.Command
+			testSets[testSetID].AppCommand = r.config.Command
 		}
 	} else {
 		testSetIDs = sortTestSetsByCmd(testSets)
@@ -191,17 +196,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.config.Test.Language = language
 		}
 
-	r.logger.Debug("language detected", zap.String("language", r.config.Test.Language.String()), zap.String("executable", executable))
 
 		switch r.config.Test.Language {
 		case models.Go:
 			cov = golang.New(ctx, r.logger, r.config.Test.CoverageReportPath, r.config)
 		case models.Python:
-			// if the executable is not starting with "python" or "python3" then skipCoverage
-		if !strings.HasPrefix(executable, "python") && !strings.HasPrefix(executable, "python3") {
-			r.logger.Warn("python command not python or python3, skipping coverage calculation")
-			r.config.Test.SkipCoverage = true
-		}
 		cov = python.New(ctx, r.logger, r.config)
 		case models.Javascript:
 			cov = javascript.New(ctx, r.logger, r.config)
@@ -229,7 +228,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testRunResult := true
 	abortTestRun := false
 	var flakyTestSets []string
-	var testSets []string	
 	var previousCmd string
 
 	for _, testSetID := range testSetIDs {
@@ -302,7 +300,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		if !r.config.Test.SkipCoverage {
-			r.config.Command, err = cov.PreProcess(testSets[testSetID].AppCmd, testSet)
+			r.config.Command, err = cov.PreProcess(testSets[testSetID].AppCommand, testSet)
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
@@ -2186,7 +2184,7 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 func sortTestSetsByCmd(testSets map[string]*models.TestSet) []string {
 	cmdFrequency := make(map[string]int)
 	for _, testSet := range testSets {
-		cmdFrequency[testSet.AppCmd]++
+		cmdFrequency[testSet.AppCommand]++
 	}
 
 	// Create a slice of test set IDs sorted by command frequency
@@ -2197,7 +2195,7 @@ func sortTestSetsByCmd(testSets map[string]*models.TestSet) []string {
 
 	// sort the testSetIds by the frequency of their commands
 	sort.Slice(sortedTestSetIDs, func(i, j int) bool {
-		cmdI, cmdJ := testSets[sortedTestSetIDs[i]].AppCmd, testSets[sortedTestSetIDs[j]].AppCmd
+		cmdI, cmdJ := testSets[sortedTestSetIDs[i]].AppCommand, testSets[sortedTestSetIDs[j]].AppCommand
 		return cmdFrequency[cmdI] > cmdFrequency[cmdJ]
 	})
 
@@ -2207,7 +2205,7 @@ func sortTestSetsByCmd(testSets map[string]*models.TestSet) []string {
 func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSet) (config.Language, error) {
 	var language config.Language
 	for testSetID, testSet := range testSets {
-		testSetLanguage := utils.DetectLanguage(logger, testSet.AppCmd)
+		testSetLanguage := utils.DetectLanguage(logger, testSet.AppCommand)
 		if testSetLanguage == models.Unknown {
 			return models.Unknown, fmt.Errorf("failed to detect language for test-set %s", testSetID)
 		}
@@ -2224,62 +2222,10 @@ func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSe
 
 func checkForCommandTypeMismatch(providedCmdType string, testSets map[string]*models.TestSet) error {
 	for testSetID, testSet := range testSets {
-		if testSet.AppCmd == "" {
+		if testSet.AppCommand == "" {
 			continue
 		}
-		if string(utils.FindDockerCmd(testSet.AppCmd)) != providedCmdType {
-			return fmt.Errorf("command type mismatch for test-set %s", testSetID)
-		}
-	}
-	return nil
-}
-
-// sorts the test sets by the frequency of their commands
-func sortTestSetsByCmd(testSets map[string]*models.TestSet) []string {
-	cmdFrequency := make(map[string]int)
-	for _, testSet := range testSets {
-		cmdFrequency[testSet.AppCmd]++
-	}
-
-	// Create a slice of test set IDs sorted by command frequency
-	sortedTestSetIDs := make([]string, 0, len(testSets))
-	for testSetID := range testSets {
-		sortedTestSetIDs = append(sortedTestSetIDs, testSetID)
-	}
-
-	// sort the testSetIds by the frequency of their commands
-	sort.Slice(sortedTestSetIDs, func(i, j int) bool {
-		cmdI, cmdJ := testSets[sortedTestSetIDs[i]].AppCmd, testSets[sortedTestSetIDs[j]].AppCmd
-		return cmdFrequency[cmdI] > cmdFrequency[cmdJ]
-	})
-
-	return sortedTestSetIDs
-}
-
-func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSet) (config.Language, error) {
-	var language config.Language
-	for testSetID, testSet := range testSets {
-		testSetLanguage := utils.DetectLanguage(logger, testSet.AppCmd)
-		if testSetLanguage == models.Unknown {
-			return models.Unknown, fmt.Errorf("failed to detect language for test-set %s", testSetID)
-		}
-		if language == "" {
-			language = testSetLanguage
-			continue
-		}
-		if language != testSetLanguage {
-			return models.Unknown, fmt.Errorf("multiple languages detected in the test sets")
-		}
-	}
-	return language, nil
-}
-
-func checkForCommandTypeMismatch(providedCmdType string, testSets map[string]*models.TestSet) error {
-	for testSetID, testSet := range testSets {
-		if testSet.AppCmd == "" {
-			continue
-		}
-		if string(utils.FindDockerCmd(testSet.AppCmd)) != providedCmdType {
+		if string(utils.FindDockerCmd(testSet.AppCommand)) != providedCmdType {
 			return fmt.Errorf("command type mismatch for test-set %s", testSetID)
 		}
 	}

@@ -31,14 +31,13 @@ type Recorder struct {
 	globalMockCh    chan<- *models.Mock
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, testSetDB TestSetDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, testSetDB TestSetDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
-		testSetConf:     testSetConf,
 		testSetDB:       testSetDB,
 		config:          config,
 	}
@@ -226,7 +225,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		})
 	}
 
-	err = r.testSetDB.Write(ctx, newTestSetID, &models.TestSet{AppCmd: r.config.Command})
+	err = r.testSetDB.Write(ctx, newTestSetID, &models.TestSet{AppCommand: r.config.Command})
 	if err != nil {
 		stopReason = "failed to upsert app command"
 		utils.LogError(r.logger, err, stopReason)
