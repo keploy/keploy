@@ -91,7 +91,7 @@ send_request() {
   sleep 10
   echo "$kp_pid Keploy PID"
   echo "Killing Keploy"
-  sudo kill "$kp_pid" 2>/dev/null || true
+  sudo kill -INT "$kp_pid" 2>/dev/null || true
 }
 
 run_record_iteration() {
@@ -114,8 +114,8 @@ run_record_iteration() {
   sudo "$RECORD_BIN" config --generate
   sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' ./keploy.yml
 
-  # Build app
-  go build -cover
+  # Build app with runtime coverage instrumentation
+  go build -cover -coverpkg=./... -o echo-mysql
 
   # Start recording in background so we capture its PID explicitly
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./echo-mysql" --generateGithubActions=false \
@@ -152,6 +152,15 @@ run_record_iteration() {
 
   endsec
 }
+
+section "Coverage setup"
+COVER_DIR="$PWD/coverage-reports"
+rm -rf "$COVER_DIR"; mkdir -p "$COVER_DIR"
+# make sure both root (sudo) and the runner user can write/read
+chmod -R a+rwx "$COVER_DIR"
+export GOCOVERDIR="$COVER_DIR"
+echo "GOCOVERDIR=$GOCOVERDIR"
+endsec
 
 # ----- main flow -----
 
