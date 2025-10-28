@@ -27,7 +27,7 @@ sed -i 's/ports: 0/ports: 27017/' "$config_file"
 rm -rf keploy/
 
 # Build the binary.
-go build -o ginApp
+go build -cover -coverpkg=./... -o ginApp
 
 
 send_request(){
@@ -104,6 +104,8 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
+
+cat test_logs.txt || true
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
