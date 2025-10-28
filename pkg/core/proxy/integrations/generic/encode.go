@@ -70,7 +70,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	var resTimestampMock time.Time
 
 	// ticker := time.NewTicker(1 * time.Second)
-	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
+	logger.Debug("the iteration for the generic request starts", zap.Int("genericReqs", len(genericRequests)), zap.Int("genericResps", len(genericResponses)))
 	for {
 		select {
 		case <-ctx.Done():
@@ -82,6 +82,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
+				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 				// Save the mock
 				mocks <- &models.Mock{
 					Version: models.GetVersion(),
@@ -111,9 +112,12 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				genericResponseCopy := make([]models.Payload, len(genericResponses))
 				copy(genericResponseCopy, genericResponses)
 				copy(genericRequestsCopy, genericRequests)
-				go func(reqs []models.Payload, resps []models.Payload) {
+				reqTS := reqTimestampMock
+				resTS := resTimestampMock
+				go func(reqs []models.Payload, resps []models.Payload, reqTimestamp, resTimestamp time.Time) {
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
+					metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 					// Save the mock
 					mocks <- &models.Mock{
 						Version: models.GetVersion(),
@@ -122,13 +126,13 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						Spec: models.MockSpec{
 							GenericRequests:  reqs,
 							GenericResponses: resps,
-							ReqTimestampMock: reqTimestampMock,
-							ResTimestampMock: resTimestampMock,
+							ReqTimestampMock: reqTimestamp,
+							ResTimestampMock: resTimestamp,
 							Metadata:         metadata,
 						},
 					}
 
-				}(genericRequestsCopy, genericResponseCopy)
+				}(genericRequestsCopy, genericResponseCopy, reqTS, resTS)
 				genericRequests = []models.Payload{}
 				genericResponses = []models.Payload{}
 			}

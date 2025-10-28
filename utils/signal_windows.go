@@ -3,11 +3,11 @@
 package utils
 
 import (
-	"syscall"
 	"context"
-	"os/exec"
-	"time"
 	"errors"
+	"os/exec"
+	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/windows"

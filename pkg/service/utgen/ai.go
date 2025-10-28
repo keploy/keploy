@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,15 +12,22 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type AIClient struct {
-	Model      string
-	APIBase    string
-	APIVersion string
-	Logger     *zap.Logger
+	Model             string
+	APIBase           string
+	APIVersion        string
+	APIKey            string
+	APIServerURL      string
+	Auth              service.Auth
+	Logger            *zap.Logger
+	SessionID         string
+	FunctionUnderTest string
 }
 
 type Prompt struct {
@@ -30,12 +36,22 @@ type Prompt struct {
 }
 
 type CompletionParams struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	MaxTokens   int       `json:"max_tokens"`
-	Stream      bool      `json:"stream"`
-	Temperature float32   `json:"temperature"`
+	Model               string        `json:"model"`
+	Messages            []Message     `json:"messages"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Stream              *bool         `json:"stream,omitempty"`
+	Temperature         float32       `json:"temperature,omitempty"`
+	ReasoningEffort     ReasoningType `json:"reasoning_effort,omitempty"`
 }
+
+type ReasoningType string
+
+const (
+	HighReasioning   ReasoningType = "high"   // HighReasioning represents high reasoning effort.
+	LowReasioning    ReasoningType = "low"    // LowReasioning represents low reasoning effort.
+	MediumReasioning ReasoningType = "medium" // MediumReasioning represents medium reasoning effort.
+)
 
 type Message struct {
 	Role    string `json:"role"`
@@ -62,60 +78,155 @@ type ResponseChunk struct {
 	Choices []Choice `json:"choices"`
 }
 
-type Choice struct {
-	Delta Delta `json:"delta"`
-}
-
 type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAIClient(model, apiBase, apiVersion string, logger *zap.Logger) *AIClient {
+type AIResponse struct {
+	IsSuccess        bool   `json:"isSuccess"`
+	Error            string `json:"error"`
+	FinalContent     string `json:"finalContent"`
+	PromptTokens     int    `json:"promptTokens"`
+	CompletionTokens int    `json:"completionTokens"`
+	APIKey           string `json:"apiKey"`
+}
+
+type AIRequest struct {
+	MaxTokens      int         `json:"maxTokens"`
+	Prompt         Prompt      `json:"prompt"`
+	SessionID      string      `json:"sessionId"`
+	Iteration      int         `json:"iteration"`
+	RequestPurpose PurposeType `json:"requestPurpose"`
+}
+
+// PurposeType defines the type of purpose for the AI request.
+type PurposeType string
+
+const (
+	// TestForFunction represents a purpose type where the request is to test a function.
+	TestForFunction PurposeType = "TestForFunction"
+
+	// TestForFile represents a purpose type where the request is to test a file.
+	TestForFile PurposeType = "TestForFile"
+)
+
+type CompletionResponse struct {
+	ID      string    `json:"id"`
+	Object  string    `json:"object"`
+	Created int64     `json:"created"`
+	Model   string    `json:"model"`
+	Choices []Choice  `json:"choices"`
+	Usage   UsageData `json:"usage"`
+}
+
+type Choice struct {
+	Index        int     `json:"index"`
+	FinishReason string  `json:"finish_reason"`
+	Message      Message `json:"message"`
+	Delta        Delta   `json:"delta"`
+}
+
+type UsageData struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+func NewAIClient(genConfig config.UtGen, apiKey, apiServerURL string, auth service.Auth, sessionID string, logger *zap.Logger) *AIClient {
 	return &AIClient{
-		Model:      model,
-		APIBase:    apiBase,
-		APIVersion: apiVersion,
-		Logger:     logger,
+		Model:             genConfig.Model,
+		APIBase:           genConfig.APIBaseURL,
+		APIVersion:        genConfig.APIVersion,
+		Logger:            logger,
+		APIKey:            apiKey,
+		APIServerURL:      apiServerURL,
+		Auth:              auth,
+		SessionID:         sessionID,
+		FunctionUnderTest: genConfig.FunctionUnderTest,
 	}
 }
 
-func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
+func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams, aiRequest AIRequest, stream bool) (string, error) {
 
 	var apiBaseURL string
 
-	if prompt.System == "" && prompt.User == "" {
-		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
-	}
+	var apiKey string
+	if ai.APIBase == ai.APIServerURL {
 
-	var messages []Message
-	if prompt.System == "" {
-		messages = []Message{
-			{Role: "user", Content: prompt.User},
+		token, err := ai.Auth.GetToken(ctx)
+		if err != nil {
+			return "", fmt.Errorf("error getting token: %v", err)
 		}
-	} else {
-		messages = []Message{
-			{Role: "system", Content: prompt.System},
-			{Role: "user", Content: prompt.User},
+
+		ai.Logger.Debug("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
+		httpClient := &http.Client{}
+		aiRequestBytes, err := json.Marshal(aiRequest)
+		if err != nil {
+			return "", fmt.Errorf("error marshalling AI request: %v", err)
 		}
-	}
 
-	completionParams := CompletionParams{
-		Model:       ai.Model,
-		Messages:    messages,
-		MaxTokens:   maxTokens,
-		Stream:      true,
-		Temperature: 0.2,
-	}
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ai/call", ai.APIServerURL), bytes.NewBuffer(aiRequestBytes))
+		if err != nil {
+			return "", fmt.Errorf("error creating request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
 
-	if ai.APIBase != "" {
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("error making request: %v", err)
+		}
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		var aiResponse AIResponse
+		err = json.Unmarshal(bodyBytes, &aiResponse)
+		if err != nil {
+			return "", fmt.Errorf("error unmarshalling response body: %v", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, aiResponse.Error)
+		}
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
+			}
+		}()
+
+		return aiResponse.FinalContent, nil
+	} else if ai.APIBase != "" {
 		apiBaseURL = ai.APIBase
 	} else {
 		apiBaseURL = "https://api.openai.com/v1"
 	}
 
+	if completionParams.Model == "" {
+		completionParams.Model = "gpt-4o"
+		if ai.Model != "" {
+			completionParams.Model = ai.Model
+		}
+	}
+
+	if len(completionParams.Messages) == 0 {
+		var messages []Message
+		if aiRequest.Prompt.System == "" {
+			messages = []Message{
+				{Role: "user", Content: aiRequest.Prompt.User},
+			}
+		} else {
+			messages = []Message{
+				{Role: "system", Content: aiRequest.Prompt.System},
+				{Role: "user", Content: aiRequest.Prompt.User},
+			}
+		}
+
+		completionParams.Messages = messages
+	}
+
 	requestBody, err := json.Marshal(completionParams)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("error marshalling request body: %v", err)
+		return "", fmt.Errorf("error marshalling request body: %v", err)
 	}
 
 	queryParams := ""
@@ -125,10 +236,15 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/chat/completions"+queryParams, bytes.NewBuffer(requestBody))
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
+		return "", fmt.Errorf("error creating request: %v", err)
 	}
 
-	apiKey := os.Getenv("API_KEY")
+	if ai.APIKey == "" {
+		apiKey = os.Getenv("API_KEY")
+	} else {
+		apiKey = ai.APIKey
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("api-key", apiKey)
@@ -136,7 +252,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("error making request: %v", err)
+		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -147,7 +263,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		bodyString := string(bodyBytes)
-		return "", 0, 0, fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, bodyString)
+		return "", fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, bodyString)
 	}
 
 	var contentBuilder strings.Builder
@@ -157,49 +273,119 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		fmt.Println("Streaming results from LLM model...")
 	}
 
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil && err != io.EOF {
-			utils.LogError(ai.Logger, err, "Error reading stream")
-			return "", 0, 0, err
-		}
-		line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-		if line == "[DONE]" {
-			break
-		}
+	fmt.Println("Streaming results from LLM model...")
+	if stream {
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				utils.LogError(ai.Logger, err, "Error reading stream")
+				return "", err
+			}
+			line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+			if line == "[DONE]" {
+				break
+			}
 
-		if line == "" {
-			continue
-		}
+			if line == "" {
+				continue
+			}
 
-		var chunk ModelResponse
-		err = json.Unmarshal([]byte(line), &chunk)
-		if err != nil {
-			utils.LogError(ai.Logger, err, "Error unmarshalling chunk")
-			continue
-		}
+			var chunk ModelResponse
+			err = json.Unmarshal([]byte(line), &chunk)
+			if err != nil {
+				utils.LogError(ai.Logger, err, "Error unmarshalling chunk")
+				continue
+			}
 
-		if len(chunk.Choices) > 0 {
-			if chunk.Choices[0].Delta != (Delta{}) {
-				contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
-				if ai.Logger.Level() == zap.DebugLevel {
-					fmt.Print(chunk.Choices[0].Delta.Content)
+			if len(chunk.Choices) > 0 {
+				if chunk.Choices[0].Delta != (Delta{}) {
+					contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
+					if ai.Logger.Level() == zap.DebugLevel {
+						fmt.Print(chunk.Choices[0].Delta.Content)
+					}
 				}
 			}
-		}
 
-		if err == io.EOF {
-			break
+			if err == io.EOF {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		time.Sleep(10 * time.Millisecond) // Optional: Delay to simulate more 'natural' response pacing
+	} else {
+		responseData, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("error reading response: %v", err)
+		}
+		var completionResponse CompletionResponse
+		err = json.Unmarshal(responseData, &completionResponse)
+		if err != nil {
+			return "", fmt.Errorf("error unmarshalling response: %v", err)
+		}
+		if len(completionResponse.Choices) > 0 {
+			finalContent := completionResponse.Choices[0].Message.Content
+			return finalContent, nil
+		}
 	}
-	if ai.Logger.Level() == zap.DebugLevel {
-		fmt.Println()
-	}
-
 	finalContent := contentBuilder.String()
-	promptTokens := len(strings.Fields(prompt.System)) + len(strings.Fields(prompt.User))
-	completionTokens := len(strings.Fields(finalContent))
 
-	return finalContent, promptTokens, completionTokens, nil
+	return finalContent, nil
+}
+
+func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, oldCoverage, newCoverage float64, iterationCount int) error {
+	// Construct the request body with session ID, old coverage, and new coverage
+	requestPurpose := TestForFile
+	if len(ai.FunctionUnderTest) > 0 {
+		requestPurpose = TestForFunction
+	}
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"sessionId":      sessionID,
+		"initalCoverage": oldCoverage,
+		"finalCoverage":  newCoverage,
+		"iteration":      iterationCount,
+		"requestPurpose": requestPurpose,
+	})
+	if err != nil {
+		return fmt.Errorf("error marshalling request body: %v", err)
+	}
+
+	// Determine the base URL
+	var apiBaseURL string
+	if ai.APIBase != "" {
+		apiBaseURL = ai.APIBase
+	}
+	// Create a POST request
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/ai/coverage/update", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	token, err := ai.Auth.GetToken(ctx)
+
+	if err != nil {
+		return fmt.Errorf("error getting token: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// Execute the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error making request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			utils.LogError(ai.Logger, err, "Error closing response body")
+		}
+	}()
+
+	// Check for successful response
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyString := string(bodyBytes)
+		return fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, bodyString)
+	}
+
+	ai.Logger.Debug("Coverage update sent successfully", zap.String("session_id", sessionID))
+	return nil
 }

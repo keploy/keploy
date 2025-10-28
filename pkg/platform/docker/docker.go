@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/docker/docker/api/types/filters"
 	nativeDockerClient "github.com/docker/docker/client"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
 )
 
@@ -341,7 +341,7 @@ func (idc *Impl) GetNetworkInfo(compose *Compose) *NetworkInfo {
 }
 
 // GetHostWorkingDirectory Inspects Keploy docker container to get bind mount for current directory
-func (idc *Impl) GetHostWorkingDirectory() (string, error) {
+func (idc *Impl) GetHostWorkingDirectory(keployContainer string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
@@ -351,7 +351,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		return "", err
 	}
 
-	container, err := idc.ContainerInspect(ctx, "keploy-v2")
+	container, err := idc.ContainerInspect(ctx, keployContainer)
 	if err != nil {
 		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")
 		return "", err
@@ -364,12 +364,12 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 			return mount.Source, nil
 		}
 	}
-	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
+	return "", fmt.Errorf("%s", fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
 }
 
 // ForceAbsolutePath replaces relative paths in bind mounts with absolute paths
-func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
-	hostWorkingDirectory, err := idc.GetHostWorkingDirectory()
+func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string, keployContainer string) error {
+	hostWorkingDirectory, err := idc.GetHostWorkingDirectory(keployContainer)
 	if err != nil {
 		return err
 	}
@@ -380,7 +380,7 @@ func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
 		return err
 	}
 	dockerComposeContext = filepath.Dir(dockerComposeContext)
-	idc.logger.Debug("docker compose file location in host filesystem", zap.Any("dockerComposeContext", dockerComposeContext))
+	idc.logger.Debug("docker compose file location in host filesystem", zap.String("dockerComposeContext", dockerComposeContext))
 
 	// Loop through all services in compose file
 	for _, service := range c.Services.Content {
@@ -461,6 +461,7 @@ func (idc *Impl) MakeNetworkExternal(c *Compose) error {
 // SetKeployNetwork adds the keploy-network network to the new docker compose file and copy rest of the contents from
 // existing user docker compose file
 func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
+
 	// Ensure that the top-level networks mapping exists.
 	if c.Networks.Content == nil {
 		c.Networks.Kind = yaml.MappingNode
@@ -538,7 +539,31 @@ func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 	return false, nil
 }
 
-func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool) error {
+// volumeOptionsMatch compares existing volume options with desired options
+// Returns true if they match, false otherwise
+func (idc *Impl) volumeOptionsMatch(existingOpts, desiredOpts map[string]string) bool {
+	// If both are empty or nil, they match
+	if len(existingOpts) == 0 && len(desiredOpts) == 0 {
+		return true
+	}
+
+	// If lengths are different, they don't match
+	if len(existingOpts) != len(desiredOpts) {
+		return false
+	}
+
+	// Compare each key-value pair
+	for key, desiredValue := range desiredOpts {
+		existingValue, exists := existingOpts[key]
+		if !exists || existingValue != desiredValue {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error {
 	// Set a timeout for the context
 	ctx, cancel := context.WithTimeout(ctx, idc.timeoutForDockerQuery)
 	defer cancel()
@@ -553,32 +578,47 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 	}
 
 	if len(volumeList.Volumes) > 0 {
-		if !recreate {
-			idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
-			return err
+		// Volume exists, check if it has the same options
+		existingVolume := volumeList.Volumes[0]
+
+		// Compare driver options
+		if idc.volumeOptionsMatch(existingVolume.Options, driverOpts) {
+			idc.logger.Info("volume already exists with the same options", zap.String("volume", volumeName))
+			return nil
 		}
 
+		if !recreate {
+			idc.logger.Info("volume already exists but with different options", zap.String("volume", volumeName))
+			return fmt.Errorf("volume %s exists with different options", volumeName)
+		}
+
+		idc.logger.Debug("removing existing volume with different options", zap.String("volume", volumeName))
 		err := idc.VolumeRemove(ctx, volumeName, false)
 		if err != nil {
-			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+			idc.logger.Error("failed to remove existing volume", zap.String("volume", volumeName), zap.Error(err))
+			cancel()
 			return err
 		}
+		idc.logger.Info("removed existing volume", zap.String("volume", volumeName))
 	}
-
-	// Create the 'debugfs' volume if it doesn't exist
-	_, err = idc.VolumeCreate(ctx, volume.CreateOptions{
+	// Create the volume,
+	// Create volume with provided driver options or default
+	createOptions := volume.CreateOptions{
 		Name:   volumeName,
 		Driver: "local",
-		DriverOpts: map[string]string{
-			"type":   volumeName, // Use "none" for local driver
-			"device": volumeName,
-		},
-	})
+	}
+
+	// If driverOpts is provided and not empty, use them; otherwise use default
+	if len(driverOpts) > 0 {
+		createOptions.DriverOpts = driverOpts
+	}
+
+	_, err = idc.VolumeCreate(ctx, createOptions)
 	if err != nil {
-		idc.logger.Error("failed to create volume", zap.Any("volume", volumeName), zap.Error(err))
+		idc.logger.Error("failed to create volume", zap.String("volume", volumeName), zap.Error(err))
 		return err
 	}
 
-	idc.logger.Debug("volume created", zap.Any("volume", volumeName))
+	idc.logger.Debug("volume created", zap.String("volume", volumeName))
 	return nil
 }

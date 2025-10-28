@@ -4,6 +4,7 @@ package hooks
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -108,4 +110,17 @@ func getSelfInodeNumber() (uint64, error) {
 		return Ino, nil
 	}
 	return 0, nil
+}
+
+func GetPortToSendToKernel(_ context.Context, rules []config.BypassRule) []uint {
+	// if the rule only contains port, then it should be sent to kernel
+	ports := []uint{}
+	for _, rule := range rules {
+		if rule.Host == "" && rule.Path == "" {
+			if rule.Port != 0 {
+				ports = append(ports, rule.Port)
+			}
+		}
+	}
+	return ports
 }

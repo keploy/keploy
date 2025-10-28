@@ -32,6 +32,12 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return errUnsupported
 }
 
+func (c *Core) GetHookUnloadDone(id uint64) <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch) // Immediately close since no actual hooks are loaded
+	return ch
+}
+
 func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 	return errUnsupported
 }
@@ -40,7 +46,7 @@ func (c *Core) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock,
 	return errUnsupported
 }
 
-func (c *Core) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
+func (c *Core) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
 	return nil, errUnsupported
 }
 
@@ -52,4 +58,8 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 
 func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 	return "", errUnsupported
+}
+
+func (c *Core) GetErrorChannel() <-chan error {
+	return nil
 }

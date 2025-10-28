@@ -19,7 +19,28 @@ type DecodeContext struct {
 	LastOp             *LastOperation
 	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
 	ServerGreetings    *ServerGreetings
+	ClientCapabilities uint32
 	PluginName         string
+	UseSSL             bool
+	// Capability flags
+	ServerCaps         uint32 // negotiated server caps (from HandshakeV10)
+	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
+	RecordedClientCaps uint32 // caps from the recorded config mock
+	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
+}
+
+const CLIENT_DEPRECATE_EOF = 0x01000000
+
+func (d *DecodeContext) effectiveClientCaps() uint32 {
+	if d.PreferRecordedCaps && d.RecordedClientCaps != 0 {
+		return d.RecordedClientCaps
+	}
+	return d.ClientCaps
+}
+
+func (d *DecodeContext) DeprecateEOF() bool {
+	return (d.ServerCaps&CLIENT_DEPRECATE_EOF) != 0 &&
+		(d.effectiveClientCaps()&CLIENT_DEPRECATE_EOF) != 0
 }
 
 // This map is used to store the last operation that was performed on a connection.
@@ -101,7 +122,8 @@ func GetCachingSha2PasswordMechanism(data byte) (string, error) {
 	case byte(mysql.FastAuthSuccess):
 		return mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess), nil
 	default:
-		return "", fmt.Errorf("invalid caching_sha2_password mechanism")
+		einval := fmt.Sprintf("invalid caching_sha2_password mechanism, found:%02x ", data)
+		return "", fmt.Errorf("%s", einval)
 	}
 }
 
@@ -112,7 +134,8 @@ func StringToCachingSha2PasswordMechanism(data string) (mysql.CachingSha2Passwor
 	case "FastAuthSuccess":
 		return mysql.FastAuthSuccess, nil
 	default:
-		return 0, fmt.Errorf("invalid caching_sha2_password mechanism")
+		einval := fmt.Sprintf("invalid caching_sha2_password mechanism, found:%s ", data)
+		return 0, fmt.Errorf("%s", einval)
 	}
 }
 

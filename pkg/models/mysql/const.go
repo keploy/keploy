@@ -21,6 +21,7 @@ const (
 // Some constants for MySQL
 const (
 	HandshakeResponse41 = "HandshakeResponse41"
+	SSLRequest          = "SSLRequest"
 	COM_STMT_PREPARE_OK = "COM_STMT_PREPARE_OK"
 )
 
@@ -40,6 +41,8 @@ const (
 // Some constants for MySQL
 const (
 	EncryptedPassword = "encrypted_password"
+	PlainPassword     = "plain_password"
+	AuthSwithResponse = "AuthSwitchResponse"
 )
 
 // CachingSha2Password constants
@@ -142,6 +145,15 @@ const (
 	PART_KEY_FLAG       = 16384
 	GROUP_FLAG          = 32768
 	UNIQUE_FLAG         = 65536
+)
+
+// Cursor types for prepared statements
+const (
+	CURSOR_TYPE_NO_CURSOR     byte = 0x0
+	CURSOR_TYPE_READ_ONLY     byte = 0x1
+	CURSOR_TYPE_FOR_UPDATE    byte = 0x2
+	CURSOR_TYPE_SCROLLABLE    byte = 0x4
+	PARAMETER_COUNT_AVAILABLE byte = 0x8
 )
 
 // Utility command Packet Status

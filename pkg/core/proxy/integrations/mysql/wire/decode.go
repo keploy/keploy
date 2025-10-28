@@ -21,19 +21,6 @@ import (
 	"go.uber.org/zap"
 )
 
-/*
-    1.  BytesToMySQLStruct
-	2.	DecodeMySQLBytes
-	3.	ParseMySQLPacket
-	4.	MySQLBytesToStruct
-	5.	UnmarshalMySQLPacket
-	6.	ConvertBytesToMySQL
-	7.	DeserializeMySQLPacket
-	8.	DecodeMySQLData
-	9.	BytesToMySQLData
-	10.	UnpackMySQLBytes
-*/
-
 // DecodePayload is used to decode mysql packets that don't consist of multiple packets within them, because we are reading per packet.
 func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *DecodeContext) (*mysql.PacketBundle, error) {
 	//Parse the data into mysql header and payload
@@ -82,7 +69,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
-		return parsedPacket, fmt.Errorf("Server Greetings not found")
+		return parsedPacket, fmt.Errorf("server Greetings not found")
 	}
 
 	logger.Debug("Last operation when handling client query", zap.Any("last operation", mysql.CommandStatusToString(lastOp)))
@@ -160,7 +147,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	if payloadType != mysql.HandshakeV10 {
 		sg, ok = decodeCtx.ServerGreetings.Load(clientConn)
 		if !ok {
-			return parsedPacket, fmt.Errorf("Server Greetings not found")
+			return parsedPacket, fmt.Errorf("server Greetings not found")
 		}
 	}
 
@@ -168,15 +155,33 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	// Handle handshakeResponse41 separately, because its status is not defined and can be changed with the client capabilities.
 	if lastOp == mysql.HandshakeV10 {
-		logger.Debug("HandshakeResponse41 packet", zap.Any("Type", payloadType))
-		pkt, err := connection.DecodeHandshakeResponse41(ctx, logger, payload)
+		logger.Debug("HandshakeResponse41/SSL Request packet", zap.Any("Type", payloadType))
+		pkt, err := connection.DecodeHandshakeResponse(ctx, logger, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode HandshakeResponse41 packet: %w", err)
 		}
 
-		setPacketInfo(ctx, parsedPacket, pkt, mysql.HandshakeResponse41, clientConn, payloadType, decodeCtx)
+		var pktType string
+		switch pkt := pkt.(type) {
+		case *mysql.HandshakeResponse41Packet:
+			// Store the client capabilities to use it later
+			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
 
-		logger.Debug("HandshakeResponse41 decoded", zap.Any("parsed packet", parsedPacket))
+			pktType = mysql.HandshakeResponse41
+			lastOp = payloadType
+		case *mysql.SSLRequestPacket:
+			// Store the client capabilities to use it later
+			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+
+			pktType = mysql.SSLRequest
+			decodeCtx.UseSSL = true
+			logger.Info("SSL Request packet detected")
+			// Don't change the last operation if the packet is an SSL Request
+		}
+
+		setPacketInfo(ctx, parsedPacket, pkt, pktType, clientConn, lastOp, decodeCtx)
+
+		logger.Debug("HandshakeResponse41/SSL Request decoded", zap.Any("parsed packet", parsedPacket))
 
 		return parsedPacket, nil
 	}
@@ -206,7 +211,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	case payloadType == mysql.OK:
 		if lastOp == mysql.COM_STMT_PREPARE {
 			logger.Debug("COM_STMT_PREPARE_OK packet", zap.Any("Type", payloadType))
-			pkt, err := preparedstmt.DecodePrepareOk(ctx, logger, payload)
+			pkt, err := preparedstmt.DecodePrepareOk(ctx, logger, payload, sg.CapabilityFlags)
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode COM_STMT_PREPARE_OK packet: %w", err)
 			}
@@ -357,7 +362,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	case payloadType == mysql.COM_QUERY:
 		logger.Debug("COM_QUERY packet", zap.Any("Type", payloadType))
 
-		pkt, err := query.DecodeQuery(ctx, payload)
+		pkt, err := query.DecodeQuery(ctx, logger, payload, decodeCtx.ClientCapabilities)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_QUERY packet: %w", err)
 		}
@@ -380,7 +385,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	case payloadType == mysql.COM_STMT_EXECUTE:
 		logger.Debug("COM_STMT_EXECUTE packet", zap.Any("Type", payloadType))
-		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements)
+		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_EXECUTE packet: %w", err)
 		}
@@ -421,7 +426,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		logger.Debug("COM_STMT_SEND_LONG_DATA decoded", zap.Any("parsed packet", parsedPacket))
 	default:
 		logger.Warn("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
-		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), "Unknown type", clientConn, RESET, decodeCtx)
+		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), clientConn, RESET, decodeCtx)
 	}
 
 	return parsedPacket, nil

@@ -13,24 +13,35 @@ type Instrumentation interface {
 	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error)
+	StartIncomingProxy(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions) error
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
 
 type Service interface {
-	Start(ctx context.Context, reRecord bool) error
+	Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
+	SetGlobalMockChannel(mockCh chan<- *models.Mock)
+	GetNextTestSetID(ctx context.Context) (string, error)
 }
 
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error
+	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error
 	// GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 }
 
 type MockDB interface {
 	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
+	DeleteMocksForSet(ctx context.Context, testSetID string) error
+	GetCurrMockID() int64
+	ResetCounterID()
+}
+
+type TestSetConfig interface {
+	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
 
 type TestSetDB interface {

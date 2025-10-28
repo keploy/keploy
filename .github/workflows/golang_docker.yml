@@ -1,27 +1,64 @@
 name: Golang On Docker
-on: [pull_request]
+on:
+  workflow_call:
+    inputs:
+      image_tag:            
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
 jobs:
   golang_docker:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: gin-mongo
+            path: gin-mongo
+            script_dir: gin_mongo
+          - name: echo-sql
+            path: echo-sql
+            script_dir: echo_sql
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Run build script
-      run: |
-         source ./.github/workflows/test_workflow_scripts/update-docker.sh
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          image_tag: ${{ inputs.image_tag }}
 
-    - name: Build binary
-      run: |
-        go build  -tags=viper_bind_struct -o keployv2
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
 
-    - name: Checkout the samples-go repository
-      uses: actions/checkout@v2
-      with:
-        repository: keploy/samples-go
-        path: samples-go
-    - name: Run gin-mongo application
-      run: |
-        cd samples-go/gin-mongo
-        source ./../../.github/workflows/test_workflow_scripts/golang-docker.sh
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
 
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+      - name: Run ${{ matrix.app.name }} application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker.sh

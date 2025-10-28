@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/app"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -19,33 +20,37 @@ import (
 )
 
 type Core struct {
-	Proxy                      // embedding the Proxy interface to transfer the proxy methods to the core object
-	Hooks                      // embedding the Hooks interface to transfer the hooks methods to the core object
-	Tester                     // embedding the Tester interface to transfer the tester methods to the core object
-	dockerClient docker.Client //embedding the docker client to transfer the docker client methods to the core object
-	logger       *zap.Logger
-	id           utils.AutoInc
-	apps         sync.Map
-	proxyStarted bool
+	Proxy                       // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks                       // embedding the Hooks interface to transfer the hooks methods to the core object
+	IncomingProxy               // embedding the IncomingProxy interface to transfer the incoming proxy methods to the core object
+	Tester                      // embedding the Tester interface to transfer the tester methods to the core object
+	dockerClient  docker.Client //embedding the docker client to transfer the docker client methods to the core object
+	logger        *zap.Logger
+	id            utils.AutoInc
+	apps          sync.Map
+	proxyStarted  bool
 }
 
-func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
+func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client, ingressProxy IncomingProxy) *Core {
 	return &Core{
-		logger:       logger,
-		Hooks:        hook,
-		Proxy:        proxy,
-		Tester:       tester,
-		dockerClient: client,
+		logger:        logger,
+		Hooks:         hook,
+		IncomingProxy: ingressProxy,
+		Proxy:         proxy,
+		Tester:        tester,
+		dockerClient:  client,
 	}
 }
 
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// create a new app and store it in the map
 	id := uint64(c.id.Next())
+	c.logger.Info("setting up app", zap.String("keployContainer", opts.KeployContainer))
 	a := app.NewApp(c.logger, id, cmd, c.dockerClient, app.Options{
-		DockerNetwork: opts.DockerNetwork,
-		Container:     opts.Container,
-		DockerDelay:   opts.DockerDelay,
+		DockerNetwork:   opts.DockerNetwork,
+		Container:       opts.Container,
+		DockerDelay:     opts.DockerDelay,
+		KeployContainer: opts.KeployContainer,
 	})
 	c.apps.Store(id, a)
 
@@ -81,12 +86,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return hookErr
 	}
 
-	isDocker := false
-	appKind := a.Kind(ctx)
-	//check if the app is docker/docker-compose or native
-	if utils.IsDockerCmd(appKind) {
-		isDocker = true
-	}
+	isDocker := utils.IsDockerCmd(a.Kind(ctx))
 
 	select {
 	case <-ctx.Done():
@@ -99,7 +99,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return errors.New("failed to get the error group from the context")
 	}
 
-	// create a new error group for the hooks
+	// Create a new error group for the hooks (Always required)
 	hookErrGrp, _ := errgroup.WithContext(ctx)
 	hookCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the hookCtx to control the lifecycle of the hooks
 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
@@ -113,7 +113,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	g.Go(func() error {
 		<-ctx.Done()
-
 		proxyCtxCancel()
 		err = proxyErrGrp.Wait()
 		if err != nil {
@@ -128,18 +127,22 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
 		c.apps.Delete(id)
-		c.id = utils.AutoInc{}
+		c.id.Reset()
 
 		return nil
 	})
 
-	//load hooks
-	err = c.Hooks.Load(hookCtx, id, HookCfg{
+	// Load hooks
+	err = c.Load(hookCtx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
 		IsDocker:   isDocker,
 		KeployIPV4: a.KeployIPv4Addr(),
 		Mode:       opts.Mode,
+		Rules:      opts.Rules,
+		E2E:        opts.E2E,
+		Port:       opts.Port,
+		BigPayload: opts.BigPayload,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")
@@ -161,10 +164,11 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
 	// start proxy
-	err = c.Proxy.StartProxy(proxyCtx, ProxyOptions{
+	err = c.StartProxy(proxyCtx, ProxyOptions{
 		DNSIPv4Addr: a.KeployIPv4Addr(),
 		//DnsIPv6Addr: ""
 	})
+
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to start proxy")
 		return hookErr
@@ -190,7 +194,12 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
-func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
+// GetHookUnloadDone returns a channel that signals when hooks are completely unloaded
+func (c *Core) GetHookUnloadDone(id uint64) <-chan struct{} {
+	return c.GetUnloadDone()
+}
+
+func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
 	a, err := c.getApp(id)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to get app")
@@ -206,7 +215,6 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	defer func() {
 		err := runAppErrGrp.Wait()
 		defer close(inodeErrCh)
-		defer close(inodeChan)
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to stop the app")
 		}
@@ -215,11 +223,12 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		if a.Kind(ctx) == utils.Native {
+			close(inodeChan) // since we are not using inode in native mode
 			return nil
 		}
 		select {
 		case inode := <-inodeChan:
-			err := c.Hooks.SendInode(ctx, id, inode)
+			err := c.SendDockerAppInfo(id, structs.DockerAppInfo{AppInode: inode, ClientID: id})
 			if err != nil {
 				utils.LogError(c.logger, err, "")
 
@@ -231,9 +240,14 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 		return nil
 	})
 
+	originalApp := a.GetAppCommand()
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(appErrCh)
+		defer a.SetAppCommand(originalApp)
+		if opts.AppCommand != "" {
+			a.SetAppCommand(opts.AppCommand)
+		}
 		appErr := a.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr.Err, "error while running the app")
@@ -244,6 +258,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 
 	select {
 	case <-runAppCtx.Done():
+		c.logger.Debug("Run context cancelled, stopping the app and reverting the app command")
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	case appErr := <-appErrCh:
 		return appErr

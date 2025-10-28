@@ -2,6 +2,7 @@
 package testdb
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -9,7 +10,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
@@ -34,23 +37,38 @@ type tcsInfo struct {
 	path string
 }
 
-func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
+	tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 
 	return nil
 }
 
 func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
+	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger, yaml.ModeDir)
+}
+
+func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) ([]string, error) {
+	if latestRunID == "" {
+		ts.logger.Warn("No latest run ID provided, returning empty test set IDs")
+		return []string{}, nil
+	}
+
+	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
+
+	return yaml.ReadSessionIndices(ctx, runReportPath, ts.logger, yaml.ModeFile)
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+
 	tcs := []*models.TestCase{}
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
@@ -63,12 +81,12 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	}
 	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -83,11 +101,21 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			return nil, err
 		}
 
+		if len(data) == 0 {
+			ts.logger.Warn("skipping empty testcase", zap.String("testcase name", name))
+			continue
+		}
+
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
 			return nil, err
+		}
+
+		if testCase == nil {
+			ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", name))
+			continue
 		}
 
 		tc, err := Decode(testCase, ts.logger)
@@ -97,20 +125,41 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		}
 		tcs = append(tcs, tc)
 	}
+
+	// Sort test cases by their actual timestamp, whether HTTP or gRPC
 	sort.SliceStable(tcs, func(i, j int) bool {
-		return tcs[i].HTTPReq.Timestamp.Before(tcs[j].HTTPReq.Timestamp)
+		var timeI, timeJ time.Time
+
+		// Determine which timestamp to use for test case i based on its Kind
+		if tcs[i].Kind == models.HTTP {
+			timeI = tcs[i].HTTPReq.Timestamp
+		} else if tcs[i].Kind == models.GRPC_EXPORT {
+			timeI = tcs[i].GrpcReq.Timestamp
+		}
+
+		// Determine which timestamp to use for test case j based on its Kind
+		if tcs[j].Kind == models.HTTP {
+			timeJ = tcs[j].HTTPReq.Timestamp
+		} else if tcs[j].Kind == models.GRPC_EXPORT {
+			timeJ = tcs[j].GrpcReq.Timestamp
+		}
+
+		return timeI.Before(timeJ)
 	})
+
 	return tcs, nil
 }
 
-func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
 
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 	return nil
 }
 
@@ -131,10 +180,24 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 	yamlTc.Name = tcsName
-	data, err := yamlLib.Marshal(&yamlTc)
+
+	var buf bytes.Buffer
+	encoder := yamlLib.NewEncoder(&buf)
+	encoder.SetIndent(2) // Set indent to 2 spaces to match the original style
+	err = encoder.Encode(&yamlTc)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
+	data := buf.Bytes()
+
+	_, err = yaml.FileExists(ctx, ts.logger, tcsPath, tcsName)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to find yaml file", zap.String("path directory", tcsPath), zap.String("yaml", tcsName))
+		return tcsInfo{name: tcsName, path: tcsPath}, err
+	}
+
+	data = append([]byte(utils.GetVersionAsComment()), data...)
+
 	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
@@ -161,6 +224,60 @@ func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 	err := yaml.DeleteDir(ctx, ts.logger, path)
 	if err != nil {
 		ts.logger.Error("failed to delete the testset", zap.String("testset id", testSetID))
+		return err
+	}
+	return nil
+}
+func (ts *TestYaml) ChangePath(path string) {
+
+	ts.TcsPath = path
+}
+
+func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
+	// get the test case and fill the assertion and update the test case
+	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	data, err := yaml.ReadFile(ctx, ts.logger, tcsPath, testCaseID)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
+		return err
+	}
+	if len(data) == 0 {
+		ts.logger.Warn("skipping empty testcase", zap.String("testcase name", testCaseID))
+		return nil
+	}
+	var testCase *yaml.NetworkTrafficDoc
+
+	err = yamlLib.Unmarshal(data, &testCase)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+		return err
+	}
+
+	if testCase == nil {
+		ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
+		return nil
+	}
+
+	tc, err := Decode(testCase, ts.logger)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to decode the testcase")
+		return err
+	}
+	tc.Assertions = assertions
+	yamlTc, err := EncodeTestcase(*tc, ts.logger)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to encode the testcase")
+		return err
+	}
+	yamlTc.Name = testCaseID
+	data, err = yamlLib.Marshal(&yamlTc)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to marshall the testcase")
+		return err
+	}
+	err = yaml.WriteFile(ctx, ts.logger, tcsPath, testCaseID, data, false)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
 		return err
 	}
 	return nil

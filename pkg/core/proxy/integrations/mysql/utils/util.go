@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -103,7 +104,7 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 
 // BytesToMySQLPacket converts a byte slice to a MySQL packet
 func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
-	if buffer == nil || len(buffer) < 4 {
+	if len(buffer) < 4 {
 		return mysql.Packet{}, errors.New("buffer is nil or too short to be a valid MySQL packet")
 	}
 
@@ -141,14 +142,23 @@ func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 
 		// 252: value of following 2
 	case 0xfc:
+		if len(b) < 3 {
+			return 0, true, 0
+		}
 		return uint64(b[1]) | uint64(b[2])<<8, false, 3
 
 		// 253: value of following 3
 	case 0xfd:
+		if len(b) < 4 {
+			return 0, true, 0
+		}
 		return uint64(b[1]) | uint64(b[2])<<8 | uint64(b[3])<<16, false, 4
 
 		// 254: value of following 8
 	case 0xfe:
+		if len(b) < 9 {
+			return 0, true, 0
+		}
 		return uint64(b[1]) | uint64(b[2])<<8 | uint64(b[3])<<16 |
 				uint64(b[4])<<24 | uint64(b[5])<<32 | uint64(b[6])<<40 |
 				uint64(b[7])<<48 | uint64(b[8])<<56,
@@ -288,4 +298,102 @@ func WriteUint24(buf *bytes.Buffer, value uint32) error {
 	buf.WriteByte(byte(value >> 8))
 	buf.WriteByte(byte(value >> 16))
 	return nil
+}
+
+func ParseBinaryDate(b []byte) (interface{}, int, error) {
+	if len(b) == 0 {
+		return nil, 0, nil
+	}
+	length := b[0]
+	if length == 0 {
+		return nil, 1, nil
+	}
+	year := binary.LittleEndian.Uint16(b[1:3])
+	month := b[3]
+	day := b[4]
+	return fmt.Sprintf("%04d-%02d-%02d", year, month, day), int(length) + 1, nil
+}
+
+func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
+	if len(b) == 0 {
+		return nil, 0, nil
+	}
+	l := int(b[0])
+	if l == 0 {
+		return nil, 1, nil // zero value
+	}
+	// DATETIME valid lengths in MySQL binary row: 4, 7, 11
+	if l != 4 && l != 7 && l != 11 {
+		return nil, 0, fmt.Errorf("invalid DATETIME length %d (expected 0|4|7|11) - likely misaligned buffer", l)
+	}
+	if len(b) < 1+l {
+		return nil, 0, io.ErrUnexpectedEOF
+	}
+
+	p := b[1:] // start of payload after length
+	year := int(binary.LittleEndian.Uint16(p[0:2]))
+	month := int(p[2])
+	day := int(p[3])
+
+	switch l {
+	case 4:
+		// YYYY-MM-DD
+		return fmt.Sprintf("%04d-%02d-%02d", year, month, day), 1 + l, nil
+	case 7:
+		hour := int(p[4])
+		minute := int(p[5])
+		second := int(p[6])
+		// Basic sanity guard helps catch misalignment early
+		if !validYMDHMS(year, month, day, hour, minute, second) {
+			return nil, 0, fmt.Errorf("invalid DATETIME %04d-%02d-%02d %02d:%02d:%02d (misaligned?)",
+				year, month, day, hour, minute, second)
+		}
+		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d",
+			year, month, day, hour, minute, second), 1 + l, nil
+	case 11:
+		hour := int(p[4])
+		minute := int(p[5])
+		second := int(p[6])
+		us := binary.LittleEndian.Uint32(p[7:11])
+		if !validYMDHMS(year, month, day, hour, minute, second) {
+			return nil, 0, fmt.Errorf("invalid DATETIME %04d-%02d-%02d %02d:%02d:%02d.%06d (misaligned?)",
+				year, month, day, hour, minute, second, us)
+		}
+		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d",
+			year, month, day, hour, minute, second, us), 1 + l, nil
+	}
+	panic(fmt.Sprintf("unreachable code reached in ParseBinaryDateTime: unexpected length l=%d", l))
+}
+
+func validYMDHMS(y, m, d, hh, mm, ss int) bool {
+	return y >= 1 && y <= 9999 &&
+		m >= 1 && m <= 12 &&
+		d >= 1 && d <= 31 && // fine for a quick guard; deeper month/day checks optional
+		hh >= 0 && hh <= 23 &&
+		mm >= 0 && mm <= 59 &&
+		ss >= 0 && ss <= 59
+}
+
+func ParseBinaryTime(b []byte) (interface{}, int, error) {
+	if len(b) == 0 {
+		return nil, 0, nil
+	}
+	length := b[0]
+	if length == 0 {
+		return nil, 1, nil
+	}
+	isNegative := b[1] == 1
+	days := binary.LittleEndian.Uint32(b[2:6])
+	hours := b[6]
+	minutes := b[7]
+	seconds := b[8]
+	var microseconds uint32
+	if length > 8 {
+		microseconds = binary.LittleEndian.Uint32(b[9:13])
+	}
+	timeString := fmt.Sprintf("%d %02d:%02d:%02d.%06d", days, hours, minutes, seconds, microseconds)
+	if isNegative {
+		timeString = "-" + timeString
+	}
+	return timeString, int(length) + 1, nil
 }

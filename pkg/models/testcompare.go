@@ -1,11 +1,11 @@
 package models
 
 type AbsResult struct {
-	Kind       StringResult `json:"kind" bson:"kind" yaml:"kind"`
-	Name       StringResult `json:"name" bson:"name" yaml:"name"`
-	Req        ReqCompare   `json:"req" bson:"req" yaml:"req"`
-	Resp       RespCompare  `json:"resp" bson:"resp" yaml:"resp"`
-	CurlResult StringResult `json:"curl_result" bson:"curl_result" yaml:"curl_result"`
+	Kind StringResult `json:"kind" bson:"kind" yaml:"kind"`
+	Name StringResult `json:"name" bson:"name" yaml:"name"`
+	Req  ReqCompare   `json:"req" bson:"req" yaml:"req"`
+	Resp RespCompare  `json:"resp" bson:"resp" yaml:"resp"`
+	// CurlResult StringResult `json:"curl_result" bson:"curl_result" yaml:"curl_result"`
 }
 
 type ReqCompare struct {

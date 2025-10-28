@@ -7,6 +7,7 @@ body:
   attributes:
     value: |
       Thanks for taking the time to fill out our bug report form 🙏
+
 - type: checkboxes
   attributes:
     label: "👀 Is there an existing issue for this?"
@@ -14,6 +15,7 @@ body:
     options:
     - label: I have searched and didn't find similar issue
       required: true
+
 - type: textarea
   attributes:
     label: 👍 Current behavior
@@ -24,6 +26,7 @@ body:
       What I expect is <Z>
   validations:
     required: true
+
 - type: textarea
   attributes:
     label: 👟 Steps to Replicate
@@ -35,60 +38,130 @@ body:
       4. See error
   validations:
     required: true
+
+- type: textarea
+  id: logs
+  attributes:
+    label: 📜 Logs (if any)
+    description: Paste any relevant logs here. You can also upload `.log` files via drag & drop.
+    placeholder: |
+      ```
+      paste stack trace, application log, or keploy logs here
+      ```
+  validations:
+    required: false
+
+- type: dropdown
+  id: operating-system
+  attributes:
+    label: "💻 Operating system"
+    description: What OS is your server/device running on?
+    options:
+      - Linux
+      - MacOS
+      - Windows
+      - Something else
+  validations:
+    required: true
+
+- type: textarea
+  id: uname
+  attributes:
+    label: 🧾 System Info (`uname -a`)
+    description: Run "uname -a" on your terminal and paste the output (macOS/Linux only).
+    placeholder: |
+      Darwin MacBook-Pro.local 22.6.0 Darwin Kernel Version ...
+  validations:
+    required: false
+
+- type: textarea
+  id: os-release
+  attributes:
+    label: 📦 OS Release Info (`cat /etc/os-release`)
+    description: Run "cat /etc/os-release" (Linux only) and paste the full output here.
+    placeholder: |
+      NAME="Ubuntu"
+      VERSION="22.04.4 LTS (Jammy Jellyfish)"
+      ...
+  validations:
+    required: false
+
+- type: textarea
+  id: docker
+  attributes:
+    label: 🐳 Docker Info (if applicable)
+    description: |
+      Are you running inside Docker? If yes, please mention:
+      - Docker version
+      - Docker Desktop version (if used)
+      - Build image
+      - Runtime image
+    placeholder: |
+      Yes, running inside Docker.
+      - Docker version: 24.0.2
+      - Docker Desktop version: 4.24.2
+      - Build image: golang:1.21-alpine
+      - Runtime image: alpine:3.18
+  validations:
+    required: false
+
 - type: textarea
   id: environment
   attributes:
     label: "🧱 Your Environment"
-    description: "What exact version of Appwrite? What Appwrite SDK and version are you using? Is your environment customized in any way?"
-    placeholder: "I use AWS for ..."
+    description: Include any infrastructure info (e.g., local machine, VM, cloud, Kubernetes etc.)
+    placeholder: |
+      - Running on Kubernetes (GKE)
+      - 3-node cluster
   validations:
     required: false
-- type: dropdown
-  id: operating-system
-  attributes:
-      label: "💻 Operating system"
-      description: "What OS is your server / device running on?"
-      options:
-        - Linux
-        - MacOS
-        - Windows
-        - Something else
-  validations:
-      required: true
+
 - type: textarea
   id: version
   attributes:
     label: 🎲 Version
+    description: |
+      You can find your current Keploy version by running "keploy -v" or "keploy --version" in your terminal.
     placeholder: |
-      "I am using latest version v2.0.0-alpha31"
+      I am using latest version v2.5.2
   validations:
     required: true
+
 - type: dropdown
   id: repository
   attributes:
-    label: 💻 Repository
+    label: 📦 Repository
     options:
-        - keploy
-        - go-sdk
-        - java-sdk
-        - python-sdk
-        - typescript-sdk
-        - docs
-        - website
-        - writers-program
-        - blog-website
-        - ui
-        - vscode-extension
-        - jetbrains-plugin
-        - samples-go
-        - samples-java
-        - samples-rust
-        - samples-python
-        - samples-csharp
-        - samples-typescript
+      - keploy
+      - go-sdk
+      - java-sdk
+      - python-sdk
+      - typescript-sdk
+      - docs
+      - website
+      - writers-program
+      - blog-website
+      - ui
+      - vscode-extension
+      - jetbrains-plugin
+      - samples-go
+      - samples-java
+      - samples-rust
+      - samples-python
+      - samples-csharp
+      - samples-typescript
   validations:
     required: true
+
+- type: textarea
+  id: use-case
+  attributes:
+    label: 🤔 What use case were you trying? (optional)
+    description: Tell us briefly what you were trying to achieve when this bug occurred.
+    placeholder: |
+      I was trying to capture test cases during a login API call...
+
 - type: markdown
   attributes:
     value: |
-        I have read the [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md) and followed [Contribution Guide](https://keploy.io/docs/keploy-explained/contribution-guide/)
+      I have read the [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md) and followed [Contribution Guide](https://keploy.io/docs/keploy-explained/contribution-guide/)

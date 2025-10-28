@@ -1,24 +1,29 @@
 package replay
 
 import (
-	"context"
 	"fmt"
 	"net/url"
+	"os"
+	"path"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/olekukonko/tablewriter"
+	// "encoding/json"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
-	total    int
-	passed   int
-	failed   int
-	ignored  int
-	status   bool
-	duration time.Duration
+	total     int
+	passed    int
+	failed    int
+	ignored   int
+	status    bool
+	duration  time.Duration
+	timeTaken string
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
@@ -67,67 +72,16 @@ func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 
 	parsedOldURL.Scheme = parsedNewURL.Scheme
 	parsedOldURL.Host = parsedNewURL.Host
-	path, err := url.JoinPath(parsedNewURL.Path, parsedOldURL.Path)
-	if err != nil {
-		return "", fmt.Errorf("failed to join '%v' and '%v' paths: %v", parsedNewURL.Path, parsedOldURL.Path, err)
-	}
-	parsedOldURL.Path = path
+	apiPath := path.Join(parsedNewURL.Path, parsedOldURL.Path)
 
+	parsedOldURL.Path = apiPath
+	parsedOldURL.RawPath = apiPath
 	replacedURL := parsedOldURL.String()
-	return replacedURL, nil
-}
-
-type requestMockUtil struct {
-	logger     *zap.Logger
-	path       string
-	mockName   string
-	apiTimeout uint64
-	basePath   string
-}
-
-func NewRequestMockUtil(logger *zap.Logger, path, mockName string, apiTimeout uint64, basePath string) RequestMockHandler {
-	return &requestMockUtil{
-		path:       path,
-		logger:     logger,
-		mockName:   mockName,
-		apiTimeout: apiTimeout,
-		basePath:   basePath,
+	decodedURL, err := url.PathUnescape(replacedURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode the URL: %v", err)
 	}
-}
-func (t *requestMockUtil) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
-	switch tc.Kind {
-	case models.HTTP:
-		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, t.logger, t.apiTimeout)
-		t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		return resp, err
-	}
-	return nil, nil
-}
-
-func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID string, coverage models.TestCoverage, tsCnt int) (*models.TestReport, error) {
-	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totalTestSetCount", tsCnt), zap.Any("coverage", coverage))
-	return nil, nil
-}
-
-func (t *requestMockUtil) ProcessTestRunStatus(_ context.Context, status bool, testSetID string) {
-	if status {
-		t.logger.Debug("Test case passed for", zap.String("testSetID", testSetID))
-	} else {
-		t.logger.Debug("Test case failed for", zap.String("testSetID", testSetID))
-	}
-}
-
-func (t *requestMockUtil) FetchMockName() string {
-	return t.mockName
-}
-
-func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
-	if t.basePath != "" {
-		t.logger.Debug("Mocking is disabled when basePath is given", zap.String("testSetID", testSetID), zap.String("basePath", t.basePath))
-		return
-	}
-	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
+	return decodedURL, nil
 }
 
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {
@@ -157,4 +111,263 @@ func timeWithUnits(duration time.Duration) string {
 		return fmt.Sprintf("%.2f min", duration.Minutes())
 	}
 	return fmt.Sprintf("%.2f hr", duration.Hours())
+}
+
+func getFailedTCs(results []models.TestResult) []string {
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.Status == models.TestStatusFailed {
+			ids = append(ids, r.TestCaseID)
+		}
+	}
+	return ids
+}
+
+func compareMockArrays(arr1, arr2 []string) bool {
+	counts1 := make(map[string]int)
+	counts2 := make(map[string]int)
+
+	for _, mock := range arr1 {
+		counts1[mock]++
+	}
+
+	for _, mock := range arr2 {
+		counts2[mock]++
+	}
+
+	if len(counts1) != len(counts2) {
+		return false
+	}
+
+	for mock, count := range counts1 {
+		if counts2[mock] != count {
+			return false
+		}
+	}
+
+	return true
+}
+
+type TestFailure struct {
+	TestSetID     string
+	TestID        string
+	ExpectedMocks []string
+	ActualMocks   []string
+	FailureReason models.ParserErrorType
+}
+
+type TestFailureStore struct {
+	mu       sync.Mutex
+	failures []TestFailure
+}
+
+func NewTestFailureStore() *TestFailureStore {
+	return &TestFailureStore{
+		failures: make([]TestFailure, 0),
+	}
+}
+
+func (tfs *TestFailureStore) AddFailure(testSetID, testID string, expectedMocks, actualMocks []string) {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
+	failure := TestFailure{
+		TestSetID:     testSetID,
+		TestID:        testID,
+		ExpectedMocks: expectedMocks,
+		ActualMocks:   actualMocks,
+	}
+	tfs.failures = append(tfs.failures, failure)
+}
+
+func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID string, proxyErr models.ParserError) {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
+	failure := TestFailure{
+		TestSetID:     testSetID,
+		TestID:        testCaseID,
+		ExpectedMocks: []string{},
+		ActualMocks:   []string{},
+		FailureReason: proxyErr.ParserErrorType,
+	}
+	tfs.failures = append(tfs.failures, failure)
+}
+
+func (tfs *TestFailureStore) GetFailures() []TestFailure {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
+	// Return a copy to prevent external modifications
+	failures := make([]TestFailure, len(tfs.failures))
+	copy(failures, tfs.failures)
+	return failures
+}
+
+type MockDifference struct {
+	Key            string
+	ExpectedValues []string
+	ActualValues   []string
+	DiffType       string // "missing", "extra", "different"
+}
+
+// CompareMockSlices compares two mock slices and returns the differences
+func CompareMockSlices(expected, actual []string) []MockDifference {
+	var differences []MockDifference
+
+	// Convert slices to maps for easier comparison
+	expectedMap := make(map[string]bool)
+	actualMap := make(map[string]bool)
+
+	for _, mock := range expected {
+		expectedMap[mock] = true
+	}
+	for _, mock := range actual {
+		actualMap[mock] = true
+	}
+
+	// Get all unique keys
+	allKeys := make(map[string]bool)
+	for mock := range expectedMap {
+		allKeys[mock] = true
+	}
+	for mock := range actualMap {
+		allKeys[mock] = true
+	}
+
+	// Sort keys for consistent output
+	var keys []string
+	for key := range allKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		_, expectedExists := expectedMap[key]
+		_, actualExists := actualMap[key]
+
+		if !expectedExists && actualExists {
+			differences = append(differences, MockDifference{
+				Key:            key,
+				ExpectedValues: []string{},
+				ActualValues:   []string{key},
+				DiffType:       "extra",
+			})
+		} else if expectedExists && !actualExists {
+			differences = append(differences, MockDifference{
+				Key:            key,
+				ExpectedValues: []string{key},
+				ActualValues:   []string{},
+				DiffType:       "missing",
+			})
+		}
+	}
+
+	return differences
+}
+
+// PrintFailuresTable prints all failures in a formatted table
+func (tfs *TestFailureStore) PrintFailuresTable() {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
+	if len(tfs.failures) == 0 {
+		fmt.Println("No test failures recorded.")
+		return
+	}
+
+	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
+	table.SetBorder(true)
+	table.SetRowLine(true)
+	table.SetCenterSeparator("|")
+	table.SetColumnSeparator("|")
+	table.SetRowSeparator("-")
+	table.SetAutoWrapText(true)
+	table.SetReflowDuringAutoWrap(false)
+	table.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
+	table.SetAlignment(tablewriter.ALIGN_CENTER)
+	table.SetColWidth(120)
+	table.SetTablePadding(" ")
+	table.SetColMinWidth(0, 15) // TEST SET column min width
+	table.SetColMinWidth(1, 12) // TEST ID column min width
+	table.SetColMinWidth(2, 50) // MOCK DIFFERENCES column min width
+
+	// Group failures by test set for better presentation
+	testSetGroups := make(map[string][]TestFailure)
+	for _, failure := range tfs.failures {
+		testSetGroups[failure.TestSetID] = append(testSetGroups[failure.TestSetID], failure)
+	}
+
+	// Sort test set IDs for consistent output
+	var testSetIDs []string
+	for testSetID := range testSetGroups {
+		testSetIDs = append(testSetIDs, testSetID)
+	}
+	sort.Strings(testSetIDs)
+
+	for _, testSetID := range testSetIDs {
+		failures := testSetGroups[testSetID]
+		testSetPrinted := false
+
+		// Group failures by test ID to combine mock differences and proxy errors
+		testIDGroups := make(map[string][]TestFailure)
+		for _, failure := range failures {
+			testIDGroups[failure.TestID] = append(testIDGroups[failure.TestID], failure)
+		}
+
+		// Sort test IDs for consistent output
+		var testIDs []string
+		for testID := range testIDGroups {
+			testIDs = append(testIDs, testID)
+		}
+		sort.Strings(testIDs)
+
+		for _, testID := range testIDs {
+			testFailures := testIDGroups[testID]
+			var combinedDiffText string
+			var allDiffStrings []string
+
+			for _, failure := range testFailures {
+				if failure.FailureReason == models.ErrMockNotFound {
+					allDiffStrings = append(allDiffStrings, "Outgoing call mock was not matched")
+				}
+
+				if len(failure.ExpectedMocks) > 0 || len(failure.ActualMocks) > 0 {
+					differences := CompareMockSlices(failure.ExpectedMocks, failure.ActualMocks)
+					var missingMocks, extraMocks []string
+					for _, diff := range differences {
+						switch diff.DiffType {
+						case "missing":
+							missingMocks = append(missingMocks, diff.Key)
+						case "extra":
+							extraMocks = append(extraMocks, diff.Key)
+						}
+					}
+					if len(missingMocks) > 0 {
+						allDiffStrings = append(allDiffStrings, fmt.Sprintf("Missing mocks: %s", strings.Join(missingMocks, ", ")))
+					}
+					if len(extraMocks) > 0 {
+						allDiffStrings = append(allDiffStrings, fmt.Sprintf("Extra mocks: %s", strings.Join(extraMocks, ", ")))
+					}
+				}
+				if len(allDiffStrings) > 0 {
+					combinedDiffText = strings.Join(allDiffStrings, " | ")
+				} else {
+					combinedDiffText = "No differences"
+				}
+			}
+
+			if !testSetPrinted {
+				table.Append([]string{testSetID, testID, combinedDiffText})
+				testSetPrinted = true
+			} else {
+				table.Append([]string{"", testID, combinedDiffText})
+			}
+		}
+	}
+
+	table.Render()
 }

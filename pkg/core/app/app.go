@@ -26,18 +26,15 @@ import (
 
 func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
 	app := &App{
-		logger:            logger,
-		id:                id,
-		cmd:               cmd,
-		docker:            client,
-		kind:              utils.FindDockerCmd(cmd),
-		keployContainer:   "keploy-v2",
-		mutex:             &sync.Mutex{},
-		container:         opts.Container,
-		containerDelay:    opts.DockerDelay,
-		containerNetwork:  opts.DockerNetwork,
-		containerIPv4:     "",
-		containerIPV4Chan: make(chan string, 1),
+		logger:           logger,
+		id:               id,
+		cmd:              cmd,
+		docker:           client,
+		kind:             utils.FindDockerCmd(cmd),
+		keployContainer:  opts.KeployContainer,
+		container:        opts.Container,
+		containerDelay:   opts.DockerDelay,
+		containerNetwork: opts.DockerNetwork,
 	}
 	return app
 }
@@ -65,9 +62,10 @@ type App struct {
 type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
-	Container     string
-	DockerDelay   uint64
-	DockerNetwork string
+	Container       string
+	DockerDelay     uint64
+	DockerNetwork   string
+	KeployContainer string
 }
 
 func (a *App) Setup(_ context.Context) error {
@@ -107,10 +105,8 @@ func (a *App) ContainerIPv4Addr() string {
 }
 
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-	a.containerIPv4 = ipAddr
-	a.containerIPV4Chan <- ipAddr
+	a.logger.Debug("setting container IPv4 address", zap.String("ipAddr", ipAddr))
+	a.containerIPv4 <- ipAddr
 }
 
 func (a *App) SetupDocker() error {
@@ -124,6 +120,19 @@ func (a *App) SetupDocker() error {
 			return fmt.Errorf("docker container is already in running state")
 		}
 	}
+
+	a.logger.Debug("inside setup docker", zap.String("cmd", a.cmd))
+
+	if HookImpl != nil {
+		newCmd, err := HookImpl.BeforeDockerSetup(context.Background(), a.cmd)
+		if err != nil {
+			utils.LogError(a.logger, err, "hook failed during docker setup")
+			return err
+		}
+		a.cmd = newCmd
+	}
+
+	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
 	//injecting appNetwork to keploy.
 	err := a.injectNetwork(a.containerNetwork)
@@ -162,10 +171,22 @@ func (a *App) SetupCompose() error {
 	}
 	composeChanged := false
 
+	// hook: allow compose mutation before further processing
+	if HookImpl != nil {
+		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+		if err != nil {
+			utils.LogError(a.logger, err, "hook failed during compose mutation")
+			return err
+		}
+		if changed {
+			composeChanged = true
+		}
+	}
+
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)
 	if ok {
-		err = a.docker.ForceAbsolutePath(compose, path)
+		err = a.docker.ForceAbsolutePath(compose, path, a.keployContainer)
 		if err != nil {
 			utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
 			return err
@@ -232,6 +253,15 @@ func (a *App) SetupCompose() error {
 	return nil
 }
 
+func (a *App) SetAppCommand(appCommand string) {
+	a.logger.Debug("Setting App Command", zap.String("cmd", appCommand))
+	a.cmd = appCommand
+}
+
+func (a *App) GetAppCommand() string {
+	return a.cmd
+}
+
 func (a *App) Kind(_ context.Context) utils.CmdType {
 	return a.kind
 }
@@ -274,8 +304,8 @@ func (a *App) injectNetwork(network string) error {
 	}
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
-
 func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
+
 	if e.Action != "start" {
 		return false, nil
 	}
@@ -346,9 +376,16 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		errCh <- errors.New("failed to get the error group from the context")
 		return errCh
 	}
+
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer close(errCh)
+		// closing the channels in any case when returning.
+		defer func() {
+			a.logger.Debug("closing err, containerIPv4 and inode channels ")
+			close(errCh)
+			close(a.containerIPv4)
+			close(a.inodeChan)
+		}()
 		for {
 			select {
 			case <-timer.C:
@@ -391,7 +428,10 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
+	dockerMetaCtx, cancel := context.WithCancel(ctx)
+
 	defer func() {
+		cancel()
 		err := g.Wait()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to run dockerized app")
@@ -399,13 +439,9 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}()
 
 	errCh := make(chan error, 1)
+
 	// listen for the "create container" event in order to send the inode of the container to the kernel
-	errCh2 := a.getDockerMeta(ctx)
-	defer func() {
-		a.mutex.Lock()
-		a.containerIPv4 = ""
-		a.mutex.Unlock()
-	}()
+	errCh2 := a.getDockerMeta(dockerMetaCtx)
 
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
@@ -436,7 +472,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
-
+	a.containerIPv4 = make(chan string, 1)
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}
@@ -472,7 +508,6 @@ func (a *App) waitTillExit() {
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
-
 	userCmd := a.cmd
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
@@ -485,6 +520,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+
 				return err
 			}
 			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)

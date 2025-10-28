@@ -6,7 +6,9 @@ import (
 	"context"
 	"sync"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core/app"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -16,9 +18,10 @@ type Hooks interface {
 	AppInfo
 	DestInfo
 	OutgoingInfo
-	TestBenchInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
+	GetUnloadDone() <-chan struct{}
 }
 
 type HookCfg struct {
@@ -27,6 +30,10 @@ type HookCfg struct {
 	IsDocker   bool
 	KeployIPV4 string
 	Mode       models.Mode
+	Rules      []config.BypassRule
+	E2E        bool
+	Port       uint32
+	BigPayload bool
 }
 
 type App interface {
@@ -42,7 +49,12 @@ type Proxy interface {
 	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
-	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
+	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
+	GetErrorChannel() <-chan error
+}
+
+type IncomingProxy interface {
+	Start(ctx context.Context, persister models.TestCasePersister, opts models.IncomingOptions)
 }
 
 type ProxyOptions struct {
@@ -58,7 +70,7 @@ type DestInfo interface {
 }
 
 type AppInfo interface {
-	SendInode(ctx context.Context, id uint64, inode uint64) error
+	SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error
 }
 
 // For keploy test bench
@@ -67,14 +79,13 @@ type Tester interface {
 	Setup(ctx context.Context, opts models.TestingOptions) error
 }
 type TestBenchInfo interface {
-	SendKeployPids(key models.ModeKey, pid uint32) error
-	SendKeployPorts(key models.ModeKey, port uint32) error
+	// SendKeployPids(key models.ModeKey, pid uint32) error
+	// SendKeployPorts(key models.ModeKey, port uint32) error
 }
 
 // ----------------------
 
 type OutgoingInfo interface {
-	PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error
 }
 
 type NetworkAddress struct {

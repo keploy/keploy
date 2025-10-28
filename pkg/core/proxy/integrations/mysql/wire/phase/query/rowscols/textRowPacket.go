@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -38,169 +37,69 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 			continue
 		}
 
-		switch mysql.FieldType(col.Type) {
-		case mysql.FieldTypeDate:
-			data := data[offset+1:]
-			if dataLength < 10 || len(data) < int(dataLength) {
-				return nil, 0, fmt.Errorf("invalid date data length")
-			}
-			dateStr := string(data[:dataLength])
-			layout := "2006-01-02"
-			t, err := time.Parse(layout, dateStr)
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the date string")
-			}
-
-			year, month, day := t.Date()
-			row.Values = append(row.Values, mysql.ColumnEntry{
-				Type:  mysql.FieldType(col.Type),
-				Name:  col.Name,
-				Value: fmt.Sprintf("%04d-%02d-%02d", year, int(month), day),
-			})
-
-			offset += int(dataLength) + 1
-
-		case mysql.FieldTypeTime:
-			data := data[offset+1:]
-			if dataLength < 8 || len(data) < int(dataLength) {
-				return nil, 0, fmt.Errorf("invalid time data length")
-			}
-			timeStr := string(data[:dataLength])
-			layout := "15:04:05"
-			t, err := time.Parse(layout, timeStr)
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the time string")
-			}
-
-			hour, minute, second := t.Clock()
-			row.Values = append(row.Values, mysql.ColumnEntry{
-				Type:  mysql.FieldType(col.Type),
-				Name:  col.Name,
-				Value: fmt.Sprintf("%02d:%02d:%02d", hour, minute, second),
-			})
-
-			offset += int(dataLength) + 1
-
-		case mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
-			data := data[offset+1:]
-			if dataLength < 19 || len(data) < int(dataLength) {
-				return nil, 0, fmt.Errorf("invalid datetime/timestamp data length")
-			}
-			dateTimeStr := string(data[:dataLength])
-			layout := "2006-01-02 15:04:05"
-			t, err := time.Parse(layout, dateTimeStr)
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the datetime/timestamp string")
-			}
-
-			year, month, day := t.Date()
-			hour, minute, second := t.Clock()
-			row.Values = append(row.Values, mysql.ColumnEntry{
-				Type:  mysql.FieldType(col.Type),
-				Name:  col.Name,
-				Value: fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, int(month), day, hour, minute, second),
-			})
-
-			offset += int(dataLength) + 1
-
-		default:
-			value, _, n, err := utils.ReadLengthEncodedString(data[offset:])
-			if err != nil {
-				return nil, offset, err
-			}
-			row.Values = append(row.Values, mysql.ColumnEntry{
-				Type:  mysql.FieldType(col.Type),
-				Name:  col.Name,
-				Value: string(value),
-			})
-			offset += n
+		value, _, n, err := utils.ReadLengthEncodedString(data[offset:])
+		if err != nil {
+			return nil, offset, fmt.Errorf("failed to read length-encoded string: %w", err)
 		}
+		row.Values = append(row.Values, mysql.ColumnEntry{
+			Type:  mysql.FieldType(col.Type),
+			Name:  col.Name,
+			Value: string(value),
+		})
+		offset += n
 	}
+
 	return row, offset, nil
 }
 
+// rowscols/textRowPacket.go
+
 func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
-	buf := new(bytes.Buffer)
+	body := new(bytes.Buffer)
 
-	// Write the packet header
-	if err := utils.WriteUint24(buf, row.Header.PayloadLength); err != nil {
-		return nil, fmt.Errorf("failed to write PayloadLength: %w", err)
-	}
-	if err := buf.WriteByte(row.Header.SequenceID); err != nil {
-		return nil, fmt.Errorf("failed to write SequenceID: %w", err)
-	}
-
-	// Write each column's value
-	for i, col := range columns {
-		value := row.Values[i].Value
-		if value == nil {
-			// Write NULL value
-			if err := buf.WriteByte(0xfb); err != nil {
-				return nil, fmt.Errorf("failed to write NULL value: %w", err)
-			}
-			continue
-		}
-
-		switch row.Values[i].Type {
-		case mysql.FieldTypeDate:
-			dateValue, ok := value.(string)
-			if !ok {
-				return nil, fmt.Errorf("invalid value type for date field")
+	// Write each column's value into the body
+	for i := range columns {
+		v := row.Values[i].Value
+		switch x := v.(type) {
+		case nil:
+			// NULL is 0xfb
+			if err := body.WriteByte(0xfb); err != nil {
+				return nil, fmt.Errorf("failed to write NULL: %w", err)
 			}
 
-			// Write the length of the date value
-			if err := buf.WriteByte(byte(len(dateValue))); err != nil {
-				return nil, fmt.Errorf("failed to write date length: %w", err)
+		case string:
+			if err := utils.WriteLengthEncodedString(body, x); err != nil {
+				return nil, fmt.Errorf("failed to write lenenc string: %w", err)
 			}
 
-			// Write the date value
-			if _, err := buf.WriteString(dateValue); err != nil {
-				return nil, fmt.Errorf("failed to write date value: %w", err)
+		case []byte:
+			// allow blobs as raw bytes in text rows
+			if err := utils.WriteLengthEncodedInteger(body, uint64(len(x))); err != nil {
+				return nil, fmt.Errorf("failed to write len for bytes: %w", err)
 			}
-
-		case mysql.FieldTypeTime:
-			timeValue, ok := value.(string)
-			if !ok {
-				return nil, fmt.Errorf("invalid value type for time field")
-			}
-
-			// Write the length of the time value
-			if err := buf.WriteByte(byte(len(timeValue))); err != nil {
-				return nil, fmt.Errorf("failed to write time length: %w", err)
-			}
-
-			// Write the time value
-			if _, err := buf.WriteString(timeValue); err != nil {
-				return nil, fmt.Errorf("failed to write time value: %w", err)
-			}
-
-		case mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
-			dateTimeValue, ok := value.(string)
-			if !ok {
-				return nil, fmt.Errorf("invalid value type for datetime/timestamp field")
-			}
-
-			// Write the length of the datetime/timestamp value
-			if err := buf.WriteByte(byte(len(dateTimeValue))); err != nil {
-				return nil, fmt.Errorf("failed to write datetime/timestamp length: %w", err)
-			}
-
-			// Write the datetime/timestamp value
-			if _, err := buf.WriteString(dateTimeValue); err != nil {
-				return nil, fmt.Errorf("failed to write datetime/timestamp value: %w", err)
+			if _, err := body.Write(x); err != nil {
+				return nil, fmt.Errorf("failed to write bytes: %w", err)
 			}
 
 		default:
-			// Write length-encoded string for other types
-			strValue, ok := value.(string)
-			if !ok {
-				return nil, fmt.Errorf("invalid value type for column %s", col.Name)
-			}
-			if err := utils.WriteLengthEncodedString(buf, strValue); err != nil {
-				return nil, fmt.Errorf("failed to write length-encoded string: %w", err)
+			// fall back to the textual form (keeps old recordings working)
+			s := fmt.Sprint(x)
+			if err := utils.WriteLengthEncodedString(body, s); err != nil {
+				return nil, fmt.Errorf("failed to write fallback string: %w", err)
 			}
 		}
 	}
 
-	return buf.Bytes(), nil
+	// Now prepend the header using the computed length
+	out := new(bytes.Buffer)
+	if err := utils.WriteUint24(out, uint32(body.Len())); err != nil {
+		return nil, fmt.Errorf("failed to write PayloadLength: %w", err)
+	}
+	if err := out.WriteByte(row.Header.SequenceID); err != nil {
+		return nil, fmt.Errorf("failed to write SequenceID: %w", err)
+	}
+	if _, err := out.Write(body.Bytes()); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }

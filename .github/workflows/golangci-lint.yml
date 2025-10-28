@@ -2,8 +2,7 @@ name: golangci-lint
 on:
   push:
     branches:
-      - master
-      - main
+      - v2
   pull_request:
 
 permissions:
@@ -16,30 +15,47 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
   cancel-in-progress: true
 
-
 jobs:
   golangci:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v4
-        with:
-          go-version: '1.22'
-          cache: false
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
-        with:
-          # Require: The version of golangci-lint to use.
-          # When `install-mode` is `binary` (default) the value can be v1.2 or v1.2.3 or `latest` to use the latest version.
-          # When `install-mode` is `goinstall` the value can be v1.2.3, `latest`, or the hash of a commit.
-          version: v1.57.1
+      - uses: actions/checkout@v4
 
-          # Optional: show only new issues if it's a pull request. The default value is `false`.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+          cache: false
+      
+      - name: Add Private Parsers
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+
+      - name: Configure Git to use SSH
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
           only-new-issues: true
-          args: --out-format=colored-line-number
-          # Optional: The mode to install golangci-lint. It can be 'binary' or 'goinstall'.
-          install-mode: "goinstall"
-      - name: Check for Deprecated Dependencies
+          args: --timeout=5m
+
+      - name: Check gofmt (diff with line numbers)
         run: |
-            source ./.github/workflows/test_workflow_scripts/check-deprecated-deps.sh
+          output=$(gofmt -l -d .)
+          if [ -n "$output" ]; then
+            echo "🚨 gofmt found issues:"
+            echo "$output"
+            exit 1
+          fi
+
+      - name: Check for Deprecated Dependencies
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+        env:
+          GOPRIVATE: github.com/keploy/*
+        run: |
+          source ./.github/workflows/test_workflow_scripts/check-deprecated-deps.sh

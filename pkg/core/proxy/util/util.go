@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package util provides utility functions for the proxy package.
 package util
 
@@ -13,11 +11,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/getsentry/sentry-go"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/models"
 	"golang.org/x/sync/errgroup"
 
@@ -40,6 +38,23 @@ func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
+// Conn is helpful for multiple reads from the same connection
+type Conn struct {
+	net.Conn
+	Reader io.Reader
+	Logger *zap.Logger
+	mu     sync.Mutex
+}
+
+func (c *Conn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(p) == 0 {
+		c.Logger.Debug("the length is 0 for the reading from customConn")
+	}
+	return c.Reader.Read(p)
+}
+
 type Peer string
 
 // Peer constants
@@ -47,6 +62,32 @@ const (
 	Client      Peer = "client"
 	Destination Peer = "destination"
 )
+
+func HasCompleteHTTPHeaders(buf []byte) bool {
+
+	// Check for the presence of the end of headers sequence "\r\n\r\n"
+	endOfHeaders := []byte("\r\n\r\n")
+	if len(buf) < len(endOfHeaders) {
+		return false
+	}
+
+	// Check if the buffer contains the end of headers sequence
+	return bytes.Contains(buf, endOfHeaders)
+}
+
+func IsHTTPReq(buf []byte) bool {
+	isHTTP := bytes.HasPrefix(buf[:], []byte("HTTP/")) ||
+		bytes.HasPrefix(buf[:], []byte("GET ")) ||
+		bytes.HasPrefix(buf[:], []byte("POST ")) ||
+		bytes.HasPrefix(buf[:], []byte("PUT ")) ||
+		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
+		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
+		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
+		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
+		bytes.HasPrefix(buf[:], []byte("CONNECT "))
+
+	return isHTTP
+}
 
 // ReadBuffConn is used to read the buffer from the connection
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
@@ -79,25 +120,82 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 	}
 }
 
+func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
+	readErr := errors.New("failed to read HTTP headers")
+
+	// Read the incoming data (headers)
+	initialBuf, err := ReadBytes(ctx, logger, conn)
+
+	// Early return if we receive EOF with no data
+	if err == io.EOF && len(initialBuf) == 0 {
+		logger.Debug("received EOF, closing conn", zap.Error(err))
+		return nil, readErr
+	}
+
+	// Handle errors other than EOF
+	if err != nil && err != io.EOF {
+		utils.LogError(logger, err, "failed to read HTTP headers")
+		return nil, readErr
+	}
+
+	// Check if the initial buffer already contains complete headers
+	if HasCompleteHTTPHeaders(initialBuf) {
+		logger.Debug("received complete HTTP headers in initial buffer", zap.Any("size", len(initialBuf)), zap.Any("headers", string(initialBuf)))
+		return initialBuf, nil
+	}
+
+	// If not, continue reading until we find the end of headers
+	var buffer []byte
+	buffer = append(buffer, initialBuf...)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return buffer, ctx.Err()
+		default:
+			// Check if the connection is nil
+			if conn == nil {
+				logger.Debug("the conn is nil")
+				return nil, readErr
+			}
+			// Read more data until we find the header end sequence
+			part, err := ReadBytes(ctx, logger, conn)
+			if err != nil {
+				if err == io.EOF && len(part) == 0 {
+					break // EOF reached, but nothing more to read
+				}
+				utils.LogError(logger, err, "error while reading HTTP headers")
+				return nil, readErr
+			}
+
+			// Append the new data to the buffer
+			buffer = append(buffer, part...)
+
+			// Check if we reached the end of headers
+			if HasCompleteHTTPHeaders(buffer) {
+				logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), zap.Any("headers", string(buffer)))
+				return buffer, nil
+			}
+		}
+	}
+}
+
 func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
 	readErr := errors.New("failed to read the initial request buffer")
 
 	initialBuf, err := ReadBytes(ctx, logger, conn)
-	if err != nil && err != io.EOF {
-		utils.LogError(logger, err, "failed to read the request message in proxy")
-		return nil, readErr
-	}
 
 	if err == io.EOF && len(initialBuf) == 0 {
 		logger.Debug("received EOF, closing conn", zap.Error(err))
 		return nil, readErr
 	}
 
-	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
-	if err != nil {
+	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read the request message in proxy")
 		return nil, readErr
 	}
+
+	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
 	return initialBuf, nil
 }
 
@@ -237,7 +335,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 				return buffer, result.err
 			}
 
-			if result.n == numBytes {
+			if numBytes == 0 {
 				return buffer, nil
 			}
 		}
@@ -274,7 +372,7 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 
 // PassThrough function is used to pass the network traffic to the destination connection.
 // It also closes the destination connection if the function returns an error.
-func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
+func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
 	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 	// making destConn
 	var destConn net.Conn
@@ -310,6 +408,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	// channels for writing messages from proxy to destination or client
 	destBufferChannel := make(chan []byte)
 	errChannel := make(chan error, 1)
+	passthroughContext, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	go func() {
 		defer Recover(logger, clientConn, nil)
@@ -322,7 +422,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			}
 		}(destConn)
 
-		ReadBuffConn(ctx, logger, destConn, destBufferChannel, errChannel)
+		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
 	}()
 
 	select {
@@ -339,6 +439,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 		logger.Debug("the iteration for the generic response ends with responses:"+strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
 	case err := <-errChannel:
+		// Applied this nolint to ignore the staticcheck error here because of readability
+		// nolint:staticcheck
 		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 			return nil, err
 		}

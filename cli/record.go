@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	recordSvc "go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -25,7 +26,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var record recordSvc.Service
@@ -35,7 +36,13 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				return nil
 			}
 
-			err = record.Start(ctx, false)
+			cfg := models.ReRecordCfg{
+				Rerecord: false,
+				TestSet:  "",
+			}
+
+			err = record.Start(ctx, cfg)
+
 			if err != nil {
 				utils.LogError(logger, err, "failed to record")
 				return nil

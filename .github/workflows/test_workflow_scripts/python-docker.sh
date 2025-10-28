@@ -11,7 +11,6 @@ rm -rf keploy/  # Clean up old test data
 docker build -t flask-app:1.0 .  # Build the Docker image
 
 # Configure keploy
-sudo -E env PATH=$PATH ./../../keployv2 config --generate --in-ci
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
 sleep 5  # Allow time for configuration to apply
 
@@ -52,7 +51,7 @@ send_request(){
 for i in {1..2}; do
     container_name="flaskApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
@@ -68,9 +67,15 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+# Shutdown mongo before test mode - Keploy should use mocks for database interactions
+echo "Shutting down mongo before test mode..."
+docker stop mongo || true
+docker rm mongo || true
+echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+
 # Testing phase
 test_container="flashApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"

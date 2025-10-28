@@ -16,19 +16,6 @@ import (
 	"go.uber.org/zap"
 )
 
-/*
-    1.  MySQLStructToBytes
-	2.	EncodeMySQLStruct
-	3.	MySQLPacketToBytes
-	4.	MarshalMySQLPacket
-	5.	ConvertMySQLToBytes
-	6.	SerializeMySQLPacket
-	7.	EncodeMySQLData
-	8.	MySQLDataToBytes
-	9.	PackMySQLBytes
-	10.	StructToMySQLBytes
-*/
-
 func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.PacketBundle, clientConn net.Conn, decodeCtx *DecodeContext) ([]byte, error) {
 
 	var data []byte
@@ -37,7 +24,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	//Get the server greeting from the decode context
 	serverGreeting, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
-		return nil, fmt.Errorf("Server greeting not found for connection %s", clientConn.RemoteAddr().String())
+		return nil, fmt.Errorf("server greeting not found for connection %s", clientConn.RemoteAddr().String())
 	}
 
 	switch packet.Message.(type) {
@@ -45,7 +32,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.EOFPacket:
 		pkt, ok := packet.Message.(*mysql.EOFPacket)
 		if !ok {
-			return nil, fmt.Errorf("Expected EOFPacket, got %T", packet.Message)
+			return nil, fmt.Errorf("expected EOFPacket, got %T", packet.Message)
 		}
 
 		data, err = phase.EncodeEOF(ctx, pkt, serverGreeting.CapabilityFlags)
@@ -58,7 +45,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.ERRPacket:
 		pkt, ok := packet.Message.(*mysql.ERRPacket)
 		if !ok {
-			return nil, fmt.Errorf("Expected ERRPacket, got %T", packet.Message)
+			return nil, fmt.Errorf("expected ERRPacket, got %T", packet.Message)
 		}
 
 		data, err = phase.EncodeErr(ctx, pkt, serverGreeting.CapabilityFlags)
@@ -71,7 +58,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.OKPacket:
 		pkt, ok := packet.Message.(*mysql.OKPacket)
 		if !ok {
-			return nil, fmt.Errorf("Expected OKPacket, got %T", packet.Message)
+			return nil, fmt.Errorf("expected OKPacket, got %T", packet.Message)
 		}
 
 		data, err = phase.EncodeOk(ctx, pkt, serverGreeting.CapabilityFlags)
@@ -85,7 +72,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.AuthMoreDataPacket:
 		pkt, ok := packet.Message.(*mysql.AuthMoreDataPacket)
 		if !ok {
-			return nil, fmt.Errorf("Expected AuthMoreDataPacket, got %T", packet.Message)
+			return nil, fmt.Errorf("expected AuthMoreDataPacket, got %T", packet.Message)
 		}
 
 		data, err = conn.EncodeAuthMoreData(ctx, pkt)
@@ -98,7 +85,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.AuthSwitchRequestPacket:
 		pkt, ok := packet.Message.(*mysql.AuthSwitchRequestPacket)
 		if !ok {
-			return nil, fmt.Errorf("Expected AuthSwitchRequestPacket, got %T", packet.Message)
+			return nil, fmt.Errorf("expected AuthSwitchRequestPacket, got %T", packet.Message)
 		}
 
 		data, err = conn.EncodeAuthSwitchRequest(ctx, pkt)
@@ -111,7 +98,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.HandshakeV10Packet:
 		pkt, ok := packet.Message.(*mysql.HandshakeV10Packet)
 		if !ok {
-			return nil, fmt.Errorf("Expected HandshakeV10Packet, got %T", packet.Message)
+			return nil, fmt.Errorf("expected HandshakeV10Packet, got %T", packet.Message)
 		}
 
 		data, err = conn.EncodeHandshakeV10(ctx, logger, pkt)
@@ -125,10 +112,10 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.StmtPrepareOkPacket:
 		pkt, ok := packet.Message.(*mysql.StmtPrepareOkPacket)
 		if !ok {
-			return nil, fmt.Errorf("Expected StmtPrepareOkPacket, got %T", packet.Message)
+			return nil, fmt.Errorf("expected StmtPrepareOkPacket, got %T", packet.Message)
 		}
 
-		data, err = preparedstmt.EncodePrepareOk(ctx, logger, pkt)
+		data, err = preparedstmt.EncodePrepareOk(ctx, logger, pkt, serverGreeting.CapabilityFlags)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding StmtPrepareOkPacket: %v", err)
 		}
@@ -138,7 +125,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.TextResultSet:
 		pkt, ok := packet.Message.(*mysql.TextResultSet)
 		if !ok {
-			return nil, fmt.Errorf("Expected TextResultSet, got %T", packet.Message)
+			return nil, fmt.Errorf("expected TextResultSet, got %T", packet.Message)
 		}
 
 		data, err = query.EncodeTextResultSet(ctx, logger, pkt)
@@ -149,7 +136,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	case *mysql.BinaryProtocolResultSet:
 		pkt, ok := packet.Message.(*mysql.BinaryProtocolResultSet)
 		if !ok {
-			return nil, fmt.Errorf("Expected BinaryProtocolResultSet, got %T", packet.Message)
+			return nil, fmt.Errorf("expected BinaryProtocolResultSet, got %T", packet.Message)
 		}
 
 		data, err = query.EncodeBinaryResultSet(ctx, logger, pkt)
@@ -160,11 +147,33 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 
 	// Encode the header for the packet
 	header := make([]byte, 4)
-	binary.LittleEndian.PutUint32(header, uint32(packet.Header.Header.PayloadLength))
+	// IMPORTANT:
+	// For composite (multi-packet) messages, `data` contains multiple packets where
+	// only the FIRST sub-packet lacks its 4-byte header. The recorded header's
+	// PayloadLength corresponds to that first payload only (e.g., column-count = 1).
+	// For single-packet messages, we can safely use len(data).
+	payloadLen := len(data)
+	if isCompositeMessage(packet.Message) && packet.Header != nil && packet.Header.Header != nil {
+		payloadLen = int(packet.Header.Header.PayloadLength)
+	}
+	binary.LittleEndian.PutUint32(header, uint32(payloadLen))
 	header[3] = packet.Header.Header.SequenceID
 	data = append(header, data...)
 
 	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
 
 	return data, nil
+}
+
+// isCompositeMessage tells whether the encoded `data` contains multiple packets,
+// where only the first packet should use the header we write here.
+func isCompositeMessage(msg interface{}) bool {
+	switch msg.(type) {
+	case *mysql.TextResultSet,
+		*mysql.BinaryProtocolResultSet,
+		*mysql.StmtPrepareOkPacket:
+		return true
+	default:
+		return false
+	}
 }

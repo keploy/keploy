@@ -2,8 +2,11 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"debug/elf"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,10 +17,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -31,9 +36,13 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
+
+var TemplatizedValues = map[string]interface{}{}
+var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -56,6 +65,67 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	return parsedURL.String(), nil
 }
 
+func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
+	// Check if ipAddress is empty
+	if ipAddress == "" {
+		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
+	}
+
+	// Use net.SplitHostPort to properly handle IPv6 addresses
+	_, port, err := net.SplitHostPort(authority)
+	if err != nil {
+		return authority, fmt.Errorf("invalid authority format: %v", err)
+	}
+
+	// Replace the host part with ipAddress, keeping the port
+	return net.JoinHostPort(ipAddress, port), nil
+}
+
+func ReplaceGrpcPort(authority string, port string) (string, error) {
+	// Check if port is empty
+	if port == "" {
+		return authority, fmt.Errorf("failed to replace port in case of docker env: empty port")
+	}
+
+	// Use net.SplitHostPort to properly handle IPv6 addresses
+	host, _, err := net.SplitHostPort(authority)
+	if err != nil {
+		// If splitting fails, assume it's just a host without port
+		return net.JoinHostPort(authority, port), nil
+	}
+
+	// Replace the port part, keeping the host
+	return net.JoinHostPort(host, port), nil
+}
+
+// ReplaceBaseURL replaces the base URL (scheme + host) of the given URL with the provided baseURL.
+// It returns the updated URL as a string or an error if the operation fails.
+func ReplaceBaseURL(currentURL string, baseURL string) (string, error) {
+	// Parse the current URL
+	parsedURL, err := url.Parse(currentURL)
+	if err != nil {
+		return currentURL, err
+	}
+
+	// Check if baseURL is valid
+	if baseURL == "" {
+		return currentURL, fmt.Errorf("failed to replace baseURL: baseURL is empty")
+	}
+
+	// Parse the new baseURL
+	newBaseURL, err := url.Parse(baseURL)
+	if err != nil {
+		return currentURL, fmt.Errorf("invalid baseURL: %w", err)
+	}
+
+	// Replace the scheme and host
+	parsedURL.Scheme = newBaseURL.Scheme
+	parsedURL.Host = newBaseURL.Host
+
+	// Return the updated URL as a string
+	return parsedURL.String(), nil
+}
+
 func ReplacePort(currentURL string, port string) (string, error) {
 	if port == "" {
 		return currentURL, fmt.Errorf("failed to replace port in case of docker env")
@@ -74,6 +144,58 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	}
 
 	return parsedURL.String(), nil
+}
+
+// GetReqMeta returns the metadata of the request
+func GetReqMeta(req *http.Request) map[string]string {
+	reqMeta := map[string]string{}
+	if req != nil {
+		// get request metadata
+		reqMeta = map[string]string{
+			"method": req.Method,
+			"url":    req.URL.String(),
+			"host":   req.Host,
+		}
+	}
+	return reqMeta
+}
+
+func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
+	passThrough := false
+
+	for _, bypass := range opts.Rules {
+		if bypass.Host != "" {
+			regex, err := regexp.Compile(bypass.Host)
+			if err != nil {
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.Host)
+			if !passThrough {
+				continue
+			}
+		}
+		if bypass.Path != "" {
+			regex, err := regexp.Compile(bypass.Path)
+			if err != nil {
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.URL.String())
+			if !passThrough {
+				continue
+			}
+		}
+
+		if passThrough {
+			if bypass.Port == 0 || bypass.Port == destPort {
+				return true
+			}
+			passThrough = false
+		}
+	}
+
+	return passThrough
 }
 
 func kebabToCamel(s string) string {
@@ -173,6 +295,20 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
+// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
+// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
+// For example:
+// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
+// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
+func RemoveDoubleQuotes(tempMap map[string]interface{}) {
+	// Remove double quotes
+	for key, val := range tempMap {
+		if str, ok := val.(string); ok {
+			tempMap[key] = strings.ReplaceAll(str, `"`, "")
+		}
+	}
+}
+
 func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
@@ -203,26 +339,36 @@ var ConfigGuide = `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized, it will ask again. The function does not return
-// until it gets a valid response from the user.
-func AskForConfirmation(s string) (bool, error) {
+// confirmations. If the input is not recognized or interrupted, exit gracefully as "no".
+func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	for {
-		fmt.Printf("%s [y/n]: ", s)
+	fmt.Printf("%s [y/n]: ", s)
 
+	respCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
 		response, err := reader.ReadString('\n')
 		if err != nil {
-			return false, err
+			errCh <- err
+		} else {
+			respCh <- response
 		}
+	}()
 
+	select {
+	case <-ctx.Done():
+		// Cobra caught SIGINT (Ctrl+C) and cancelled its root context
+		return false, nil
+	case err := <-errCh:
+		return false, err
+	case response := <-respCh:
 		response = strings.ToLower(strings.TrimSpace(response))
-
 		if response == "y" || response == "yes" {
 			return true, nil
-		} else if response == "n" || response == "no" {
-			return false, nil
 		}
+		return false, nil
 	}
 }
 
@@ -235,6 +381,11 @@ func CheckFileExists(path string) bool {
 
 var Version string
 var VersionIdenitfier string
+var LogFile *os.File
+
+func GetVersionAsComment() string {
+	return fmt.Sprintf("# Generated by Keploy (%s)\n", Version)
+}
 
 func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)
@@ -306,7 +457,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Test-Report
         uses: keploy/testgpt@main
         with:
@@ -415,6 +566,74 @@ const (
 	Empty         CmdType = ""
 )
 
+func ToInt(value interface{}) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case int32:
+		return int(v)
+	case float32:
+		return int(v)
+	case string:
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			fmt.Printf("failed to convert string to int: %v", err)
+			return 0
+		}
+		return i
+	case float64:
+		return int(v)
+	case json.Number:
+		// Try int64 first
+		if i, err := v.Int64(); err == nil {
+			return int(i)
+		}
+		if f, err := v.Float64(); err == nil {
+			return int(f)
+		}
+
+	}
+	return 0
+}
+
+// ToString remove all types of value to strings for comparison.
+func ToString(val interface{}) string {
+	switch v := val.(type) {
+	case int:
+		return strconv.Itoa(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case string:
+		return v
+	}
+	return ""
+}
+
+func ToFloat(value interface{}) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			fmt.Printf("failed to convert string to float: %v", err)
+			return 0
+		}
+		return f
+	case int:
+		return float64(v)
+	}
+	return 0
+}
+
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
 	keys := make([]string, 0, len(m))
@@ -457,6 +676,26 @@ func GetAbsPath(path string) (string, error) {
 		return "", err
 	}
 	return absPath, nil
+}
+
+func ToAbsPath(logger *zap.Logger, originalPath string) string {
+	path := originalPath
+	//if user provides relative path
+	if len(path) > 0 && path[0] != '/' {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			LogError(logger, err, "failed to get the absolute path from relative path")
+		}
+		path = absPath
+	} else if len(path) == 0 { // if user doesn't provide any path
+		cdirPath, err := os.Getwd()
+		if err != nil {
+			LogError(logger, err, "failed to get the path of current directory")
+		}
+		path = cdirPath
+	}
+	path += "/keploy"
+	return path
 }
 
 // makeDirectory creates a directory if not exists with all user access
@@ -529,25 +768,93 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
+
+	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
+
 	children, err := findChildPIDs(ppid)
 	if err != nil {
 		return err
 	}
 
 	children = append(children, ppid)
+
+	logger.Debug("Found child PIDs", zap.Ints("children", children))
+
 	uniqueProcess, err := uniqueProcessGroups(children)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
 	}
 
+	logger.Debug("Unique process groups", zap.Ints("uniqueProcess", uniqueProcess))
+
+	// Send signal to interrupt each process and wait for them to exit one by one
 	for _, pid := range uniqueProcess {
 		err := SendSignal(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
+			continue
+		}
+		// Wait for this particular process to exit with a timeout of 3 seconds
+		err = waitForProcessExit(pid, 3*time.Second, logger)
+		if err != nil {
+			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
 		}
 	}
 	return nil
+}
+
+// waitForProcessExit waits for the process to exit or times out after the specified duration
+func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
+	// Create a timeout channel
+	timeoutCh := time.After(timeout)
+
+	// Loop to check if the process is running
+	for {
+		select {
+		case <-timeoutCh:
+			// If the timeout is reached, log the timeout and break
+			logger.Warn("Timed out waiting for process to exit", zap.Int("pid", pid))
+			return nil
+		default:
+			// Check if the process is running
+			isRunning, err := isProcessRunning(pid)
+			if err != nil {
+				return err
+			}
+
+			if !isRunning {
+				logger.Debug("Process exited", zap.Int("pid", pid))
+				return nil
+			}
+
+			// Wait for 1 second before checking again
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+}
+
+// isProcessRunning checks if a particular process is still running using os.FindProcess
+func isProcessRunning(pid int) (bool, error) {
+	// Try to find the process
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false, err // Process lookup failed
+	}
+
+	// Attempt to signal the process (0 means no action, just error check)
+	err = process.Signal(syscall.Signal(0))
+	if err != nil {
+		// If error occurs when signaling, it means the process is no longer running
+		if errors.Is(err, os.ErrProcessDone) || err == syscall.ESRCH {
+			return false, nil
+		}
+		// If there’s another error, consider the process as still running
+		return true, nil
+	}
+
+	// No error means the process is running
+	return true, nil
 }
 
 func uniqueProcessGroups(pids []int) ([]int, error) {
@@ -718,23 +1025,45 @@ func DetectLanguage(logger *zap.Logger, cmd string) config.Language {
 		return models.Unknown
 	}
 	fields := strings.Fields(cmd)
-	executable := fields[0]
-	if strings.HasPrefix(cmd, "python") {
+
+	// Find the actual executable by skipping environment variable assignments
+	executable := ""
+	for _, field := range fields {
+		// Skip environment variable assignments (KEY=VALUE format)
+		if strings.Contains(field, "=") && !strings.HasPrefix(field, "/") {
+			continue
+		}
+		// This is the actual executable
+		executable = field
+		break
+	}
+
+	if executable == "" {
+		return models.Unknown, ""
+	}
+
+	// Check for Python
+	pythonRegex := regexp.MustCompile(`(?i)(^|.*/)(python(\d+(\.\d+)*)?)$`)
+	if pythonRegex.MatchString(executable) {
 		return models.Python
 	}
 
+	// Check for Node.js
 	if executable == "node" || executable == "npm" || executable == "yarn" {
 		return models.Javascript
 	}
 
+	// Check for Java
 	if executable == "java" {
 		return models.Java
 	}
 
-	if executable == "go" || (len(fields) == 1 && isGoBinary(logger, executable)) {
-		return models.Go
+	// Check for Go
+	if executable == "go" || (isGoBinary(logger, executable)) {
+		return models.Go, executable
 	}
-	return models.Unknown
+
+	return models.Unknown, executable
 }
 
 // FileExists checks if a file exists and is not a directory at the given path.
@@ -780,9 +1109,8 @@ func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
 
-func CreateGitIgnore(logger *zap.Logger, path string) error {
+func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"
-	reportEntry := "/reports/"
 
 	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -798,18 +1126,261 @@ func CreateGitIgnore(logger *zap.Logger, path string) error {
 	scanner := bufio.NewScanner(file)
 	found := false
 	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == reportEntry {
+		if strings.TrimSpace(scanner.Text()) == ignoreString {
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		if _, err := file.WriteString("\n" + reportEntry + "\n"); err != nil {
+		if _, err := file.WriteString("\n" + ignoreString + "\n"); err != nil {
 			return fmt.Errorf("error writing to .gitignore file: %v", err)
 		}
 		return nil
 	}
 
 	return nil
+}
+
+func Hash(data []byte) string {
+	hasher := sha256.New()
+	hasher.Write(data)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func GetLastDirectory() (string, error) {
+	// Get the current working directory
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	// Extract the base (last directory)
+	lastDir := filepath.Base(dir)
+	return lastDir, nil
+}
+
+func IsFileEmpty(filePath string) (bool, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return false, err
+	}
+	return fileInfo.Size() == 0, nil
+}
+
+func IsXMLResponse(resp *models.HTTPResp) bool {
+	if resp == nil || resp.Header == nil {
+		return false
+	}
+
+	contentType, exists := resp.Header["Content-Type"]
+	if !exists || contentType == "" {
+		return false
+	}
+	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
+}
+
+// TrimSpaces removes unwanted spaces around unescaped ',' and '='
+func TrimSpaces(input string) string {
+	var output strings.Builder
+	var lastWasEscape bool  // tracks if the previous rune was a backslash
+	var skippingSpaces bool // set when we just wrote a separator
+
+	for _, ch := range input {
+		// after writing a separator, drop any spaces
+		if skippingSpaces {
+			if ch == ' ' {
+				continue
+			}
+			skippingSpaces = false
+		}
+
+		// handle escape character
+		if ch == '\\' && !lastWasEscape {
+			lastWasEscape = true
+			output.WriteRune(ch)
+			continue
+		}
+
+		// if this is an unescaped separator, trim before & skip after
+		if (ch == ',' || ch == '=') && !lastWasEscape {
+			// remove trailing spaces before the separator
+			trimmed := strings.TrimRight(output.String(), " ")
+			output.Reset()
+			output.WriteString(trimmed)
+
+			// write the separator itself
+			output.WriteRune(ch)
+
+			// skip any spaces that follow
+			skippingSpaces = true
+			lastWasEscape = false
+			continue
+		}
+
+		// normal character (or escaped separator)
+		output.WriteRune(ch)
+		lastWasEscape = false
+	}
+
+	return output.String()
+}
+
+func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
+	if metadataStr == "" {
+		return nil, nil
+	}
+	m := make(map[string]interface{})
+	if err := strvals.ParseInto(metadataStr, m); err != nil {
+		return nil, fmt.Errorf("cannot parse metadata: %w", err)
+	}
+	return m, nil
+}
+
+// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
+// executes them with the provided data, and replaces them with the result.
+// It is robust against strings that contain non-template curly braces by using a strict regex.
+func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
+	// This regex is specifically designed to match valid Keploy templates:
+	// - It must start with {{ and optional whitespace.
+	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
+	// - It MUST contain a dot (.) to indicate a field access.
+	// - It non-greedily matches characters until the closing braces.
+	// This prevents it from matching invalid syntax like {{u^2}}.
+	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
+
+	funcMap := template.FuncMap{
+		"int":    ToInt,
+		"string": ToString,
+		"float":  ToFloat,
+	}
+
+	var firstErr error
+
+	result := re.ReplaceAllStringFunc(input, func(match string) string {
+		// Only parse and execute the matched placeholder, not the entire string.
+		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
+		if err != nil {
+
+			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
+			return match
+		}
+
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, templateData)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
+			}
+			return match
+		}
+
+		return output.String()
+	})
+
+	return result, firstErr
+}
+
+// // XMLToMap converts an XML string into a map[string]interface{}
+// func XMLToMap(data string) (map[string]any, error) {
+// 	mv, err := mxj.NewMapXml([]byte(data))
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return mv, nil
+// }
+
+// // MapToXML converts a map[string]interface{} into an XML string
+// func MapToXML(data map[string]any) (string, error) {
+// 	mv := mxj.Map(data)
+// 	xmlBytes, err := mv.Xml()
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	return string(xmlBytes), nil
+// }
+
+func ParseGRPCPath(p string) (serviceFull, method string, err error) {
+	// Trim whitespace and validate input
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", "", fmt.Errorf("gRPC path cannot be empty")
+	}
+
+	// Store original path for error messages
+	originalPath := p
+	p = strings.TrimPrefix(p, "/")
+
+	// Split path into components
+	parts := strings.Split(p, "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid gRPC path %q: expected format '/package.Service/Method', got %d path segments", originalPath, len(parts))
+	}
+
+	serviceFull = strings.TrimSpace(parts[0])
+	method = strings.TrimSpace(parts[1])
+
+	// Validate service name is not empty
+	if serviceFull == "" {
+		return "", "", fmt.Errorf("invalid gRPC path %q: service name cannot be empty", originalPath)
+	}
+
+	// Validate method name is not empty
+	if method == "" {
+		return "", "", fmt.Errorf("invalid gRPC path %q: method name cannot be empty", originalPath)
+	}
+
+	// Validate service name format (should contain at least package.Service)
+	if !strings.Contains(serviceFull, ".") {
+		return "", "", fmt.Errorf("invalid service name %q in path %q: expected format 'package.Service'", serviceFull, originalPath)
+	}
+
+	// Validate service name doesn't start or end with dots
+	if strings.HasPrefix(serviceFull, ".") || strings.HasSuffix(serviceFull, ".") {
+		return "", "", fmt.Errorf("invalid service name %q in path %q: cannot start or end with '.'", serviceFull, originalPath)
+	}
+
+	// Validate service name doesn't contain consecutive dots
+	if strings.Contains(serviceFull, "..") {
+		return "", "", fmt.Errorf("invalid service name %q in path %q: cannot contain consecutive dots", serviceFull, originalPath)
+	}
+
+	// Validate method name format (basic identifier validation)
+	if !isValidGRPCIdentifier(method) {
+		return "", "", fmt.Errorf("invalid method name %q in path %q: must be a valid identifier", method, originalPath)
+	}
+
+	// Validate service parts are valid identifiers
+	serviceParts := strings.Split(serviceFull, ".")
+	for i, part := range serviceParts {
+		if !isValidGRPCIdentifier(part) {
+			return "", "", fmt.Errorf("invalid service name component %q at position %d in path %q: must be a valid identifier", part, i, originalPath)
+		}
+	}
+
+	return serviceFull, method, nil
+}
+
+// isValidGRPCIdentifier validates if a string is a valid gRPC identifier
+// gRPC identifiers must start with a letter and contain only letters, digits, and underscores
+func isValidGRPCIdentifier(name string) bool {
+	if len(name) == 0 {
+		return false
+	}
+
+	// First character must be a letter or underscore
+	first := name[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+		return false
+	}
+
+	// Remaining characters must be letters, digits, or underscores
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+
+	return true
 }

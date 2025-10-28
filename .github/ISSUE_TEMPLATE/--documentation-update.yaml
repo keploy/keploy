@@ -9,11 +9,11 @@ body:
       value: Thank you for taking the time to our documentation better 🙏
   - type: checkboxes
     attributes:
-    label: "👀 Is there an existing issue for this?"
-    description: Please search to see if an issue already exists for the bug you encountered
-    options:
-    - label: I have searched and didn't find similar issue
-      required: true
+      label: "👀 Is there an existing issue for this?"
+      description: Please search to see if an issue already exists for the bug you encountered
+      options:
+        - label: I have searched and didn't find similar issue
+          required: true
   - type: textarea
     attributes:
       label: "💭 Description"

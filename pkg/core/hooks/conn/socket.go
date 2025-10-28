@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/models"
@@ -33,29 +34,26 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to initialize real time offset")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	c := NewFactory(time.Minute, l)
+	c := NewFactory(5*time.Minute, l, opts)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")
 	}
 	g.Go(func() error {
 		defer utils.Recover(l)
-		go func() {
-			defer utils.Recover(l)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					// TODO refactor this to directly consume the events from the maps
-					c.ProcessActiveTrackers(ctx, t, opts)
-					time.Sleep(100 * time.Millisecond)
-				}
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		defer close(t)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				// TODO refactor this to directly consume the events from the maps
+				c.ProcessActiveTrackers(ctx, t, opts)
 			}
-		}()
-		<-ctx.Done()
-		close(t)
-		return nil
+		}
 	})
 
 	err = open(ctx, c, l, openMap)
@@ -103,7 +101,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				}
 
 				if rec.LostSamples != 0 {
-					l.Debug("Unable to add samples to the socketOpenEvent array due to its full capacity", zap.Any("samples", rec.LostSamples))
+					l.Debug("Unable to add samples to the socketOpenEvent array due to its full capacity", zap.Uint64("samples", uint64(rec.LostSamples)))
 					continue
 				}
 				data := rec.RawSample
@@ -240,4 +238,24 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		return nil
 	})
 	return nil
+}
+
+// InitRealTimeOffset calculates the offset between the real clock and the monotonic clock used in the BPF.
+func initRealTimeOffset() error {
+	var monotonicTime, realTime unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &monotonicTime); err != nil {
+		return fmt.Errorf("failed getting monotonic clock due to: %v", err)
+	}
+	if err := unix.ClockGettime(unix.CLOCK_REALTIME, &realTime); err != nil {
+		return fmt.Errorf("failed getting real clock time due to: %v", err)
+	}
+	realTimeOffset = uint64(time.Second)*(uint64(realTime.Sec)-uint64(monotonicTime.Sec)) + uint64(realTime.Nsec) - uint64(monotonicTime.Nsec)
+	// realTimeCopy := time.Unix(int64(realTimeOffset/1e9), int64(realTimeOffset%1e9))
+	// log.Debug(fmt.Sprintf("%s real time offset is: %v", Emoji, realTimeCopy))
+	return nil
+}
+
+// GetRealTimeOffset is a getter for the real-time-offset.
+func getRealTimeOffset() uint64 {
+	return realTimeOffset
 }

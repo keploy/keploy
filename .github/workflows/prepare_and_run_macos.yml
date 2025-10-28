@@ -1,0 +1,155 @@
+name: Prepare Binary and Run Workflows (macOS)
+on:
+  pull_request:
+    branches: [v2]
+  push:
+    branches: [v2]
+  # push:
+  #   branches: [ v2 ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-upload:
+    runs-on: [self-hosted, macOS, native]
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+    steps:
+      - name: Clean up git config
+        if: always()
+        continue-on-error: true
+        run: |
+          rm -rf ~/.gitconfig
+      
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+    
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: false
+
+      - name: Build Keploy - macOS (darwin/arm64)
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
+      - uses: actions/upload-artifact@v4
+        with: { name: build, path: keploy }
+
+  # upload-latest:
+  #   runs-on: [self-hosted, macOS, native]
+  #   steps:
+  #     - name: Download latest release (macOS)
+  #       run: |
+  #         LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
+  #         URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_darwin_all.tar.gz"
+  #         curl -L "$URL" -o keploy.tar.gz
+  #         tar -xzf keploy.tar.gz
+  #         chmod +x keploy
+
+  #     - uses: actions/upload-artifact@v4
+  #       with: { name: latest, path: keploy }
+
+  #     - name: Clean up git config
+  #       if: always() # This ensures the step runs even if previous steps fail
+  #       continue-on-error: true
+  #       run: |
+  #         git config --global --unset url."git@github.com:".insteadOf
+
+  # Build docker image on Ubuntu and push to registry
+  build-docker-image:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+      image_digest: ${{ steps.digest.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+      
+      - name: Build and push Docker image
+        run: |
+          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+
+      - name: Make unique tag for this run
+        id: tag
+        run: |
+          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_SHA}-1h"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
+          docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
+
+      - name: Push unique tag
+        run: |
+          docker push "${{ steps.tag.outputs.image_tag }}"
+          
+      - name: Clean up git config
+        if: always() # This ensures the step runs even if previous steps fail
+        continue-on-error: true
+        run: |
+          git config --global --unset url."git@github.com:".insteadOf
+
+  pull-docker-image:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+    runs-on: [self-hosted, macOS, native]
+    needs: [build-docker-image]
+    
+    steps:
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+          
+      - name: Pull Docker image
+        run: |
+          docker pull ${{ needs.build-docker-image.outputs.image_tag }}
+
+  run_python_docker_macos:
+    needs: [build-and-upload, pull-docker-image, build-docker-image]
+    uses: ./.github/workflows/python_docker_macos.yml
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
+    secrets:
+      MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+  run_golang_docker_macos:
+    needs: [build-and-upload, pull-docker-image, build-docker-image]
+    uses: ./.github/workflows/golang_docker_macos.yml
+    with:
+      image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
+    secrets:
+      MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+  
+  clean_up_docker_macos:
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2')) }}
+    runs-on: [self-hosted, macOS, native]
+    needs: [run_python_docker_macos, run_golang_docker_macos]
+    steps:
+      - name: Unlock keychain
+        if: runner.os == 'macOS'
+        run: |
+          security unlock-keychain -p $KEYCHAIN_PASSWORD
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
+
+      - name: Docker Image Prune (unused only, wait if locked)
+        run: |
+          # Wait if another prune is running (lock file /var/lib/docker/tmp/docker-prune.lock may exist)
+          while lsof /var/lib/docker/tmp/docker-prune.lock >/dev/null 2>&1; do
+            echo "Waiting for existing docker prune operation to finish..."
+            sleep 5
+          done
+          # Prune only dangling (untagged) images not in use
+          docker image prune -a -f
+          # Prune dangling (unused) volumes as well
+          docker volume prune -a -f

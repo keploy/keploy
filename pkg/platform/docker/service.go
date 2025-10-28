@@ -18,7 +18,7 @@ type Client interface {
 	NetworkExists(network string) (bool, error)
 
 	HasRelativePath(c *Compose) bool
-	ForceAbsolutePath(c *Compose, basePath string) error
+	ForceAbsolutePath(c *Compose, basePath string, keployContainer string) error
 
 	GetNetworkInfo(compose *Compose) *NetworkInfo
 
@@ -29,7 +29,7 @@ type Client interface {
 	WriteComposeFile(compose *Compose, path string) error
 
 	IsContainerRunning(containerName string) (bool, error)
-	CreateVolume(ctx context.Context, volumeName string, recreate bool) error
+	CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error
 }
 
 type NetworkInfo struct {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -32,8 +33,15 @@ func New(logger *zap.Logger, reportPath string) *TestReport {
 	}
 }
 
+func (fe *TestReport) ClearTestCaseResults(_ context.Context, testRunID string, testSetID string) {
+	fe.m.Lock()
+	defer fe.m.Unlock()
+
+	fe.tests[testRunID] = make(map[string][]models.TestResult)
+}
+
 func (fe *TestReport) GetAllTestRunIDs(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger)
+	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger, yaml.ModeDir)
 }
 
 func (fe *TestReport) InsertTestCaseResult(_ context.Context, testRunID string, testSetID string, result *models.TestResult) error {
@@ -72,7 +80,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 	}
 	data, err := yaml.ReadFile(ctx, fe.Logger, path, reportName)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
+		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.String("reportName", reportName), zap.String("session", filepath.Base(path)))
 		return nil, err
 	}
 
@@ -93,16 +101,19 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		testReport.Name = testSetID + "-report"
 	}
 
+	testReport.CreatedAt = time.Now().Unix()
+
 	data := []byte{}
 	d, err := yamlLib.Marshal(&testReport)
 	if err != nil {
 		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
 	}
 	data = append(data, d...)
+	data = append([]byte(utils.GetVersionAsComment()), data...)
 
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to write the report to yaml", zap.Any("session", filepath.Base(reportPath)))
+		utils.LogError(fe.Logger, err, "failed to write the report to yaml", zap.String("session", filepath.Base(reportPath)))
 		return err
 	}
 	return nil
@@ -120,7 +131,7 @@ func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, covera
 
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, "coverage", data, false)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to write the coverage report to yaml", zap.Any("session", filepath.Base(reportPath)))
+		utils.LogError(fe.Logger, err, "failed to write the coverage report to yaml", zap.String("session", filepath.Base(reportPath)))
 		return err
 	}
 	return nil

@@ -10,7 +10,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
-	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -20,7 +19,7 @@ import (
 
 // Mock Yaml to Binary
 
-func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
 	unfiltered, err := mockDb.GetUnFilteredMocks()
@@ -29,24 +28,38 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *int
 		return err
 	}
 
-	// Get the mysql mocks
-	mocks := intgUtil.GetMockByKind(unfiltered, "MySQL")
+	var configMocks []*models.Mock
+	var hasMySQLMocks bool
+	var totalMySQLMocks int
+	var dataMocks int
+	// Get the mocks having "config" metadata and check for any MySQL mocks in a single pass.
+	for _, mock := range unfiltered {
+		if mock.Kind == models.MySQL {
+			hasMySQLMocks = true
+			totalMySQLMocks++
+			if mock.Spec.Metadata["type"] == "config" {
+				configMocks = append(configMocks, mock)
+			} else {
+				dataMocks++
+			}
+		}
+	}
 
-	if len(mocks) == 0 {
+	logger.Info("MySQL replay session starting",
+		zap.Int("total_unfiltered_mocks", len(unfiltered)),
+		zap.Int("total_mysql_mocks", totalMySQLMocks),
+		zap.Int("config_mocks", len(configMocks)),
+		zap.Int("data_mocks", dataMocks),
+		zap.Bool("has_mysql_mocks", hasMySQLMocks))
+
+	if !hasMySQLMocks {
 		utils.LogError(logger, nil, "no mysql mocks found")
 		return nil
 	}
 
-	var configMocks []*models.Mock
-	// Get the mocks having "config" metadata
-	for _, mock := range mocks {
-		if mock.Spec.Metadata["type"] == "config" {
-			configMocks = append(configMocks, mock)
-		}
-	}
-
 	if len(configMocks) == 0 {
 		utils.LogError(logger, nil, "no mysql config mocks found for handshake")
+		return nil
 	}
 
 	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {
@@ -62,17 +75,27 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *int
 			ServerGreetings: wire.NewGreetings(),
 			// Map for storing prepared statements per connection
 			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-			PluginName:         string(mysql.CachingSha2), // Only supported plugin for now
+			PluginName:         string(mysql.CachingSha2), // usually a default plugin in newer versions of MySQL
+			PreferRecordedCaps: true,
 		}
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
 		// Simulate the initial client-server handshake (connection phase)
 
-		err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
+		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx, opts)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate initial handshake")
 			errCh <- err
 			return
+		}
+
+		if decodeCtx.UseSSL {
+			if res.tlsClientConn == nil {
+				logger.Error("SSL is enabled but could not get the tls client connection")
+				errCh <- nil
+				return
+			}
+			clientConn = res.tlsClientConn
 		}
 
 		logger.Debug("Initial handshake completed successfully")

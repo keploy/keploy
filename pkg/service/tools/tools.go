@@ -14,30 +14,53 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/pkg/service/export"
+	postmanimport "go.keploy.io/server/v2/pkg/service/import"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, telemetry teleDB) Service {
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
 	return &Tools{
-		logger:    logger,
-		telemetry: telemetry,
+		logger:      logger,
+		telemetry:   telemetry,
+		auth:        auth,
+		testSetConf: testsetConfig,
+		testDB:      testDB,
+		reportDB:    reportDB,
+		config:      config,
 	}
 }
 
 type Tools struct {
-	logger    *zap.Logger
-	telemetry teleDB
+	logger      *zap.Logger
+	telemetry   teleDB
+	testSetConf TestSetConfig
+	testDB      TestDB
+	reportDB    ReportDB
+	config      *config.Config
+	auth        service.Auth
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
-func (t *Tools) SendTelemetry(event string, output ...map[string]interface{}) {
+func (t *Tools) SendTelemetry(event string, output ...*sync.Map) {
 	t.telemetry.SendTelemetry(event, output...)
+}
+
+func (t *Tools) Export(ctx context.Context) error {
+	return export.Export(ctx, t.logger)
+}
+
+func (t *Tools) Import(ctx context.Context, path, basePath string) error {
+	postmanImport := postmanimport.NewPostmanImporter(ctx, t.logger)
+	return postmanImport.Import(path, basePath)
 }
 
 // Update initiates the tools process for the Keploy binary file.
@@ -72,11 +95,19 @@ func (t *Tools) Update(ctx context.Context) error {
 	t.logger.Info("Updating to Version: " + latestVersion)
 
 	downloadURL := ""
-	if runtime.GOARCH == "amd64" {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-	} else {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+
+	if runtime.GOOS == "linux" {
+		if runtime.GOARCH == "amd64" {
+			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+		} else {
+			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+		}
 	}
+
+	if runtime.GOOS == "darwin" {
+		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
+	}
+
 	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
 	if err != nil {
 		return err
@@ -245,7 +276,7 @@ func extractTarGz(gzipPath, destDir string) error {
 }
 
 func (t *Tools) CreateConfig(_ context.Context, filePath string, configData string) error {
-	var node yaml.Node
+	var node yamlLib.Node
 	var data []byte
 	var err error
 
@@ -260,17 +291,18 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		data = []byte(configData)
 	}
 
-	if err := yaml.Unmarshal(data, &node); err != nil {
+	if err := yamlLib.Unmarshal(data, &node); err != nil {
 		utils.LogError(t.logger, err, "failed to unmarshal the config")
 		return nil
 	}
-	results, err := yaml.Marshal(node.Content[0])
+	results, err := yamlLib.Marshal(node.Content[0])
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to marshal the config")
 		return nil
 	}
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
+	finalOutput = append([]byte(utils.GetVersionAsComment()), finalOutput...)
 
 	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {
@@ -292,5 +324,62 @@ func (t *Tools) IgnoreTests(_ context.Context, _ string, _ []string) error {
 }
 
 func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
+	return nil
+}
+
+func (t *Tools) Login(ctx context.Context) bool {
+	return t.auth.Login(ctx)
+}
+
+func (t *Tools) Templatize(ctx context.Context) error {
+
+	testSets := t.config.Templatize.TestSets
+	if len(testSets) == 0 {
+		all, err := t.testDB.GetAllTestSetIDs(ctx)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to get all test sets")
+			return err
+		}
+		testSets = all
+	}
+
+	if len(testSets) == 0 {
+		t.logger.Warn("No test sets found to templatize")
+		return nil
+	}
+
+	for _, testSetID := range testSets {
+
+		testSet, err := t.testSetConf.Read(ctx, testSetID)
+		if err == nil && (testSet != nil && testSet.Template != nil) {
+			utils.TemplatizedValues = testSet.Template
+		} else {
+			utils.TemplatizedValues = make(map[string]interface{})
+		}
+
+		if err == nil && (testSet != nil && testSet.Secret != nil) {
+			utils.SecretValues = testSet.Secret
+		} else {
+			utils.SecretValues = make(map[string]interface{})
+		}
+
+		// Get test cases from the database
+		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to get test cases")
+			return err
+		}
+
+		if len(tcs) == 0 {
+			t.logger.Warn("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
+			continue
+		}
+
+		err = t.ProcessTestCasesV2(ctx, tcs, testSetID)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to process test cases")
+			return err
+		}
+	}
 	return nil
 }

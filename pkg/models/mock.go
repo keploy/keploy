@@ -6,6 +6,18 @@ import (
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
 
+type Kind string
+
+const (
+	HTTP        Kind = "Http"
+	GENERIC     Kind = "Generic"
+	REDIS       Kind = "Redis"
+	MySQL       Kind = "MySQL"
+	Postgres    Kind = "Postgres"
+	GRPC_EXPORT Kind = "gRPC"
+	Mongo       Kind = "Mongo"
+)
+
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
@@ -16,9 +28,9 @@ type Mock struct {
 }
 
 type TestModeInfo struct {
-	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
-	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int  `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
+	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
+	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 }
 
 func (m *Mock) GetKind() string {
@@ -60,7 +72,98 @@ const (
 	FromClient OriginType = "client"
 )
 
+type MockUsage string
+
+const (
+	Updated MockUsage = "updated"
+	Deleted MockUsage = "deleted"
+)
+
 type Payload struct {
 	Origin  OriginType     `json:"Origin,omitempty" yaml:"origin" bson:"origin,omitempty"`
 	Message []OutputBinary `json:"Message,omitempty" yaml:"message" bson:"message,omitempty"`
+}
+
+type MockState struct {
+	Name       string    `json:"name"`
+	Usage      MockUsage `json:"usage"`
+	IsFiltered bool      `json:"isFiltered"`
+	SortOrder  int64     `json:"sortOrder"`
+}
+
+func (m *Mock) DeepCopy() *Mock {
+	if m == nil {
+		return nil
+	}
+
+	// 1. Perform a shallow copy of the main struct and its nested structs.
+	// This handles all simple value types (string, int, bool, etc.).
+	c := *m
+	c.Spec = m.Spec
+	c.TestModeInfo = m.TestModeInfo
+
+	// 2. Deep copy the map by creating a new one and copying key-value pairs.
+	if m.Spec.Metadata != nil {
+		c.Spec.Metadata = make(map[string]string, len(m.Spec.Metadata))
+		for k, v := range m.Spec.Metadata {
+			c.Spec.Metadata[k] = v
+		}
+	}
+
+	// 3. Deep copy all slices by creating new slices and copying the elements.
+	// This gives each copy its own separate backing array.
+	c.Spec.GenericRequests = make([]Payload, len(m.Spec.GenericRequests))
+	copy(c.Spec.GenericRequests, m.Spec.GenericRequests)
+
+	c.Spec.GenericResponses = make([]Payload, len(m.Spec.GenericResponses))
+	copy(c.Spec.GenericResponses, m.Spec.GenericResponses)
+
+	c.Spec.RedisRequests = make([]Payload, len(m.Spec.RedisRequests))
+	copy(c.Spec.RedisRequests, m.Spec.RedisRequests)
+
+	c.Spec.RedisResponses = make([]Payload, len(m.Spec.RedisResponses))
+	copy(c.Spec.RedisResponses, m.Spec.RedisResponses)
+
+	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
+	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)
+
+	c.Spec.MongoResponses = make([]MongoResponse, len(m.Spec.MongoResponses))
+	copy(c.Spec.MongoResponses, m.Spec.MongoResponses)
+
+	c.Spec.PostgresRequests = make([]Backend, len(m.Spec.PostgresRequests))
+	copy(c.Spec.PostgresRequests, m.Spec.PostgresRequests)
+
+	c.Spec.PostgresResponses = make([]Frontend, len(m.Spec.PostgresResponses))
+	copy(c.Spec.PostgresResponses, m.Spec.PostgresResponses)
+
+	c.Spec.MySQLRequests = make([]mysql.Request, len(m.Spec.MySQLRequests))
+	copy(c.Spec.MySQLRequests, m.Spec.MySQLRequests)
+
+	c.Spec.MySQLResponses = make([]mysql.Response, len(m.Spec.MySQLResponses))
+	copy(c.Spec.MySQLResponses, m.Spec.MySQLResponses)
+
+	// 4. Deep copy all pointers by creating a new object and copying the value.
+	if m.Spec.HTTPReq != nil {
+		httpReqCopy := *m.Spec.HTTPReq
+		c.Spec.HTTPReq = &httpReqCopy
+	}
+	if m.Spec.HTTPResp != nil {
+		httpRespCopy := *m.Spec.HTTPResp
+		c.Spec.HTTPResp = &httpRespCopy
+	}
+	if m.Spec.GRPCReq != nil {
+		grpcReqCopy := *m.Spec.GRPCReq
+		c.Spec.GRPCReq = &grpcReqCopy
+	}
+	if m.Spec.GRPCResp != nil {
+		grpcRespCopy := *m.Spec.GRPCResp
+		c.Spec.GRPCResp = &grpcRespCopy
+	}
+
+	return &c
+}
+
+type ReRecordCfg struct {
+	Rerecord bool
+	TestSet  string
 }

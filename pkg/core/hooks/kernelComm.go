@@ -3,10 +3,14 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/ringbuf"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
@@ -22,8 +26,13 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, er
 	if err != nil {
 		return nil, err
 	}
-	// TODO : need to implement eBPF code to differentiate between different apps
-	s, ok := h.sess.Get(0)
+
+	// Use the current app ID with proper synchronization
+	h.m.Lock()
+	currentAppID := h.appID
+	h.m.Unlock()
+
+	s, ok := h.sess.Get(currentAppID)
 	if !ok {
 		return nil, fmt.Errorf("session not found")
 	}
@@ -60,145 +69,107 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 		utils.LogError(h.logger, err, "failed to remove entry from redirect proxy map")
 		return err
 	}
-	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Any("(Key)/SourcePort", srcPort))
+	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Uint16("(Key)/SourcePort", srcPort))
 	return nil
 }
 
-func (h *Hooks) SendKeployPid(pid uint32) error {
-	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", pid))
-	err := h.keployPid.Update(uint32(0), &pid, ebpf.UpdateAny)
+func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
+	err := h.clientRegistrationMap.Update(id, appInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the keploy pid to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
 		return err
 	}
 	return nil
 }
 
-// SendAppPid sends the application's process ID (PID) to the kernel.
-// This function is used when running Keploy tests along with unit tests of the application.
-func (h *Hooks) SendAppPid(pid uint32) error {
-	h.logger.Debug("Sending app pid to kernel", zap.Any("app Pid", pid))
-	err := h.appPidMap.Update(uint32(0), &pid, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the app pid to the ebpf program")
-		return err
-	}
-	return nil
-}
-
-func (h *Hooks) SetKeployModeInKernel(mode uint32) error {
+func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	key := 0
-	err := h.keployModeMap.Update(uint32(key), &mode, ebpf.UpdateAny)
+	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to set keploy mode in the epbf program")
+		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
 		return err
 	}
 	return nil
 }
 
-// SendProxyInfo sends the IP and Port of the running proxy in the eBPF program.
-func (h *Hooks) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
+func (h *Hooks) SendE2EInfo(pid uint32) error {
 	key := 0
-	err := h.proxyInfoMap.Update(uint32(key), structs.ProxyInfo{IP4: ip4, IP6: ip6, Port: port}, ebpf.UpdateAny)
+	err := h.e2eAppRegistrationMap.Update(uint64(key), pid, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the proxy IP & Port to the epbf program")
+		utils.LogError(h.logger, err, "failed to send the E2E info to the ebpf program")
 		return err
 	}
 	return nil
 }
 
-// SendInode sends the inode of the container to ebpf hooks to filter the network traffic
-func (h *Hooks) SendInode(_ context.Context, _ uint64, inode uint64) error {
-	return h.SendNameSpaceID(0, inode)
-}
+func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppInfo) error {
+	h.m.Lock()
+	defer h.m.Unlock()
 
-// SendNameSpaceID function is helpful when user application in running inside a docker container.
-func (h *Hooks) SendNameSpaceID(key uint32, inode uint64) error {
-	err := h.inodeMap.Update(key, &inode, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the namespace id to the epbf program", zap.Any("key", key), zap.Any("Inode", inode))
-		return err
-	}
-	return nil
-}
-
-func (h *Hooks) SendCmdType(isDocker bool) error {
-	// to notify the kernel hooks that the user application command is running in native linux or docker/docker-compose.
-	key := 0
-	err := h.DockerCmdMap.Update(uint32(key), &isDocker, ebpf.UpdateAny)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (h *Hooks) SendDNSPort(port uint32) error {
-	h.logger.Debug("sending dns server port", zap.Any("port", port))
-	key := 0
-	err := h.DNSPort.Update(uint32(key), &port, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send dns server port to the epbf program", zap.Any("dns server port", port))
-		return err
-	}
-	return nil
-}
-
-func (h *Hooks) PassThroughPortsInKernel(_ context.Context, _ uint64, ports []uint) error {
-	return h.SendPassThroughPorts(ports)
-}
-
-// SendPassThroughPorts sends the destination ports of the server which should not be intercepted by keploy proxy.
-func (h *Hooks) SendPassThroughPorts(filterPorts []uint) error {
-	portsSize := len(filterPorts)
-	if portsSize > 10 {
-		utils.LogError(h.logger, nil, "can not send more than 10 ports to be filtered to the ebpf program")
-		return fmt.Errorf("passthrough ports limit exceeded")
+	// Use the provided app ID or the current app ID, don't generate a random one
+	dockerAppID := appID
+	if dockerAppID == 0 {
+		dockerAppID = h.appID
 	}
 
-	var ports [10]int32
-
-	for i := 0; i < 10; i++ {
-		if i < portsSize {
-			// Convert uint to int32
-			ports[i] = int32(filterPorts[i])
-		} else {
-			// Fill the remaining elements with -1
-			ports[i] = -1
-		}
-	}
-
-	for i, v := range ports {
-		h.logger.Debug(fmt.Sprintf("PassthroughPort(%v):[%v]", i, v))
-		err := h.passthroughPorts.Update(uint32(i), &v, ebpf.UpdateAny)
+	if h.appID != 0 && h.appID != dockerAppID {
+		err := h.dockerAppRegistrationMap.Delete(h.appID)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to send the passthrough ports to the ebpf program")
+			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Uint64("(Key)/AppID", h.appID))
 			return err
 		}
 	}
-	return nil
-}
 
-// For keploy test bench
-// The below function is used to send the keploy record binary server port to the ebpf so that the flow first reaches to the keploy record proxy and then keploy test proxy
-
-// SendKeployPorts is used to send keploy recordServer(key-0) or testServer(key-1) Port to the ebpf program
-func (h *Hooks) SendKeployPorts(key models.ModeKey, port uint32) error {
-
-	err := h.tbenchFilterPort.Update(key, &port, ebpf.UpdateAny)
+	// Don't override the app ID with a random number - use the real app ID
+	err := h.dockerAppRegistrationMap.Update(dockerAppID, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
+		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program", zap.Uint64("appID", dockerAppID))
 		return err
 	}
-	return nil
-}
 
-// SendKeployPids is used to send keploy recordServer(key-0) or testServer(key-1) Pid to the ebpf program
-func (h *Hooks) SendKeployPids(key models.ModeKey, pid uint32) error {
-
-	err := h.tbenchFilterPid.Update(key, &pid, ebpf.UpdateAny)
-	if err != nil {
-		return err
+	// Update the app ID only if we received a valid one
+	if appID != 0 {
+		h.appID = appID
 	}
+
 	return nil
 }
 
-//---------------------------
+func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
+	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
+	if err != nil {
+		return nil, err // Return error if we can't create the reader
+	}
+
+	eventChan := make(chan models.IngressEvent, 10) // A buffered channel can be useful
+
+	go func() {
+		defer rb.Close()
+		defer close(eventChan)
+
+		for {
+			// Read raw data from the ring buffer
+			rec, err := rb.Read()
+			if err != nil {
+				// If the reader was closed, it's a clean shutdown.
+				if errors.Is(err, ringbuf.ErrClosed) {
+					return
+				}
+				continue
+			}
+
+			var e models.IngressEvent
+			if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
+				utils.LogError(h.logger, err, "failed to decode ingress event")
+				continue
+			}
+			h.logger.Debug("Intercepted application bind event")
+			select {
+			case <-ctx.Done(): // Context was cancelled, so we shut down.
+				return
+			case eventChan <- e: // Send the decoded event to the channel.
+			}
+		}
+	}()
+	return eventChan, nil
+}
