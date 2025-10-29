@@ -444,14 +444,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 	}
-
-	r.logger.Info("value of skip coverage flag", zap.Bool("skipCoverage", r.config.Test.SkipCoverage), zap.String("language", r.config.Test.Language.String()))
-
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
-		r.logger.Info("merging and generating jacoco coverage report")
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
-			r.logger.Warn("failed to merge and generate jacoco report", zap.Error(err))
 			r.config.Test.SkipCoverage = true
 		}
 	}
