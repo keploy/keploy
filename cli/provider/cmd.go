@@ -891,6 +891,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+
+		// Parse proto paths early for Docker volume mounting
+		// Only needed for test/rerecord commands before starting Docker
+		if (cmd.Name() == "test" || cmd.Name() == "rerecord") && !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
+			err := parseAndMountProtoPaths(ctx, c.logger, c.cfg, cmd); 
+			if err != nil {
+				return err
+			}
+			// DockerConfig.VolumeMounts
+			c.logger.Debug("the bind mounts are", zap.Any("bind mounts", DockerConfig.VolumeMounts))
+		}
+
 		err := StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
@@ -1079,55 +1091,57 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// parse and set proto related flags
-
-			protoFile, err := cmd.Flags().GetString("proto-file")
-			if err != nil {
-				errMsg := "failed to get the proto-file flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if protoFile != "" {
-				c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
+			// Skip if already parsed (for Docker volume mounting)
+			if c.cfg.Test.ProtoFile == "" && c.cfg.Test.ProtoDir == "" && len(c.cfg.Test.ProtoInclude) == 0 {
+				protoFile, err := cmd.Flags().GetString("proto-file")
 				if err != nil {
-					errMsg := "failed to get the absolute path of proto-file"
+					errMsg := "failed to get the proto-file flag"
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
-			}
 
-			protoDir, err := cmd.Flags().GetString("proto-dir")
-			if err != nil {
-				errMsg := "failed to get the proto-dir flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if protoDir != "" {
-				c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-dir"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoInclude, err := cmd.Flags().GetStringArray("proto-include")
-			if err != nil {
-				errMsg := "failed to get the proto-include flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if len(protoInclude) > 0 {
-				for _, dir := range protoInclude {
-					absDir, err := utils.GetAbsPath(dir)
+				if protoFile != "" {
+					c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
 					if err != nil {
-						errMsg := "failed to get the absolute path of proto-include"
+						errMsg := "failed to get the absolute path of proto-file"
 						utils.LogError(c.logger, err, errMsg)
 						return errors.New(errMsg)
 					}
-					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
+				}
+
+				protoDir, err := cmd.Flags().GetString("proto-dir")
+				if err != nil {
+					errMsg := "failed to get the proto-dir flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+
+				if protoDir != "" {
+					c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
+					if err != nil {
+						errMsg := "failed to get the absolute path of proto-dir"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+				}
+
+				protoInclude, err := cmd.Flags().GetStringArray("proto-include")
+				if err != nil {
+					errMsg := "failed to get the proto-include flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+
+				if len(protoInclude) > 0 {
+					for _, dir := range protoInclude {
+						absDir, err := utils.GetAbsPath(dir)
+						if err != nil {
+							errMsg := "failed to get the absolute path of proto-include"
+							utils.LogError(c.logger, err, errMsg)
+							return errors.New(errMsg)
+						}
+						c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
+					}
 				}
 			}
 		}
