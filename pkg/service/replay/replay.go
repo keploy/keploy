@@ -257,6 +257,17 @@ func (r *Replayer) Start(ctx context.Context) error {
 			previousCmd = testSets[testSetID].AppCommand
 		}
 
+		if !runApp && r.instrument {
+			r.logger.Info("Clearing mock state from previous test set before running new one", zap.String("testSetID", testSetID))
+			// Setting mocks to an empty list should clear the instrumentation's internal state.
+			err := r.instrumentation.SetMocks(ctx, inst.AppID, []*models.Mock{}, []*models.Mock{})
+			if err != nil {
+				// This is a critical error, as it will lead to mock mismatches.
+				utils.LogError(r.logger, err, "failed to clear mocks between test sets, aborting run")
+				return fmt.Errorf("failed to clear mocks between test sets: %w", err)
+			}
+		}
+
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, runApp)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -265,6 +276,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 				return err
 			}
 			return fmt.Errorf(stopReason)
+		}
+		if r.instrument {
+			 r.logger.Info("Test set finished, closing all proxy connections.", zap.String("testSetID", testSetID))
+			 
+			 // You will need to add this method to your instrumentation interface
+			r.instrumentation.CloseConnections()
+			 if err != nil {
+				utils.LogError(r.logger, err, "failed to close client connections between test sets")
+			 }
 		}
 
 		switch testSetStatus {
@@ -376,88 +396,6 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	}
 	return &InstrumentState{AppID: appID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(appID)}, nil
 }
-
-// // reloadHooks cancels existing hooks and reloads them for the next test set.
-// // This ensures that any stale eBPF state is cleared and fresh hooks are loaded,
-// // which can help with reliability and prevent issues between test set runs.
-// // This method handles the app context preservation to avoid app deletion during reload.
-// func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentState, error) {
-// 	if !r.instrument {
-// 		return &InstrumentState{}, nil
-// 	}
-
-// 	r.logger.Debug("Reloading eBPF hooks", zap.Uint64("appID", appID))
-
-// 	// The challenge is that calling Hook again will set up new cleanup that deletes the app
-// 	// when the context is canceled. We need to create a fresh setup.
-
-// 	// First, set up the app again since it might have been deleted during cleanup
-// 	newAppID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
-// 		Container:       r.config.ContainerName,
-// 		DockerNetwork:   r.config.NetworkName,
-// 		DockerDelay:     r.config.BuildDelay,
-// 		KeployContainer: r.config.KeployContainer,
-// 	})
-// 	if err != nil {
-// 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
-// 	}
-
-// 	// Update the config with the new app ID
-// 	r.config.AppID = newAppID
-
-// 	// Create a retry mechanism in case of temporary race conditions
-// 	var lastErr error
-// 	maxRetries := 5
-// 	baseDelay := 200 * time.Millisecond
-
-// 	for attempt := 1; attempt <= maxRetries; attempt++ {
-// 		// Check for context cancellation
-// 		select {
-// 		case <-ctx.Done():
-// 			return &InstrumentState{}, context.Canceled
-// 		default:
-// 		}
-
-// 		// Add a small delay before each attempt to let any remaining cleanup finish
-// 		if attempt > 1 {
-// 			delay := baseDelay * time.Duration(attempt) // Linear backoff
-// 			r.logger.Debug("Retrying hook reload", zap.Int("attempt", attempt), zap.Duration("delay", delay))
-// 			time.Sleep(delay)
-// 		}
-
-// 		// Start fresh hooks with the new app ID
-// 		hookCtx := context.WithoutCancel(ctx)
-// 		hookCtx, cancel := context.WithCancel(hookCtx)
-
-// 		err := r.instrumentation.Hook(hookCtx, newAppID, models.HookOptions{
-// 			Mode:          models.MODE_TEST,
-// 			EnableTesting: r.config.EnableTesting,
-// 			Rules:         r.config.BypassRules,
-// 		})
-// 		if err != nil {
-// 			cancel()
-// 			lastErr = err
-// 			if errors.Is(err, context.Canceled) {
-// 				return &InstrumentState{}, err
-// 			}
-// 			// If this failed due to a race condition, wait and retry with exponential backoff
-// 			if attempt < maxRetries {
-// 				delay := baseDelay * time.Duration(attempt*attempt) // Quadratic backoff
-// 				r.logger.Debug("Hook reload failed, retrying", zap.Int("attempt", attempt), zap.Duration("delay", delay), zap.Error(err))
-// 				time.Sleep(delay)
-// 				continue
-// 			}
-// 			return &InstrumentState{}, fmt.Errorf("failed to reload hooks after %d attempts: %w", maxRetries, lastErr)
-// 		}
-
-// 		// Success - return the new hook state with the new app ID
-// 		r.logger.Debug("Successfully reloaded eBPF hooks", zap.Uint64("oldAppID", appID), zap.Uint64("newAppID", newAppID), zap.Int("attempt", attempt))
-// 		return &InstrumentState{AppID: newAppID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(newAppID)}, nil
-// 	}
-
-// 	// This should never be reached, but just in case
-// 	return &InstrumentState{}, fmt.Errorf("failed to reload hooks after %d attempts: %w", maxRetries, lastErr)
-// }
 
 func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
 	testRunIDs, err := r.reportDB.GetAllTestRunIDs(ctx)
@@ -594,7 +532,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
-
+	fmt.Println("Length of filteredMocks:", len(filteredMocks))
+	fmt.Println("Length of unfilteredMocks:", len(unfilteredMocks))
 	if filteredMocks == nil && unfilteredMocks == nil {
 		r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
 	}
@@ -660,13 +599,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
+	// time.Sleep(50 * time.Millisecond)
 	if r.instrument {
 		if runApp {
 			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
 			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
 			r.appErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+				appErr = r.RunApplication(r.appCtx, appID, models.RunOptions{
 					AppCommand: conf.AppCommand,
 				})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
@@ -844,6 +784,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
+		// time.Sleep(50 * time.Millisecond)
 		// Handle Docker environment IP replacement
 		if utils.IsDockerCmd(cmdType) {
 			err = r.replaceHostInTestCase(testCase, userIP, "docker container's IP")
@@ -1272,6 +1213,8 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 
 	filtered = pkg.FilterTcsMocks(ctx, r.logger, filtered, afterTime, beforeTime)
 	unfiltered = pkg.FilterConfigMocks(ctx, r.logger, unfiltered, afterTime, beforeTime)
+	fmt.Println("Length of filtered mocks after timestamp-based filtering:", len(filtered))
+	fmt.Println("Length of unfiltered mocks after timestamp-based filtering:", len(unfiltered))
 
 	filterOutDeleted := func(in []*models.Mock) []*models.Mock {
 		out := make([]*models.Mock, 0, len(in))
@@ -1296,7 +1239,8 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 
 	filtered = filterOutDeleted(filtered)
 	unfiltered = filterOutDeleted(unfiltered)
-
+	fmt.Println("Length of filtered mocks after removing deleted mocks:", len(filtered))
+	fmt.Println("Length of unfiltered mocks after removing deleted mocks:", len(unfiltered))
 	err := r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")

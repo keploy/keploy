@@ -164,6 +164,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		return nil, err
 	}
 
+	fmt.Println("using this mock path :", mockPath)
 	if _, err := os.Stat(mockPath); err == nil {
 		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
 		if err != nil {

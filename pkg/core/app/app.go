@@ -350,6 +350,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
 	}
+	fmt.Println("here is the network details: ", n.IPAddress)
 	a.SetContainerIPv4Addr(n.IPAddress)
 	return inode != 0 && n.IPAddress != "", nil
 }
@@ -443,7 +444,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}()
 
 	errCh := make(chan error, 1)
-
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	errCh2 := a.getDockerMeta(dockerMetaCtx)
 
