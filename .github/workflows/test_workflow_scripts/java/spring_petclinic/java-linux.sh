@@ -165,6 +165,7 @@ endsec
 
 # Clean once (keep artifacts across iterations)
 sudo rm -rf keploy/
+sudo rm keploy.yml || true
 
 for i in 1 2; do
   section "Record iteration $i"
@@ -228,6 +229,8 @@ set -e
 echo "Replay exit code: $REPLAY_RC"
 cat test_logs.txt || true
 endsec
+
+cat keploy.yml || true
 
 # ✅ Extract and validate coverage percentage from log
 coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
