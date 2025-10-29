@@ -49,6 +49,7 @@ func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 
 	for _, file := range zipReader.File {
 		if strings.HasSuffix(file.Name, "jacococli.jar") {
+			logger.Info("extracting jacoco cli jar", zap.String("to", cliPath))
 			cliFile, err := file.Open()
 			if err != nil {
 				return err
@@ -78,7 +79,7 @@ func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 
 	cliStat, err := os.Stat(cliPath)
 
-	if os.IsNotExist(err) || cliStat != nil {
+	if os.IsNotExist(err) || cliStat.Size() == 0 {
 		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
 	}
 
