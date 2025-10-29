@@ -14,6 +14,7 @@ import (
 	"strings"
 	"text/template"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/invopop/yaml"
 	"go.keploy.io/server/v2/pkg/models"
@@ -842,9 +843,13 @@ func toCamelCase(s string) string {
 	}
 	out := b.String()
 	// Must not start with digit for Go templates: {{ .<ident> }}
-	if len(out) > 0 && out[0] >= '0' && out[0] <= '9' {
-		out = "v" + strings.ToUpper(out[:1]) + out[1:]
+	if out != "" {
+		r, _ := utf8.DecodeRuneInString(out) // safe for multi-byte
+		if unicode.IsDigit(r) {
+			out = "v" + out
+		}
 	}
+
 	return out
 }
 
@@ -1078,7 +1083,7 @@ func splitSetCookie(s string) []string {
 
 		// Consider a token a new cookie if it looks like "name=value".
 		// (Allow letters, digits, '_' as a simple/robust check.)
-		startsName := hasEq && name != "" && isCookieName(name)
+		startsName := hasEq && name != "" && isValidFirstRune(name)
 
 		if startsName {
 			out = append(out, t)
@@ -1090,11 +1095,12 @@ func splitSetCookie(s string) []string {
 	return out
 }
 
-func isCookieName(name string) bool {
+func isValidFirstRune(name string) bool {
 	if name == "" {
 		return false
 	}
-	r := rune(name[0])
+	r, _ := utf8.DecodeRuneInString(name)
+	// Keep your original semantics (letters/digits/_/$ allowed in your check):
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
 }
 
