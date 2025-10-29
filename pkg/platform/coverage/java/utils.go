@@ -126,9 +126,13 @@ func MergeJacocoCoverageFiles(ctx context.Context, jacocoCliPath string) error {
 	// Specify the output file
 	args = append(args, "--destfile", "target/keploy-e2e.exec")
 
+	fmt.Println("Merging coverage files:", strings.Join(args, " "))
+
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
+	fmt.Println(cmd.String())
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to merge coverage files: %w", err)

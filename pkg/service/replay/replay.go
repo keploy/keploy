@@ -447,6 +447,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
+			r.logger.Warn("failed to merge and generate jacoco report", zap.Error(err))
 			r.config.Test.SkipCoverage = true
 		}
 	}
