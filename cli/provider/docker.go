@@ -117,7 +117,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger, keployContainer string
 			continue
 		}
 
-		logger.Debug("creating named volume for enterprise use case", zap.String("volume", volumeName))
 		err := client.CreateVolume(ctx, volumeName, false, nil)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create volume "+volumeName)

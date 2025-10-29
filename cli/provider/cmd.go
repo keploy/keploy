@@ -895,11 +895,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// Parse proto paths early for Docker volume mounting
 		// Only needed for test/rerecord commands before starting Docker
 		if (cmd.Name() == "test" || cmd.Name() == "rerecord") && !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
-			err := parseAndMountProtoPaths(ctx, c.logger, c.cfg, cmd); 
+			err := parseAndMountProtoPaths(ctx, c.logger, c.cfg, cmd)
 			if err != nil {
 				return err
 			}
-			// DockerConfig.VolumeMounts
+			// Log the bind mounts that will be used for Docker volume mounting.
 			c.logger.Debug("the bind mounts are", zap.Any("bind mounts", DockerConfig.VolumeMounts))
 		}
 
