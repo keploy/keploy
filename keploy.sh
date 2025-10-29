@@ -1,5 +1,162 @@
 #!/bin/bash
 
+
+# Loader function to show a spinner animation
+show_loader() {
+    local pid=$1
+    local message=$2
+    local completion_message="${3:-$message}"
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    
+    # Hide cursor
+    tput civis 2>/dev/null || true
+    
+    while kill -0 $pid 2>/dev/null; do
+        i=$(( (i+1) %10 ))
+        printf "\r${spin:$i:1} $message"
+        sleep .1
+    done
+    
+    # Show cursor
+    tput cnorm 2>/dev/null || true
+    printf "\r\033[K✓ $completion_message\n"
+}
+
+
+# Function to run command with loader
+run_with_loader() {
+    local message=$1
+    local completion_message=$2
+    shift 2
+    local cmd="$@"
+    
+    # Disable job control
+    set +m 2>/dev/null || true
+    
+    # Execute command in background, redirect stdout only to suppress job messages
+    eval "$cmd" >/dev/null 2>&1 &
+    local cmd_pid=$!
+    
+    # Show loader while command runs
+    show_loader $cmd_pid "$message" "$completion_message"
+    
+    # Wait for command to complete and get exit status
+    wait $cmd_pid 2>/dev/null
+    local exit_code=$?
+    
+    # Restore job control
+    set -m 2>/dev/null || true
+    
+    return $exit_code
+}
+
+
+# Function to download with a colored, clean progress bar
+download_with_progress() {
+    local url=$1
+    local output=$2
+    local message=$3
+    local completion_message=$4
+
+
+    # Hide cursor
+    tput civis 2>/dev/null || true
+
+
+    # Try to get content length (in bytes)
+    local total_bytes=0
+    total_bytes=$(curl -sI "$url" | awk '/[Cc]ontent-[Ll]ength:/ {print $2}' | tr -d '\r')
+    if [[ ! "$total_bytes" =~ ^[0-9]+$ ]]; then
+        total_bytes=0
+    fi
+
+
+    # Prepare colors (green bar, reset)
+    local color_bar
+    local color_reset
+    color_bar=$(tput setaf 2 2>/dev/null || echo '')
+    color_reset=$(tput sgr0 2>/dev/null || echo '')
+
+
+    # Determine terminal width for progress bar
+    local term_cols=80
+    if command -v tput >/dev/null 2>&1; then
+        term_cols=$(tput cols 2>/dev/null || echo 80)
+    fi
+    local bar_width=$(( term_cols - 30 ))
+    if [ $bar_width -lt 10 ]; then
+        bar_width=10
+    fi
+
+
+    # Disable job control notifications
+    set +m 2>/dev/null || true
+
+
+    # Start download in background - curl is already silent, just background it
+    curl -L --fail --silent --show-error "$url" -o "$output" &
+    local curl_pid=$!
+
+
+    # Monitor progress by polling file size
+    while kill -0 "$curl_pid" 2>/dev/null; do
+        local current_size=0
+        if [ -f "$output" ]; then
+            current_size=$(stat -c%s "$output" 2>/dev/null || stat -f%z "$output" 2>/dev/null || echo 0)
+        fi
+
+
+        if [ "$total_bytes" -gt 0 ]; then
+            local percent=$(( (current_size * 100) / total_bytes ))
+            if [ $percent -gt 100 ]; then percent=100; fi
+
+
+            local filled=$(( (percent * bar_width) / 100 ))
+            local empty=$((bar_width - filled))
+            local bar_filled
+            local bar_empty
+            bar_filled=$(printf '%*s' "$filled" '' | tr ' ' '█')
+            bar_empty=$(printf '%*s' "$empty" '' | tr ' ' '─')
+
+
+            printf "\r%s %s[%s%s%s] %3d%%" "$message" "$color_bar" "$bar_filled" "$color_reset" "$bar_empty" "$percent"
+        else
+            local size_mb=$((current_size / 1048576))
+            printf "\r%s %s[%dMB downloaded]%s" "$message" "$color_bar" "$size_mb" "$color_reset"
+        fi
+        sleep 0.12
+    done
+
+
+    # Wait for curl to finish and capture exit code
+    wait "$curl_pid" 2>/dev/null
+    local exit_code=$?
+
+
+    # Clear the progress line completely using ANSI escape code
+    printf "\r\033[K"
+
+
+    if [ $exit_code -eq 0 ]; then
+        printf "%s✓ %s%s\n" "$color_bar" "$completion_message" "$color_reset"
+    else
+        printf "%s✗ %s (exit %d)%s\n" "$color_bar" "$completion_message" "$exit_code" "$color_reset"
+    fi
+
+
+    # Restore job control
+    set -m 2>/dev/null || true
+
+
+    # Show cursor
+    tput cnorm 2>/dev/null || true
+
+
+    return $exit_code
+}
+
+
 installKeploy (){
     version="latest"
     IS_CI=false
@@ -37,12 +194,14 @@ installKeploy (){
         echo "Installing Keploy version: $version......"
     fi
 
+
     move_keploy_binary() {
         # Check if NO_ROOT is set to true
         if [ "$NO_ROOT" = "true" ]; then
             # Move without sudo
             target_dir="$HOME/.keploy/bin"
             source_dir="/tmp/keploy"  # Default source directory
+
 
             # Create the target directory in the user's home directory
             mkdir -p "$target_dir"
@@ -51,11 +210,13 @@ installKeploy (){
                 exit 1
             fi
 
+
             # Check if the OS is macOS (Darwin) to set the correct source path
             OS_NAME=$(uname)  # Get the operating system name
             if [ "$OS_NAME" = "Darwin" ]; then
                 source_dir="/tmp/keploy/keploy"  # Set source directory to the binary inside the extracted folder
             fi
+
 
             # Move the keploy binary to the user's home directory bin
             if [ -f "$source_dir" ]; then
@@ -68,6 +229,7 @@ installKeploy (){
                 echo "Error: $source_dir does not exist."
                 exit 1
             fi
+
 
             # Make sure the binary is executable
             chmod +x "$target_dir/keploy"
@@ -86,6 +248,7 @@ installKeploy (){
         set_alias
     }
 
+
     install_keploy_darwin_all() {
         if [ "$version" != "latest" ]; then
             download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_darwin_all.tar.gz"
@@ -96,10 +259,17 @@ installKeploy (){
         # to avoid the "File exists" error
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
-        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
+        
+        # Download with progress
+        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
+        
+        # Extract with loader
+        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz -C /tmp/keploy/ && rm -f /tmp/keploy.tar.gz"
+        
         move_keploy_binary
         delete_keploy_alias
     }
+
 
     install_keploy_arm() {
         if [ "$version" != "latest" ]; then
@@ -107,9 +277,16 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
+        
+        # Download with progress
+        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
+        
+        # Extract with loader
+        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp && rm -f /tmp/keploy.tar.gz"
+        
         move_keploy_binary
     }
+
 
 
     install_keploy_amd() {        
@@ -118,9 +295,16 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
+        
+        # Download with progress
+        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
+        
+        # Extract with loader
+        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp && rm -f /tmp/keploy.tar.gz"
+        
         move_keploy_binary
     }
+
 
     append_to_rc() {
         last_byte=$(tail -c 1 $2)
@@ -131,6 +315,7 @@ installKeploy (){
         fi
         source $2
     }
+
 
     update_path() {
         PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
@@ -143,6 +328,7 @@ installKeploy (){
             export PATH="$PATH_CMD"
         fi
     }
+
 
     # Get the alias to set and set it
     set_alias() {
@@ -188,9 +374,11 @@ installKeploy (){
                 fi
             fi
 
+
         fi
     
     }
+
 
     delete_keploy_alias() {
         current_shell="$PLATFORM"
@@ -220,6 +408,7 @@ installKeploy (){
         fi
     }
 
+
     cleanup_tmp() {
         # Remove extracted files /tmp directory
         tmp_files=("LICENSE" "README.md" "READMEes-Es.md" "README-UnitGen.md")
@@ -235,12 +424,14 @@ installKeploy (){
         done
     }
 
+
     ARCH=$(uname -m)
     
     OS_NAME="$(uname -s)"
     if [ "$OS_NAME" = "Darwin" ]; then
         NO_ROOT=true
     fi
+
 
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
@@ -285,7 +476,9 @@ installKeploy (){
     fi
 }
 
+
 installKeploy "$@"
+
 
 if command -v keploy &> /dev/null; then
     keploy example
