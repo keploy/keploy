@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/utils"
 
-	"go.keploy.io/server/v2/pkg/agent"
-	grpc "go.keploy.io/server/v2/pkg/agent/proxy/incoming/gRPC"
-	"go.keploy.io/server/v2/pkg/agent/proxy/util"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/agent"
+	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

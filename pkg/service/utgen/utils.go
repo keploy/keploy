@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
-	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
+	"go.keploy.io/server/v3/pkg/models"
+	settings "go.keploy.io/server/v3/pkg/service/utgen/assets"
 	"go.uber.org/zap"
 
 	"gopkg.in/yaml.v2"

@@ -15,16 +15,16 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/utils"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 
-	"go.keploy.io/server/v2/pkg/agent"
-	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
 //COM_STMT_PREPARE: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_prepare.html

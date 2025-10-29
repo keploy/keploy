@@ -12,8 +12,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/agent"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )

@@ -4,7 +4,7 @@ package provider
 import (
 	"context"
 
-	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v3/config"
 	"go.uber.org/zap"
 )
 

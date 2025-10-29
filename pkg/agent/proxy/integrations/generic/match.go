@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/util"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // fuzzyMatch performs a fuzzy matching algorithm to find the best matching mock for the given request.

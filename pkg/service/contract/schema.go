@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/getkin/kin-openapi/openapi3"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 	yamlLib "gopkg.in/yaml.v3"
 )
 

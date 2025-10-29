@@ -5,7 +5,7 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v3/config"
 	"go.uber.org/zap"
 )
 

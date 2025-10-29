@@ -1,14 +1,14 @@
 package provider
 
 import (
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/storage"
-	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
-	mapdb "go.keploy.io/server/v2/pkg/platform/yaml/mapdb"
-	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
-	openapidb "go.keploy.io/server/v2/pkg/platform/yaml/openapidb"
-	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
-	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/storage"
+	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
+	mapdb "go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	mockdb "go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	openapidb "go.keploy.io/server/v3/pkg/platform/yaml/openapidb"
+	reportdb "go.keploy.io/server/v3/pkg/platform/yaml/reportdb"
+	testdb "go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 )
 
 type commonPlatformServices struct {

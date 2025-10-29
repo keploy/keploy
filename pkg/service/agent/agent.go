@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"sync"
 
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/agent"
-	"go.keploy.io/server/v2/pkg/models"
-	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/models"
+	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
