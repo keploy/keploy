@@ -24,7 +24,7 @@ jobs:
 
             - name: Install Docker CLI and Colima
               run: |
-                  brew install docker colima
+                  brew install docker colima qemu
 
             - name: Start Colima
               run: |
@@ -37,8 +37,11 @@ jobs:
                     --mount-type=sshfs \
                     --dns=1.1.1.1
                   
-                  # Verify Colima started
+                  # Wait for Colima to be ready
+                  sleep 10
                   colima status
+                  docker context ls
+                  docker info
 
             - name: Verify Docker connectivity
               run: |
