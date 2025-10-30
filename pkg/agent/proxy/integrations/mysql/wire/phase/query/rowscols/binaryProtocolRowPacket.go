@@ -188,6 +188,7 @@ func isZeroTimeString(s string) bool {
 		s == "-00:00:00" ||
 		s == "-00:00:00.000000"
 }
+
 func isZeroDateString(s string) bool {
 	return strings.TrimSpace(s) == utils.ZeroDateString
 }
@@ -243,9 +244,6 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 
 		case mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB:
 			switch v := ce.Value.(type) {
-			case nil:
-				// This should not happen due to the NULL bitmap check above, but handle it gracefully
-				return nil, fmt.Errorf("blob-like field %q has nil value but NULL bit not set", col.Name)
 			case []byte:
 				if err := writeLenEncBytes(body, v); err != nil {
 					return nil, err
