@@ -10,7 +10,7 @@ on:
 jobs:
     test-colima:
         runs-on: macos-13
-        timeout-minutes: 20
+        timeout-minutes: 30
 
         steps:
             - name: Checkout repository
@@ -33,7 +33,11 @@ jobs:
               run: |
                   docker network create keploy-network
 
-            - name: Create minimal test app
+            - name: Pre-pull Keploy image
+              run: |
+                  docker pull ghcr.io/keploy/keploy:latest
+
+            - name: Create test app
               run: |
                   mkdir -p test-app
 
