@@ -1,0 +1,248 @@
+name: Test Colima Support
+
+on:
+    push:
+        branches: [main, develop]
+    pull_request:
+        branches: [main, develop]
+    workflow_dispatch:
+
+jobs:
+    test-colima:
+        runs-on: macos-latest
+        timeout-minutes: 30
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Checkout samples-go repository
+              uses: actions/checkout@v4
+              with:
+                  repository: keploy/samples-go
+                  path: samples-go
+
+            - name: Install Docker CLI and Colima
+              run: |
+                  brew install docker colima
+
+            - name: Start Colima
+              run: |
+                  colima start --cpu 2 --memory 4 --disk 10
+
+            - name: Verify Docker connectivity
+              run: |
+                  docker context ls
+                  docker info
+
+            - name: Create Keploy network
+              run: |
+                  docker network create keploy-network
+
+            - name: Build gin-mongo sample app
+              run: |
+                  cd samples-go/gin-mongo
+                  docker build -t gin-mongo:test .
+
+            - name: Start MongoDB
+              run: |
+                  docker run -d --name mongoDb \
+                    --network keploy-network \
+                    -p 27017:27017 \
+                    mongo
+
+            - name: Wait for MongoDB to be ready
+              run: |
+                  sleep 10
+                  docker logs mongoDb
+
+            - name: Record with Keploy (Iteration 1)
+              run: |
+                  cd samples-go/gin-mongo
+                  
+                  # Start recording in background
+                  docker run --name keploy-record-1 \
+                    --privileged \
+                    --pid=host \
+                    -p 16789:16789 \
+                    -v "$(pwd):$(pwd)" \
+                    -w "$(pwd)" \
+                    -v /sys/fs/cgroup:/sys/fs/cgroup \
+                    -v /sys/kernel/debug:/sys/kernel/debug \
+                    -v /sys/fs/bpf:/sys/fs/bpf \
+                    -v "$HOME/.colima/default/docker.sock":/var/run/docker.sock \
+                    ghcr.io/keploy/keploy:latest \
+                    record -c "docker run -p 8080:8080 --name ginApp_1 --network keploy-network --rm gin-mongo:test" \
+                    --containerName ginApp_1 \
+                    --delay 10 &
+                  
+                  KEPLOY_PID=$!
+                  
+                  # Wait for app
+                  sleep 20
+                  
+                  # Generate traffic
+                  curl -X POST http://localhost:8080/url \
+                    -H "Content-Type: application/json" \
+                    -d '{"url":"https://google.com"}'
+                  
+                  sleep 2
+                  
+                  curl -X POST http://localhost:8080/url \
+                    -H "Content-Type: application/json" \
+                    -d '{"url":"https://github.com"}'
+                  
+                  sleep 5
+                  
+                  # Stop Keploy gracefully
+                  kill -SIGINT $KEPLOY_PID || true
+                  wait $KEPLOY_PID || true
+                  
+                  # Cleanup
+                  docker stop ginApp_1 || true
+
+            - name: Record with Keploy (Iteration 2)
+              run: |
+                  cd samples-go/gin-mongo
+                  
+                  # Start recording in background (FIXED: removed -d)
+                  docker run --name keploy-record-2 \
+                    --privileged \
+                    --pid=host \
+                    -p 16789:16789 \
+                    -v "$(pwd):$(pwd)" \
+                    -w "$(pwd)" \
+                    -v /sys/fs/cgroup:/sys/fs/cgroup \
+                    -v /sys/kernel/debug:/sys/kernel/debug \
+                    -v /sys/fs/bpf:/sys/fs/bpf \
+                    -v "$HOME/.colima/default/docker.sock":/var/run/docker.sock \
+                    ghcr.io/keploy/keploy:latest \
+                    record -c "docker run -p 8080:8080 --name ginApp_2 --network keploy-network --rm gin-mongo:test" \
+                    --containerName ginApp_2 \
+                    --delay 10 &
+                  
+                  KEPLOY_PID=$!
+                  
+                  # Wait for app
+                  sleep 20
+                  
+                  # Generate DIFFERENT traffic to create distinct test-set
+                  curl -X POST http://localhost:8080/url \
+                    -H "Content-Type: application/json" \
+                    -d '{"url":"https://facebook.com"}'
+                  
+                  sleep 2
+                  
+                  curl -X POST http://localhost:8080/url \
+                    -H "Content-Type: application/json" \
+                    -d '{"url":"https://twitter.com"}'
+                  
+                  sleep 5
+                  
+                  # Stop Keploy gracefully
+                  kill -SIGINT $KEPLOY_PID || true
+                  wait $KEPLOY_PID || true
+                  
+                  # Cleanup
+                  docker stop ginApp_2 || true
+
+            - name: Verify testcases were recorded
+              run: |
+                  cd samples-go/gin-mongo
+
+                  if [ ! -d "./keploy" ]; then
+                    echo "Error: keploy directory not created"
+                    exit 1
+                  fi
+
+                  # FIXED: Changed tests-*.yaml to test-*.yaml
+                  if ! ls ./keploy/test-set-*/test-*.yaml 1> /dev/null 2>&1; then
+                    echo "Error: No testcases found"
+                    echo "Contents of keploy directory:"
+                    ls -la ./keploy/ || true
+                    find ./keploy -type f || true
+                    exit 1
+                  fi
+
+                  echo "Testcases recorded successfully:"
+                  find ./keploy -name "*.yaml" -type f
+
+            - name: Stop MongoDB before test mode
+              run: |
+                  echo "Shutting down MongoDB - Keploy should use mocks"
+                  docker stop mongoDb || true
+                  docker rm mongoDb || true
+
+            - name: Test with Keploy
+              run: |
+                  cd samples-go/gin-mongo
+                  
+                  docker run --name keploy-test \
+                    --privileged \
+                    --pid=host \
+                    -p 16789:16789 \
+                    -v "$(pwd):$(pwd)" \
+                    -w "$(pwd)" \
+                    -v /sys/fs/cgroup:/sys/fs/cgroup \
+                    -v /sys/kernel/debug:/sys/kernel/debug \
+                    -v /sys/fs/bpf:/sys/fs/bpf \
+                    -v "$HOME/.colima/default/docker.sock":/var/run/docker.sock \
+                    ghcr.io/keploy/keploy:latest \
+                    test -c "docker run -p 8080:8080 --name ginApp_test --network keploy-network --rm gin-mongo:test" \
+                    --containerName ginApp_test \
+                    --apiTimeout 60 \
+                    --delay 20
+                  
+                  # Ensure app container is stopped
+                  docker stop ginApp_test 2>/dev/null || true
+
+            - name: Verify test reports and check status
+              run: |
+                  cd samples-go/gin-mongo
+
+                  if ! ls ./keploy/reports/test-run-*/test-set-*-report.yaml 1> /dev/null 2>&1; then
+                    echo "Error: No test report found"
+                    echo "Contents of reports directory:"
+                    ls -laR ./keploy/reports/ || true
+                    exit 1
+                  fi
+
+                  echo "Test reports generated successfully:"
+                  find ./keploy/reports -name "*-report.yaml" -type f
+
+                  # Check test status for all test sets
+                  all_passed=true
+                  for report in ./keploy/reports/test-run-0/test-set-*-report.yaml; do
+                    if [ -f "$report" ]; then
+                      test_status=$(grep 'status:' "$report" | head -n 1 | awk '{print $2}')
+                      echo "Test status for $(basename $report): $test_status"
+                      if [ "$test_status" != "PASSED" ]; then
+                        all_passed=false
+                        echo "Failed report content:"
+                        cat "$report"
+                      fi
+                    fi
+                  done
+
+                  if [ "$all_passed" = false ]; then
+                    echo "Some tests failed"
+                    exit 1
+                  fi
+
+                  echo "All tests passed!"
+
+            - name: Upload Keploy artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: keploy-colima-test-results
+                  path: samples-go/gin-mongo/keploy/
+                  retention-days: 7
+
+            - name: Cleanup
+              if: always()
+              run: |
+                  docker stop ginApp_1 ginApp_2 ginApp_test keploy-record-1 keploy-record-2 keploy-test mongoDb 2>/dev/null || true
+                  docker rm ginApp_1 ginApp_2 ginApp_test keploy-record-1 keploy-record-2 keploy-test mongoDb 2>/dev/null || true
+                  docker network rm keploy-network 2>/dev/null || true
+                  colima stop || true
