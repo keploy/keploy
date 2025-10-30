@@ -309,7 +309,7 @@ func (a *App) injectNetwork(network string) error {
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
 func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
-
+	fmt.Println("Getting here 1")
 	if e.Action != "start" {
 		return false, nil
 	}
@@ -319,8 +319,9 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
 		return false, err
 	}
-
+	fmt.Println("Getting here 2")
 	// Check if the container's name matches the desired name
+	fmt.Println("Container Name is :", info.Name, "Desired Container name is :", "/"+a.container)
 	if info.Name != "/"+a.container {
 		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
 		return false, nil
@@ -328,6 +329,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 
 	// Set Docker Container ID
 	a.docker.SetContainerID(e.ID)
+	fmt.Println("Getting here 3")
 	a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
 	if info.State.Pid == 0 {
 		return false, errors.New("failed to get the pid of the container")
