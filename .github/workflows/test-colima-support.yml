@@ -33,18 +33,6 @@ jobs:
               run: |
                   docker network create keploy-network
 
-            - name: Build test app and pre-pull Keploy image
-              run: |
-                  # Start pulling in the background
-                  docker pull ghcr.io/keploy/keploy:latest &
-                  PULL_PID=$!
-
-                  cd test-app
-                  docker build -t test-app:colima . 
-
-                  # Wait for the pull to finish
-                  wait $PULL_PID
-
             - name: Create test app
               run: |
                   mkdir -p test-app
@@ -126,6 +114,18 @@ jobs:
                   EXPOSE 8080
                   CMD ["./server"]
                   EOF
+            
+            - name: Build test app and pre-pull Keploy image
+              run: |
+                  # Start pulling in the background
+                  docker pull ghcr.io/keploy/keploy:latest &
+                  PULL_PID=$!
+
+                  cd test-app
+                  docker build -t test-app:colima . 
+
+                  # Wait for the pull to finish
+                  wait $PULL_PID
 
             - name: Record with Keploy (Iteration 1)
               run: |
