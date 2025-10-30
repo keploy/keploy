@@ -128,8 +128,8 @@ jobs:
               run: |
                   cd test-app
 
-                  # Start Keploy in record mode
-                  docker run -d --name keploy-record-1 \
+                  # Start Keploy in record mode (FOREGROUND, not detached)
+                  docker run --name keploy-record-1 \
                     --privileged \
                     --pid=host \
                     -p 16789:16789 \
@@ -141,36 +141,63 @@ jobs:
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-1 --network keploy-network --rm test-app:colima" \
                     --containerName test-app-1 \
-                    --delay 10
-
+                    --delay 10 &
+                  
+                  KEPLOY_PID=$!
+                  
                   # Wait for app to be ready
-                  sleep 10
+                  echo "Waiting for app to start..."
+                  for i in {1..30}; do
+                    if curl -s http://localhost:8080/health &>/dev/null; then
+                      echo "App is ready!"
+                      break
+                    fi
+                    if [ $i -eq 30 ]; then
+                      echo "✗ App failed to start"
+                      docker logs test-app-1 || true
+                      docker logs keploy-record-1 || true
+                      exit 1
+                    fi
+                    sleep 1
+                  done
 
                   # Generate traffic
                   curl -X POST http://localhost:8080/items \
                     -H "Content-Type: application/json" \
-                    -d '{"key":"test1","value":"value1"}' || true
+                    -d '{"key":"test1","value":"value1"}'
 
                   sleep 2
 
-                  curl -X GET http://localhost:8080/items || true
+                  curl -X GET http://localhost:8080/items
 
                   sleep 2
 
-                  curl -X GET http://localhost:8080/health || true
+                  curl -X GET http://localhost:8080/health
 
-                  # Let Keploy process
                   sleep 5
 
-                  # Stop
-                  docker stop keploy-record-1 || true
+                  # Stop Keploy gracefully
+                  echo "Stopping Keploy..."
+                  kill -SIGINT $KEPLOY_PID || true
+                  timeout 15 wait $KEPLOY_PID || kill -9 $KEPLOY_PID 2>/dev/null || true
+
                   docker stop test-app-1 || true
+                  
+                  # Verify testcases created
+                  sleep 2
+                  if ! ls ./keploy/test-set-0/test-*.yaml 1> /dev/null 2>&1; then
+                    echo "✗ Iteration 1 failed: No testcases found"
+                    ls -la ./keploy/ || true
+                    docker logs keploy-record-1 || true
+                    exit 1
+                  fi
+                  echo "Iteration 1: Testcases created"
 
             - name: Record with Keploy (Iteration 2)
               run: |
                   cd test-app
 
-                  docker run -d --name keploy-record-2 \
+                  docker run --name keploy-record-2 \
                     --privileged \
                     --pid=host \
                     -p 16789:16789 \
@@ -182,22 +209,49 @@ jobs:
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-2 --network keploy-network --rm test-app:colima" \
                     --containerName test-app-2 \
-                    --delay 10
-
-                  sleep 10
+                    --delay 10 &
+                  
+                  KEPLOY_PID=$!
+                  
+                  echo "Waiting for app to start..."
+                  for i in {1..30}; do
+                    if curl -s http://localhost:8080/health &>/dev/null; then
+                      echo "App is ready!"
+                      break
+                    fi
+                    if [ $i -eq 30 ]; then
+                      echo "✗ App failed to start"
+                      docker logs test-app-2 || true
+                      docker logs keploy-record-2 || true
+                      exit 1
+                    fi
+                    sleep 1
+                  done
 
                   curl -X POST http://localhost:8080/items \
                     -H "Content-Type: application/json" \
-                    -d '{"key":"test2","value":"value2"}' || true
+                    -d '{"key":"test2","value":"value2"}'
 
                   sleep 2
 
-                  curl -X GET http://localhost:8080/items || true
+                  curl -X GET http://localhost:8080/items
 
                   sleep 5
 
-                  docker stop keploy-record-2 || true
+                  echo "Stopping Keploy..."
+                  kill -SIGINT $KEPLOY_PID || true
+                  timeout 15 wait $KEPLOY_PID || kill -9 $KEPLOY_PID 2>/dev/null || true
+
                   docker stop test-app-2 || true
+                  
+                  sleep 2
+                  if ! ls ./keploy/test-set-1/test-*.yaml 1> /dev/null 2>&1; then
+                    echo "✗ Iteration 2 failed: No testcases found"
+                    ls -la ./keploy/ || true
+                    docker logs keploy-record-2 || true
+                    exit 1
+                  fi
+                  echo "Iteration 2: Testcases created"
 
             - name: Verify testcases were recorded
               run: |
