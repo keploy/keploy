@@ -445,6 +445,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 	errCh := make(chan error, 1)
 	// listen for the "create container" event in order to send the inode of the container to the kernel
+	fmt.Println("Getting docker meta")
 	errCh2 := a.getDockerMeta(dockerMetaCtx)
 
 	g.Go(func() error {
@@ -514,6 +515,7 @@ func (a *App) waitTillExit() {
 func (a *App) run(ctx context.Context) models.AppError {
 	a.mutex.Lock() // <-- ADD READ LOCK
 	userCmd := a.cmd
+	fmt.Println("Running command: ", userCmd)
 	a.mutex.Unlock()
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
