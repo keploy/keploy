@@ -254,6 +254,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 			}
 			runApp = true
+			fmt.Println("here is the previous command :", previousCmd)
+			fmt.Println("here is the current command  :", testSets[testSetID].AppCommand)
 			previousCmd = testSets[testSetID].AppCommand
 		}
 
@@ -278,15 +280,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			return fmt.Errorf(stopReason)
 		}
 		if r.instrument {
-			 r.logger.Info("Test set finished, closing all proxy connections.", zap.String("testSetID", testSetID))
-			 
-			 // You will need to add this method to your instrumentation interface
-			r.instrumentation.CloseConnections()
-			 if err != nil {
-				utils.LogError(r.logger, err, "failed to close client connections between test sets")
-			 }
-		}
+			r.logger.Info("Test set finished, closing all proxy connections.", zap.String("testSetID", testSetID))
 
+			// You will need to add this method to your instrumentation interface
+			r.instrumentation.CloseConnections()
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to close client connections between test sets")
+			}
+		}
+		time.Sleep(5 * time.Second)
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
 			testSetResult = false
@@ -417,7 +419,7 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, runApp bool) (models.TestSetStatus, error) {
-
+	fmt.Println("Run app is :", runApp)
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
