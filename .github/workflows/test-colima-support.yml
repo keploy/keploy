@@ -128,21 +128,19 @@ jobs:
               run: |
                   cd test-app
 
-                  # Start Keploy in record mode (FOREGROUND, not detached)
+                  # Start Keploy in record mode
                   docker run --name keploy-record-1 \
-                    --privileged \
-                    --pid=host \
-                    -p 16789:16789 \
-                    -v "$(pwd):$(pwd)" \
-                    -w "$(pwd)" \
+                    --privileged --pid=host -p 16789:16789 \
+                    -v "$(pwd):$(pwd)" -w "$(pwd)" \
                     -v /sys/fs/cgroup:/sys/fs/cgroup \
                     -v /sys/kernel/debug:/sys/kernel/debug \
                     -v /sys/fs/bpf:/sys/fs/bpf \
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-1 --network keploy-network --rm test-app:colima" \
-                    --containerName test-app-1 \
-                    --delay 10 &
-                  
+                    --container-name test-app-1 \
+                    --record-timer 20s \
+                    --in-ci &
+                    
                   KEPLOY_PID=$!
                   
                   # Wait for app to be ready
@@ -198,18 +196,16 @@ jobs:
                   cd test-app
 
                   docker run --name keploy-record-2 \
-                    --privileged \
-                    --pid=host \
-                    -p 16789:16789 \
-                    -v "$(pwd):$(pwd)" \
-                    -w "$(pwd)" \
+                    --privileged --pid=host -p 16789:16789 \
+                    -v "$(pwd):$(pwd)" -w "$(pwd)" \
                     -v /sys/fs/cgroup:/sys/fs/cgroup \
                     -v /sys/kernel/debug:/sys/kernel/debug \
                     -v /sys/fs/bpf:/sys/fs/bpf \
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-2 --network keploy-network --rm test-app:colima" \
-                    --containerName test-app-2 \
-                    --delay 10 &
+                    --container-name test-app-2 \
+                    --record-timer 20s \
+                    --in-ci &
                   
                   KEPLOY_PID=$!
                   
@@ -276,18 +272,16 @@ jobs:
                   cd test-app
 
                   docker run --name keploy-test \
-                    --privileged \
-                    --pid=host \
-                    -p 16789:16789 \
-                    -v "$(pwd):$(pwd)" \
-                    -w "$(pwd)" \
+                    --privileged --pid=host -p 16789:16789 \
+                    -v "$(pwd):$(pwd)" -w "$(pwd)" \
                     -v /sys/fs/cgroup:/sys/fs/cgroup \
                     -v /sys/kernel/debug:/sys/kernel/debug \
                     -v /sys/fs/bpf:/sys/fs/bpf \
                     ghcr.io/keploy/keploy:latest \
                     test -c "docker run -p 8080:8080 --name test-app-test --network keploy-network --rm test-app:colima" \
-                    --containerName test-app-test \
-                    --delay 10
+                    --container-name test-app-test \
+                    --delay 10 \
+                    --in-ci
 
                   docker stop test-app-test || true
 
