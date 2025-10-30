@@ -135,6 +135,7 @@ jobs:
                     -v /sys/fs/cgroup:/sys/fs/cgroup \
                     -v /sys/kernel/debug:/sys/kernel/debug \
                     -v /sys/fs/bpf:/sys/fs/bpf \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-1 --network keploy-network --rm test-app:colima" \
                     --container-name test-app-1 \
@@ -201,6 +202,7 @@ jobs:
                     -v /sys/fs/cgroup:/sys/fs/cgroup \
                     -v /sys/kernel/debug:/sys/kernel/debug \
                     -v /sys/fs/bpf:/sys/fs/bpf \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-2 --network keploy-network --rm test-app:colima" \
                     --container-name test-app-2 \
