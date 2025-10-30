@@ -114,7 +114,7 @@ jobs:
                   EXPOSE 8080
                   CMD ["./server"]
                   EOF
-            
+
             - name: Build test app and pre-pull Keploy image
               run: |
                   # Start pulling in the background
@@ -147,7 +147,7 @@ jobs:
                     --in-ci &
                     
                   KEPLOY_PID=$!
-                  
+
                   # Wait for app to be ready
                   echo "Waiting for app to start..."
                   for i in {1..30}; do
@@ -156,7 +156,7 @@ jobs:
                       break
                     fi
                     if [ $i -eq 30 ]; then
-                      echo "✗ App failed to start"
+                      echo "App failed to start"
                       docker logs test-app-1 || true
                       docker logs keploy-record-1 || true
                       exit 1
@@ -182,14 +182,15 @@ jobs:
                   # Stop Keploy gracefully
                   echo "Stopping Keploy..."
                   kill -SIGINT $KEPLOY_PID || true
-                  timeout 15 wait $KEPLOY_PID || kill -9 $KEPLOY_PID 2>/dev/null || true
+                  sleep 15  # Give it time to shut down gracefully
+                  kill -9 $KEPLOY_PID 2>/dev/null || true
 
                   docker stop test-app-1 || true
-                  
+
                   # Verify testcases created
                   sleep 2
-                  if ! ls ./keploy/test-set-0/test-*.yaml 1> /dev/null 2>&1; then
-                    echo "✗ Iteration 1 failed: No testcases found"
+                  if ! ls ./keploy/test-set-0/tests/test-*.yaml 1> /dev/null 2>&1; then
+                    echo "Iteration 1 failed: No testcases found"
                     ls -la ./keploy/ || true
                     docker logs keploy-record-1 || true
                     exit 1
@@ -213,9 +214,9 @@ jobs:
                     --keploy-container keploy-record-2 \
                     --record-timer 20s \
                     --in-ci &
-                  
+
                   KEPLOY_PID=$!
-                  
+
                   echo "Waiting for app to start..."
                   for i in {1..30}; do
                     if curl -s http://localhost:8080/health &>/dev/null; then
@@ -223,7 +224,7 @@ jobs:
                       break
                     fi
                     if [ $i -eq 30 ]; then
-                      echo "✗ App failed to start"
+                      echo "App failed to start"
                       docker logs test-app-2 || true
                       docker logs keploy-record-2 || true
                       exit 1
@@ -243,13 +244,14 @@ jobs:
 
                   echo "Stopping Keploy..."
                   kill -SIGINT $KEPLOY_PID || true
-                  timeout 15 wait $KEPLOY_PID || kill -9 $KEPLOY_PID 2>/dev/null || true
+                  sleep 15  # Give it time to shut down gracefully
+                  kill -9 $KEPLOY_PID 2>/dev/null || true
 
                   docker stop test-app-2 || true
-                  
+
                   sleep 2
-                  if ! ls ./keploy/test-set-1/test-*.yaml 1> /dev/null 2>&1; then
-                    echo "✗ Iteration 2 failed: No testcases found"
+                  if ! ls ./keploy/test-set-1/tests/test-*.yaml 1> /dev/null 2>&1; then
+                    echo "Iteration 2 failed: No testcases found"
                     ls -la ./keploy/ || true
                     docker logs keploy-record-2 || true
                     exit 1
@@ -265,7 +267,7 @@ jobs:
                     exit 1
                   fi
 
-                  if ! ls ./keploy/test-set-*/test-*.yaml 1> /dev/null 2>&1; then
+                  if ! ls ./keploy/test-set-*/tests/test-*.yaml 1> /dev/null 2>&1; then
                     echo "Error: No testcases found"
                     ls -la ./keploy/ || true
                     exit 1
