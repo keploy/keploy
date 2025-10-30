@@ -322,10 +322,10 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 	fmt.Println("Getting here 2")
 	// Check if the container's name matches the desired name
 	fmt.Println("Container Name is :", info.Name, "Desired Container name is :", "/"+a.container)
-	if info.Name != "/"+a.container {
-		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
-		return false, nil
-	}
+	// if info.Name != "/"+a.container {
+	// 	a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
+	// 	return false, nil
+	// }
 
 	// Set Docker Container ID
 	a.docker.SetContainerID(e.ID)
