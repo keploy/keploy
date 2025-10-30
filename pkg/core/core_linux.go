@@ -244,14 +244,14 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		return nil
 	})
 
-	originalApp := a.GetAppCommand()
+	// originalApp := a.GetAppCommand()
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(appErrCh)
-		defer a.SetAppCommand(originalApp)
-		if opts.AppCommand != "" {
-			a.SetAppCommand(opts.AppCommand)
-		}
+		// defer a.SetAppCommand(originalApp)
+		// if opts.AppCommand != "" {
+		// 	a.SetAppCommand(opts.AppCommand)
+		// }
 		appErr := a.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr.Err, "error while running the app")

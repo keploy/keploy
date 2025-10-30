@@ -228,8 +228,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
-	var previousCmd string
-
+	// var previousCmd string
+	runApp := false
+	firstrun := true
 	for i, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
@@ -244,30 +245,34 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
 
-		var runApp bool
-		if previousCmd != testSets[testSetID].AppCommand || previousCmd == "" {
-			if previousCmd != "" {
-				r.appCtxCancel()
-				err := r.appErrGrp.Wait()
-				if err != nil {
-					utils.LogError(r.logger, err, "error in cancelling the test set run")
-				}
-			}
+		// var runApp bool
+		// if previousCmd != testSets[testSetID].AppCommand || previousCmd == "" {
+		// 	if previousCmd != "" {
+		// 		r.appCtxCancel()
+		// 		err := r.appErrGrp.Wait()
+		// 		if err != nil {
+		// 			utils.LogError(r.logger, err, "error in cancelling the test set run")
+		// 		}
+		// 	}
+		// 	runApp = true
+		// 	fmt.Println("here is the previous command :", previousCmd)
+		// 	fmt.Println("here is the current command  :", testSets[testSetID].AppCommand)
+		// 	previousCmd = testSets[testSetID].AppCommand
+		// }
+		
+		// if !runApp && r.instrument {
+		// 	r.logger.Info("Clearing mock state from previous test set before running new one", zap.String("testSetID", testSetID))
+		// 	// Setting mocks to an empty list should clear the instrumentation's internal state.
+		// 	err := r.instrumentation.SetMocks(ctx, inst.AppID, []*models.Mock{}, []*models.Mock{})
+		// 	if err != nil {
+		// 		// This is a critical error, as it will lead to mock mismatches.
+		// 		utils.LogError(r.logger, err, "failed to clear mocks between test sets, aborting run")
+		// 		return fmt.Errorf("failed to clear mocks between test sets: %w", err)
+		// 	}
+		// }
+		if !runApp && firstrun{
 			runApp = true
-			fmt.Println("here is the previous command :", previousCmd)
-			fmt.Println("here is the current command  :", testSets[testSetID].AppCommand)
-			previousCmd = testSets[testSetID].AppCommand
-		}
-
-		if !runApp && r.instrument {
-			r.logger.Info("Clearing mock state from previous test set before running new one", zap.String("testSetID", testSetID))
-			// Setting mocks to an empty list should clear the instrumentation's internal state.
-			err := r.instrumentation.SetMocks(ctx, inst.AppID, []*models.Mock{}, []*models.Mock{})
-			if err != nil {
-				// This is a critical error, as it will lead to mock mismatches.
-				utils.LogError(r.logger, err, "failed to clear mocks between test sets, aborting run")
-				return fmt.Errorf("failed to clear mocks between test sets: %w", err)
-			}
+			firstrun = false
 		}
 
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, runApp)
@@ -289,6 +294,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 		time.Sleep(5 * time.Second)
+
+		if !firstrun {
+			runApp = false
+		}
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
 			testSetResult = false
@@ -314,6 +323,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
 		}
+		//
 	}
 
 	if r.appCtxCancel != nil {
