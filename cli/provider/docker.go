@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -109,7 +110,13 @@ func RunInDocker(ctx context.Context, logger *zap.Logger, keployContainer string
 		if strings.Contains(volume, ":") {
 			volumeName = strings.Split(volume, ":")[0]
 		}
-		logger.Debug("creating volume", zap.String("volume", volumeName))
+
+		// If the volumeName is an absolute path, it's a bind mount. DO NOT create a volume for it.
+		if filepath.IsAbs(volumeName) {
+			logger.Debug("identified as bind mount, skipping volume creation", zap.String("path", volumeName))
+			continue
+		}
+
 		err := client.CreateVolume(ctx, volumeName, false, nil)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create volume "+volumeName)
@@ -200,16 +207,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, keployContainer string, p
 		ttyFlag = " "
 	}
 
+	// Build the volume mount flags safely.
+	var volumeFlags []string
+	for _, volume := range DockerConfig.VolumeMounts {
+		volumeFlags = append(volumeFlags, "-v "+volume)
+	}
 	Volumes := ""
-	for i, volume := range DockerConfig.VolumeMounts {
-		if i != 0 {
-			Volumes = Volumes + "-v " + volume
-		} else {
-			Volumes = "-v " + volume
-		}
-		if i == len(DockerConfig.VolumeMounts)-1 {
-			Volumes = Volumes + " "
-		}
+	if len(volumeFlags) > 0 {
+		Volumes = strings.Join(volumeFlags, " ") + " "
 	}
 
 	switch osName {

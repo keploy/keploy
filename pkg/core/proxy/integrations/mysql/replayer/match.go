@@ -313,6 +313,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// Re-fetch once to avoid spin
 		return nil, false, fmt.Errorf("failed to update matched mock")
 	}
+	logger.Debug("matched command with the mock", zap.Any("mock", matchedMock.Name))
 	return matchedResp, true, nil
 }
 
