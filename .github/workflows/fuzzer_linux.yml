@@ -245,6 +245,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
+          ref: reusable-workflow # needed because script for postgres fuzzer is only present in this branch before merge
 
       - name: Download Keploy Binary (for Record)
         id: record_keploy
