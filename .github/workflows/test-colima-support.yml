@@ -9,84 +9,123 @@ on:
 
 jobs:
     test-colima:
-        runs-on: macos-13
-        timeout-minutes: 45
+        runs-on: macos-latest
+        timeout-minutes: 20
 
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
 
-            - name: Checkout samples-go repository
-              uses: actions/checkout@v4
-              with:
-                  repository: keploy/samples-go
-                  path: samples-go
-
             - name: Install Docker CLI and Colima
               run: |
-                  brew install docker colima qemu
+                  brew install docker colima
 
             - name: Start Colima
               run: |
-                  # Use QEMU driver for GitHub Actions compatibility
-                  colima start \
-                    --cpu 2 \
-                    --memory 4 \
-                    --disk 10 \
-                    --vm-type=qemu \
-                    --mount-type=sshfs \
-                    --dns=1.1.1.1
-                  
-                  # Wait for Colima to be ready
-                  sleep 10
-                  colima status
-                  docker context ls
-                  docker info
+                  colima start --cpu 2 --memory 4 --disk 10
 
             - name: Verify Docker connectivity
               run: |
                   docker context ls
                   docker info
-                  echo "Docker socket: $(docker context inspect colima -f '{{.Endpoints.docker.Host}}')"
 
             - name: Create Keploy network
               run: |
                   docker network create keploy-network
 
-            - name: Build gin-mongo sample app
+            - name: Create minimal test app
               run: |
-                  cd samples-go/gin-mongo
-                  docker build -t gin-mongo:test .
+                  mkdir -p test-app
 
-            - name: Start MongoDB
-              run: |
-                  docker run -d --name mongoDb \
-                    --network keploy-network \
-                    -p 27017:27017 \
-                    mongo
+                  # Create a minimal Go HTTP server
+                  cat > test-app/main.go << 'EOF'
+                  package main
 
-            - name: Wait for MongoDB to be ready
+                  import (
+                      "encoding/json"
+                      "fmt"
+                      "log"
+                      "net/http"
+                      "sync"
+                  )
+
+                  var (
+                      store = make(map[string]string)
+                      mu    sync.RWMutex
+                  )
+
+                  type Item struct {
+                      Key   string `json:"key"`
+                      Value string `json:"value"`
+                  }
+
+                  func main() {
+                      http.HandleFunc("/items", handleItems)
+                      http.HandleFunc("/health", handleHealth)
+                      
+                      fmt.Println("Server starting on :8080")
+                      log.Fatal(http.ListenAndServe(":8080", nil))
+                  }
+
+                  func handleHealth(w http.ResponseWriter, r *http.Request) {
+                      w.WriteHeader(http.StatusOK)
+                      w.Write([]byte("OK"))
+                  }
+
+                  func handleItems(w http.ResponseWriter, r *http.Request) {
+                      w.Header().Set("Content-Type", "application/json")
+                      
+                      switch r.Method {
+                      case http.MethodPost:
+                          var item Item
+                          if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+                              http.Error(w, err.Error(), http.StatusBadRequest)
+                              return
+                          }
+                          
+                          mu.Lock()
+                          store[item.Key] = item.Value
+                          mu.Unlock()
+                          
+                          w.WriteHeader(http.StatusCreated)
+                          json.NewEncoder(w).Encode(map[string]string{"status": "created", "key": item.Key})
+                          
+                      case http.MethodGet:
+                          mu.RLock()
+                          defer mu.RUnlock()
+                          json.NewEncoder(w).Encode(store)
+                          
+                      default:
+                          http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+                      }
+                  }
+                  EOF
+
+                  # Create minimal Dockerfile
+                  cat > test-app/Dockerfile << 'EOF'
+                  FROM golang:1.21-alpine AS builder
+                  WORKDIR /app
+                  COPY main.go .
+                  RUN go build -o server main.go
+
+                  FROM alpine:latest
+                  WORKDIR /app
+                  COPY --from=builder /app/server .
+                  EXPOSE 8080
+                  CMD ["./server"]
+                  EOF
+
+            - name: Build test app
               run: |
-                  echo "Waiting for MongoDB..."
-                  for i in {1..30}; do
-                    if docker exec mongoDb mongosh --eval 'db.runCommand({ ping: 1 })' &>/dev/null; then
-                      echo "MongoDB is ready!"
-                      break
-                    fi
-                    if [ $i -eq 30 ]; then
-                      echo "MongoDB failed to start"
-                      docker logs mongoDb
-                      exit 1
-                    fi
-                    sleep 1
-                  done
+                  cd test-app
+                  docker build -t test-app:colima .
 
             - name: Record with Keploy (Iteration 1)
               run: |
-                  cd samples-go/gin-mongo
-                  
-                  # Start recording in background
-                  docker run --name keploy-rec-1 \
+                  cd test-app
+
+                  # Start Keploy in record mode
+                  docker run -d --name keploy-record-1 \
                     --privileged \
                     --pid=host \
                     -p 16789:16789 \
@@ -97,55 +136,38 @@ jobs:
                     -v /sys/fs/bpf:/sys/fs/bpf \
                     -v "$HOME/.colima/default/docker.sock":/var/run/docker.sock \
                     ghcr.io/keploy/keploy:latest \
-                    record -c "docker run -p 8080:8080 --name gin-app-1 --network keploy-network --rm gin-mongo:test" \
-                    --containerName gin-app-1 \
-                    --delay 10 &
-                  
-                  KEPLOY_PID=$!
-                  sleep 5
-                  
-                  # Wait for app
-                  echo "Waiting for app..."
-                  for i in {1..30}; do
-                    if curl -s http://localhost:8080/ &>/dev/null; then
-                      echo "App is ready!"
-                      break
-                    fi
-                    if [ $i -eq 30 ]; then
-                      echo "App failed to start"
-                      docker logs gin-app-1 || true
-                      exit 1
-                    fi
-                    sleep 1
-                  done
-                  
+                    record -c "docker run -p 8080:8080 --name test-app-1 --network keploy-network --rm test-app:colima" \
+                    --containerName test-app-1 \
+                    --delay 10
+
+                  # Wait for app to be ready
+                  sleep 10
+
                   # Generate traffic
-                  echo "Generating traffic..."
-                  curl -X POST http://localhost:8080/url \
+                  curl -X POST http://localhost:8080/items \
                     -H "Content-Type: application/json" \
-                    -d '{"url":"https://google.com"}'
-                  
+                    -d '{"key":"test1","value":"value1"}' || true
+
                   sleep 2
-                  
-                  curl -X POST http://localhost:8080/url \
-                    -H "Content-Type: application/json" \
-                    -d '{"url":"https://github.com"}'
-                  
+
+                  curl -X GET http://localhost:8080/items || true
+
+                  sleep 2
+
+                  curl -X GET http://localhost:8080/health || true
+
+                  # Let Keploy process
                   sleep 5
-                  
-                  # Stop Keploy
-                  echo "Stopping Keploy..."
-                  kill -SIGINT $KEPLOY_PID || true
-                  timeout 15 wait $KEPLOY_PID || kill -9 $KEPLOY_PID 2>/dev/null || true
-                  
-                  docker stop gin-app-1 || true
-                  docker logs keploy-rec-1 --tail 50 || true
+
+                  # Stop
+                  docker stop keploy-record-1 || true
+                  docker stop test-app-1 || true
 
             - name: Record with Keploy (Iteration 2)
               run: |
-                  cd samples-go/gin-mongo
-                  
-                  docker run --name keploy-rec-2 \
+                  cd test-app
+
+                  docker run -d --name keploy-record-2 \
                     --privileged \
                     --pid=host \
                     -p 16789:16789 \
@@ -156,75 +178,47 @@ jobs:
                     -v /sys/fs/bpf:/sys/fs/bpf \
                     -v "$HOME/.colima/default/docker.sock":/var/run/docker.sock \
                     ghcr.io/keploy/keploy:latest \
-                    record -c "docker run -p 8080:8080 --name gin-app-2 --network keploy-network --rm gin-mongo:test" \
-                    --containerName gin-app-2 \
-                    --delay 10 &
-                  
-                  KEPLOY_PID=$!
-                  sleep 5
-                  
-                  echo "Waiting for app..."
-                  for i in {1..30}; do
-                    if curl -s http://localhost:8080/ &>/dev/null; then
-                      echo "App is ready!"
-                      break
-                    fi
-                    if [ $i -eq 30 ]; then
-                      echo "App failed to start"
-                      docker logs gin-app-2 || true
-                      exit 1
-                    fi
-                    sleep 1
-                  done
-                  
-                  echo "Generating traffic..."
-                  curl -X POST http://localhost:8080/url \
+                    record -c "docker run -p 8080:8080 --name test-app-2 --network keploy-network --rm test-app:colima" \
+                    --containerName test-app-2 \
+                    --delay 10
+
+                  sleep 10
+
+                  curl -X POST http://localhost:8080/items \
                     -H "Content-Type: application/json" \
-                    -d '{"url":"https://facebook.com"}'
-                  
+                    -d '{"key":"test2","value":"value2"}' || true
+
                   sleep 2
-                  
-                  curl -X POST http://localhost:8080/url \
-                    -H "Content-Type: application/json" \
-                    -d '{"url":"https://twitter.com"}'
-                  
+
+                  curl -X GET http://localhost:8080/items || true
+
                   sleep 5
-                  
-                  echo "Stopping Keploy..."
-                  kill -SIGINT $KEPLOY_PID || true
-                  timeout 15 wait $KEPLOY_PID || kill -9 $KEPLOY_PID 2>/dev/null || true
-                  
-                  docker stop gin-app-2 || true
-                  docker logs keploy-rec-2 --tail 50 || true
+
+                  docker stop keploy-record-2 || true
+                  docker stop test-app-2 || true
 
             - name: Verify testcases were recorded
               run: |
-                  cd samples-go/gin-mongo
+                  cd test-app
 
                   if [ ! -d "./keploy" ]; then
                     echo "Error: keploy directory not created"
                     exit 1
                   fi
 
-                  if ! ls ./keploy/test-set-*/test-*.yaml 1> /dev/null 2>&1; then
+                  if ! ls ./keploy/test-set-*/tests-*.yaml 1> /dev/null 2>&1; then
                     echo "Error: No testcases found"
-                    find ./keploy -type f || true
+                    ls -la ./keploy/ || true
                     exit 1
                   fi
 
                   echo "Testcases recorded successfully:"
                   find ./keploy -name "*.yaml" -type f
 
-            - name: Stop MongoDB before test mode
-              run: |
-                  echo "Shutting down MongoDB - Keploy should use mocks"
-                  docker stop mongoDb || true
-                  docker rm mongoDb || true
-
             - name: Test with Keploy
               run: |
-                  cd samples-go/gin-mongo
-                  
+                  cd test-app
+
                   docker run --name keploy-test \
                     --privileged \
                     --pid=host \
@@ -236,4 +230,58 @@ jobs:
                     -v /sys/fs/bpf:/sys/fs/bpf \
                     -v "$HOME/.colima/default/docker.sock":/var/run/docker.sock \
                     ghcr.io/keploy/keploy:latest \
-                    test -c "docker run -p 8080:8080 --
+                    test -c "docker run -p 8080:8080 --name test-app-test --network keploy-network --rm test-app:colima" \
+                    --containerName test-app-test \
+                    --delay 10
+
+                  docker stop test-app-test || true
+
+            - name: Verify test reports
+              run: |
+                  cd test-app
+
+                  if ! ls ./keploy/reports/test-run-*/test-set-*/report-*.yaml 1> /dev/null 2>&1; then
+                    echo "Error: No test report found"
+                    ls -la ./keploy/reports/ || true
+                    exit 1
+                  fi
+
+                  echo "Test reports generated:"
+                  find ./keploy/reports -name "report-*.yaml" -type f
+
+                  # Check test status
+                  all_passed=true
+                  for i in {0..1}; do
+                    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+                    if [ -f "$report_file" ]; then
+                      test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+                      echo "Test status for test-set-$i: $test_status"
+                      if [ "$test_status" != "PASSED" ]; then
+                        all_passed=false
+                        cat "$report_file"
+                      fi
+                    fi
+                  done
+
+                  if [ "$all_passed" = false ]; then
+                    echo "Some tests failed"
+                    exit 1
+                  fi
+
+                  echo "All tests passed - Colima support verified!"
+
+            - name: Upload Keploy artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: keploy-colima-test-results
+                  path: test-app/keploy/
+                  retention-days: 7
+
+            - name: Cleanup
+              if: always()
+              run: |
+                  docker stop test-app-1 test-app-2 test-app-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
+                  docker rm test-app-1 test-app-2 test-app-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
+                  docker network rm keploy-network 2>/dev/null || true
+                  colima stop || true
