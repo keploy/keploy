@@ -33,9 +33,17 @@ jobs:
               run: |
                   docker network create keploy-network
 
-            - name: Pre-pull Keploy image
+            - name: Build test app and pre-pull Keploy image
               run: |
-                  docker pull ghcr.io/keploy/keploy:latest
+                  # Start pulling in the background
+                  docker pull ghcr.io/keploy/keploy:latest &
+                  PULL_PID=$!
+
+                  cd test-app
+                  docker build -t test-app:colima . 
+
+                  # Wait for the pull to finish
+                  wait $PULL_PID
 
             - name: Create test app
               run: |
@@ -119,11 +127,6 @@ jobs:
                   CMD ["./server"]
                   EOF
 
-            - name: Build test app
-              run: |
-                  cd test-app
-                  docker build -t test-app:colima .
-
             - name: Record with Keploy (Iteration 1)
               run: |
                   cd test-app
@@ -139,6 +142,7 @@ jobs:
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-1 --network keploy-network --rm test-app:colima" \
                     --container-name test-app-1 \
+                    --keploy-container keploy-record-1 \
                     --record-timer 20s \
                     --in-ci &
                     
@@ -206,6 +210,7 @@ jobs:
                     ghcr.io/keploy/keploy:latest \
                     record -c "docker run -p 8080:8080 --name test-app-2 --network keploy-network --rm test-app:colima" \
                     --container-name test-app-2 \
+                    --keploy-container keploy-record-2 \
                     --record-timer 20s \
                     --in-ci &
                   
@@ -282,6 +287,7 @@ jobs:
                     ghcr.io/keploy/keploy:latest \
                     test -c "docker run -p 8080:8080 --name test-app-test --network keploy-network --rm test-app:colima" \
                     --container-name test-app-test \
+                    --keploy-container keploy-test \
                     --delay 10 \
                     --in-ci
 
