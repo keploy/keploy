@@ -115,7 +115,7 @@ func (h *Hooks) load(ctx context.Context, setupOpts config.Agent) error {
 	dirname := filepath.Dir(filename)
 
 	// Join the current directory with the relative path to the executable
-	exePath := filepath.Join(dirname, "windows", "windows-redirector.exe")
+	exePath := filepath.Join(dirname, "windows-redirector.exe")
 	exePath = filepath.Clean(exePath)
 
 	cmd := exec.CommandContext(ctx, exePath, `C:\my.sock`)
@@ -153,4 +153,8 @@ func (h *Hooks) unLoad(_ context.Context) {
 
 func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	return conn.ListenSocket(ctx, h.logger, h.openEventChan, h.dataEventChan, h.closeEventChan, opts)
+}
+
+func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
+	return nil, nil
 }
