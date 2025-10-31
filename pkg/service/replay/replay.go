@@ -259,8 +259,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// 	fmt.Println("here is the current command  :", testSets[testSetID].AppCommand)
 		// 	previousCmd = testSets[testSetID].AppCommand
 		// }
-		
-		// if !runApp && r.instrument {
+
+		// if r.instrument {
 		// 	r.logger.Info("Clearing mock state from previous test set before running new one", zap.String("testSetID", testSetID))
 		// 	// Setting mocks to an empty list should clear the instrumentation's internal state.
 		// 	err := r.instrumentation.SetMocks(ctx, inst.AppID, []*models.Mock{}, []*models.Mock{})
@@ -270,7 +270,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// 		return fmt.Errorf("failed to clear mocks between test sets: %w", err)
 		// 	}
 		// }
-		if !runApp && firstrun{
+		if !runApp && firstrun {
 			runApp = true
 			firstrun = false
 		}
@@ -293,7 +293,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to close client connections between test sets")
 			}
 		}
-		time.Sleep(5 * time.Second)
 
 		if !firstrun {
 			runApp = false
@@ -323,6 +322,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
 		}
+		time.Sleep(1 * time.Second)
 		//
 	}
 
