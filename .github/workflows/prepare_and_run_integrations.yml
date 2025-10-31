@@ -93,8 +93,3 @@ jobs:
       jobs-to-run: 'postgres_fuzzer,grpc_fuzzer'
     secrets:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  run_grpc_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/grpc_linux.yml
-    with:
-      runner: ${{ inputs.runner }}
