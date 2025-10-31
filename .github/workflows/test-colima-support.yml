@@ -2,9 +2,9 @@ name: Test Colima Support
 
 on:
     push:
-        branches: [main, develop]
+        branches: [main]
     pull_request:
-        branches: [main, develop]
+        branches: [main]
     workflow_dispatch:
 
 jobs:
@@ -115,17 +115,23 @@ jobs:
                   CMD ["./server"]
                   EOF
 
-            - name: Build test app and pre-pull Keploy image
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Build test app (cached) and pre-pull Keploy in parallel
               run: |
-                  # Start pulling in the background
-                  docker pull ghcr.io/keploy/keploy:latest &
-                  PULL_PID=$!
+                docker pull ghcr.io/keploy/keploy:v2.11.12 &  # pin for stability
+                PULL_PID=$!
 
-                  cd test-app
-                  docker build -t test-app:colima . 
+                cd test-app
+                docker buildx build \
+                  --load \
+                  --tag test-app:colima \
+                  --cache-from type=gha \
+                  --cache-to type=gha,mode=max \
+                  .
 
-                  # Wait for the pull to finish
-                  wait $PULL_PID
+                wait $PULL_PID
 
             - name: Record with Keploy (Iteration 1)
               run: |
