@@ -151,7 +151,7 @@ jobs:
                   # Wait for app to be ready
                   echo "Waiting for app to start..."
                   for i in {1..30}; do
-                    if curl -s http://localhost:8080/health &>/dev/null; then
+                    if docker exec keploy-record-1 curl -s http://test-app-1:8080/health &>/dev/null; then
                       echo "App is ready!"
                       break
                     fi
@@ -165,17 +165,17 @@ jobs:
                   done
 
                   # Generate traffic
-                  curl -X POST http://localhost:8080/items \
+                  docker exec keploy-record-1 curl -X POST http://test-app-1:8080/items \
                     -H "Content-Type: application/json" \
                     -d '{"key":"test1","value":"value1"}'
 
                   sleep 2
 
-                  curl -X GET http://localhost:8080/items
+                  docker exec keploy-record-1 curl -X GET http://test-app-1:8080/items
 
                   sleep 2
 
-                  curl -X GET http://localhost:8080/health
+                  docker exec keploy-record-1 curl -X GET http://test-app-1:8080/health
 
                   sleep 5
 
@@ -219,7 +219,7 @@ jobs:
 
                   echo "Waiting for app to start..."
                   for i in {1..30}; do
-                    if curl -s http://localhost:8080/health &>/dev/null; then
+                    if docker exec keploy-record-2 curl -s http://test-app-2:8080/health &>/dev/null; then
                       echo "App is ready!"
                       break
                     fi
@@ -232,13 +232,13 @@ jobs:
                     sleep 1
                   done
 
-                  curl -X POST http://localhost:8080/items \
+                  docker exec keploy-record-2 curl -X POST http://test-app-2:8080/items \
                     -H "Content-Type: application/json" \
                     -d '{"key":"test2","value":"value2"}'
 
                   sleep 2
 
-                  curl -X GET http://localhost:8080/items
+                  docker exec keploy-record-2 curl -X GET http://test-app-2:8080/items
 
                   sleep 5
 
@@ -286,6 +286,7 @@ jobs:
                     -v /sys/fs/cgroup:/sys/fs/cgroup \
                     -v /sys/kernel/debug:/sys/kernel/debug \
                     -v /sys/fs/bpf:/sys/fs/bpf \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
                     ghcr.io/keploy/keploy:latest \
                     test -c "docker run -p 8080:8080 --name test-app-test --network keploy-network --rm test-app:colima" \
                     --container-name test-app-test \
@@ -293,16 +294,14 @@ jobs:
                     --delay 10 \
                     --in-ci
 
-                  docker stop test-app-test || true
-
             - name: Verify test reports
               run: |
                   cd test-app
 
-                  if ! ls ./keploy/reports/test-run-*/test-set-*/report-*.yaml 1> /dev/null 2>&1; then
-                    echo "Error: No test report found"
-                    ls -la ./keploy/reports/ || true
-                    exit 1
+                  if ! find ./keploy/reports -name "report-*.yaml" -type f | grep -q .; then
+                      echo "Error: No test report found"
+                      ls -laR ./keploy/reports/ || true
+                      exit 1
                   fi
 
                   echo "Test reports generated:"
