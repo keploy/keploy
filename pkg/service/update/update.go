@@ -1,6 +1,6 @@
 package update
 
-// This is a generic auto update package  
+// This is a generic auto update package
 
 import (
 	"archive/tar"
@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/charmbracelet/glamour"
 	"go.uber.org/zap"
@@ -175,6 +176,23 @@ func extractTarGz(gzipPath, destDir string) error {
 		}
 
 		target := filepath.Join(destDir, filepath.Clean(header.Name))
+		// Ensure the target path is within the destination directory to prevent Zip Slip vulnerabilities.
+		targetAbs, err := filepath.Abs(target)
+		if err != nil {
+			return err
+		}
+		destDirAbs, err := filepath.Abs(destDir)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(destDirAbs, targetAbs)
+		if err != nil {
+			return err
+		}
+		// If rel starts with ".." or is absolute, it's outside destDir; skip or error.
+		if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			return fmt.Errorf("tar file entry %q is outside the target directory", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
