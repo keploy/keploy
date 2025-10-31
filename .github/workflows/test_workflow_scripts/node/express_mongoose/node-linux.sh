@@ -4,6 +4,8 @@
 set -Eeuo pipefail
 set -o errtrace
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 

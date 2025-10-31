@@ -3,6 +3,8 @@
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 echo "iid.sh executed"
 

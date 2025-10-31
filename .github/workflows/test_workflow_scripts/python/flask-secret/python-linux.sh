@@ -2,6 +2,8 @@
 
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # Function to cleanup any remaining keploy processes
 cleanup_keploy() {
     echo "Cleaning up any remaining keploy processes..."

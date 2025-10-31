@@ -51,7 +51,12 @@ jobs:
         with:
           repository: keploy/samples-typescript
           path: samples-typescript
-      
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x' # Or your desired Node.js version
+
       - name: Setup nyc for code coverage
         run: |
           npm install -g nyc

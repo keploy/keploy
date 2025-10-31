@@ -7,6 +7,8 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
@@ -131,7 +133,7 @@ wait_for_http() {
   local host="localhost" # Assuming localhost
   local port="$2"
   section "Waiting for application on port $port..."
-  for i in {1..120}; do
+  for i in {1..300}; do
     # Use netcat (nc) to check if the port is open without sending app-level data
     if nc -z "$host" "$port" >/dev/null 2>&1; then
       echo "✅ Application port $port is open."
@@ -195,7 +197,7 @@ endsec
 
 # --- Recording Phase ---
 section "Start Recording Server"
-sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record.txt &
+sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" --debug 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec

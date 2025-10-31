@@ -2,6 +2,8 @@
 # safer bash, but we’ll locally disable -e around commands we want to inspect
 set -Eeuo pipefail
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # ----- helpers -----
 section()  { echo "::group::$*"; }
 endsec()   { echo "::endgroup::"; }
@@ -89,9 +91,10 @@ send_request() {
 
   # Give Keploy a moment to persist artifacts, then stop it cleanly
   sleep 10
-  echo "$kp_pid Keploy PID"
-  echo "Killing Keploy"
-  sudo kill "$kp_pid" 2>/dev/null || true
+  REC_PID="$(pgrep -n -f 'keploy record' || true)"
+  echo "$REC_PID Keploy PID"
+  echo "Killing keploy"
+  sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 run_record_iteration() {

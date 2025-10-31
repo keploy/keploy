@@ -8,6 +8,8 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
