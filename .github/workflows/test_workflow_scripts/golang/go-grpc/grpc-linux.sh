@@ -135,7 +135,7 @@ wait_for_port() {
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
         # Use lsof to check for a listening TCP socket on the specified port
-        if nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
+        if sudo nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
