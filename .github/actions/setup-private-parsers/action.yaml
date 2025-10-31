@@ -34,34 +34,34 @@ runs:
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    - name: Configure Git, Fetch Dependencies, and Create Parsers File
-      shell: bash
-      env:
-        INTEGRATION_REF: ${{ inputs.integration-ref }}
-        # This command tells git's underlying ssh client to disable strict host key checking
-        GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=no"
-      run: |
-        # Optional but recommended: Test the SSH connection directly for debugging
-        echo "Testing SSH connection to github.com..."
-        ssh -T git@github.com
+    # - name: Configure Git, Fetch Dependencies, and Create Parsers File
+    #   shell: bash
+    #   env:
+    #     INTEGRATION_REF: ${{ inputs.integration-ref }}
+    #     # This command tells git's underlying ssh client to disable strict host key checking
+    #     GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=no"
+    #   run: |
+    #     # Optional but recommended: Test the SSH connection directly for debugging
+    #     echo "Testing SSH connection to github.com..."
+    #     ssh -T git@github.com
 
-        # Configure git to use SSH instead of HTTPS for GitHub
-        git config --global url."git@github.com:".insteadOf "https://github.com/"
+    #     # Configure git to use SSH instead of HTTPS for GitHub
+    #     git config --global url."git@github.com:".insteadOf "https://github.com/"
         
-        echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+    #     echo "Fetching private integrations dependency via SSH..."
+    #     GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
         
-        echo "Creating extraparsers.go..."
-        mkdir -p pkg/agent/proxy
-        cat <<'EOF' > pkg/agent/proxy/extraparsers.go
-        //go:build linux
+    #     echo "Creating extraparsers.go..."
+    #     mkdir -p pkg/agent/proxy
+    #     cat <<'EOF' > pkg/agent/proxy/extraparsers.go
+    #     //go:build linux
 
-        package proxy
+    #     package proxy
 
-        import (
-        	_ "github.com/keploy/integrations/pkg/parsers"
-        )
-        EOF
+    #     import (
+    #     	_ "github.com/keploy/integrations/pkg/parsers"
+    #     )
+    #     EOF
     - name: Add any missing Go modules
       shell: bash
       run: |
