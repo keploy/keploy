@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/invopop/yaml"
 	"go.keploy.io/server/v3/pkg/models"
@@ -193,7 +195,26 @@ func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, r
 	valueIndex := make(map[string][]*ValueLocation)
 	for i := range tcs {
 		for k, val := range tcs[i].HTTPReq.Header {
-			loc := &ValueLocation{TestCaseIndex: i, Part: RequestHeader, Path: k, Pointer: &tcs[i].HTTPReq.Header, OriginalType: "string"}
+			// Special handling for Cookie: split "a=1; b=2"
+			if strings.EqualFold(k, "Cookie") {
+				kvs := parseCookiePairs(val)
+				for _, kv := range kvs {
+					if kv.Name == "" {
+						continue
+					}
+					loc := &ValueLocation{
+						TestCaseIndex: i, Part: RequestHeader,
+						Path:    fmt.Sprintf("Cookie.%s", kv.Name),
+						Pointer: &tcs[i].HTTPReq.Header, OriginalType: "string",
+					}
+					valueIndex[kv.Value] = append(valueIndex[kv.Value], loc)
+				}
+				continue
+			}
+			loc := &ValueLocation{
+				TestCaseIndex: i, Part: RequestHeader,
+				Path: k, Pointer: &tcs[i].HTTPReq.Header, OriginalType: "string",
+			}
 			if k == "Authorization" && strings.HasPrefix(val, "Bearer ") {
 				token := strings.TrimPrefix(val, "Bearer ")
 				valueIndex[token] = append(valueIndex[token], loc)
@@ -201,6 +222,32 @@ func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, r
 				valueIndex[val] = append(valueIndex[val], loc)
 			}
 		}
+		// --- Response headers as potential producers ---
+		for k, val := range tcs[i].HTTPResp.Header {
+			if strings.EqualFold(k, "Set-Cookie") {
+				cookies := splitSetCookie(val)
+				for _, sc := range cookies {
+					name, cval := splitSetCookieNameValue(sc)
+					if name == "" {
+						continue
+					}
+					loc := &ValueLocation{
+						TestCaseIndex: i, Part: ResponseHeader,
+						Path:    fmt.Sprintf("Set-Cookie.%s", name),
+						Pointer: &tcs[i].HTTPResp.Header, OriginalType: "string",
+					}
+					valueIndex[cval] = append(valueIndex[cval], loc)
+				}
+				continue
+			}
+			// index other response headers too
+			loc := &ValueLocation{
+				TestCaseIndex: i, Part: ResponseHeader,
+				Path: k, Pointer: &tcs[i].HTTPResp.Header, OriginalType: "string",
+			}
+			valueIndex[val] = append(valueIndex[val], loc)
+		}
+
 		parsedURL, err := url.Parse(tcs[i].HTTPReq.URL)
 		if err == nil {
 			pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
@@ -309,7 +356,7 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 
 		var subsequentConsumers []*ValueLocation
 		for _, loc := range locations {
-			if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex {
+			if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex && typesCompatible(producer, loc) {
 				subsequentConsumers = append(subsequentConsumers, loc)
 			}
 		}
@@ -320,9 +367,11 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 		// Determine all occurrences (producers + valid consumers at/after producer index)
 		var occurrences []*ValueLocation
 		for _, loc := range locations {
-			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
-			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
-			if isProducer || isConsumer {
+			isSelectedProducer := loc == producer
+			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) &&
+				loc.TestCaseIndex > producer.TestCaseIndex
+
+			if isSelectedProducer || (isConsumer && typesCompatible(producer, loc)) {
 				occurrences = append(occurrences, loc)
 			}
 		}
@@ -349,7 +398,10 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 						}
 					}
 				}
-				baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
+				parent = normalizeBaseKey(parent)
+				baseKey = fmt.Sprintf("%sIx%s", parent, baseKey)
+			} else {
+				baseKey = normalizeBaseKey(baseKey)
 			}
 		}
 
@@ -432,9 +484,29 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			for _, loc := range cand.occurrences {
 				if loc.Part == RequestHeader {
 					if headerMap, ok := loc.Pointer.(*map[string]string); ok {
-						originalHeaderValue := (*headerMap)[loc.Path]
-						if loc.Path == "Authorization" && strings.HasPrefix(originalHeaderValue, "Bearer ") {
-							(*headerMap)[loc.Path] = "Bearer " + templateString
+						// Cookie.<name> ⇒ replace only that cookie value inside Cookie header
+						if strings.HasPrefix(loc.Path, "Cookie.") {
+							name := strings.TrimPrefix(loc.Path, "Cookie.")
+							(*headerMap)["Cookie"] = replaceCookieValue((*headerMap)["Cookie"], name, templateString)
+							continue
+						}
+						// Authorization: Bearer <token>
+						if loc.Path == "Authorization" {
+							orig := (*headerMap)[loc.Path]
+							if strings.HasPrefix(orig, "Bearer ") {
+								(*headerMap)[loc.Path] = "Bearer " + templateString
+								continue
+							}
+						}
+						// Normal header key
+						(*headerMap)[loc.Path] = templateString
+					}
+				} else if loc.Part == ResponseHeader {
+					if headerMap, ok := loc.Pointer.(*map[string]string); ok {
+						// Set-Cookie.<name> ⇒ replace only that cookie’s value, keep attrs
+						if strings.HasPrefix(loc.Path, "Set-Cookie.") {
+							name := strings.TrimPrefix(loc.Path, "Set-Cookie.")
+							(*headerMap)["Set-Cookie"] = replaceSetCookieValue((*headerMap)["Set-Cookie"], name, templateString)
 						} else {
 							(*headerMap)[loc.Path] = templateString
 						}
@@ -727,12 +799,61 @@ func filterInsignificantChains(chains []CanonicalChain) []CanonicalChain {
 	return significantChains
 }
 
-// helper to ensure parent segment forms a valid key (reuses existing conventions)
-func sanitizeKey(k string) string {
-	k = strings.ToLower(k)
-	k = strings.ReplaceAll(k, "-", "")
-	k = strings.ReplaceAll(k, "_", "")
-	return k
+func toCamelCase(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "v"
+	}
+	// Tokenize on non-alphanumeric
+	var tokens []string
+	var cur []rune
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			cur = append(cur, r)
+		} else if len(cur) > 0 {
+			tokens = append(tokens, string(cur))
+			cur = cur[:0]
+		}
+	}
+	if len(cur) > 0 {
+		tokens = append(tokens, string(cur))
+	}
+	if len(tokens) == 0 {
+		return "v"
+	}
+
+	// Build camelCase
+	var b strings.Builder
+	for i, t := range tokens {
+		t = strings.ToLower(t)
+		if i == 0 {
+			b.WriteString(t)
+		} else {
+			r, size := utf8.DecodeRuneInString(t)
+			if size == 0 || r == utf8.RuneError {
+				// invalid/empty, just append as-is
+				b.WriteString(t)
+			} else {
+				b.WriteRune(unicode.ToUpper(r))
+				b.WriteString(t[size:])
+			}
+		}
+	}
+	out := b.String()
+	// Must not start with digit for Go templates: {{ .<ident> }}
+	if out != "" {
+		r, size := utf8.DecodeRuneInString(out)
+		if size == 0 || r == utf8.RuneError || unicode.IsDigit(r) {
+			out = "v" + out
+		}
+	}
+
+	return out
+}
+
+// Use this everywhere you finalize a base key.
+func normalizeBaseKey(s string) string {
+	return toCamelCase(s)
 }
 
 func reconstructURL(urlPtr *string, segmentPath string, template string) {
@@ -842,26 +963,19 @@ func render(val string) (interface{}, error) {
 	return outputString, nil
 }
 
-func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
-	baseKey = strings.ToLower(baseKey)
-	baseKey = strings.ReplaceAll(baseKey, "-", "")
-	baseKey = strings.ReplaceAll(baseKey, "_", "")
-	if myMap[baseKey] == value {
-		return baseKey
-	}
+func insertUnique(baseKey, value string, m map[string]interface{}) string {
 	key := baseKey
 	i := 0
 	for {
-		if existingVal, exists := myMap[key]; !exists {
-			myMap[key] = value
-			break
+		if existingVal, exists := m[key]; !exists {
+			m[key] = value
+			return key
 		} else if existingVal == value {
-			break
+			return key
 		}
 		i++
-		key = baseKey + strconv.Itoa(i)
+		key = fmt.Sprintf("%s%d", baseKey, i) // camelCase + numeric suffix
 	}
-	return key
 }
 
 func removeQuotesInTemplates(jsonStr string) string {
@@ -885,4 +999,160 @@ func addQuotesInTemplates(jsonStr string) string {
 		}
 		return `"` + match + `"`
 	})
+}
+
+type cookiePair struct {
+	Name  string
+	Value string
+}
+
+// parseCookiePairs parses a Cookie header (request) of form "a=1; b=2".
+func parseCookiePairs(s string) []cookiePair {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ";")
+	out := make([]cookiePair, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(p, "=")
+		if !ok {
+			continue
+		}
+		out = append(out, cookiePair{Name: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
+	}
+	return out
+}
+
+// replaceCookieValue replaces only the value of a named cookie in a Cookie header string.
+func replaceCookieValue(cookieHdr, name, newVal string) string {
+	kvs := parseCookiePairs(cookieHdr)
+	if len(kvs) == 0 {
+		// if none, create fresh single cookie
+		return name + "=" + newVal
+	}
+	for i := range kvs {
+		if kvs[i].Name == name {
+			kvs[i].Value = newVal
+			break
+		}
+	}
+
+	var b strings.Builder
+	for i, kv := range kvs {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(kv.Name)
+		b.WriteByte('=')
+		b.WriteString(kv.Value)
+	}
+	return b.String()
+}
+
+func splitSetCookie(s string) []string {
+	if s == "" {
+		return nil
+	}
+	// Prefer newline-separated multiple Set-Cookie lines if available.
+	if strings.Contains(s, "\n") {
+		lines := strings.Split(s, "\n")
+		out := make([]string, 0, len(lines))
+		for _, ln := range lines {
+			if ln = strings.TrimSpace(ln); ln != "" {
+				out = append(out, ln)
+			}
+		}
+		return out
+	}
+
+	// Split on comma (with or without space). Rejoin pieces that are NOT cookie starts
+	// (e.g., the ", 23 Oct ..." part of Expires).
+	raw := strings.Split(s, ",")
+	if len(raw) == 1 {
+		return []string{strings.TrimSpace(raw[0])}
+	}
+
+	out := []string{strings.TrimSpace(raw[0])}
+	for _, token := range raw[1:] {
+		t := strings.TrimSpace(token)
+		name, _, hasEq := strings.Cut(t, "=")
+
+		// Consider a token a new cookie if it looks like "name=value".
+		// (Allow letters, digits, '_' as a simple/robust check.)
+		startsName := hasEq && name != "" && isValidFirstRune(name)
+
+		if startsName {
+			out = append(out, t)
+		} else {
+			// Part of previous cookie (e.g., Expires=Thu, 23 Oct ...). Preserve comma.
+			out[len(out)-1] = out[len(out)-1] + "," + token
+		}
+	}
+	return out
+}
+
+func isValidFirstRune(name string) bool {
+	if name == "" {
+		return false
+	}
+	r, size := utf8.DecodeRuneInString(name)
+	if size == 0 || r == utf8.RuneError {
+		return false
+	}
+	// Keep original semantics (letters/digits/_/$ allowed):
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
+}
+
+// splitSetCookieNameValue extracts the cookie name and value (before attributes).
+// E.g. "sid=abc123; Path=/; HttpOnly" => ("sid", "abc123")
+func splitSetCookieNameValue(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", ""
+	}
+	firstSemi := strings.IndexByte(line, ';')
+	head := line
+	if firstSemi >= 0 {
+		head = line[:firstSemi]
+	}
+	name, val, ok := strings.Cut(head, "=")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(name), strings.TrimSpace(val)
+}
+
+func replaceSetCookieValue(setCookieHdr, name, newVal string) string {
+	lines := splitSetCookie(setCookieHdr)
+	if len(lines) == 0 {
+		// create a basic cookie line
+		return name + "=" + newVal
+	}
+	for i, ln := range lines {
+		cn, _ := splitSetCookieNameValue(ln)
+		if cn == name {
+			rest := ""
+			if idx := strings.IndexByte(ln, ';'); idx >= 0 {
+				rest = ln[idx:] // includes leading ';'
+			}
+			lines[i] = name + "=" + newVal + rest
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isNum(t string) bool {
+	return t == "int" || t == "float"
+}
+
+func typesCompatible(p, c *ValueLocation) bool {
+	if isNum(p.OriginalType) && isNum(c.OriginalType) {
+		return true
+	}
+	return p.OriginalType == c.OriginalType
 }
