@@ -135,7 +135,7 @@ wait_for_http() {
   section "Waiting for application on port $port..."
   for i in {1..300}; do
     # Use netcat (nc) to check if the port is open without sending app-level data
-    if nc -z "$host" "$port" >/dev/null 2>&1; then
+    if nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
       echo "✅ Application port $port is open."
       endsec
       return 0
