@@ -23,65 +23,40 @@ runs:
         go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
-    - name: Configure SSH known_hosts for GitHub
+    - name: Add GitHub to known hosts
       shell: bash
       run: |
-        set -euo pipefail
         mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
-        ssh-keyscan -H -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
-        chmod 644 ~/.ssh/known_hosts
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
 
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    - name: Force GitHub fetches to use SSH + set Go private module env
-      shell: bash
-      run: |
-        set -euo pipefail
-        # Always use SSH for github.com to ensure the ssh-agent key is used
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
-        # Make Go bypass proxy/sumdb for your private org
-        go env -w GOPRIVATE=github.com/keploy/*
-        go env -w GONOSUMDB=github.com/keploy/*
-        go env -w GOPROXY=direct
-        # Safety valve for host key prompts in CI (optional but handy)
-        echo 'GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new' >> "$GITHUB_ENV"
-
-    - name: Verify access to private repo (fast fail if not)
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
-        set -euo pipefail
-        # This makes failures obvious before go get
-        git ls-remote git@github.com:keploy/integrations "${INTEGRATION_REF}" >/dev/null
-
-    - name: Fetch private integrations dependency & create parsers file
-      shell: bash
-      env:
-        INTEGRATION_REF: ${{ inputs.integration-ref }}
-      run: |
-        set -euo pipefail
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        
         echo "Fetching private integrations dependency via SSH..."
-        go get -v github.com/keploy/integrations@${INTEGRATION_REF}
-
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+        
         echo "Creating extraparsers.go..."
         mkdir -p pkg/agent/proxy
-        cat > pkg/agent/proxy/extraparsers.go <<'EOF'
-//go:build linux
+        cat <<'EOF' > pkg/agent/proxy/extraparsers.go
+        //go:build linux
 
-package proxy
+        package proxy
 
-import (
-	_ "github.com/keploy/integrations/pkg/parsers"
-)
-EOF
-
-    - name: Tidy Go modules
+        import (
+        	_ "github.com/keploy/integrations/pkg/parsers"
+        )
+        EOF
+    - name: Add any missing Go modules
       shell: bash
       run: |
-        set -euo pipefail
-        go mod tidy
+        echo "Tidying up Go modules..."
+        go mod tidy    
