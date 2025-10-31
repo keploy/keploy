@@ -68,9 +68,9 @@ func (t *Tools) Update(ctx context.Context) error {
 
 	// Configure download URLs for each platform
 	downloadURLs := map[string]string{
-		"linux_amd64": "https://github.com/keploy/keploy/releases/download/v2.11.8/keploy_linux_amd64.tar.gz",
-		"linux_arm64": "https://github.com/keploy/keploy/releases/download/v2.11.8/keploy_linux_arm64.tar.gz",
-		"darwin_all":  "https://github.com/keploy/keploy/releases/download/v2.11.8/keploy_darwin_all.tar.gz",
+		"linux_amd64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz",
+		"linux_arm64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz",
+		"darwin_all":  "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz",
 	}
 
 	// Get latest release info
