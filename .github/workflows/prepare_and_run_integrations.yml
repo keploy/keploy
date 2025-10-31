@@ -109,15 +109,23 @@ jobs:
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
   run_java_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/java_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
   run_node_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
   run_fuzzer_linux:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload, upload-latest]
@@ -130,3 +138,5 @@ jobs:
   run_grpc_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/grpc_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
