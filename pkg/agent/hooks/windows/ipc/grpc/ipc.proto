@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package ipc;
+
+option go_package = "./";
+
+message InterceptConf {
+  bool default = 1;
+  repeated string actions = 2;
+}
+
+message Message {
+  oneof message {
+    NewFlow flow = 1; 
+    SocketOpenEvent socketOpenEvent = 2;
+    SocketCloseEvent socketCloseEvent = 3;
+    SocketDataEvent socketDataEvent = 4;
+  }
+}
+
+message NewFlow {
+  oneof message {
+    TcpFlow tcp = 1;
+    UdpFlow udp = 2;
+  }
+}
+
+message TcpFlow {
+  Address remote_address = 1;
+}
+
+message UdpFlow {
+  optional Address local_address = 1;
+}
+
+message UdpPacket {
+  bytes data = 1;
+  Address remote_address = 2;
+}
+
+message Address {
+  string host = 1;
+  uint32 port = 2;
+  string version = 3;
+  uint32 src_port = 4;
+}
+
+message SocketOpenEvent{
+  uint64 time_stamp_nano = 1;
+  uint32 pid = 2;
+}
+
+message SocketCloseEvent{
+  uint64 time_stamp_nano = 1;
+  uint32 pid = 2;
+}
+
+message SocketDataEvent {
+  uint64 entry_time_stamp_nano = 1;
+	uint64 time_stamp_nano = 2;    
+  uint32 pid = 3;
+  bool direction = 4;   
+  uint32 msg_size = 5;
+  bytes msg = 6;
+  int64 validate_read_bytes = 7;  
+	int64 Validate_written_bytes = 8;
+}

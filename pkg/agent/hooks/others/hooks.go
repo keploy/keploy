@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !windows && !linux
 
 // Package others provides hooks implementation for non-Linux platforms.
 package others
