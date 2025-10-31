@@ -65,9 +65,10 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    echo "$kp_pid Keploy PID"
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    sudo kill "$kp_pid" 2>/dev/null || true
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 
