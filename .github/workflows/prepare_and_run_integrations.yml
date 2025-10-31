@@ -22,6 +22,11 @@ jobs:
           repository: keploy/keploy
           ref: reusable-workflow
 
+      - name: Installing build Essentials and gcc
+        run: |
+          sudo apt -y update
+          sudo apt -y install build-essential gcc libc-dev     
+
       - name: Add Private Parsers
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
