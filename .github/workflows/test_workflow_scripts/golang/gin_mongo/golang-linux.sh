@@ -6,6 +6,8 @@
 git fetch origin
 git checkout native-linux
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
