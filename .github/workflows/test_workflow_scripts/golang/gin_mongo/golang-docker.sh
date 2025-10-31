@@ -59,6 +59,15 @@ send_request(){
 
     curl -X GET http://localhost:8080/CJBKJd92
 
+    # Test email verification endpoint
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=shanky74022@gmail.com' \
+      --header 'Accept: application/json'
+
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
+      --header 'Accept: application/json'
+
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
     container_kill
@@ -109,7 +118,7 @@ fi
 
 all_passed=true
 
-for i in {0..1}
+for i in {0..2}
 do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
