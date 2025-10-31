@@ -288,22 +288,22 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}
 }
 func (p *Proxy) CloseAllClientConnections() {
-    p.logger.Info("Closing all active client connections for test set switch.")
-    p.connMutex.Lock()
-    defer p.connMutex.Unlock()
+	p.logger.Info("Closing all active client connections for test set switch.")
+	p.connMutex.Lock()
+	defer p.connMutex.Unlock()
 
-    // Close all tracked connections
-    for _, conn := range p.clientConnections {
-        if conn != nil {
-            // This will cause the blocking ReadBytes() in decodeMongo to
-            // return an error, gracefully stopping the goroutine.
-            conn.Close()
-        }
-    }
-    
-    // Clear the slice
-    p.clientConnections = make([]net.Conn, 0)
-    p.logger.Info("All client connections closed and list cleared.")
+	// Close all tracked connections
+	for _, conn := range p.clientConnections {
+		if conn != nil {
+			// This will cause the blocking ReadBytes() in decodeMongo to
+			// return an error, gracefully stopping the goroutine.
+			conn.Close()
+		}
+	}
+
+	// Clear the slice
+	p.clientConnections = make([]net.Conn, 0)
+	p.logger.Info("All client connections closed and list cleared.")
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
@@ -311,23 +311,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 	p.connMutex.Lock()
-    p.clientConnections = append(p.clientConnections, srcConn)
-    p.connMutex.Unlock()
+	p.clientConnections = append(p.clientConnections, srcConn)
+	p.connMutex.Unlock()
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
 
 	defer func(start time.Time) {
 		p.connMutex.Lock()
-        for i, conn := range p.clientConnections {
-            if conn == srcConn {
-                // Remove the element without preserving order (faster)
-                p.clientConnections[i] = p.clientConnections[len(p.clientConnections)-1]
-                p.clientConnections = p.clientConnections[:len(p.clientConnections)-1]
-                break
-            }
-        }
-        p.connMutex.Unlock()
+		for i, conn := range p.clientConnections {
+			if conn == srcConn {
+				// Remove the element without preserving order (faster)
+				p.clientConnections[i] = p.clientConnections[len(p.clientConnections)-1]
+				p.clientConnections = p.clientConnections[:len(p.clientConnections)-1]
+				break
+			}
+		}
+		p.connMutex.Unlock()
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
 	}(start)
@@ -774,7 +774,7 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
-	} else{
+	} else {
 		fmt.Println("Mock Manager not found for AppID:", id)
 	}
 	return nil

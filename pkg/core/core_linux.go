@@ -194,7 +194,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
-func (c *Core) CloseConnections (){
+func (c *Core) CloseConnections() {
 	c.CloseAllClientConnections()
 }
 
