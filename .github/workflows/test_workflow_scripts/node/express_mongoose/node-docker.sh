@@ -1,7 +1,8 @@
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # Start the docker container.
 docker network create keploy-network
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
@@ -12,16 +13,6 @@ sudo rm -rf keploy/
 # Build the image of the application.
 docker build -t node-app:1.0 .
 
-container_kill() {
-    # pid=$(pgrep -f "keploy record")
-    # echo "$pid Keploy record PID" 
-    # echo "Killing keploy record"
-    # sudo kill $pid
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
-}
 
 
 send_request(){

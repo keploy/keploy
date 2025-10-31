@@ -2,9 +2,9 @@
 # Safe, chatty CI script for Java + Postgres + Keploy with auto API-prefix detection
 
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
 
 die() {
   rc=$?
