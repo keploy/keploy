@@ -89,9 +89,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-<<<<<<< HEAD:.github/workflows/test_workflow_scripts/golang-docker.sh
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false
-=======
+
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
@@ -105,7 +103,6 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     cat "${test_container}.txt"
     exit 1
 fi
->>>>>>> v2:.github/workflows/test_workflow_scripts/golang/gin_mongo/golang-docker.sh
 
 all_passed=true
 
