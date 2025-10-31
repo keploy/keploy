@@ -185,7 +185,7 @@ jobs:
                   sleep 15  # Give it time to shut down gracefully
                   kill -9 $KEPLOY_PID 2>/dev/null || true
 
-                  docker stop test-app-1 || true
+                  docker stop test-app-1 2>/dev/null || true
 
                   # Verify testcases created
                   sleep 2
@@ -247,7 +247,7 @@ jobs:
                   sleep 15  # Give it time to shut down gracefully
                   kill -9 $KEPLOY_PID 2>/dev/null || true
 
-                  docker stop test-app-2 || true
+                  docker stop test-app-2 2>/dev/null || true
 
                   sleep 2
                   if ! ls ./keploy/test-set-1/tests/test-*.yaml 1> /dev/null 2>&1; then
@@ -298,24 +298,25 @@ jobs:
               run: |
                   cd test-app
 
-                  if ! find ./keploy/reports -name "report-*.yaml" -type f | grep -q .; then
+                  if ! find ./keploy/reports -name "*-report.yaml" -type f | grep -q .; then
                       echo "Error: No test report found"
                       ls -laR ./keploy/reports/ || true
                       exit 1
                   fi
 
                   echo "Test reports generated:"
-                  find ./keploy/reports -name "report-*.yaml" -type f
+                  find ./keploy/reports -name "*-report.yaml" -type f
 
                   # Check test status
                   all_passed=true
-                  for i in {0..1}; do
-                    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+                  for report_file in ./keploy/reports/test-run-*/*-report.yaml; do
                     if [ -f "$report_file" ]; then
                       test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-                      echo "Test status for test-set-$i: $test_status"
+                      test_name=$(basename "$(dirname "$report_file")")/$(basename "$report_file")
+                      echo "Test status for $test_name: $test_status"
                       if [ "$test_status" != "PASSED" ]; then
                         all_passed=false
+                        echo "Failed test details:"
                         cat "$report_file"
                       fi
                     fi
