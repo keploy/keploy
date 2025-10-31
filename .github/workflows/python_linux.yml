@@ -1,9 +1,15 @@
 name: Python On Linux
 on:
   workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
 jobs:
   python_linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +58,7 @@ jobs:
 
   python_linux_private:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:

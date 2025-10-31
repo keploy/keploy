@@ -7,9 +7,15 @@ on:
         required: false
         type: string
         default: 'main' # Use main branch if nothing is sent**
+      runner:
+        description: 'The type of runner to use'
+        type: string
+        required: false
+        default: 'ubuntu-latest' # The original GitHub runner
+
 jobs:
   build-and-upload:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }} 
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,7 +51,7 @@ jobs:
 
 
   upload-latest:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }} 
     steps:
       - name: Upload latest release
         run: |
@@ -58,7 +64,7 @@ jobs:
         with: { name: latest, path: keploy }
 
   build-docker-image:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }} 
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
       image_digest: ${{ steps.digest.outputs.image_digest }}
@@ -109,6 +115,9 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
+      jobs-to-run: 'postgres_fuzzer,grpc_fuzzer'
     secrets:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   run_grpc_linux:

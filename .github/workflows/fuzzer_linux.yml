@@ -5,10 +5,23 @@ on:
     secrets:
       AWS_SECRET_ACCESS_KEY:
         required: true
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest' # Keep a sensible default
+      jobs-to-run:
+        description: 'Comma-separated list of jobs to run, or "all"'
+        type: string
+        required: false
+        default: 'all' # Default to running all jobs
+
 
 jobs:
   rerecord_fuzzer:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'rerecord_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +101,8 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/rerecord/golang-linux.sh
 
   mysql_fuzzer:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'mysql_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -154,7 +168,8 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mysql/golang-linux.sh
 
   grpc_fuzzer:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'grpc_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -226,7 +241,8 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
   
   postgres_fuzzer:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'postgres_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
