@@ -40,6 +40,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
+          ref: reusable-workflow
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -91,6 +92,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
+          ref: reusable-workflow
 
       - id: record
         uses: ./.github/actions/download-binary

@@ -45,6 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
+          ref: reusable-workflow
 
       # These steps download the 'build' artifact (with race detector) by default
       - name: Download Keploy Binary (for Record)
@@ -123,6 +124,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
+          ref: reusable-workflow
 
       - name: Download Keploy Binary (for Record)
         id: record_keploy
@@ -191,6 +193,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
+          ref: reusable-workflow
 
       - name: Download Binary (for Record)
         id: record
@@ -215,6 +218,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
           aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
 
       - name: Download and Extract gRPC Fuzzer
         id: fuzzer
@@ -288,6 +297,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
           aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+      
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
 
       - name: Download and Extract Postgres Fuzzer
         id: postgres_fuzzer
