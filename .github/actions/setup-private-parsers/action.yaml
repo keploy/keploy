@@ -38,7 +38,14 @@ runs:
       shell: bash
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
+        # This command tells git's underlying ssh client to disable strict host key checking
+        GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=no"
       run: |
+        # Optional but recommended: Test the SSH connection directly for debugging
+        echo "Testing SSH connection to github.com..."
+        ssh -T git@github.com
+
+        # Configure git to use SSH instead of HTTPS for GitHub
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
