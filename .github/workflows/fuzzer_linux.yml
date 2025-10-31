@@ -219,6 +219,8 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
           FUZZER_CLIENT_BIN: ${{ steps.fuzzer.outputs.client }}
           FUZZER_SERVER_BIN: ${{ steps.fuzzer.outputs.server }}
+          RECORD_SRC: ${{ matrix.config.record_src }}
+          REPLAY_SRC: ${{ matrix.config.replay_src }}
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}

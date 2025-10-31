@@ -33,8 +33,8 @@ final_cleanup() {
   dump_logs
 
   section "Stopping Mongo container..."
-  docker stop mongo-container || true
-  docker rm mongo-container || true
+  docker stop mongo-fuzzer-db || true
+  docker rm mongo-fuzzer-db || true
   endsec
 
   if [[ $rc -eq 0 ]]; then
@@ -113,7 +113,7 @@ wait_for_mongo() {
   section "Waiting for Mongo to become ready..."
   for i in {1..90}; do
     # Use mongosh to ping the admin database
-    if docker exec mongo-container mongosh --eval "db.adminCommand('ping')" --quiet >/dev/null 2>&1; then
+    if docker exec mongo-fuzzer-db mongosh --eval "db.adminCommand('ping')" --quiet >/dev/null 2>&1; then
       echo "✅ Mongo is ready."
       endsec
       return 0
@@ -178,8 +178,7 @@ sudo chmod +x $MONGO_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
 
 # Start a Mongo instance for the recording session
-docker run --name mongo-container \
-  -p 27017:27017 --rm -d mongo:latest
+docker run --name mongo-fuzzer-db -d -p 27017:27017 mongo:latest
 wait_for_mongo
 
 # Generate Keploy configuration and add noise parameter
@@ -217,7 +216,7 @@ endsec
 
 # --- Teardown before Replay ---
 section "Shutting Down Mongo for Replay"
-docker stop mongo-container || true
+docker stop mongo-fuzzer-db || true
 echo "✅ Mongo container stopped. Replay will rely on Keploy mocks."
 endsec
 
