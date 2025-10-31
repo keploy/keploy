@@ -69,43 +69,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy }
 
-  build-docker-image:
-    runs-on: ${{ inputs.runner }} 
-    outputs:
-      image_tag: ${{ steps.tag.outputs.image_tag }}
-      image_digest: ${{ steps.digest.outputs.image_digest }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: keploy/keploy
-          ref: reusable-workflow
-
-      - name: Add Private Parsers
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: true
-          integration-ref: ${{ inputs.integration-ref }}
-          
-      - name: Build image
-        run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker.sh
-      
-      - name: Make unique tag for this run
-        id: tag
-        env:
-          PRNUM: ${{ github.event.pull_request.number }}
-        run: |
-          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_RUN_ID}-${GITHUB_SHA}-1h"
-          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
-          docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
-
-      - name: Push unique tag
-        run: |
-          docker push "${{ steps.tag.outputs.image_tag }}"
-
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
