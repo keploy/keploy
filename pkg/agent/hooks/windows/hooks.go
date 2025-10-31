@@ -151,7 +151,7 @@ func (h *Hooks) load(ctx context.Context, setupOpts config.Agent) error {
 func (h *Hooks) unLoad(_ context.Context) {
 }
 
-func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	return conn.ListenSocket(ctx, h.logger, h.openEventChan, h.dataEventChan, h.closeEventChan, opts)
 }
 

@@ -12,6 +12,7 @@ type Hooks interface {
 	// AppInfo
 	DestInfo
 	Load(ctx context.Context, cfg HookCfg, setupOpts config.Agent) error
+	Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
 }
 
