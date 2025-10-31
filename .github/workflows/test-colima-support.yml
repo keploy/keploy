@@ -13,10 +13,6 @@ concurrency:
 
 jobs:
     test-colima:
-        strategy:
-          matrix:
-            iter: [1, 2]
-        
         runs-on: macos-13
         timeout-minutes: 30
 
@@ -63,22 +59,22 @@ jobs:
 
                 wait $PULL_PID
 
-            - name: Record with Keploy (Iteration ${{ matrix.iter }})
+            - name: Record with Keploy (Iteration 1)
               run: |
                   cd test-app
 
                   # Start Keploy in record mode
-                  docker run --name keploy-record-${{ matrix.iter }} \
+                  docker run --name keploy-record-1 \
                     --privileged --pid=host -p 16789:16789 \
                     -v "$(pwd):$(pwd)" -w "$(pwd)" \
                     -v /sys/fs/cgroup:/sys/fs/cgroup \
                     -v /sys/kernel/debug:/sys/kernel/debug \
                     -v /sys/fs/bpf:/sys/fs/bpf \
                     -v /var/run/docker.sock:/var/run/docker.sock \
-                    ghcr.io/keploy/keploy:v2.11.12 \
-                    record -c "docker run -p 8080:8080 --name test-app-${{ matrix.iter }} --network keploy-network --rm test-app:colima" \
-                    --container-name test-app-${{ matrix.iter }} \
-                    --keploy-container keploy-record-${{ matrix.iter }} \
+                    ghcr.io/keploy/keploy:latest \
+                    record -c "docker run -p 8080:8080 --name test-app-1 --network keploy-network --rm test-app:colima" \
+                    --container-name test-app-1 \
+                    --keploy-container keploy-record-1 \
                     --record-timer 20s \
                     --in-ci &
                     
@@ -87,31 +83,31 @@ jobs:
                   # Wait for app to be ready
                   echo "Waiting for app to start..."
                   for i in {1..30}; do
-                    if docker exec keploy-record-${{ matrix.iter }} curl -s http://test-app-${{ matrix.iter }}:8080/health &>/dev/null; then
+                    if docker exec keploy-record-1 curl -s http://test-app-1:8080/health &>/dev/null; then
                       echo "App is ready!"
                       break
                     fi
                     if [ $i -eq 30 ]; then
                       echo "App failed to start"
-                      docker logs test-app-${{ matrix.iter }} || true
-                      docker logs keploy-record-${{ matrix.iter }} || true
+                      docker logs test-app-1 || true
+                      docker logs keploy-record-1 || true
                       exit 1
                     fi
                     sleep 1
                   done
 
                   # Generate traffic
-                  docker exec keploy-record-${{ matrix.iter }} curl -X POST http://test-app-${{ matrix.iter }}:8080/items \
+                  docker exec keploy-record-1 curl -X POST http://test-app-1:8080/items \
                     -H "Content-Type: application/json" \
-                    -d '{"key":"test${{ matrix.iter }}","value":"value${{ matrix.iter }}"}'
+                    -d '{"key":"test1","value":"value1"}'
 
                   sleep 2
 
-                  docker exec keploy-record-${{ matrix.iter }} curl -X GET http://test-app-${{ matrix.iter }}:8080/items
+                  docker exec keploy-record-1 curl -X GET http://test-app-1:8080/items
 
                   sleep 2
 
-                  docker exec keploy-record-${{ matrix.iter }} curl -X GET http://test-app-${{ matrix.iter }}:8080/health
+                  docker exec keploy-record-1 curl -X GET http://test-app-1:8080/health
 
                   sleep 5
 
@@ -121,21 +117,80 @@ jobs:
                   sleep 15  # Give it time to shut down gracefully
                   kill -9 $KEPLOY_PID 2>/dev/null || true
 
-                  docker stop test-app-${{ matrix.iter }} 2>/dev/null || true
+                  docker stop test-app-1 2>/dev/null || true
 
                   # Verify testcases created
                   sleep 2
-                  expected=$(( ${{ matrix.iter }} - 1 ))
-                  if ! ls ./keploy/test-set-${expected}/tests/test-*.yaml 1> /dev/null 2>&1; then
-                    echo "Iteration ${{ matrix.iter }} failed: No testcases found"
+                  if ! ls ./keploy/test-set-0/tests/test-*.yaml 1> /dev/null 2>&1; then
+                    echo "Iteration 1 failed: No testcases found"
                     ls -la ./keploy/ || true
-                    docker logs keploy-record-${{ matrix.iter }} || true
+                    docker logs keploy-record-1 || true
                     exit 1
                   fi
-                  echo "Iteration ${{ matrix.iter }}: Testcases created"
+                  echo "Iteration 1: Testcases created"
+
+            - name: Record with Keploy (Iteration 2)
+              run: |
+                  cd test-app
+
+                  docker run --name keploy-record-2 \
+                    --privileged --pid=host -p 16789:16789 \
+                    -v "$(pwd):$(pwd)" -w "$(pwd)" \
+                    -v /sys/fs/cgroup:/sys/fs/cgroup \
+                    -v /sys/kernel/debug:/sys/kernel/debug \
+                    -v /sys/fs/bpf:/sys/fs/bpf \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    ghcr.io/keploy/keploy:latest \
+                    record -c "docker run -p 8080:8080 --name test-app-2 --network keploy-network --rm test-app:colima" \
+                    --container-name test-app-2 \
+                    --keploy-container keploy-record-2 \
+                    --record-timer 20s \
+                    --in-ci &
+
+                  KEPLOY_PID=$!
+
+                  echo "Waiting for app to start..."
+                  for i in {1..30}; do
+                    if docker exec keploy-record-2 curl -s http://test-app-2:8080/health &>/dev/null; then
+                      echo "App is ready!"
+                      break
+                    fi
+                    if [ $i -eq 30 ]; then
+                      echo "App failed to start"
+                      docker logs test-app-2 || true
+                      docker logs keploy-record-2 || true
+                      exit 1
+                    fi
+                    sleep 1
+                  done
+
+                  docker exec keploy-record-2 curl -X POST http://test-app-2:8080/items \
+                    -H "Content-Type: application/json" \
+                    -d '{"key":"test2","value":"value2"}'
+
+                  sleep 2
+
+                  docker exec keploy-record-2 curl -X GET http://test-app-2:8080/items
+
+                  sleep 5
+
+                  echo "Stopping Keploy..."
+                  kill -SIGINT $KEPLOY_PID || true
+                  sleep 15  # Give it time to shut down gracefully
+                  kill -9 $KEPLOY_PID 2>/dev/null || true
+
+                  docker stop test-app-2 2>/dev/null || true
+
+                  sleep 2
+                  if ! ls ./keploy/test-set-1/tests/test-*.yaml 1> /dev/null 2>&1; then
+                    echo "Iteration 2 failed: No testcases found"
+                    ls -la ./keploy/ || true
+                    docker logs keploy-record-2 || true
+                    exit 1
+                  fi
+                  echo "Iteration 2: Testcases created"
 
             - name: Verify testcases were recorded
-              if: ${{ matrix.iter == 2 }}
               run: |
                   cd test-app
 
@@ -154,7 +209,6 @@ jobs:
                   find ./keploy -name "*.yaml" -type f
 
             - name: Test with Keploy
-              if: ${{ matrix.iter == 2 }}
               run: |
                   cd test-app
 
@@ -173,7 +227,6 @@ jobs:
                     --in-ci
 
             - name: Verify test reports
-              if: ${{ matrix.iter == 2 }}
               run: |
                   cd test-app
 
@@ -209,7 +262,7 @@ jobs:
                   echo "All tests passed - Colima support verified!"
 
             - name: Upload Keploy artifacts
-              if: ${{ always() && matrix.iter == 2 }}
+              if: always()
               uses: actions/upload-artifact@v4
               with:
                   name: keploy-colima-test-results
@@ -217,7 +270,7 @@ jobs:
                   retention-days: 7
 
             - name: Cleanup
-              if: ${{ always() && matrix.iter == 2 }}
+              if: always()
               run: |
                   docker stop test-app-1 test-app-2 test-app-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
                   docker rm test-app-1 test-app-2 test-app-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
