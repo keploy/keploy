@@ -12,15 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/export"
 	postmanimport "go.keploy.io/server/v2/pkg/service/import"
+	"go.keploy.io/server/v2/pkg/service/update"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -63,76 +62,34 @@ func (t *Tools) Import(ctx context.Context, path, basePath string) error {
 	return postmanImport.Import(path, basePath)
 }
 
-// Update initiates the tools process for the Keploy binary file.
+// Update initiates the update process for the Keploy binary file.
 func (t *Tools) Update(ctx context.Context) error {
 	currentVersion := "v" + utils.Version
-	isKeployInDocker := len(os.Getenv("KEPLOY_INDOCKER")) > 0
-	if isKeployInDocker {
-		fmt.Println("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
-		return nil
-	}
-	if strings.HasSuffix(currentVersion, "-dev") {
-		fmt.Println("you are using a development version of Keploy. Skipping update")
-		return nil
+
+	// Configure download URLs for each platform
+	downloadURLs := map[string]string{
+		"linux_amd64": "https://github.com/keploy/keploy/releases/download/v2.11.8/keploy_linux_amd64.tar.gz",
+		"linux_arm64": "https://github.com/keploy/keploy/releases/download/v2.11.8/keploy_linux_arm64.tar.gz",
+		"darwin_all":  "https://github.com/keploy/keploy/releases/download/v2.11.8/keploy_darwin_all.tar.gz",
 	}
 
+	// Get latest release info
 	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, t.logger)
 	if err != nil {
-		if errors.Is(err, ErrGitHubAPIUnresponsive) {
-			return errors.New("gitHub API is unresponsive. Update process cannot continue")
-		}
-		return fmt.Errorf("failed to fetch latest GitHub release version: %v", err)
+		return fmt.Errorf("failed to fetch latest release info: %v", err)
 	}
 
-	latestVersion := releaseInfo.TagName
-	changelog := releaseInfo.Body
+	updateMgr := update.NewUpdateManager(t.logger, update.Config{
+		BinaryName:     "keploy",
+		CurrentVersion: currentVersion,
+		IsDevVersion:   strings.HasSuffix(currentVersion, "-dev"),
+		IsInDocker:     len(os.Getenv("KEPLOY_INDOCKER")) > 0,
+		DownloadURLs:   downloadURLs,
+		LatestVersion:  releaseInfo.TagName,
+		Changelog:      releaseInfo.Body,
+	})
 
-	if currentVersion == latestVersion {
-		fmt.Println("✅You are already on the latest version of Keploy: " + latestVersion)
-		return nil
-	}
-
-	t.logger.Info("Updating to Version: " + latestVersion)
-
-	downloadURL := ""
-
-	if runtime.GOOS == "linux" {
-		if runtime.GOARCH == "amd64" {
-			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-		} else {
-			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
-		}
-	}
-
-	if runtime.GOOS == "darwin" {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
-	}
-
-	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
-	if err != nil {
-		return err
-	}
-
-	t.logger.Info("Update Successful!")
-
-	changelog = "\n" + string(changelog)
-	var renderer *glamour.TermRenderer
-
-	var termRendererOpts []glamour.TermRendererOption
-	termRendererOpts = append(termRendererOpts, glamour.WithAutoStyle(), glamour.WithWordWrap(0))
-
-	renderer, err = glamour.NewTermRenderer(termRendererOpts...)
-	if err != nil {
-		utils.LogError(t.logger, err, "failed to initialize renderer")
-		return err
-	}
-	changelog, err = renderer.Render(changelog)
-	if err != nil {
-		utils.LogError(t.logger, err, "failed to render release notes")
-		return err
-	}
-	fmt.Println(changelog)
-	return nil
+	return updateMgr.CheckAndUpdate(ctx)
 }
 
 func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {
