@@ -42,7 +42,7 @@ jobs:
                   docker network inspect keploy-network >/dev/null 2>&1 || docker network create keploy-network
 
             - name: Create test app
-              run: .github/workflows/test_workflows_scripts/test-colima-support.sh
+              run: .github/workflows/test_workflow_scripts/test-colima-support.sh
                   
 
             - name: Set up Docker Buildx
