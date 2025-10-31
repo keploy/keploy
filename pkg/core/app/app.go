@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,26 +35,29 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
+		mutex:            &sync.Mutex{},
 	}
 	return app
 }
 
 type App struct {
-	logger           *zap.Logger
-	docker           docker.Client
-	id               uint64
-	cmd              string
-	kind             utils.CmdType
-	containerDelay   uint64
-	container        string
-	containerNetwork string
-	containerIPv4    chan string
-	keployNetwork    string
-	keployContainer  string
-	keployIPv4       string
-	inodeChan        chan uint64
-	EnableTesting    bool
-	Mode             models.Mode
+	logger            *zap.Logger
+	docker            docker.Client
+	id                uint64
+	cmd               string
+	kind              utils.CmdType
+	containerDelay    uint64
+	container         string
+	containerNetwork  string
+	containerIPv4     string
+	containerIPV4Chan chan string
+	keployNetwork     string
+	keployContainer   string
+	keployIPv4        string
+	inodeChan         chan uint64
+	mutex             *sync.Mutex
+	EnableTesting     bool
+	Mode              models.Mode
 }
 
 type Options struct {
@@ -93,11 +97,17 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
-	return <-a.containerIPv4
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	if a.containerIPv4 == "" {
+		a.containerIPv4 = <-a.containerIPV4Chan
+	}
+	return a.containerIPv4
 }
+
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
 	a.logger.Debug("setting container IPv4 address", zap.String("ipAddr", ipAddr))
-	a.containerIPv4 <- ipAddr
+	a.containerIPV4Chan <- ipAddr
 }
 
 func (a *App) SetupDocker() error {
@@ -245,6 +255,9 @@ func (a *App) SetupCompose() error {
 }
 
 func (a *App) SetAppCommand(appCommand string) {
+	a.mutex.Lock()         // Acquire the write lock
+	defer a.mutex.Unlock() // Release it when the function returns
+
 	a.logger.Debug("Setting App Command", zap.String("cmd", appCommand))
 	a.cmd = appCommand
 }
@@ -296,7 +309,7 @@ func (a *App) injectNetwork(network string) error {
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
 func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
-
+	fmt.Println("Getting here 1")
 	if e.Action != "start" {
 		return false, nil
 	}
@@ -306,8 +319,9 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
 		return false, err
 	}
-
+	fmt.Println("Getting here 2")
 	// Check if the container's name matches the desired name
+	fmt.Println("Container Name is :", info.Name, "Desired Container name is :", "/"+a.container)
 	if info.Name != "/"+a.container {
 		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
 		return false, nil
@@ -315,6 +329,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 
 	// Set Docker Container ID
 	a.docker.SetContainerID(e.ID)
+	fmt.Println("Getting here 3")
 	a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
 	if info.State.Pid == 0 {
 		return false, errors.New("failed to get the pid of the container")
@@ -337,6 +352,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
 	}
+	fmt.Println("here is the network details: ", n.IPAddress)
 	a.SetContainerIPv4Addr(n.IPAddress)
 	return inode != 0 && n.IPAddress != "", nil
 }
@@ -374,7 +390,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		defer func() {
 			a.logger.Debug("closing err, containerIPv4 and inode channels ")
 			close(errCh)
-			close(a.containerIPv4)
+			close(a.containerIPV4Chan)
 			close(a.inodeChan)
 		}()
 		for {
@@ -415,7 +431,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	if a.cmd == "" {
 		return models.AppError{}
 	}
-
+	fmt.Println("Running dockerized app with cmd:", a.cmd)
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
@@ -430,8 +446,8 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}()
 
 	errCh := make(chan error, 1)
-
 	// listen for the "create container" event in order to send the inode of the container to the kernel
+	fmt.Println("Getting docker meta")
 	errCh2 := a.getDockerMeta(dockerMetaCtx)
 
 	g.Go(func() error {
@@ -463,7 +479,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
-	a.containerIPv4 = make(chan string, 1)
+	a.containerIPV4Chan = make(chan string, 1)
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}
@@ -499,7 +515,10 @@ func (a *App) waitTillExit() {
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
+	a.mutex.Lock() // <-- ADD READ LOCK
 	userCmd := a.cmd
+	fmt.Println("Running command: ", userCmd)
+	a.mutex.Unlock()
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)

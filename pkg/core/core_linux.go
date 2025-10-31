@@ -194,6 +194,10 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
+func (c *Core) CloseConnections() {
+	c.CloseAllClientConnections()
+}
+
 // GetHookUnloadDone returns a channel that signals when hooks are completely unloaded
 func (c *Core) GetHookUnloadDone(id uint64) <-chan struct{} {
 	return c.GetUnloadDone()
@@ -240,14 +244,14 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		return nil
 	})
 
-	originalApp := a.GetAppCommand()
+	// originalApp := a.GetAppCommand()
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(appErrCh)
-		defer a.SetAppCommand(originalApp)
-		if opts.AppCommand != "" {
-			a.SetAppCommand(opts.AppCommand)
-		}
+		// defer a.SetAppCommand(originalApp)
+		// if opts.AppCommand != "" {
+		// 	a.SetAppCommand(opts.AppCommand)
+		// }
 		appErr := a.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr.Err, "error while running the app")
@@ -274,7 +278,7 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 		utils.LogError(c.logger, err, "failed to get app")
 		return "", err
 	}
-
+	fmt.Println("here is the app details:")
 	ip := a.ContainerIPv4Addr()
 	c.logger.Debug("ip address of the target app container", zap.Any("ip", ip))
 	if ip == "" {

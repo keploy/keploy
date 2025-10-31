@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -19,7 +18,6 @@ import (
 type Csharp struct {
 	ctx                context.Context
 	logger             *zap.Logger
-	reportdb           coverage.ReportDB
 	cmd                string
 	executable         string
 	dotnetCoveragePath string
@@ -37,11 +35,10 @@ type CoverageStructure struct {
 	} `xml:"packages>package"`
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, dotnetCoveragePath, executable string) *Csharp {
+func New(ctx context.Context, logger *zap.Logger, cmd, dotnetCoveragePath, executable string) *Csharp {
 	return &Csharp{
 		ctx:                ctx,
 		logger:             logger,
-		reportdb:           reportDB,
 		cmd:                cmd,
 		dotnetCoveragePath: dotnetCoveragePath,
 		executable:         executable,

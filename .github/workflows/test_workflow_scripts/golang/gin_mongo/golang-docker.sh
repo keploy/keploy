@@ -89,6 +89,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
+
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then

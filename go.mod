@@ -6,6 +6,8 @@ toolchain go1.24.6
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
+// replace github.com/keploy/integrations => ./integrations
+
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cilium/ebpf v0.19.0

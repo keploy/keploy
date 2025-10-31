@@ -117,9 +117,12 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	results := make([]*models.Mock, 0, 64)
+
 	m.filtered.rangeValues(func(v interface{}) bool {
+		fmt.Println("here are the mocks in filtered")
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
+			fmt.Println("mock name:", mock.Name)
 		}
 		return true
 	})
@@ -191,7 +194,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
-
+		fmt.Println("Inserted mock into filtered:", mock.Name)
 		k := mock.Kind
 		td := newFilteredByKind[k]
 		if td == nil {
