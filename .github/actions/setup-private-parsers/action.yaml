@@ -42,7 +42,7 @@ runs:
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@$reusable-workflow
         
         echo "Creating extraparsers.go..."
         mkdir -p pkg/agent/proxy
