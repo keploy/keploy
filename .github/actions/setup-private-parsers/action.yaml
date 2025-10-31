@@ -23,6 +23,12 @@ runs:
         go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
+    - name: Add GitHub to known hosts
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
