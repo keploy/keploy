@@ -79,7 +79,7 @@ wait_for_http() {
   local port="$1"
   section "Waiting for application on port $port..."
   for i in {1..60}; do
-    if nc -z "localhost" "$port" >/dev/null 2>&1; then
+    if nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
       echo "✅ Application port $port is open."
       endsec
       return 0
