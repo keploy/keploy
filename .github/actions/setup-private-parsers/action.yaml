@@ -23,50 +23,40 @@ runs:
         go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
-    - name: Start ssh-agent and add key
+    - name: Add GitHub to known hosts
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+    - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    - name: Trust github.com host key
-      shell: bash
-      run: |
-        mkdir -p ~/.ssh
-        ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
-        chmod 600 ~/.ssh/known_hosts
-
-    - name: Force GitHub over SSH (no stray spaces!)
-      shell: bash
-      run: |
-        git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
-        git config --global url."ssh://git@github.com/".insteadOf "http://github.com/"
-
-    - name: Configure Go for private modules
-      shell: bash
-      run: |
-        go env -w GOPRIVATE=github.com/keploy/*
-        go env -w GONOSUMDB=github.com/keploy/*
-
-    - name: Fetch private integrations dependency & create parsers file
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
-        echo "Downloading github.com/keploy/integrations@${INTEGRATION_REF:-main}"
-        # go get can modify go.mod; for a pure fetch use go mod download:
-        go mod download github.com/keploy/integrations@${INTEGRATION_REF:-main}
-
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+        
+        echo "Fetching private integrations dependency via SSH..."
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
+        
         echo "Creating extraparsers.go..."
         mkdir -p pkg/agent/proxy
-        cat > pkg/agent/proxy/extraparsers.go <<'EOF'
+        cat <<'EOF' > pkg/agent/proxy/extraparsers.go
         //go:build linux
+
         package proxy
 
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
         EOF
-
-    - name: Tidy modules
+    - name: Add any missing Go modules
       shell: bash
-      run: go mod tidy
+      run: |
+        echo "Tidying up Go modules..."
+        go mod tidy    
