@@ -7,9 +7,15 @@ on:
         type: string
         required: false
         default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
 
 jobs:
   golang_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false

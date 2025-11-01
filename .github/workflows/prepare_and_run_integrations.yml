@@ -74,11 +74,13 @@ jobs:
     uses: ./.github/workflows/golang_linux.yml
     with:
       runner: ${{ inputs.runner }}
+      jobs_to_run: 'private_only'
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
     with:
       runner: ${{ inputs.runner }}
+      jobs_to_run: 'private_only'
   run_fuzzer_linux:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload, upload-latest]
