@@ -4,8 +4,6 @@
 set -Eeuo pipefail
 set -o errtrace
 
-echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
-
 section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
@@ -74,10 +72,9 @@ send_request() {
   curl -sS http://localhost:8000/get || true
 
   sleep 10
-  REC_PID="$(pgrep -n -f 'keploy record' || true)"
-  echo "$REC_PID Keploy PID"
+  echo "$kp_pid Keploy PID"
   echo "Killing keploy"
-  sudo kill -INT "$REC_PID" 2>/dev/null || true
+  sudo kill "$kp_pid" 2>/dev/null || true
 }
 
 # ----- main -----

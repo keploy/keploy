@@ -8,8 +8,6 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
-echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
-
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
@@ -77,42 +75,16 @@ check_for_errors() {
 # Waits for the Go application's HTTP endpoint to become available
 wait_for_http() {
   local port="$1"
-  local host="${2:-127.0.0.1}"
-  local timeout_s="${3:-60}"
-
-  section "Waiting for application on $host:$port..."
-
-  for ((i=1; i<=timeout_s; i++)); do
-    # 1) Try real HTTP if curl is present (any status code is fine)
-    if command -v curl >/dev/null 2>&1; then
-      if curl -fsS --max-time 1 "http://$host:$port/" -o /dev/null; then
-        echo "✅ HTTP responded on $host:$port"
-        endsec; return 0
-      fi
+  section "Waiting for application on port $port..."
+  for i in {1..60}; do
+    if nc -z "localhost" "$port" >/dev/null 2>&1; then
+      echo "✅ Application port $port is open."
+      endsec
+      return 0
     fi
-
-    # 2) Bash TCP fallback (no external deps)
-    if bash -c ">/dev/tcp/$host/$port" >/dev/null 2>&1; then
-      echo "✅ TCP open on $host:$port (/dev/tcp)"
-      endsec; return 0
-    fi
-
-    # 3) netcat if available (both v4 and v6)
-    if command -v nc >/dev/null 2>&1; then
-      if nc -z -w 1 "$host" "$port" >/dev/null 2>&1 || nc -z -w 1 ::1 "$port" >/dev/null 2>&1; then
-        echo "✅ TCP open on $host:$port (nc)"
-        endsec; return 0
-      fi
-    fi
-
     sleep 1
   done
-
-  echo "::error::Application did not become available on $host:$port in time."
-  echo "🔎 Quick diagnostics:"
-  command -v ss   >/dev/null 2>&1 && ss -ltnp | awk 'NR==1 || /:'"$port"'\b/'
-  command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$port" -sTCP:LISTEN || true
-  ps -eo pid,cmd | grep -E "my-app|keploy" | grep -v grep || true
+  echo "::error::Application did not become available on port $port in time."
   endsec
   return 1
 }
