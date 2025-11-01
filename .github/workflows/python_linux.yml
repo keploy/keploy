@@ -111,7 +111,7 @@ jobs:
 
       - name: Install PostgreSQL dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y libpq-dev build-essential
+          sudo apt-get update && sudo apt-get install -y libpq-dev build-essential python3-dev
 
       - id: record
         uses: ./.github/actions/download-binary
