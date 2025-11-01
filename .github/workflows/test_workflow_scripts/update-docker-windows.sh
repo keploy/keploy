@@ -97,19 +97,11 @@ use_ssh_for_github_and_known_hosts() {
   ' "$DOCKERFILE_PATH" | rewrite_in_place
 }
 
-build_docker_image() {
-  echo "Building Docker image with BuildKit and SSH forwarding..."
-  # On mac, Docker Desktop supports BuildKit and --ssh if enabled.
-  # Ensure you have an SSH agent running with your key loaded (ssh-add -l to verify).
-  DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
-}
-
 main() {
   ensure_dockerfile_syntax
   add_race_flag
   enable_ssh_mount_for_go_mod
   use_ssh_for_github_and_known_hosts
-  build_docker_image
 }
 
 main

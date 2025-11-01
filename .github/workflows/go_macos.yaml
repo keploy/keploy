@@ -2,7 +2,7 @@ name: Go on macOS
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ v2 ]
 
 jobs:
 

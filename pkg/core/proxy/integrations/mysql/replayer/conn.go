@@ -31,10 +31,22 @@ type handshakeRes struct {
 	tlsClientConn net.Conn
 }
 
+// CAVEAT: We haven't handled the case where clients connect to entirely different MySQL servers.
+// However, we do handle scenarios where multiple clients connect to the same server
+// but use different databases or usernames.
+
 // Replay mode
 func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
 	// Get the mock for initial handshake
 	initialHandshakeMock := mocks[0]
+
+	for i, mock := range mocks {
+		if i == 0 {
+			logger.Debug("Using initial handshake mock", zap.Int("index", i), zap.String("mock_name", mock.Name), zap.String("conn_id", mock.Spec.Metadata["connID"]))
+			continue
+		}
+		logger.Debug("Config mocks available", zap.Int("index", i), zap.String("mock_name", mock.Name), zap.String("conn_id", mock.Spec.Metadata["connID"]))
+	}
 
 	// Read the intial request and response for the handshake from the mocks
 	resp := initialHandshakeMock.Spec.MySQLResponses
@@ -96,6 +108,10 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		return res, err
 	}
 
+	// NEW: holders for SSL-first-packet and SSL-matched candidates
+	var sslFirstPacket *mysql.PacketBundle
+	var sslMatchedMocks []*models.Mock
+
 	// handle the SSL request
 	if decodeCtx.UseSSL {
 		_, ok := pkt.Message.(*mysql.SSLRequestPacket)
@@ -104,20 +120,31 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			return res, nil
 		}
 
-		// Get the SSL request from the mock
-		_, ok = req[reqIdx].Message.(*mysql.SSLRequestPacket)
-		if !ok {
-			utils.LogError(logger, nil, "failed to assert mock SSL request packet", zap.Any("expected", req[reqIdx].Header.Type))
-			return res, nil
+		// NEW: Strictly collect all mocks whose requests[0] match this SSLRequest.
+		cp := *pkt
+		sslFirstPacket = &cp
+
+		for _, m := range mocks {
+			mReq := m.Spec.MySQLRequests
+			if len(mReq) == 0 {
+				continue
+			}
+			// NEW: direct constant, not ...ToString
+			if mReq[0].Header.Type != mysql.SSLRequest {
+				continue
+			}
+			if err := matchSSLRequest(ctx, logger, mReq[0].PacketBundle, *sslFirstPacket); err == nil {
+				sslMatchedMocks = append(sslMatchedMocks, m)
+			}
 		}
 
-		// Match the SSL request from the client with the mock
-		err = matchSSLRequest(ctx, logger, req[reqIdx].PacketBundle, *pkt)
-		if err != nil {
-			utils.LogError(logger, err, "error while matching SSL request")
-			return res, err
+		// NEW: If no SSL matches at all, fail immediately (as requested).
+		if len(sslMatchedMocks) == 0 {
+			utils.LogError(logger, nil, "no mysql mocks matched the SSL request")
+			return res, fmt.Errorf("no mysql mocks matched the SSL request")
 		}
-		reqIdx++ // matched with the mock so increment the index
+
+		reqIdx++ // matched (logically) with the mock so increment the index
 
 		// Upgrade the client connection to TLS
 		reader := bufio.NewReader(clientConn)
@@ -174,6 +201,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		}
 	}
 
+	// At this point, pkt MUST be HandshakeResponse41 (either SSL path post-decrypt or non-SSL path).
 	hr41, ok := pkt.Message.(*mysql.HandshakeResponse41Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert actual handshake response packet")
@@ -181,22 +209,75 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	}
 	decodeCtx.ClientCaps = hr41.CapabilityFlags // live client caps
 
-	// Get the handshake response from the mock
-	hrec, ok := req[reqIdx].Message.(*mysql.HandshakeResponse41Packet)
+	// NEW: Build a single candidate list:
+	// - If SSL was used: match HR41 within sslMatchedMocks only.
+	// - Else: match HR41 across all mocks.
+	candidates := mocks
+	if sslFirstPacket != nil {
+		candidates = sslMatchedMocks
+	}
+
+	// NEW: Strictly find the first candidate whose HR41 matches (auth_response ignored in matcher).
+	// Try HR41 at index 0 and 1 to be tolerant to recording layout.
+
+	logger.Debug("matching handshake response", zap.Any("actual request", pkt))
+
+	selectedIdx := -1
+	hrIdx := -1
+	for i, m := range candidates {
+		mReq := m.Spec.MySQLRequests
+		if len(mReq) > 0 && mReq[0].Header.Type == mysql.HandshakeResponse41 {
+			// attempt match
+			if err := matchHanshakeResponse41(ctx, logger, mReq[0].PacketBundle, *pkt); err == nil {
+				selectedIdx = i
+				hrIdx = 0
+				break
+			}
+		}
+		if len(mReq) > 1 && mReq[1].Header.Type == mysql.HandshakeResponse41 {
+			if err := matchHanshakeResponse41(ctx, logger, mReq[1].PacketBundle, *pkt); err == nil {
+				selectedIdx = i
+				hrIdx = 1
+				break
+			}
+		}
+	}
+
+	// NEW: If nothing matched HR41 strictly, error out.
+	if selectedIdx == -1 {
+		if sslFirstPacket != nil {
+			utils.LogError(logger, nil, "no mysql mocks matched the HandshakeResponse41 within SSL-selected mocks")
+			return res, fmt.Errorf("no mysql mocks matched the HandshakeResponse41 within SSL-selected mocks")
+		}
+		utils.LogError(logger, nil, "no mysql mocks matched the HandshakeResponse41")
+		return res, fmt.Errorf("no mysql mocks matched the HandshakeResponse41")
+	}
+
+	// NEW: We have a strict HR41 match at candidates[selectedIdx], request index hrIdx.
+	handshakeMatchedIdx := selectedIdx
+	handshakeMock := candidates[handshakeMatchedIdx]
+
+	// Update both responses and requests from the ultimately picked mock
+	resp = handshakeMock.Spec.MySQLResponses
+	req = handshakeMock.Spec.MySQLRequests
+
+	// Once successful match of handshakeResponse41 is done the `reqIdx` can continue to increment just like how it is getting incremented.
+	reqIdx = hrIdx + 1 // we have consumed HR41 at hrIdx
+	respIdx = 1        // next server packet after HandshakeV10 is at responses[1]
+
+	logger.Debug("picked mock for mysql handshake", zap.String("mock_name", handshakeMock.Name))
+
+	// Get the handshake response from the mock (we have advanced past HR41, so look back one)
+	if reqIdx-1 < 0 || reqIdx-1 >= len(req) {
+		utils.LogError(logger, nil, "handshake response index out of range after selection")
+		return res, nil
+	}
+	hrec, ok := req[reqIdx-1].Message.(*mysql.HandshakeResponse41Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert mock handshake response packet")
 		return res, nil
 	}
 	decodeCtx.RecordedClientCaps = hrec.CapabilityFlags
-
-	// Match the handshake response from the client with the mock
-	logger.Debug("matching handshake response", zap.Any("actual", pkt), zap.Any("mock", req[reqIdx].PacketBundle))
-	err = matchHanshakeResponse41(ctx, logger, req[reqIdx].PacketBundle, *pkt)
-	if err != nil {
-		utils.LogError(logger, err, "error while matching handshakeResponse41")
-		return res, err
-	}
-	reqIdx++ // matched with the mock so increment the index
 
 	// Get the next response in order to find the auth mechanism
 	if len(resp) < respIdx+1 {
@@ -296,7 +377,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		nativePassMocks.resp = resp[respIdx:]
 
 		// It means we need to simulate the native password
-		err := simulateNativePassword(ctx, logger, clientConn, nativePassMocks, initialHandshakeMock, mockDb, decodeCtx)
+		err := simulateNativePassword(ctx, logger, clientConn, nativePassMocks, handshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate native password")
 			return res, err
@@ -309,7 +390,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		cacheSha2PassMock.resp = resp[respIdx:]
 
 		// It means we need to simulate the caching_sha2_password
-		err := simulateCacheSha2Password(ctx, logger, clientConn, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
+		err := simulateCacheSha2Password(ctx, logger, clientConn, cacheSha2PassMock, handshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate caching_sha2_password")
 			return res, err

@@ -547,7 +547,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, KeployContainer: r.config.KeployContainer})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return &InstrumentState{}, err
@@ -592,9 +592,10 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 
 	// First, set up the app again since it might have been deleted during cleanup
 	newAppID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
-		Container:     r.config.ContainerName,
-		DockerNetwork: r.config.NetworkName,
-		DockerDelay:   r.config.BuildDelay,
+		Container:       r.config.ContainerName,
+		DockerNetwork:   r.config.NetworkName,
+		DockerDelay:     r.config.BuildDelay,
+		KeployContainer: r.config.KeployContainer,
 	})
 	if err != nil {
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
@@ -792,6 +793,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		return models.TestSetStatusFailed, err
+	}
+
+	if filteredMocks == nil && unfilteredMocks == nil {
+		r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
 	}
 
 	// Check if mappings are present and decide filtering strategy
@@ -1248,6 +1253,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if testCaseResult != nil {
+				if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
+					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
+					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
+				}
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
@@ -1288,6 +1297,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	riskHigh, riskMed, riskLow := 0, 0, 0
+	for _, tr := range testCaseResults {
+		if tr.Status == models.TestStatusFailed && tr.Result.FailureInfo.Risk != models.None {
+			switch tr.Result.FailureInfo.Risk {
+			case models.High:
+				riskHigh++
+			case models.Medium:
+				riskMed++
+			case models.Low:
+				riskLow++
+			}
+		}
+	}
+
 	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
@@ -1302,15 +1325,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testReport = &models.TestReport{
-		Version:   models.GetVersion(),
-		TestSet:   testSetID,
-		Status:    string(testSetStatus),
-		Total:     testCasesCount,
-		Success:   success,
-		Failure:   failure,
-		Ignored:   ignored,
-		Tests:     testCaseResults,
-		TimeTaken: timeTaken.String(),
+		Version:    models.GetVersion(),
+		TestSet:    testSetID,
+		Status:     string(testSetStatus),
+		Total:      testCasesCount,
+		Success:    success,
+		Failure:    failure,
+		Ignored:    ignored,
+		Tests:      testCaseResults,
+		TimeTaken:  timeTaken.String(),
+		HighRisk:   riskHigh,
+		MediumRisk: riskMed,
+		LowRisk:    riskLow,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1858,6 +1884,11 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 	if result != nil {
 		testCaseResult.Result = *result
+	}
+
+	if result != nil && result.FailureInfo.Risk != models.None {
+		testCaseResult.FailureInfo.Risk = result.FailureInfo.Risk
+		testCaseResult.FailureInfo.Category = result.FailureInfo.Category
 	}
 
 	return testCaseResult

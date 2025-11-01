@@ -205,6 +205,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
 		cmd.Flags().String("tests", "", "Test Sets to be normalized")
+		cmd.Flags().Bool("allow-high-risk", false, "Allow normalization of high-risk test failures")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -257,6 +258,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		err := cmd.Flags().MarkHidden("bigPayload")
 		if err != nil {
@@ -407,6 +409,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"protoFile":             "proto-file",
 		"protoDir":              "proto-dir",
 		"protoInclude":          "proto-include",
+		"allowHighRisk":         "allow-high-risk",
 		"disableMapping":        "disable-mapping",
 	}
 
@@ -465,53 +468,85 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 }
 
 func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
+	// 1) Bind flags (highest precedence in Viper)
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
-	err := viper.BindPFlags(cmd.Flags())
-	if err != nil {
+	if err := viper.BindPFlags(cmd.Flags()); err != nil {
 		errMsg := "failed to bind flags to config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 
-	// used to bind flags with environment variables
+	// 2) Env: KEPLOY_*
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("KEPLOY")
 
-	//used to bind flags specific to the command for eg: testsets, delay, recordTimer etc. (nested flags)
-	err = utils.BindFlagsToViper(c.logger, cmd, "")
-	if err != nil {
+	// 3) Nested flag binding (your existing util)
+	if err := utils.BindFlagsToViper(c.logger, cmd, ""); err != nil {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
+	// 4) Use provided configPath as-is (your default is already ".")
 	configPath, err := cmd.Flags().GetString("configPath")
 	if err != nil {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
 	}
+
+	// 5) Read base keploy.yml exactly like before
 	viper.SetConfigName("keploy")
 	viper.SetConfigType("yml")
 	viper.AddConfigPath(configPath)
+
 	if err := viper.ReadInConfig(); err != nil {
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		IsConfigFileFound = false
 		c.logger.Info("config file not found; proceeding with flags only")
+	} else {
+		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
+		lastDir, err := utils.GetLastDirectory()
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to get last directory name for override config file in path '%s'", configPath)
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		// overridePath is <configPath>/<lastDir>.keploy.yml
+		overridePath := filepath.Join(configPath, fmt.Sprintf("%s.keploy.yml", lastDir))
+
+		if _, statErr := os.Stat(overridePath); statErr == nil {
+			viper.SetConfigFile(overridePath)
+			if err := viper.MergeInConfig(); err != nil {
+				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.logger.Info("merged override config file", zap.String("file", overridePath))
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			errMsg := fmt.Sprintf("failed to stat override config file: %s", overridePath)
+			utils.LogError(c.logger, statErr, errMsg)
+			return errors.New(errMsg)
+		}
+		IsConfigFileFound = true
 	}
 
+	// 7) Unmarshal
 	if err := viper.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 
+	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
 	return nil
 }
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
@@ -856,6 +891,41 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+
+		// Parse proto paths early for Docker volume mounting
+		// Only needed for test/rerecord commands before starting Docker
+		if (cmd.Name() == "test" || cmd.Name() == "rerecord") && !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
+			// Parse proto flags from command
+			err := parseProtoFlags(c.logger, c.cfg, cmd)
+			if err != nil {
+				return err
+			}
+
+			// Mount proto paths that are outside current working directory
+			// Mount proto file (if specified)
+			err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoFile, true)
+			if err != nil {
+				return err
+			}
+
+			// Mount proto directory (if specified)
+			err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoDir, false)
+			if err != nil {
+				return err
+			}
+
+			// Mount proto include directories (if any)
+			for _, includePath := range c.cfg.Test.ProtoInclude {
+				err = mountPathIfExternal(c.logger, includePath, false)
+				if err != nil {
+					return err
+				}
+			}
+
+			// Log the bind mounts that will be used for Docker volume mounting.
+			c.logger.Debug("the bind mounts are", zap.Any("bind mounts", DockerConfig.VolumeMounts))
+		}
+
 		err := StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
@@ -1044,56 +1114,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// parse and set proto related flags
-
-			protoFile, err := cmd.Flags().GetString("proto-file")
-			if err != nil {
-				errMsg := "failed to get the proto-file flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if protoFile != "" {
-				c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-file"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoDir, err := cmd.Flags().GetString("proto-dir")
-			if err != nil {
-				errMsg := "failed to get the proto-dir flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if protoDir != "" {
-				c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-dir"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoInclude, err := cmd.Flags().GetStringArray("proto-include")
-			if err != nil {
-				errMsg := "failed to get the proto-include flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if len(protoInclude) > 0 {
-				for _, dir := range protoInclude {
-					absDir, err := utils.GetAbsPath(dir)
-					if err != nil {
-						errMsg := "failed to get the absolute path of proto-include"
-						utils.LogError(c.logger, err, errMsg)
-						return errors.New(errMsg)
-					}
-					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
-				}
+			if err := parseProtoFlags(c.logger, c.cfg, cmd); err != nil {
+				return err
 			}
 		}
 
@@ -1124,6 +1146,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		err = config.SetSelectedTestsNormalize(c.cfg, tests)
 		if err != nil {
 			errMsg := "failed to normalize the selected tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		c.cfg.Normalize.AllowHighRisk, err = cmd.Flags().GetBool("allow-high-risk")
+		if err != nil {
+			errMsg := "failed to read allow-high-risk flag"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}

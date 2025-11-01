@@ -174,6 +174,27 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 	}
 }
 
+func isZeroDateTimeString(s string) bool {
+	s = strings.TrimSpace(s)
+	return s == utils.ZeroDateString ||
+		s == utils.ZeroDateTimeString ||
+		s == utils.ZeroDateTimeString+".000000"
+}
+
+func isZeroTimeString(s string) bool {
+	s = strings.TrimSpace(s)
+	return s == utils.ZeroTimeString ||
+		s == utils.ZeroTimeString+".000000" ||
+		s == "0 00:00:00" ||
+		s == "0 00:00:00.000000" ||
+		s == "-00:00:00" ||
+		s == "-00:00:00.000000"
+}
+
+func isZeroDateString(s string) bool {
+	return strings.TrimSpace(s) == utils.ZeroDateString
+}
+
 func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
 	body := new(bytes.Buffer)
 
@@ -193,6 +214,10 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 		}
 
 		ce := row.Values[i]
+
+		if ce.Value == nil {
+			return nil, fmt.Errorf("encode: value for %q is nil but NULL bit not set", columns[i].Name)
+		}
 
 		switch ce.Type {
 		case mysql.FieldTypeLong:
@@ -333,8 +358,6 @@ func coerceToString(v interface{}) (string, error) {
 		return t, nil
 	case []byte:
 		return string(t), nil
-	case fmt.Stringer:
-		return t.String(), nil
 	case time.Time:
 		// MySQL DATETIME has microsecond precision max; drop to microseconds if needed.
 		ts := t.Round(time.Microsecond)
@@ -344,8 +367,27 @@ func coerceToString(v interface{}) (string, error) {
 			return base, nil
 		}
 		return fmt.Sprintf("%s.%06d", base, usec), nil
+	case fmt.Stringer:
+		return t.String(), nil
 	default:
 		return "", fmt.Errorf("cannot coerce %T to string", v)
+	}
+}
+
+// accepts string, []byte, time.Time, or fmt.Stringer; returns a normalized date string (YYYY-MM-DD).
+func coerceDateToString(v interface{}) (string, error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case []byte:
+		return string(t), nil
+	case time.Time:
+		// For dates, we only need the date part (YYYY-MM-DD)
+		return t.Format("2006-01-02"), nil
+	case fmt.Stringer:
+		return t.String(), nil
+	default:
+		return "", fmt.Errorf("cannot coerce %T to date string", v)
 	}
 }
 
@@ -397,7 +439,7 @@ func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte,
 }
 
 func encodeDate(value interface{}) ([]byte, error) {
-	dateStr, err := coerceToString(value)
+	dateStr, err := coerceDateToString(value)
 	if err != nil {
 		return nil, err
 	}
@@ -405,6 +447,10 @@ func encodeDate(value interface{}) ([]byte, error) {
 	// If a time portion leaked in, keep just the date
 	if i := strings.IndexByte(dateStr, ' '); i >= 0 {
 		dateStr = dateStr[:i]
+	}
+
+	if isZeroDateString(dateStr) {
+		return []byte{0x00}, nil
 	}
 
 	var year, month, day int
@@ -438,6 +484,11 @@ func encodeDateTime(value interface{}) ([]byte, error) {
 		return nil, err
 	}
 	s = stripISOStuff(s)
+
+	// Accept both full zero and date-only zero forms.
+	if isZeroDateTimeString(s) {
+		return []byte{0x00}, nil
+	}
 
 	// allow MySQL DATETIME encoded as date-only variant (length=4)
 	if !strings.Contains(s, " ") {
@@ -528,6 +579,10 @@ func encodeTime(value interface{}) ([]byte, error) {
 		return nil, err
 	}
 	s = strings.TrimSpace(s)
+
+	if isZeroTimeString(s) {
+		return []byte{0x00}, nil
+	}
 
 	neg := false
 	if strings.HasPrefix(s, "-") {
