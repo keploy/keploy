@@ -1,6 +1,6 @@
 package consumer
 
-import "go.keploy.io/server/v3/pkg/models"
+import "github.com/keploy/keploy-integrations-shared/pkg/models"
 
 // Service defines the consumer service interface
 type Service interface {

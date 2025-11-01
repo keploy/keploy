@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/service/contract/consumer"
 	"go.keploy.io/server/v3/pkg/service/contract/provider"

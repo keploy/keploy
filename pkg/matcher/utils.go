@@ -20,8 +20,8 @@ import (
 	"github.com/7sDream/geko"
 	"github.com/fatih/color"
 	jsonDiff "github.com/keploy/jsonDiff"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"github.com/olekukonko/tablewriter"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )

@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/render"
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 )
 
 func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {

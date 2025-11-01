@@ -6,8 +6,8 @@ import (
 	"net"
 	"sync"
 
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/models/mysql"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 )
 
 const RESET = 0x00

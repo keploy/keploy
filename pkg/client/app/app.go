@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"

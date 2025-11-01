@@ -5,9 +5,9 @@ import (
 
 	"errors"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/pkg"
 	matcher "go.keploy.io/server/v3/pkg/matcher"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 )
 
 // GenerateTableDiff creates a human-readable key-value diff for two JSON strings.

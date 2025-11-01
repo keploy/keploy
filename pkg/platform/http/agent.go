@@ -19,11 +19,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	ptls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/client/app"
-	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/utils"

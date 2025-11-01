@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 )
 
 // customComparator is a custom comparator function for the tree db

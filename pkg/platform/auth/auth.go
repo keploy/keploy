@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"

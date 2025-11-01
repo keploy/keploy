@@ -10,11 +10,11 @@ import (
 	"strings"
 
 	"github.com/agnivade/levenshtein"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations/util"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/utils"
 	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -401,7 +401,7 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
 	originalMatchedMock := *matchedMock
 	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	matchedMock.TestModeInfo.SortOrder = utils.GetNextSortNum()
 	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 	return updated
 }

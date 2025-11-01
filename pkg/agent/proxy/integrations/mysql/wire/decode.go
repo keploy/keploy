@@ -13,9 +13,9 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/preparedstmt"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/utility"
 
-	itgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/models/mysql"
+	itgUtils "github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations/util"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 

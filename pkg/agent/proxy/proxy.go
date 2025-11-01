@@ -19,13 +19,14 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/utils"
 	"golang.org/x/sync/errgroup"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/integrations"
+	"github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/util"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
-	"go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 

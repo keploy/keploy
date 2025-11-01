@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	pUtil "github.com/keploy/keploy-integrations-shared/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )

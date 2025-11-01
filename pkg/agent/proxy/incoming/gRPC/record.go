@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

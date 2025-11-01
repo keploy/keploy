@@ -12,10 +12,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/k0kubun/pp/v3"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"github.com/wI2L/jsondiff"
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/utils"
 )

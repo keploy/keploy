@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"go.keploy.io/server/v3/pkg/models/mysql"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 

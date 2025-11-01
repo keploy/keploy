@@ -3,9 +3,9 @@ package cli
 import (
 	"context"
 
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/models"
 	recordSvc "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"

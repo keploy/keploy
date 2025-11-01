@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 
-	"go.keploy.io/server/v3/pkg/models/mysql"
+	"github.com/keploy/keploy-integrations-shared/pkg/models/mysql"
 )
 
 //ref:https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_auth_switch_response.html

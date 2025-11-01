@@ -5,7 +5,7 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
-	"go.keploy.io/server/v3/pkg/models"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
 )
 
 type Client interface {

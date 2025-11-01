@@ -19,12 +19,13 @@ import (
 
 	"facette.io/natsort"
 	"github.com/k0kubun/pp/v3"
+	"github.com/keploy/keploy-integrations-shared/pkg/models"
+	util "github.com/keploy/keploy-integrations-shared/pkg/utils"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	grpcMatcher "go.keploy.io/server/v3/pkg/matcher/grpc"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
-	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage"
 	"go.keploy.io/server/v3/pkg/platform/coverage/golang"
 	"go.keploy.io/server/v3/pkg/platform/coverage/java"
@@ -797,7 +798,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
-		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
+		util.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
