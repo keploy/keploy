@@ -1,17 +1,10 @@
 name: Java on Linux
 on:
   workflow_call:
-    inputs:
-      runner:
-        description: 'The type of runner to use for this job'
-        type: string
-        required: false
-        default: 'ubuntu-latest'
-
 jobs:
   java_linux:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ${{ inputs.runner }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -33,9 +26,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          repository: keploy/keploy
-          ref: reusable-workflow
 
       - id: record
         uses: ./.github/actions/download-binary

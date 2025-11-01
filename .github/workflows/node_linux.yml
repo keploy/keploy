@@ -1,16 +1,10 @@
 name: Node on Linux
 on:
   workflow_call:
-    inputs:
-      runner:
-        description: 'The type of runner to use for this job'
-        type: string
-        required: false
-        default: 'ubuntu-latest'
 jobs:
   node_linux:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ${{ inputs.runner }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -32,9 +26,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          repository: keploy/keploy
-          ref: reusable-workflow
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -51,12 +42,7 @@ jobs:
         with:
           repository: keploy/samples-typescript
           path: samples-typescript
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24.x' # Or your desired Node.js version
-
+      
       - name: Setup nyc for code coverage
         run: |
           npm install -g nyc
