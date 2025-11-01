@@ -173,7 +173,7 @@ wait_for_http() {
 # Triggers the fuzzer, lets it run for a short time, and then kills the Keploy process.
 send_requests() {
   # Wait for the fuzzer's API to be ready
-  wait_for_http "http://localhost:8080/fuzz" 8080
+  wait_for_http 8080
 
   echo "Triggering the fuzzer to generate traffic..."
   curl -sS --request POST 'http://localhost:8080/fuzz' \
