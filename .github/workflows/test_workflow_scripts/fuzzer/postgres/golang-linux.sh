@@ -220,7 +220,7 @@ endsec
 
 # --- Recording Phase ---
 section "Start Recording Server"
-sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" --debug 2>&1 | tee record.txt &
+sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
