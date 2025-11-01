@@ -3,8 +3,6 @@
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
 
-echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
-
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 echo "iid.sh executed"
 
@@ -64,10 +62,10 @@ send_request() {
 
     # Wait for 7 seconds for Keploy to record the tcs and mocks.
     sleep 7
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID"
+    echo "Killing Keploy"
+    sudo kill $pid
 }
 
 for i in {1..2}; do

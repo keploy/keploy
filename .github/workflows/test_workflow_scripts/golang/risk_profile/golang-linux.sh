@@ -75,7 +75,6 @@ check_for_errors() {
 }
 
 # Waits for the Go application's HTTP endpoint to become available
-# Drop-in replacement
 wait_for_http() {
   local port="$1"
   local host="${2:-127.0.0.1}"
