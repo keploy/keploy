@@ -623,8 +623,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 		case models.MODE_TEST:
-			// Add your log statement here to know which parser is being used in test mode.
-			p.logger.Info("Using parser to mock.", zap.String("parser", string(parserType)))
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
@@ -640,7 +638,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if generic {
-		logger.Info("The external dependency is not supported. Hence using generic parser")
+		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
