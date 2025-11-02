@@ -237,7 +237,11 @@ echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
 REC_PID="$(pgrep -n -f 'keploy record' || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
+if [[ -n "$REC_PID" ]]; then
+  sudo kill -INT "$REC_PID" 2>/dev/null || true
+else
+  echo "No Keploy record process found to kill."
+fi
 
 sleep 5
 check_for_errors "record.txt"
