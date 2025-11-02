@@ -70,7 +70,11 @@ send_request(){
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
+    if [ -n "$REC_PID" ]; then
+        sudo kill -INT "$REC_PID" 2>/dev/null || true
+    else
+        echo "No keploy process found to kill."
+    fi
 }
 
 
