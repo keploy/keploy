@@ -6,6 +6,8 @@ source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 git fetch origin
 git checkout native-linux
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # Start the postgres database
 docker compose up -d
 

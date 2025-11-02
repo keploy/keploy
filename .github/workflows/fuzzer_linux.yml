@@ -5,10 +5,23 @@ on:
     secrets:
       AWS_SECRET_ACCESS_KEY:
         required: true
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest' # Keep a sensible default
+      jobs-to-run:
+        description: 'Comma-separated list of jobs to run, or "all"'
+        type: string
+        required: false
+        default: 'all' # Default to running all jobs
+
 
 jobs:
   rerecord_fuzzer:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'rerecord_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +43,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+          ref: reusable-workflow
 
       # These steps download the 'build' artifact (with race detector) by default
       - name: Download Keploy Binary (for Record)
@@ -86,7 +102,8 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/rerecord/golang-linux.sh
 
   mysql_fuzzer:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'mysql_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +122,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+          ref: reusable-workflow
 
       - name: Download Keploy Binary (for Record)
         id: record_keploy
@@ -150,7 +170,8 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mysql/golang-linux.sh
 
   grpc_fuzzer:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'grpc_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -170,6 +191,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+          ref: reusable-workflow
 
       - name: Download Binary (for Record)
         id: record
@@ -195,6 +219,12 @@ jobs:
           aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
           aws-region: ${{ vars.AWS_DEFAULT_REGION }}
 
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install --update
+
       - name: Download and Extract gRPC Fuzzer
         id: fuzzer
         run: |
@@ -218,3 +248,77 @@ jobs:
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
+  
+  postgres_fuzzer:
+    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'postgres_fuzzer') }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+
+    name: Postgres Fuzzer (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+          ref: reusable-workflow # needed because script for postgres fuzzer is only present in this branch before merge
+
+      - name: Download Keploy Binary (for Record)
+        id: record_keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - name: Download Keploy Binary (for Replay)
+        id: replay_keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+      
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install --update
+
+      - name: Download and Extract Postgres Fuzzer
+        id: postgres_fuzzer
+        run: |
+          set -e
+          KEY="releases/postgres-fuzzer/latest/postgres-fuzzer-linux-amd64.tar.gz"
+          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          tar -xzf postgres-fuzzer-linux-amd64.tar.gz
+          chmod +x ./postgres-fuzzer
+          echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
+
+      - name: Run Postgres Fuzzer Test
+        env:
+          RECORD_KEPLOY_BIN:    ${{ steps.record_keploy.outputs.path }}
+          REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}
+          POSTGRES_FUZZER_BIN:  ${{ steps.postgres_fuzzer.outputs.path }}
+        run: |
+          chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/postgres/golang-linux.sh
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/postgres/golang-linux.sh
