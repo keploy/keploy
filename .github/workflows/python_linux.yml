@@ -39,7 +39,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
-          ref: reusable-workflow
 
       - name: Install Python
         uses: deadsnakes/action@v3.2.0
@@ -94,7 +93,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
-          ref: reusable-workflow
       
       - name: Install Python
         uses: deadsnakes/action@v3.2.0
