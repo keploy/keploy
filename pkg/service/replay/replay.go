@@ -345,6 +345,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
+			// if r.instrument {
+			// 	r.logger.Info("Test set finished, closing all proxy connections.")
+
+			// 	// You will need to add this method to your instrumentation interface
+			// 	r.instrumentation.CloseConnections()
+			// 	if err != nil {
+			// 		utils.LogError(r.logger, err, "failed to close client connections between test sets")
+			// 	}
+			// }
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false, runApp)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -354,15 +363,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 				return fmt.Errorf("%s", stopReason)
 			}
-			if r.instrument {
-				r.logger.Info("Test set finished, closing all proxy connections.")
-
-				// You will need to add this method to your instrumentation interface
-				r.instrumentation.CloseConnections()
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to close client connections between test sets")
-				}
-			}
+			
 			if !firstrun {
 				runApp = false
 			}
@@ -885,7 +886,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
 	}
-
+	fmt.Println("setting mocks filtered : ", len(filteredMocks), " unfiltered : ", len(unfilteredMocks))
 	// Initial mock setup - use empty mapping for initial setup
 	// For the initial setup, we always use mapping-based with empty mapping to get all unfiltered mocks
 	err = r.FilterAndSetMocksWithFallback(ctx, appID, filteredMocks, unfilteredMocks, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
