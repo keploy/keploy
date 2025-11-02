@@ -1096,7 +1096,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to filter and set mocks")
 			break
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 
 		// Handle Docker environment IP replacement
 		if utils.IsDockerCmd(cmdType) {

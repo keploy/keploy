@@ -95,15 +95,15 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
-	a.containerIPv4Mux.RLock() // 1. Lock for reading
-    defer a.containerIPv4Mux.RUnlock() // 3. Unlock when the function returns
-    return a.containerIPv4 // 2. Read the value
+	a.containerIPv4Mux.RLock()         // 1. Lock for reading
+	defer a.containerIPv4Mux.RUnlock() // 3. Unlock when the function returns
+	return a.containerIPv4             // 2. Read the value
 }
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
 	a.logger.Debug("setting container IPv4 address", zap.String("ipAddr", ipAddr))
-	a.containerIPv4Mux.Lock() // 1. Lock for writing
-    defer a.containerIPv4Mux.Unlock() // 3. Unlock when the function returns
-    a.containerIPv4 = ipAddr // 2. Set the value
+	a.containerIPv4Mux.Lock()         // 1. Lock for writing
+	defer a.containerIPv4Mux.Unlock() // 3. Unlock when the function returns
+	a.containerIPv4 = ipAddr          // 2. Set the value
 }
 
 func (a *App) SetupDocker() error {

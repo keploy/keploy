@@ -268,7 +268,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 }
 
 func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
-	
+
 	a, err := c.getApp(id)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to get app")
