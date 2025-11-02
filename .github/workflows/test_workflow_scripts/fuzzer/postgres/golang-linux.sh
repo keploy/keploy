@@ -198,7 +198,7 @@ send_requests() {
 section "Initializing Environment"
 echo "POSTGRES_FUZZER_BIN: $POSTGRES_FUZZER_BIN"
 echo "RECORD_KEPLOY_BIN: $RECORD_KEPLOY_BIN"
-echo "REPLAY_KEPLOY _BIN: $REPLAY_KEPLOY_BIN"
+echo "REPLAY_KEPLOY_BIN: $REPLAY_KEPLOY_BIN"
 rm -rf keploy/ keploy.yml golden/ record.txt test.txt
 mkdir -p golden/
 sudo chmod +x $POSTGRES_FUZZER_BIN
