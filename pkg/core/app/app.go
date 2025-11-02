@@ -49,7 +49,7 @@ type App struct {
 	container        string
 	containerNetwork string
 	containerIPv4    string
-	containerIPv4Mux sync.RWMutex // Added this mutex
+	containerIPv4Mux sync.RWMutex
 	keployNetwork    string
 	keployContainer  string
 	keployIPv4       string
