@@ -6,6 +6,8 @@
 git fetch origin
 git checkout native-linux
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
@@ -65,9 +67,14 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    echo "$kp_pid Keploy PID"
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    sudo kill "$kp_pid" 2>/dev/null || true
+    if [ -n "$REC_PID" ]; then
+        sudo kill -INT "$REC_PID" 2>/dev/null || true
+    else
+        echo "No keploy process found to kill."
+    fi
 }
 
 

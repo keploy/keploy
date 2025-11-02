@@ -13,6 +13,8 @@ set -Eeuo pipefail
 
 MODE=${1:-incoming}
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # --- Sanity Checks ---
 [ -x "${RECORD_BIN:-}" ] || { echo "RECORD_BIN not set or not executable"; exit 1; }
 [ -x "${REPLAY_BIN:-}" ] || { echo "REPLAY_BIN not set or not executable"; exit 1; }
@@ -133,7 +135,7 @@ wait_for_port() {
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
         # Use lsof to check for a listening TCP socket on the specified port
-        if sudo lsof -iTCP:"$port" -sTCP:LISTEN -t >/dev/null; then
+        if sudo nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
