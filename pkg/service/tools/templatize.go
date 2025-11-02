@@ -22,12 +22,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var validGoIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-func isValidIdent(s string) bool {
-	return validGoIdent.MatchString(s)
-}
-
 // --- V2 Data Structures for Optimized Templatization ---
 
 type PartType int
@@ -835,17 +829,21 @@ func toCamelCase(s string) string {
 		if i == 0 {
 			b.WriteString(t)
 		} else {
-			b.WriteString(strings.ToUpper(t[:1]))
-			if len(t) > 1 {
-				b.WriteString(t[1:])
+			r, size := utf8.DecodeRuneInString(t)
+			if size == 0 || r == utf8.RuneError {
+				// invalid/empty, just append as-is
+				b.WriteString(t)
+			} else {
+				b.WriteRune(unicode.ToUpper(r))
+				b.WriteString(t[size:])
 			}
 		}
 	}
 	out := b.String()
 	// Must not start with digit for Go templates: {{ .<ident> }}
 	if out != "" {
-		r, _ := utf8.DecodeRuneInString(out) // safe for multi-byte
-		if unicode.IsDigit(r) {
+		r, size := utf8.DecodeRuneInString(out)
+		if size == 0 || r == utf8.RuneError || unicode.IsDigit(r) {
 			out = "v" + out
 		}
 	}
@@ -1039,8 +1037,10 @@ func replaceCookieValue(cookieHdr, name, newVal string) string {
 	for i := range kvs {
 		if kvs[i].Name == name {
 			kvs[i].Value = newVal
+			break
 		}
 	}
+
 	var b strings.Builder
 	for i, kv := range kvs {
 		if i > 0 {
@@ -1099,8 +1099,11 @@ func isValidFirstRune(name string) bool {
 	if name == "" {
 		return false
 	}
-	r, _ := utf8.DecodeRuneInString(name)
-	// Keep your original semantics (letters/digits/_/$ allowed in your check):
+	r, size := utf8.DecodeRuneInString(name)
+	if size == 0 || r == utf8.RuneError {
+		return false
+	}
+	// Keep original semantics (letters/digits/_/$ allowed):
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
 }
 
@@ -1132,12 +1135,12 @@ func replaceSetCookieValue(setCookieHdr, name, newVal string) string {
 	for i, ln := range lines {
 		cn, _ := splitSetCookieNameValue(ln)
 		if cn == name {
-			// rebuild: replace only "name=value" head, preserve "; attrs..."
 			rest := ""
 			if idx := strings.IndexByte(ln, ';'); idx >= 0 {
 				rest = ln[idx:] // includes leading ';'
 			}
 			lines[i] = name + "=" + newVal + rest
+			break
 		}
 	}
 	return strings.Join(lines, "\n")
