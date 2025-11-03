@@ -1,4 +1,4 @@
-module go.keploy.io/server/v2
+module go.keploy.io/server/v3
 
 go 1.24.4
 

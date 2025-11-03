@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 

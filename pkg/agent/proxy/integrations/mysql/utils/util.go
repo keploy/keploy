@@ -10,9 +10,9 @@ import (
 	"io"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/agent/proxy/util"
-	"go.keploy.io/server/v2/pkg/models/mysql"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -298,13 +298,21 @@ func WriteUint24(buf *bytes.Buffer, value uint32) error {
 	return nil
 }
 
+// Use constants so encoder can key off them.
+const (
+	ZeroDateString     = "0000-00-00"
+	ZeroDateTimeString = "0000-00-00 00:00:00"
+	ZeroTimeString     = "00:00:00" // conventional textual form
+)
+
 func ParseBinaryDate(b []byte) (interface{}, int, error) {
 	if len(b) == 0 {
 		return nil, 0, nil
 	}
 	length := b[0]
 	if length == 0 {
-		return nil, 1, nil
+		// Non-NULL zero DATE (length byte present, payload length=0)
+		return ZeroDateString, 1, nil
 	}
 	year := binary.LittleEndian.Uint16(b[1:3])
 	month := b[3]
@@ -318,7 +326,8 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 	}
 	l := int(b[0])
 	if l == 0 {
-		return nil, 1, nil // zero value
+		// Non-NULL zero DATETIME/TIMESTAMP
+		return ZeroDateTimeString, 1, nil
 	}
 	// DATETIME valid lengths in MySQL binary row: 4, 7, 11
 	if l != 4 && l != 7 && l != 11 {
@@ -378,7 +387,8 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 	}
 	length := b[0]
 	if length == 0 {
-		return nil, 1, nil
+		// Non-NULL zero TIME
+		return ZeroTimeString, 1, nil
 	}
 	isNegative := b[1] == 1
 	days := binary.LittleEndian.Uint32(b[2:6])

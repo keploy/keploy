@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_auth_more_data.html
