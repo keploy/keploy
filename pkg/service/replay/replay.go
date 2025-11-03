@@ -345,15 +345,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			// if r.instrument {
-			// 	r.logger.Info("Test set finished, closing all proxy connections.")
+			if r.instrument {
+				r.logger.Info("Test set finished, closing all proxy connections.")
 
-			// 	// You will need to add this method to your instrumentation interface
-			// 	r.instrumentation.CloseConnections()
-			// 	if err != nil {
-			// 		utils.LogError(r.logger, err, "failed to close client connections between test sets")
-			// 	}
-			// }
+				// You will need to add this method to your instrumentation interface
+				r.instrumentation.CloseConnections()
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to close client connections between test sets")
+				}
+			}
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false, runApp)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -491,7 +491,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
 			}
 		}
-		time.Sleep(1 * time.Second)
+		// time.Sleep(1 * time.Second)
 	}
 	if r.appCtxCancel != nil {
 		r.appCtxCancel()
@@ -1097,7 +1097,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to filter and set mocks")
 			break
 		}
-		time.Sleep(10 * time.Second)
+		// time.Sleep(10 * time.Second)
 
 		// Handle Docker environment IP replacement
 		if utils.IsDockerCmd(cmdType) {
