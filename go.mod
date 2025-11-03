@@ -107,7 +107,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/keploy/jsonDiff v1.0.8
-	github.com/minio/selfupdate v0.6.0
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.11.1
@@ -123,7 +122,6 @@ require (
 )
 
 require (
-	aead.dev/minisign v0.2.0 // indirect
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/BobuSumisu/aho-corasick v1.0.3 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
