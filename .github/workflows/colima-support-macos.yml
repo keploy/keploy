@@ -36,9 +36,16 @@ jobs:
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@v3
 
+            - name: Checkout samples-go repository
+              uses: actions/checkout@v4
+              with:
+                  repository: keploy/samples-go
+                  path: samples-go
+
             - name: Run Colima support test
               shell: bash
               run: |
+                  cd samples-go/http-pokeapi
                   bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/colima/colima-docker-macos.sh
 
             - name: Upload Keploy artifacts
@@ -46,13 +53,13 @@ jobs:
               uses: actions/upload-artifact@v4
               with:
                   name: keploy-colima-test-results
-                  path: test-app/keploy/
+                  path: samples-go/http-pokeapi/keploy/
                   retention-days: 7
 
             - name: Cleanup
               if: always()
               run: |
-                  docker stop test-app-1 test-app-2 test-app-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
-                  docker rm test-app-1 test-app-2 test-app-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
+                  docker stop http-pokeapi-1 http-pokeapi-2 http-pokeapi-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
+                  docker rm http-pokeapi-1 http-pokeapi-2 http-pokeapi-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
                   docker network rm keploy-network 2>/dev/null || true
                   colima stop || true

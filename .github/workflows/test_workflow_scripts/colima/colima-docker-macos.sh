@@ -9,95 +9,13 @@ echo "This test validates Keploy works with Colima without manual DOCKER_HOST co
 # Create Keploy network
 docker network inspect keploy-network >/dev/null 2>&1 || docker network create keploy-network
 
-# Create test app directory
-mkdir -p test-app
-cd test-app
-
-# Write main.go
-cat > main.go <<'EOF'
-package main
-
-import (
-    "encoding/json"
-    "fmt"
-    "log"
-    "net/http"
-    "sync"
-)
-
-var (
-    store = make(map[string]string)
-    mu    sync.RWMutex
-)
-
-type Item struct {
-    Key   string `json:"key"`
-    Value string `json:"value"`
-}
-
-func main() {
-    http.HandleFunc("/items", handleItems)
-    http.HandleFunc("/health", handleHealth)
-    
-    fmt.Println("Server starting on :8080")
-    log.Fatal(http.ListenAndServe(":8080", nil))
-}
-
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte("OK"))
-}
-
-func handleItems(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    
-    switch r.Method {
-    case http.MethodPost:
-        var item Item
-        if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
-            http.Error(w, err.Error(), http.StatusBadRequest)
-            return
-        }
-        
-        mu.Lock()
-        store[item.Key] = item.Value
-        mu.Unlock()
-        
-        w.WriteHeader(http.StatusCreated)
-        json.NewEncoder(w).Encode(map[string]string{"status": "created", "key": item.Key})
-        
-    case http.MethodGet:
-        mu.RLock()
-        defer mu.RUnlock()
-        json.NewEncoder(w).Encode(store)
-        
-    default:
-        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-    }
-}
-EOF
-
-# Write Dockerfile
-cat > Dockerfile <<'EOF'
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY main.go .
-RUN go build -o server main.go
-
-FROM alpine:latest
-WORKDIR /app
-COPY --from=builder /app/server .
-EXPOSE 8080
-CMD ["./server"]
-EOF
-
 echo "Building test app and pulling Keploy image in parallel..."
 docker pull ghcr.io/keploy/keploy:latest &
 PULL_PID=$!
 
 docker buildx build \
   --load \
-  --tag test-app:colima \
+  --tag http-pokeapi:colima \
   --cache-from type=gha \
   --cache-to type=gha,mode=max \
   .
@@ -118,8 +36,8 @@ docker run --name keploy-record-1 \
   -v /sys/fs/bpf:/sys/fs/bpf \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/keploy/keploy:latest \
-  record -c "docker run -p 8080:8080 --name test-app-1 --network keploy-network --rm test-app:colima" \
-  --container-name test-app-1 \
+  record -c "docker run -p 8080:8080 --name http-pokeapi-1 --network keploy-network --rm http-pokeapi:colima" \
+  --container-name http-pokeapi-1 \
   --keploy-container keploy-record-1 \
   --record-timer 20s \
   --in-ci &
@@ -129,40 +47,40 @@ KEPLOY_PID=$!
 # Wait for app to be ready
 echo "Waiting for app to start..."
 for i in {1..30}; do
-  if docker exec keploy-record-1 curl -s http://test-app-1:8080/health &>/dev/null; then
+  if docker exec keploy-record-1 curl -s http://http-pokeapi-1:8080/api/locations &>/dev/null; then
     echo "App is ready!"
     break
   fi
   if [ $i -eq 30 ]; then
     echo "App failed to start"
-    docker logs test-app-1 || true
+    docker logs http-pokeapi-1 || true
     docker logs keploy-record-1 || true
     exit 1
   fi
   sleep 1
 done
 
+# Generate traffic
 echo "Generating traffic..."
-docker exec keploy-record-1 curl -X POST http://test-app-1:8080/items \
-  -H "Content-Type: application/json" \
-  -d '{"key":"test1","value":"value1"}'
+docker exec keploy-record-1 curl -s http://http-pokeapi-1:8080/api/locations
 
 sleep 2
 
-docker exec keploy-record-1 curl -X GET http://test-app-1:8080/items
+docker exec keploy-record-1 curl -s http://http-pokeapi-1:8080/api/greet
 
 sleep 2
 
-docker exec keploy-record-1 curl -X GET http://test-app-1:8080/health
+docker exec keploy-record-1 curl -s "http://http-pokeapi-1:8080/api/greet?format=html"
 
 sleep 5
 
+# Stop Keploy gracefully
 echo "Stopping Keploy..."
 kill -SIGINT $KEPLOY_PID || true
 sleep 15
 kill -9 $KEPLOY_PID 2>/dev/null || true
 
-docker stop test-app-1 2>/dev/null || true
+docker stop http-pokeapi-1 2>/dev/null || true
 
 # Verify testcases created
 sleep 2
@@ -184,8 +102,8 @@ docker run --name keploy-record-2 \
   -v /sys/fs/bpf:/sys/fs/bpf \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/keploy/keploy:latest \
-  record -c "docker run -p 8080:8080 --name test-app-2 --network keploy-network --rm test-app:colima" \
-  --container-name test-app-2 \
+  record -c "docker run -p 8080:8080 --name http-pokeapi-2 --network keploy-network --rm http-pokeapi:colima" \
+  --container-name http-pokeapi-2 \
   --keploy-container keploy-record-2 \
   --record-timer 20s \
   --in-ci &
@@ -194,26 +112,24 @@ KEPLOY_PID=$!
 
 echo "Waiting for app to start..."
 for i in {1..30}; do
-  if docker exec keploy-record-2 curl -s http://test-app-2:8080/health &>/dev/null; then
+  if docker exec keploy-record-2 curl -s http://http-pokeapi-2:8080/api/locations &>/dev/null; then
     echo "App is ready!"
     break
   fi
   if [ $i -eq 30 ]; then
     echo "App failed to start"
-    docker logs test-app-2 || true
+    docker logs http-pokeapi-2 || true
     docker logs keploy-record-2 || true
     exit 1
   fi
   sleep 1
 done
 
-docker exec keploy-record-2 curl -X POST http://test-app-2:8080/items \
-  -H "Content-Type: application/json" \
-  -d '{"key":"test2","value":"value2"}'
+docker exec keploy-record-2 curl -s "http://http-pokeapi-2:8080/api/greet?format=xml"
 
 sleep 2
 
-docker exec keploy-record-2 curl -X GET http://test-app-2:8080/items
+docker exec keploy-record-2 curl -s http://http-pokeapi-2:8080/api/locations
 
 sleep 5
 
@@ -222,7 +138,7 @@ kill -SIGINT $KEPLOY_PID || true
 sleep 15
 kill -9 $KEPLOY_PID 2>/dev/null || true
 
-docker stop test-app-2 2>/dev/null || true
+docker stop http-pokeapi-2 2>/dev/null || true
 
 sleep 2
 if ! ls ./keploy/test-set-1/tests/test-*.yaml 1> /dev/null 2>&1; then
@@ -258,8 +174,8 @@ docker run --name keploy-test \
   -v /sys/fs/bpf:/sys/fs/bpf \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/keploy/keploy:latest \
-  test -c "docker run -p 8080:8080 --name test-app-test --network keploy-network --rm test-app:colima" \
-  --container-name test-app-test \
+  test -c "docker run -p 8080:8080 --name http-pokeapi-test --network keploy-network --rm http-pokeapi:colima" \
+  --container-name http-pokeapi-test \
   --keploy-container keploy-test \
   --delay 10 \
   --in-ci
