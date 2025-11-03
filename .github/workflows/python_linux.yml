@@ -1,9 +1,21 @@
 name: Python On Linux
 on:
   workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
 jobs:
   python_linux:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -25,6 +37,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Install Python
+        uses: deadsnakes/action@v3.2.0
+        with:
+          python-version: "3.11"
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -50,7 +69,7 @@ jobs:
 
   python_linux_private:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -77,6 +96,25 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+      
+      - name: Install Python
+        uses: deadsnakes/action@v3.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Setup docker-compose
+        run: |
+          DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+          mkdir -p $DOCKER_CONFIG/cli-plugins
+          curl -SL https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
+          chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+          docker compose version
+
+      - name: Install necessary dependencies
+        run: |
+          sudo apt-get install -y build-essential gcc python3-dev libpq-dev pkg-config
 
       - id: record
         uses: ./.github/actions/download-binary

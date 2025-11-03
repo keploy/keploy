@@ -10,6 +10,8 @@ endsec()  { echo "::endgroup::"; }
 git fetch origin
 git checkout native-linux
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 if [[ "${ENABLE_SSL:-false}" == "false" ]]; then
     echo "Starting Postgres without SSL/TLS"
     docker compose up postgres -d
