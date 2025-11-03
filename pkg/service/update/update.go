@@ -1,9 +1,8 @@
 package update
 
-// This is a generic auto update package
-
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -17,32 +16,31 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/minio/selfupdate"
 	"go.uber.org/zap"
 )
 
 var (
-	ErrInDockerEnv = errors.New("updates are not supported in Docker - please pull the latest image instead")
-	ErrDevVersion  = errors.New("updates are not supported for development versions")
+	ErrInDockerEnv         = errors.New("updates are not supported in Docker - please pull the latest image instead")
+	ErrDevVersion          = errors.New("updates are not supported for development versions")
+	ErrUnsupportedFiletype = errors.New("unsupported file type for auto-update")
 )
 
-// Config holds the configuration for the update process
 type Config struct {
-	BinaryName     string            // e.g. "keploy" or "keploy-agent"
-	CurrentVersion string            // e.g. "v1.0.0"
-	IsDevVersion   bool              // Whether this is a development version
-	IsInDocker     bool              // Whether running in Docker
-	DownloadURLs   map[string]string // Map of OS_ARCH to download URL pattern
-	LatestVersion  string            // Latest version from GitHub
-	Changelog      string            // Release notes/changelog
+	BinaryName     string
+	CurrentVersion string
+	IsDevVersion   bool
+	IsInDocker     bool
+	DownloadURLs   map[string]string
+	LatestVersion  string
+	Changelog      string
 }
 
-// UpdateManager handles the update process
 type UpdateManager struct {
 	Logger *zap.Logger
 	Config Config
 }
 
-// NewUpdateManager creates a new update manager instance
 func NewUpdateManager(logger *zap.Logger, cfg Config) *UpdateManager {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -53,7 +51,6 @@ func NewUpdateManager(logger *zap.Logger, cfg Config) *UpdateManager {
 	}
 }
 
-// CheckAndUpdate checks for new releases and updates the binary if a newer version exists
 func (u *UpdateManager) CheckAndUpdate(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -75,10 +72,12 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) error {
 
 	u.Logger.Info("Updating to version", zap.String("version", u.Config.LatestVersion))
 
-	// Get platform-specific download URL
 	osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
 	if runtime.GOOS == "darwin" {
-		osArch = "darwin_all" // Special case for macOS
+		osArch = "darwin_all"
+	}
+	if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
+		osArch = "windows_amd64"
 	}
 
 	downloadURL, ok := u.Config.DownloadURLs[osArch]
@@ -90,6 +89,8 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) error {
 		return fmt.Errorf("update failed: %w", err)
 	}
 
+	u.Logger.Info("Update successful!", zap.String("binary", u.Config.BinaryName))
+
 	if u.Config.Changelog != "" {
 		if err := renderChangelog(u.Config.Changelog); err != nil {
 			u.Logger.Warn("Failed to render changelog", zap.Error(err))
@@ -100,13 +101,17 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) error {
 }
 
 func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL string) error {
-	// Create request
+	binPath, err := findBinaryPath(u.Config.BinaryName)
+	if err != nil {
+		return fmt.Errorf("failed to locate binary: %w", err)
+	}
+	u.Logger.Info("Found binary to update", zap.String("path", binPath))
+
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Download file
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -114,53 +119,61 @@ func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL strin
 	}
 	defer resp.Body.Close()
 
-	// Create temporary file
-	tmpFile, err := os.CreateTemp("", u.Config.BinaryName+"-*.tar.gz")
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to download file: http status %s (url: %s)", resp.Status, downloadURL)
+	}
+
+	tmpFile, err := os.CreateTemp("", u.Config.BinaryName+"-*"+filepath.Ext(downloadURL))
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 
-	// Copy download to temp file
 	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
 		return fmt.Errorf("failed to save download: %w", err)
 	}
+	tmpFile.Close()
 
-	// Extract archive
-	if err := extractTarGz(tmpFile.Name(), "/tmp"); err != nil {
-		return fmt.Errorf("failed to extract archive: %w", err)
+	fileType := filepath.Ext(downloadURL)
+	if strings.Contains(fileType, ".dmg") {
+		fileType = ".dmg"
 	}
 
-	// Find binary path
-	binPath, err := findBinaryPath(u.Config.BinaryName)
-	if err != nil {
-		return fmt.Errorf("failed to locate binary: %w", err)
+	switch fileType {
+	case ".gz":
+		if err := u.extractTarGzAndApply(tmpFile.Name(), binPath); err != nil {
+			return fmt.Errorf("failed to extract and apply .tar.gz update: %w", err)
+		}
+	case ".zip":
+		if err := u.extractZipAndApply(tmpFile.Name(), binPath); err != nil {
+			return fmt.Errorf("failed to extract and apply .zip update: %w", err)
+		}
+	case ".dmg":
+		u.Logger.Warn("Downloaded .dmg, but cannot auto-install. Please install manually.", zap.String("path", tmpFile.Name()))
+		return fmt.Errorf("%w: .dmg files must be installed manually", ErrUnsupportedFiletype)
+	default:
+		return fmt.Errorf("%w: %s", ErrUnsupportedFiletype, fileType)
 	}
 
-	// Replace binary
-	if err := os.Rename("/tmp/"+u.Config.BinaryName, binPath); err != nil {
-		return fmt.Errorf("failed to install binary: %w", err)
-	}
-
-	// Set permissions
-	if err := os.Chmod(binPath, 0755); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(binPath, 0755); err != nil {
+			return fmt.Errorf("failed to set permissions: %w", err)
+		}
 	}
 
 	return nil
 }
 
-// extractTarGz extracts a tar.gz archive to the specified destination
-func extractTarGz(gzipPath, destDir string) error {
-	file, err := os.Open(gzipPath)
+func (u *UpdateManager) extractTarGzAndApply(tarballPath, finalBinPath string) error {
+	file, err := os.Open(tarballPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open downloaded tarball: %w", err)
 	}
 	defer file.Close()
 
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create gzip reader (file may be corrupt): %w", err)
 	}
 	defer gzipReader.Close()
 
@@ -172,80 +185,96 @@ func extractTarGz(gzipPath, destDir string) error {
 			break
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
-		target := filepath.Join(destDir, filepath.Clean(header.Name))
-		// Ensure the target path is within the destination directory to prevent Zip Slip vulnerabilities.
-		targetAbs, err := filepath.Abs(target)
-		if err != nil {
-			return err
-		}
-		destDirAbs, err := filepath.Abs(destDir)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(destDirAbs, targetAbs)
-		if err != nil {
-			return err
-		}
-		// If rel starts with ".." or is absolute, it's outside destDir; skip or error.
-		if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-			return fmt.Errorf("tar file entry %q is outside the target directory", header.Name)
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			outFile, err := os.Create(target)
+		if header.Typeflag == tar.TypeReg && filepath.Clean(header.Name) == u.Config.BinaryName {
+			u.Logger.Info("Found binary in archive, applying safe update...",
+				zap.String("binary", header.Name),
+				zap.String("targetPath", finalBinPath),
+			)
+			err = selfupdate.Apply(tarReader, selfupdate.Options{
+				TargetPath: finalBinPath,
+			})
 			if err != nil {
-				return err
+				return fmt.Errorf("safe update failed: %w", err)
 			}
-			if _, err := io.Copy(outFile, tarReader); err != nil {
-				outFile.Close()
-				return err
-			}
-			outFile.Close()
+			return nil
 		}
 	}
-	return nil
+
+	return fmt.Errorf("binary %q not found in downloaded archive", u.Config.BinaryName)
 }
 
-// findBinaryPath finds where the current binary is located
+func (u *UpdateManager) extractZipAndApply(zipPath, finalBinPath string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to open zip file: %w", err)
+	}
+	defer r.Close()
+
+	binaryBaseName := u.Config.BinaryName
+	if runtime.GOOS == "windows" && !strings.HasSuffix(binaryBaseName, ".exe") {
+		binaryBaseName += ".exe"
+	}
+
+	for _, f := range r.File {
+		cleanedName := filepath.Clean(f.Name)
+
+		if f.Mode().IsRegular() && (cleanedName == u.Config.BinaryName || cleanedName == binaryBaseName) {
+			u.Logger.Info("Found binary in zip archive, applying safe update...",
+				zap.String("binary", f.Name),
+				zap.String("targetPath", finalBinPath),
+			)
+
+			binaryReader, err := f.Open()
+			if err != nil {
+				return fmt.Errorf("failed to open binary from zip: %w", err)
+			}
+			defer binaryReader.Close()
+
+			err = selfupdate.Apply(binaryReader, selfupdate.Options{
+				TargetPath: finalBinPath,
+			})
+			if err != nil {
+				return fmt.Errorf("safe update failed: %w", err)
+			}
+			return nil
+		}
+	}
+
+	return fmt.Errorf("binary %q or %q not found in downloaded zip archive", u.Config.BinaryName, binaryBaseName)
+}
+
 func findBinaryPath(binaryName string) (string, error) {
 	if binaryName == "" {
 		return "", errors.New("binary name cannot be empty")
 	}
 
-	// Try to get the current executable path
 	execPath, err := os.Executable()
 	if err == nil && execPath != "" {
 		return execPath, nil
 	}
 
-	// Try to find in PATH
 	if path, err := exec.LookPath(binaryName); err == nil && path != "" {
 		return path, nil
 	}
 
-	// Fallback to default path with platform-specific binary name
-	if runtime.GOOS == "windows" {
-		binaryName += ".exe"
-	}
 	defaultPath := filepath.Join("/usr/local/bin", binaryName)
-
-	// Verify the path exists
-	if _, err := os.Stat(defaultPath); err != nil {
-		return "", fmt.Errorf("binary not found at %s: %w", defaultPath, err)
+	if runtime.GOOS == "windows" {
+		if !strings.HasSuffix(binaryName, ".exe") {
+			binaryName += ".exe"
+		}
+		defaultPath = filepath.Join("C:", "Program Files", binaryName)
 	}
 
-	return defaultPath, nil
+	if _, err := os.Stat(defaultPath); err == nil {
+		return defaultPath, nil
+	}
+
+	return "", fmt.Errorf("binary not found. Looked for %s, %s, and in PATH", execPath, defaultPath)
 }
 
-// renderChangelog pretty-prints the changelog in terminal using Glamour
 func renderChangelog(changelog string) error {
 	if changelog == "" {
 		return nil
@@ -267,3 +296,4 @@ func renderChangelog(changelog string) error {
 	fmt.Println(out)
 	return nil
 }
+
