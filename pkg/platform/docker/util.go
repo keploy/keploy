@@ -73,10 +73,57 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
+func getActiveDockerContext(ctx context.Context) (contextName, socketPath string, err error) {
+	// Get the Active Docker Context
+	cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get docker contexts: %w", err)
+	}
+
+	// Parse the output
+	lines := strings.SplitSeq(strings.TrimSpace(string(out)), "\n")
+
+	for line := range lines {
+
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+
+		name := strings.TrimSpace(parts[0])
+		isActive := strings.TrimSpace(parts[1])
+
+		if isActive == "true" {
+			contextName = name
+			break
+		}
+	}
+
+	if contextName == "" {
+		return "", "", fmt.Errorf("no active docker context found")
+	}
+
+	// Get socketPath for the active context
+	cmd = exec.CommandContext(ctx, "docker", "context", "inspect", contextName, "--format", "{{.Endpoints.docker.Host}}")
+	out, err = cmd.Output()
+	if err != nil {
+		return contextName, "", fmt.Errorf("failed to inspect docker context %s: %w", contextName, err)
+	}
+
+	socketPath = strings.TrimSpace(string(out))
+	if socketPath == "" {
+		return contextName, "", fmt.Errorf("empty socket path for docker context %s", contextName)
+	}
+
+	return contextName, socketPath, nil
+}
+
 func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
-	//TODO: configure the hardcoded port mapping
+	// TODO: configure the hardcoded port mapping
 	img := DockerConfig.DockerImage + ":v" + utils.Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
 	envs := GenerateDockerEnvs(DockerConfig)
@@ -131,19 +178,22 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			utils.LogError(logger, err, "failed to get the current working directory")
 		}
 		dpwd := convertPathToUnixStyle(pwd)
-		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
-		out, err := cmd.Output()
+
+		// Get active context and socket path
+		activeContext, socketPath, err := getActiveDockerContext(ctx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to get the current docker context")
-			return "", errors.New("failed to get alias")
+			utils.LogError(logger, err, "failed to detect docker context, falling back to default")
+			activeContext = "default"
+			socketPath = "/var/run/docker.sock"
 		}
-		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-		if len(dockerContext) == 0 {
-			utils.LogError(logger, nil, "failed to get the current docker context")
-			return "", errors.New("failed to get alias")
+
+		// Extract socket path from URL format (e.g., unix:///path/to/socket)
+		socketMountPath := socketPath
+		if strings.HasPrefix(socketPath, "unix://") {
+			socketMountPath = strings.TrimPrefix(socketPath, "unix://")
 		}
-		dockerContext = strings.Split(dockerContext, "\n")[0]
-		if dockerContext == "colima" {
+
+		if activeContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 			// return alias, nil
@@ -152,7 +202,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 				" --privileged " + Volumes + "-v " + pwd + ":" + dpwd + " -w " + dpwd +
-				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
+				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
 				"\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 				" --mode " + string(opts.Mode)
 
@@ -163,14 +213,18 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 			return alias, nil
 		}
-		// if default docker context is used
-		logger.Info("Starting keploy in docker with default context, as that is the current context.")
+		// Handle default and other contexts
+		if activeContext == "default" {
+			logger.Info("Starting keploy in docker with default context, as that is the current context.")
+		} else {
+			logger.Info("Starting keploy in docker with custom context", zap.String("context", activeContext))
+		}
 		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 			" --privileged " + Volumes + "-v " + pwd + ":" + dpwd + " -w " + dpwd +
-			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
+			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
 			"\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 			" --mode " + string(opts.Mode)
 
@@ -181,19 +235,23 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 		return alias, nil
 	case "darwin":
-		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
-		out, err := cmd.Output()
+		// Get active context and socket path
+		activeContext, socketPath, err := getActiveDockerContext(ctx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to get the current docker context")
-			return "", errors.New("failed to get alias")
+			utils.LogError(logger, err, "failed to detect docker context, falling back to default")
+			activeContext = "default"
+			socketPath = "/var/run/docker.sock"
 		}
-		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-		if len(dockerContext) == 0 {
-			utils.LogError(logger, nil, "failed to get the current docker context")
-			return "", errors.New("failed to get alias")
+
+		// Extract socket path from URL format (e.g., unix:///path/to/socket)
+		socketMountPath := socketPath
+		if strings.HasPrefix(socketPath, "unix://") {
+			socketMountPath = strings.TrimPrefix(socketPath, "unix://")
 		}
-		dockerContext = strings.Split(dockerContext, "\n")[0]
-		if dockerContext == "colima" {
+
+		logger.Info("Detected Docker context", zap.String("context", activeContext), zap.String("socketPath", socketPath), zap.String("socketMountPath", socketMountPath))
+
+		if activeContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			// return alias, nil
@@ -202,7 +260,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 				" --privileged " + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
-				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
+				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("HOME") +
 				"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 				" --mode " + string(opts.Mode)
 
@@ -213,15 +271,19 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 			return alias, nil
 		}
-		// if default docker context is used
-		logger.Info("Starting keploy in docker with default context, as that is the current context.")
+		// Handle default and other contexts
+		if activeContext == "default" {
+			logger.Info("Starting keploy in docker with default context, as that is the current context.")
+		} else {
+			logger.Info("Starting keploy in docker with custom context", zap.String("context", activeContext))
+		}
 		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		// return alias, nil
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 			" --privileged " + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
-			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
+			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("HOME") +
 			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 			" --mode " + string(opts.Mode)
 
@@ -246,7 +308,6 @@ func convertPathToUnixStyle(path string) string {
 }
 
 func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string, error) {
-
 	// Regular expression patterns
 	var containerNamePattern string
 	switch kind {

@@ -105,7 +105,7 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 
 	// write data to file
 
-	err = os.WriteFile(path, data, 0644)
+	err = os.WriteFile(path, data, 0o644)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,6 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 
 // IsContainerRunning check if the container is already running or not, required for docker start command.
 func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
-
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
@@ -440,12 +439,18 @@ func (idc *Impl) parseExtendedPortMapping(portNode *yaml.Node) string {
 
 // generateKeployVolumes creates the standard volume mappings for Keploy containers
 // This function extracts the common volume logic used by both getAlias and Docker Compose generation
-func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
+func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) []string {
 	osName := runtime.GOOS
 	volumes := []string{}
 
 	// Working directory mount
 	volumes = append(volumes, fmt.Sprintf("%s:%s", workingDir, workingDir))
+
+	socketMountPath, _ := strings.CutPrefix(socketPath, "unix://")
+
+	// if strings.HasPrefix(socketPath, "unix://") {
+	// 	socketMountPath = strings.TrimPrefix(socketPath, "unix://")
+	// }
 
 	switch osName {
 	case "linux":
@@ -454,7 +459,8 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			"/var/run/docker.sock:/var/run/docker.sock",
+			// "/var/run/docker.sock:/var/run/docker.sock",
+			fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 		)
 	case "darwin":
 		// macOS volumes
@@ -462,7 +468,8 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			"/var/run/docker.sock:/var/run/docker.sock",
+			// "/var/run/docker.sock:/var/run/docker.sock",
+			fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 		)
 	case "windows":
 		// Windows volumes - check if using default context or colima
@@ -476,7 +483,8 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					"/var/run/docker.sock:/var/run/docker.sock",
+					// "/var/run/docker.sock:/var/run/docker.sock",
+					fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 				)
 			} else {
 				// Colima context
@@ -484,7 +492,8 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					"/var/run/docker.sock:/var/run/docker.sock",
+					// "/var/run/docker.sock:/var/run/docker.sock",
+					fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 				)
 			}
 		}
@@ -545,8 +554,14 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	ports = append(ports, opts.AppPorts...)
 
+	// Get active contexts
+	_, socketPath, err := getActiveDockerContext(context.Background())
+	if err != nil {
+		socketPath = "/var/run/docker.sock"
+	}
+
 	// Generate volumes using the extracted function
-	volumes := idc.generateKeployVolumes(workingDir, homeDir)
+	volumes := idc.generateKeployVolumes(workingDir, homeDir, socketPath)
 
 	clientPid := int(os.Getpid())
 	// Build command arguments
