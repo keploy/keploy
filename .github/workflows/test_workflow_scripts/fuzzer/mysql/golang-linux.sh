@@ -44,28 +44,6 @@ final_cleanup() {
 
 trap final_cleanup EXIT
 
-# Checks a log file for critical errors or data races
-check_for_errors() {
-  local logfile=$1
-  echo "Checking for errors in $logfile..."
-  if [ -f "$logfile" ]; then
-    # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
-      echo "::error::Critical error found in $logfile. Failing the build."
-      # Print the specific errors that caused the failure
-      echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
-      echo "----------------------"
-      exit 1
-    fi
-    if grep -q "WARNING: DATA RACE" "$logfile"; then
-      echo "::error::Race condition detected in $logfile"
-      exit 1
-    fi
-  fi
-  echo "No critical errors found in $logfile."
-}
-
 # Validates the Keploy test report to ensure all test sets passed
 
 # Waits for the MySQL container to become ready and accept connections
@@ -90,7 +68,7 @@ send_requests() {
   local kp_pid="$1"
 
   # Wait for the fuzzer's API to be ready
-  wait_for_http 120 18080 "localhost"
+  wait_for_http 120 18080 localhost
 
   echo "Triggering the fuzzer to generate traffic..."
   curl -sS --request POST 'http://localhost:18080/run' \

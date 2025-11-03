@@ -20,25 +20,6 @@ die() {
 }
 trap die ERR
 
-# Waits for an HTTP endpoint to become available
-# wait_for_http() {
-#   local host="localhost"
-#   local port="$1"
-#   section "Waiting for application on port $port..."
-#   for i in {1..30}; do
-#     if nc -z "$host" "$port" >/dev/null 2>&1; then
-#       echo "✅ Application port $port is open."
-#       endsec
-#       return 0
-#     fi
-#     echo "Waiting for app... (attempt $i/30)"
-#     sleep 1
-#   done
-#   echo "::error::Application did not become available on port $port in time."
-#   endsec
-#   return 1
-# }
-
 # --- Main Execution Logic ---
 
 export ASSERT_CHAINS_WITH=$(realpath ./fuzzer_chains.yaml)

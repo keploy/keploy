@@ -41,7 +41,7 @@ wait_for_mongo() {
 send_request() {
   local kp_pid="$1"
 
-  if ! wait_for_http2 "http://localhost:8000/students" 120; then
+  if ! wait_for_url_response "http://localhost:8000/students" 120; then
     echo "::error::App did not become healthy at /students"
     # Let the pipeline fail by returning non-zero
     return 1

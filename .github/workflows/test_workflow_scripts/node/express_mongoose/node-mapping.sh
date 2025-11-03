@@ -47,7 +47,7 @@ wait_for_http() {
 send_request() {
   local kp_pid="$1"
 
-  if ! wait_for_http2 "http://localhost:8000/students" 120; then
+  if ! wait_for_url_response "http://localhost:8000/students" 120; then
     echo "::error::App did not become healthy at /students"
   else
     echo "good!App started"

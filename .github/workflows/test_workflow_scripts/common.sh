@@ -75,7 +75,7 @@ container_kill() {
     sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
-wait_for_http2() {
+wait_for_url_response() {
   local url="$1" tries="${2:-60}"
   for _ in $(seq 1 "$tries"); do
     if curl -fsS "$url" >/dev/null; then return 0; fi
@@ -109,4 +109,4 @@ wait_for_http() {
 
 
 # Export functions for use in sourced scripts
-export -f check_test_report check_for_errors section endsec container_kill wait_for_http2 
+export -f check_test_report check_for_errors section endsec container_kill wait_for_url_response wait_for_http
