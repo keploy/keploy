@@ -20,12 +20,7 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 		Use:     "test",
 		Short:   "run the recorded testcases and execute assertions",
 		Example: `keploy test -c "/path/to/user/app" --delay 6`,
-		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			// Check if this is a Docker Compose command and suppress usage on validation errors
-			commandFlag, _ := cmd.Flags().GetString("command")
-			if utils.FindDockerCmd(commandFlag) == utils.DockerCompose {
-				cmd.SilenceUsage = true
-			}
+	PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
