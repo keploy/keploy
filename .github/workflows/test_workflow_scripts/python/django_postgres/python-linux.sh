@@ -18,7 +18,25 @@ if [[ "${ENABLE_SSL:-false}" == "false" ]]; then
     git checkout enable-ssl-postgres
     docker compose up postgres_ssl -d
     export DB_SSLMODE="require"
-    sleep 10
+ 
+    echo "Waiting for PostgreSQL to be ready..."
+    # Wait for up to 2 minutes (120 seconds)
+    for i in {1..120}; do
+        # Use 'docker compose exec' to run 'pg_isready' inside the container
+        if docker compose exec postgres_ssl pg_isready -U postgres -h localhost > /dev/null 2>&1; then
+            echo "✅ PostgreSQL is ready."
+            break
+        fi
+        
+        if [ $i -eq 120 ]; then
+            echo "::error::PostgreSQL database did not become ready in 120 seconds."
+            docker compose logs postgres_ssl
+            exit 1
+        fi
+        echo "Waiting for database... ($i/120)"
+        sleep 1
+    done
+   
 fi
 
 # Install dependencies
