@@ -19,10 +19,7 @@ docker run -d --name mongoDb \
 sleep 5
 docker logs mongoDb
 
-echo "Building test app and pulling Keploy image in parallel..."
-docker pull ghcr.io/keploy/keploy:latest &
-PULL_PID=$!
-
+echo "Building test app..."
 docker buildx build \
   --load \
   --tag gin-mongo:colima \
@@ -30,7 +27,9 @@ docker buildx build \
   --cache-to type=gha,mode=max \
   .
 
-wait $PULL_PID
+echo "Pulling Keploy image..."
+docker pull ghcr.io/keploy/keploy:latest
+
 echo "Build and pull completed"
 
 # Remove any preexisting keploy tests and mocks
