@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/k0kubun/pp/v3"
-	"go.keploy.io/server/v2/pkg/matcher"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -22,6 +22,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		BodyResult:    make([]models.BodyResult, 0),
 		TrailerResult: make([]models.HeaderResult, 0),
 	}
+	currentRisk := models.None
+	var currentCategories []models.FailureCategory
 
 	// Local variables to track overall match status
 	differences := make(map[string]struct {
@@ -55,6 +57,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				Message:  "missing status header in response",
 			}
 			headerResult.Normal = false
+			currentRisk = models.High
+			currentCategories = append(currentCategories, models.StatusCodeChanged)
 		} else {
 			headerResult.Actual.Value = []string{actualStatus}
 			headerResult.Normal = expectedStatus == actualStatus
@@ -69,9 +73,76 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Actual:   actualStatus,
 					Message:  "status header value mismatch",
 				}
+				currentRisk = models.High
+				currentCategories = append(currentCategories, models.StatusCodeChanged)
 			}
 		}
 
+		result.HeadersResult = append(result.HeadersResult, headerResult)
+	}
+
+	// Compare 'content-type' in ordinary headers
+	if expectedContentType, ok := expectedResp.Headers.OrdinaryHeaders["content-type"]; ok {
+		actualContentType, exists := actualResp.Headers.OrdinaryHeaders["content-type"]
+		headerResult := models.HeaderResult{
+			Expected: models.Header{
+				Key:   "content-type",
+				Value: []string{expectedContentType},
+			},
+			Actual: models.Header{
+				Key:   "content-type",
+				Value: []string{},
+			},
+		}
+
+		if !exists {
+			differences["headers.ordinary_headers.:content-type"] = struct {
+				Expected string
+				Actual   string
+				Message  string
+			}{
+				Expected: expectedContentType,
+				Actual:   "",
+				Message:  "missing content-type header in response",
+			}
+			headerResult.Normal = false
+			currentRisk = models.High
+			currentCategories = append(currentCategories, models.HeaderChanged)
+		} else {
+			headerResult.Actual.Value = []string{actualContentType}
+
+			// Split the header strings by comma to handle potential multi-valued headers
+			// represented as a single string. This makes the order-ignoring comparison meaningful.
+			expectedParts := strings.Split(expectedContentType, ",")
+			for i := range expectedParts {
+				expectedParts[i] = strings.TrimSpace(expectedParts[i])
+			}
+
+			actualParts := strings.Split(actualContentType, ",")
+			for i := range actualParts {
+				actualParts[i] = strings.TrimSpace(actualParts[i])
+			}
+
+			normalize := func(s string) string {
+				return strings.TrimSpace(strings.Split(s, "+")[0])
+			}
+
+			headerResult.Normal = normalize(expectedContentType) == normalize(actualContentType)
+
+			if !headerResult.Normal {
+				differences["headers.ordinary_headers.:content-type"] = struct {
+					Expected string
+					Actual   string
+					Message  string
+				}{
+					Expected: expectedContentType,
+					Actual:   actualContentType,
+					Message:  "content-type header value mismatch",
+				}
+				currentRisk = models.High
+				currentCategories = append(currentCategories, models.HeaderChanged)
+			}
+		}
 		result.HeadersResult = append(result.HeadersResult, headerResult)
 	}
 
@@ -281,6 +352,37 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
 		}
+	}
+
+	if !decodedDataNormal {
+		if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
+			if assess, err := matcher.ComputeFailureAssessmentJSON(expectedDecodedData, actualDecodedData, bodyNoise, ignoreOrdering); err == nil && assess != nil {
+				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
+				currentCategories = append(currentCategories, assess.Category...)
+			} else {
+				currentRisk = models.High
+				currentCategories = append(currentCategories, models.InternalFailure)
+			}
+		} else {
+			// non-JSON payload mismatch → Broken
+			currentRisk = models.High
+			currentCategories = append(currentCategories, models.SchemaBroken)
+		}
+	}
+
+	// remove duplicates
+	catMap := make(map[models.FailureCategory]bool)
+	uniqueCategories := []models.FailureCategory{}
+	for _, cat := range currentCategories {
+		if !catMap[cat] {
+			catMap[cat] = true
+			uniqueCategories = append(uniqueCategories, cat)
+		}
+	}
+
+	result.FailureInfo = models.FailureInfo{
+		Risk:     currentRisk,
+		Category: uniqueCategories,
 	}
 
 	return matched, result

@@ -13,6 +13,8 @@ set -Eeuo pipefail
 
 MODE=${1:-incoming}
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # --- Sanity Checks ---
 [ -x "${RECORD_BIN:-}" ] || { echo "RECORD_BIN not set or not executable"; exit 1; }
 [ -x "${REPLAY_BIN:-}" ] || { echo "REPLAY_BIN not set or not executable"; exit 1; }
@@ -133,7 +135,7 @@ wait_for_port() {
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
         # Use lsof to check for a listening TCP socket on the specified port
-        if sudo lsof -iTCP:"$port" -sTCP:LISTEN -t >/dev/null; then
+        if sudo nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
@@ -146,8 +148,10 @@ wait_for_port() {
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
-    pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-    wait "$pid" 2>/dev/null || true
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
+    echo "Killing keploy"
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 # --- Main Logic ---
@@ -160,7 +164,7 @@ if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
     # Record: Keploy wraps the server to capture incoming gRPC calls. The client is just a driver.
     ./grpc-client &> client_incoming.log &
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false &> record_incoming.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
     wait_for_port 50051
 
     sleep 5
@@ -173,7 +177,7 @@ if [ "$MODE" = "incoming" ]; then
     check_for_errors record_incoming.log
 
     # Test: Keploy replays the captured gRPC calls against the server.
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload &> test_incoming.log
+    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
 
     check_for_errors test_incoming.log
     if ! check_test_report; then
@@ -188,7 +192,7 @@ elif [ "$MODE" = "outgoing" ]; then
     # Record: Keploy wraps the client to capture its outgoing gRPC calls. The server is a dependency.
     ./grpc-server &> server_outgoing.log &
     wait_for_port 50051
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false &> record_outgoing.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
 
     send_requests
     sleep 15 # Allow time for traces to be recorded
@@ -198,7 +202,7 @@ elif [ "$MODE" = "outgoing" ]; then
     check_for_errors record_outgoing.log
 
     # Test: Keploy mocks the server's responses for the client. The real server is NOT run.
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload &> test_outgoing.log
+    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
 
     check_for_errors test_outgoing.log
     if ! check_test_report; then

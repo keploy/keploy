@@ -3,6 +3,7 @@ on:
   workflow_call:
 jobs:
   node_linux:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,6 +42,10 @@ jobs:
         with:
           repository: keploy/samples-typescript
           path: samples-typescript
+      
+      - name: Setup nyc for code coverage
+        run: |
+          npm install -g nyc
 
       - name: Run the ${{ matrix.app.name }} app
         env:

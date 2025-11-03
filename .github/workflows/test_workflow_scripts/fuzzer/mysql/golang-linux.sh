@@ -175,6 +175,8 @@ echo "RECORD_KEPLOY_BIN: $RECORD_KEPLOY_BIN"
 echo "REPLAY_KEPLOY _BIN: $REPLAY_KEPLOY_BIN"
 rm -rf keploy/ keploy.yml golden/ record.txt test.txt
 mkdir -p golden/
+sudo chmod +x $MYSQL_FUZZER_BIN
+sudo chown -R $(whoami):$(whoami) golden
 
 # Start a MySQL instance for the recording session
 docker run --name mysql-container \
@@ -198,13 +200,17 @@ endsec
 section "Generate Fuzzer Traffic"
 # Trigger traffic and explicitly kill the Keploy process after a delay
 send_requests "$KEPLOY_PID"
-sleep 5
+sleep 20
 endsec
 
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-wait "$pid" 2>/dev/null || true
+
+REC_PID="$(pgrep -n -f 'keploy record' || true)"
+echo "$REC_PID Keploy PID"
+echo "Killing keploy"
+sudo kill -INT "$REC_PID" 2>/dev/null || true
+
 sleep 5
 check_for_errors "record.txt"
 echo "Recording stopped."

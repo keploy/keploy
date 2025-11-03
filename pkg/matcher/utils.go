@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"reflect"
@@ -20,8 +21,8 @@ import (
 	"github.com/fatih/color"
 	jsonDiff "github.com/keploy/jsonDiff"
 	"github.com/olekukonko/tablewriter"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -1482,5 +1483,59 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 			}
 		}
 	}
+	return true
+}
+
+// lowerMap returns a lower-cased copy of parameter keys.
+func lowerMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+// parseContentType tries strict parsing, then a tolerant fallback.
+// okStrict indicates whether strict parsing succeeded.
+func ParseContentType(raw string) (typ string, params map[string]string, okStrict bool, err error) {
+	if raw == "" {
+		return "", nil, false, nil
+	}
+	t, p, e := mime.ParseMediaType(raw)
+	if e == nil {
+		return strings.ToLower(t), lowerMap(p), true, nil
+	}
+	// tolerant fallback: take token before ';', trim, lowercase
+	token := strings.ToLower(strings.TrimSpace(strings.Split(raw, ";")[0]))
+	if token == "" || !strings.Contains(token, "/") {
+		// no usable fallback
+		return "", nil, false, e
+	}
+	return token, map[string]string{}, false, e
+}
+
+// compareSlicesIgnoreOrder checks if two string slices contain the same elements,
+// regardless of their order. It returns true if they do, and false otherwise.
+func CompareSlicesIgnoreOrder(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	// Create a frequency map of elements in the first slice.
+	freq := make(map[string]int, len(a))
+	for _, item := range a {
+		freq[item]++
+	}
+
+	// Decrement the frequency for each element in the second slice.
+	for _, item := range b {
+		if freq[item] == 0 {
+			// If an element is not in the map or its count is already zero,
+			// the slices are not identical.
+			return false
+		}
+		freq[item]--
+	}
+
+	// If the loop completes, the slices have the same elements.
 	return true
 }
