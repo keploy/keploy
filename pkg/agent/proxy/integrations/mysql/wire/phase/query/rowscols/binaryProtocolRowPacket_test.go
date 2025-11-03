@@ -50,7 +50,7 @@ func TestEncodeBinaryRow_NullDateTimeFields(t *testing.T) {
 					},
 				},
 				OkAfterRow:    true,
-				RowNullBuffer: []byte{0x00, 0x04}, // Null bitmap indicating field 1 (date_of_birth) is null
+				RowNullBuffer: []byte{0x08}, // Null bitmap indicating field 1 (date_of_birth) is null - (1+2)%8=3, so bit 3 set: 0x08
 			},
 			columns: []*mysql.ColumnDefinition41{
 				{
@@ -91,7 +91,7 @@ func TestEncodeBinaryRow_NullDateTimeFields(t *testing.T) {
 					},
 				},
 				OkAfterRow:    true,
-				RowNullBuffer: []byte{0x00, 0x04}, // Null bitmap
+				RowNullBuffer: []byte{0x08}, // Null bitmap - field 1 (last_login) is null, (1+2)%8=3, so bit 3 set: 0x08
 			},
 			columns: []*mysql.ColumnDefinition41{
 				{
@@ -128,7 +128,7 @@ func TestEncodeBinaryRow_NullDateTimeFields(t *testing.T) {
 					},
 				},
 				OkAfterRow:    true,
-				RowNullBuffer: []byte{0x00, 0x04},
+				RowNullBuffer: []byte{0x08}, // Null bitmap - field 1 (created_at) is null, (1+2)%8=3, so bit 3 set: 0x08
 			},
 			columns: []*mysql.ColumnDefinition41{
 				{
@@ -165,7 +165,7 @@ func TestEncodeBinaryRow_NullDateTimeFields(t *testing.T) {
 					},
 				},
 				OkAfterRow:    true,
-				RowNullBuffer: []byte{0x00, 0x04},
+				RowNullBuffer: []byte{0x08}, // Null bitmap - field 1 (duration) is null, (1+2)%8=3, so bit 3 set: 0x08
 			},
 			columns: []*mysql.ColumnDefinition41{
 				{
@@ -214,7 +214,7 @@ func TestEncodeBinaryRow_NullDateTimeFields(t *testing.T) {
 					},
 				},
 				OkAfterRow:    true,
-				RowNullBuffer: []byte{0x00, 0x1C}, // Multiple null fields
+				RowNullBuffer: []byte{0x38}, // Fields 1,2,3 are null: (1+2)%8=3->0x08, (2+2)%8=4->0x10, (3+2)%8=5->0x20 = 0x38
 			},
 			columns: []*mysql.ColumnDefinition41{
 				{Name: "id", Type: byte(mysql.FieldTypeVarString)},
@@ -253,7 +253,7 @@ func TestEncodeBinaryRow_NullDateTimeFields(t *testing.T) {
 					},
 				},
 				OkAfterRow:    true,
-				RowNullBuffer: []byte{0x00, 0x08}, // Only middle field is null
+				RowNullBuffer: []byte{0x08}, // Field 1 (birth_date) is null: (1+2)%8=3, so bit 3 set: 0x08
 			},
 			columns: []*mysql.ColumnDefinition41{
 				{Name: "created_at", Type: byte(mysql.FieldTypeDateTime)},
@@ -333,7 +333,7 @@ func TestEncodeBinaryRow_RealWorldExample(t *testing.T) {
 			{Type: mysql.FieldTypeVarString, Name: "organization", Value: "test_org", Unsigned: false},
 		},
 		OkAfterRow:    true,
-		RowNullBuffer: []byte{0x00, 0x00, 0x40, 0x00}, // Null bitmap indicating date_of_birth field is null
+		RowNullBuffer: []byte{0x00, 0x00, 0x02}, // Field 15 (date_of_birth) is null: (15+2)/8=2, (15+2)%8=1, so byte 2, bit 1 = 0x02
 	}
 
 	columns := make([]*mysql.ColumnDefinition41, len(row.Values))
