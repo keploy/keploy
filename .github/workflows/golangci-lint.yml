@@ -60,3 +60,12 @@ jobs:
           GOPRIVATE: github.com/keploy/*
         run: |
           source ./.github/workflows/test_workflow_scripts/check-deprecated-deps.sh
+
+      - name: Check for keploy/integrations
+        run: |
+          if grep -q "keploy/integrations" go.mod go.sum; then
+            echo "🚨 keploy/integrations found in manifest files:"
+            grep -n "keploy/integrations" go.mod go.sum || true
+            echo "Please remove keploy/integrations dependencies as they are not accessible to external contributors."
+            exit 1
+          fi
