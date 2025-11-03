@@ -45,7 +45,7 @@ jobs:
             - name: Run Colima support test
               shell: bash
               run: |
-                  cd samples-go/http-pokeapi
+                  cd samples-go/gin-mongo
                   bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/colima/colima-docker-macos.sh
 
             - name: Upload Keploy artifacts
@@ -53,13 +53,13 @@ jobs:
               uses: actions/upload-artifact@v4
               with:
                   name: keploy-colima-test-results
-                  path: samples-go/http-pokeapi/keploy/
+                  path: samples-go/gin-mongo/keploy/
                   retention-days: 7
 
             - name: Cleanup
               if: always()
               run: |
-                  docker stop http-pokeapi-1 http-pokeapi-2 http-pokeapi-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
-                  docker rm http-pokeapi-1 http-pokeapi-2 http-pokeapi-test keploy-record-1 keploy-record-2 keploy-test 2>/dev/null || true
+                  docker stop ginApp-1 ginApp-2 ginApp-test keploy-record-1 keploy-record-2 keploy-test mongoDb 2>/dev/null || true
+                  docker rm ginApp-1 ginApp-2 ginApp-test keploy-record-1 keploy-record-2 keploy-test mongoDb 2>/dev/null || true
                   docker network rm keploy-network 2>/dev/null || true
                   colima stop || true
