@@ -27,7 +27,7 @@ type DockerConfigStruct struct {
 }
 
 var DockerConfig = DockerConfigStruct{
-	DockerImage: "ghcr.io/keploy/keploy",
+	DockerImage: "keploy-oss",
 }
 
 func GenerateDockerEnvs(config DockerConfigStruct) string {
