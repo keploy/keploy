@@ -88,6 +88,29 @@ jobs:
           name: ${{ matrix.config.record_src }}
           path: record-bin
 
+      - name: Install Record Binary
+        id: setup_record
+        shell: pwsh
+        run: |
+          New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
+          Move-Item -Path ".\record-bin\keploy.exe" -Destination ".\bin\keploy-record.exe" -Force
+          echo "$env:GITHUB_WORKSPACE/bin" >> $env:GITHUB_PATH
+          echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Download Replay Binary (${{ matrix.config.replay_src }})
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.config.replay_src }}
+          path: replay-bin
+
+      - name: Install Replay Binary
+        id: setup_replay
+        shell: pwsh
+        run: |
+          New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
+          Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
+          echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
+
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
         with:
