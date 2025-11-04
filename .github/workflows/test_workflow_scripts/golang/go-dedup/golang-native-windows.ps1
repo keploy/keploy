@@ -237,7 +237,7 @@ if ($REC_PID -and $REC_PID -ne 0) {
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
-if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; exit 1 }
+if (-not (Test-Path $testSetPath)) { Write-Error "Test directory not found at $testSetPath"; Get-Content .\keploy_agent.log; exit 1 }
 $testCount = (Get-ChildItem -Path $testSetPath -Filter "test-*.yaml").Count
 if ($testCount -eq 0) { Write-Error "No test files were created. Review the full logs in the file '$logPath'"; exit 1 }
 
