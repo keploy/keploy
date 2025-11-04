@@ -81,10 +81,10 @@ jobs:
         id: rerecord_fuzzer
         run: |
           set -euo pipefail
-          KEY="releases/rerecord-fuzzer/latest/rerecord-fuzzer-linux-amd64.tar.gz"
+          KEY="releases/rerecord-fuzzer/latest/rerecord-1-fuzzer-linux-amd64.tar.gz"
           echo "Downloading fuzzer from s3://${{ vars.AWS_S3_BUCKET }}/${KEY}"
           aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
-          tar -xzf rerecord-fuzzer-linux-amd64.tar.gz
+          tar -xzf rerecord-1-fuzzer-linux-amd64.tar.gz
           chmod +x ./rerecord-client ./rerecord-server
           echo "client=$(realpath ./rerecord-client)" >> $GITHUB_OUTPUT
           echo "server=$(realpath ./rerecord-server)" >> $GITHUB_OUTPUT
