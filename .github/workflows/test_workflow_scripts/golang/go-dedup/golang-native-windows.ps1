@@ -213,12 +213,15 @@ $REC_PROC = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   } |
   Select-Object -First 1
 
+Write-Host "Value of REC_PROC: $REC_PROC"
+
 $REC_PID = if ($REC_PROC) { $REC_PROC.ProcessId } else { $null }
 
 if ($REC_PID -and $REC_PID -ne 0) {
     Write-Host "Found Keploy PID: $REC_PID"
     Write-Host "Killing keploy process tree..."
     cmd /c "taskkill /PID $REC_PID /T /F" 2>$null | Out-Null
+    cmd /c "taskkill /PID $REC_PROC /T /F" 2>$null | Out-Null
 } else {
     Write-Host "Keploy record process not found. Dumping candidate processes containing 'keploy' in CommandLine:"
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
