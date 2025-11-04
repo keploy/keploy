@@ -6,6 +6,8 @@
 git fetch origin
 git checkout gin-mongo-mail-server
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
 
@@ -27,7 +29,7 @@ sed -i 's/ports: 0/ports: 27017/' "$config_file"
 rm -rf keploy/
 
 # Build the binary.
-go build -o ginApp
+go build -cover -coverpkg=./... -o ginApp
 
 
 send_request(){
@@ -74,9 +76,14 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    echo "$kp_pid Keploy PID"
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    sudo kill "$kp_pid" 2>/dev/null || true
+    if [ -n "$REC_PID" ]; then
+        sudo kill -INT "$REC_PID" 2>/dev/null || true
+    else
+        echo "No keploy process found to kill."
+    fi
 }
 
 
@@ -113,6 +120,27 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
+
+cat test_logs.txt || true
+
+# ✅ Extract and validate coverage percentage from log
+coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
+
+if [[ -z "$coverage_line" ]]; then
+  echo "::error::No coverage percentage found in test_logs.txt"
+  return 1
+fi
+
+coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
+echo "📊 Extracted coverage: ${coverage_percent}%"
+
+# Compare coverage with threshold (50%)
+if (( $(echo "$coverage_percent < 50" | bc -l) )); then
+  echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
+  return 1
+else
+  echo "✅ Coverage meets threshold (>= 50%)"
+fi
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
