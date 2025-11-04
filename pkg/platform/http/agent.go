@@ -529,7 +529,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if stopErr := agentUtils.StopCommand(a.agentCmd, a.logger); stopErr != nil {
+		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
 			utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
 		}
 		return nil
