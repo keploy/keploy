@@ -1,13 +1,13 @@
 name: Prepare Binary and Run Workflows (Windows)
 on:
   pull_request:
-    branches: [v2]
+    branches: [main]
   push:
-    branches: [v2]
+    branches: [main]
 
 jobs:
   build-and-upload:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Aggressive Cleanup (Workspace + Keploy procs)
@@ -76,7 +76,7 @@ jobs:
           git config --global --unset url."git@github.com:".insteadOf
 
   docker-image-build:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

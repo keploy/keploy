@@ -2,7 +2,7 @@ name: Go on Windows
 
 on:
   pull_request:
-    branches: [ v2 ]
+    branches: [ main ]
 
 jobs:
 

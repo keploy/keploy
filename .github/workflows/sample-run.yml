@@ -2,7 +2,7 @@ name: sample-run
 
 on:
   push:
-    branches: [v2]
+    branches: [main]
 
 jobs:
   build:

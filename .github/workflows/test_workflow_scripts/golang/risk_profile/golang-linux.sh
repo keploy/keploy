@@ -73,7 +73,6 @@ check_for_errors() {
 
 # Waits for the Go application's HTTP endpoint to become available
 
-
 check_report_for_risk_profiles() {
     echo "validating the Keploy test report against expected risk profiles and categories"
     

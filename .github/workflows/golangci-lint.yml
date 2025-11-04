@@ -2,7 +2,8 @@ name: golangci-lint
 on:
   push:
     branches:
-      - v2
+      - master
+      - main
   pull_request:
 
 permissions:
@@ -37,14 +38,14 @@ jobs:
           fi    
       
       - name: Add Private Parsers
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
 
       - name: Configure Git to use SSH
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
 
       - name: golangci-lint
@@ -63,7 +64,7 @@ jobs:
           fi
 
       - name: Check for Deprecated Dependencies
-        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2') }}
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         env:
           GOPRIVATE: github.com/keploy/*
         run: |
