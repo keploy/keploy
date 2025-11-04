@@ -2,7 +2,6 @@ package update
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -59,12 +58,12 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) (bool, error) {
 	u.Logger.Info("Checking for new version...", zap.String("current", u.Config.CurrentVersion), zap.String("latest", u.Config.LatestVersion))
 
 	if u.Config.IsInDocker {
-		u.Logger.Debug("Skipping update check: running in Docker.")
-		return false, nil
+		u.Logger.Warn(ErrInDockerEnv.Error())
+		return false, ErrInDockerEnv
 	}
 
 	if u.Config.IsDevVersion {
-		u.Logger.Debug("Skipping update check: running 'dev' version.")
+		u.Logger.Info("Running development version, skipping update.")
 		return false, nil
 	}
 
@@ -86,7 +85,8 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) (bool, error) {
 
 	downloadURL, ok := u.Config.DownloadURLs[osArch]
 	if !ok {
-		return false, fmt.Errorf("no download URL configured for platform: %s", osArch)
+		u.Logger.Warn("No download URL configured for this platform", zap.String("platform", osArch))
+		return false, nil // Not an error, just no update path
 	}
 
 	if err := u.downloadAndUpdate(ctx, downloadURL); err != nil {
@@ -122,7 +122,7 @@ func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download file: http status %s (url: %s)", resp.Status, downloadURL)
+		return fmt.Errorf("failed to download file: http status %d %s", resp.StatusCode, resp.Status)
 	}
 
 	tmpFile, err := os.CreateTemp("", u.Config.BinaryName+"-*"+filepath.Ext(downloadURL))
@@ -137,21 +137,14 @@ func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL strin
 	tmpFile.Close()
 
 	fileType := filepath.Ext(downloadURL)
-	if strings.HasSuffix(downloadURL, ".tar.gz") {
-		fileType = ".tar.gz"
-	}
 	if strings.Contains(fileType, ".dmg") {
 		fileType = ".dmg"
 	}
 
 	switch fileType {
-	case ".tar.gz":
+	case ".gz":
 		if err := u.extractTarGzAndApply(tmpFile.Name(), binPath); err != nil {
 			return fmt.Errorf("failed to extract and apply .tar.gz update: %w", err)
-		}
-	case ".zip":
-		if err := u.extractZipAndApply(tmpFile.Name(), binPath); err != nil {
-			return fmt.Errorf("failed to extract and apply .zip update: %w", err)
 		}
 	case ".dmg":
 		u.Logger.Warn("Downloaded .dmg, but cannot auto-install. Please install manually.", zap.String("path", tmpFile.Name()))
@@ -211,44 +204,6 @@ func (u *UpdateManager) extractTarGzAndApply(tarballPath, finalBinPath string) e
 	return fmt.Errorf("binary %q not found in downloaded archive", u.Config.BinaryName)
 }
 
-func (u *UpdateManager) extractZipAndApply(zipPath, finalBinPath string) error {
-	r, err := zip.OpenReader(zipPath)
-	if err != nil {
-		return fmt.Errorf("failed to open zip file: %w", err)
-	}
-	defer r.Close()
-
-	binaryBaseName := u.Config.BinaryName
-	if runtime.GOOS == "windows" && !strings.HasSuffix(binaryBaseName, ".exe") {
-		binaryBaseName += ".exe"
-	}
-
-	for _, f := range r.File {
-		cleanedName := filepath.Clean(f.Name)
-
-		if f.Mode().IsRegular() && (cleanedName == u.Config.BinaryName || cleanedName == binaryBaseName) {
-			u.Logger.Info("Found binary in zip archive, applying safe update...",
-				zap.String("binary", f.Name),
-				zap.String("targetPath", finalBinPath),
-			)
-
-			binaryReader, err := f.Open()
-			if err != nil {
-				return fmt.Errorf("failed to open binary from zip: %w", err)
-			}
-			defer binaryReader.Close()
-
-			err = selfupdate.Apply(binaryReader, selfupdate.Options{
-				TargetPath: finalBinPath,
-			})
-			if err != nil {
-				return fmt.Errorf("safe update failed: %w", err)
-			}
-			return nil
-		}
-	}
-	return fmt.Errorf("binary %q not found in downloaded zip archive", u.Config.BinaryName)
-}
 
 func findBinaryPath(binaryName string) (string, error) {
 	if binaryName == "" {
@@ -257,12 +212,10 @@ func findBinaryPath(binaryName string) (string, error) {
 
 	execPath, err := os.Executable()
 	if err == nil && execPath != "" {
-		// Resolve symlinks to get the actual file path
 		resolvedPath, err := filepath.EvalSymlinks(execPath)
-		if err == nil && resolvedPath != "" {
+		if err == nil {
 			return resolvedPath, nil
 		}
-		// Fallback to original execPath if symlink resolution fails
 		return execPath, nil
 	}
 
