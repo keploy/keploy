@@ -122,6 +122,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
 				if closePacket, ok := commandPkt.Message.(*mysql.StmtClosePacket); ok {
 					delete(decodeCtx.PreparedStatements, closePacket.StatementID)
+					if decodeCtx.StmtIDToQuery != nil {
+						delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
+					}
 					logger.Debug("Cleaned up prepared statement", zap.Uint32("StatementID", closePacket.StatementID))
 				}
 			}
