@@ -292,7 +292,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					strings.EqualFold(q, "COMMIT"),
 					strings.EqualFold(q, "ROLLBACK"),
 					hasPrefixFold(q, "SET "),
-					// NEW: DDL/control that only expects an OK from server
+					// DDL/control that only expects an OK from server
 					hasPrefixFold(q, "ALTER "),
 					hasPrefixFold(q, "CREATE "),
 					hasPrefixFold(q, "DROP "),
@@ -494,7 +494,7 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 	return matchQuery(ctx, log, expected, actual, getQuery)
 }
 
-// NEW: query-aware EXEC scoring.
+// query-aware EXEC scoring.
 //   - Keep the existing header/flags/params scoring.
 //   - Do NOT reward raw StatementID equality.
 //   - Reward query equality (or structural equality) resolved via:
@@ -794,7 +794,7 @@ func pluginEqualCompat(exp, act string) bool {
 	return true
 }
 
-// NEW: Build recorded PREP index per connection from recorded mocks.
+// Build recorded PREP index per connection from recorded mocks.
 // We map each connID to the list of (stmtID,query) pairs found by pairing
 // StmtPrepareOkPacket(stmtID) with the nearest COM_STMT_PREPARE query.
 func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
@@ -842,7 +842,7 @@ func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 	return out
 }
 
-// NEW: lookup helper on recordedPrepByConn
+// lookup helper on recordedPrepByConn
 func lookupRecordedQuery(index map[string][]prepEntry, connID string, stmtID uint32) string {
 	list := index[connID]
 	for _, e := range list {
@@ -853,7 +853,7 @@ func lookupRecordedQuery(index map[string][]prepEntry, connID string, stmtID uin
 	return ""
 }
 
-// NEW: Query-aware CLOSE scoring (header + query bonus; no raw stmt-id equality)
+// Query-aware CLOSE scoring (header + query bonus; no raw stmt-id equality)
 func matchCloseWithQuery(expected, actual mysql.PacketBundle, expectedQuery, actualQuery string) int {
 	score := 0
 	if expected.Header.Type != actual.Header.Type {
