@@ -6,9 +6,13 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/spf13/cobra"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 func (c *CmdConfigurator) noCommandError() error {
@@ -18,6 +22,127 @@ func (c *CmdConfigurator) noCommandError() error {
 // alreadyRunning checks that during test mode, if user provides the basePath, then it implies that the application is already running somewhere.
 func alreadyRunning(cmd, basePath string) bool {
 	return (cmd == "test" && basePath != "")
+}
+
+// parseProtoFlags parses proto-related flags from command and updates config
+func parseProtoFlags(logger *zap.Logger, cfg *config.Config, cmd *cobra.Command) error {
+	// Parse proto-file flag
+	protoFile, err := cmd.Flags().GetString("proto-file")
+	if err != nil {
+		errMsg := "failed to get the proto-file flag"
+		utils.LogError(logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+
+	if protoFile != "" {
+		cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
+		if err != nil {
+			errMsg := "failed to get the absolute path of proto-file"
+			utils.LogError(logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+	}
+
+	protoDir, err := cmd.Flags().GetString("proto-dir")
+	if err != nil {
+		errMsg := "failed to get the proto-dir flag"
+		utils.LogError(logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+
+	if protoDir != "" {
+		cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
+		if err != nil {
+			errMsg := "failed to get the absolute path of proto-dir"
+			utils.LogError(logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+	}
+
+	protoInclude, err := cmd.Flags().GetStringArray("proto-include")
+	if err != nil {
+		errMsg := "failed to get the proto-include flag"
+		utils.LogError(logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+
+	if len(protoInclude) > 0 {
+		for _, dir := range protoInclude {
+			absDir, err := utils.GetAbsPath(dir)
+			if err != nil {
+				errMsg := "failed to get the absolute path of proto-include"
+				utils.LogError(logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			cfg.Test.ProtoInclude = append(cfg.Test.ProtoInclude, absDir)
+		}
+	}
+
+	return nil
+}
+
+// mountPathIfExternal mounts a path if it's outside the current working directory
+// isFile indicates whether the path points to a file (if true, mount its parent directory)
+// path is expected to be an absolute path
+func mountPathIfExternal(logger *zap.Logger, path string, isFile bool) error {
+	if path == "" {
+		return nil
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current working directory: %w", err)
+	}
+
+	// For files, mount the directory containing the file
+	dirToMount := path
+	if isFile {
+		dirToMount = filepath.Dir(path)
+	}
+
+	// Ensure dirToMount is absolute
+	if !filepath.IsAbs(dirToMount) {
+		dirToMount, err = filepath.Abs(dirToMount)
+		if err != nil {
+			return fmt.Errorf("failed to get absolute path for %s: %w", dirToMount, err)
+		}
+	}
+
+	// Check if outside current working directory
+	if isPathOutsideCwd(cwd, dirToMount) {
+		volumeMount := dirToMount + ":" + dirToMount
+		if !volumeMountExists(volumeMount) {
+			DockerConfig.VolumeMounts = append(DockerConfig.VolumeMounts, volumeMount)
+			logger.Info("Mounting external proto path", zap.String("path", dirToMount))
+		}
+	}
+
+	return nil
+}
+
+// isPathOutsideCwd checks if a path is outside the current working directory
+// by comparing absolute paths - if the path doesn't have cwd as a prefix, it's outside
+func isPathOutsideCwd(cwd, path string) bool {
+	// Ensure both paths are absolute and clean
+	absCwd := filepath.Clean(cwd)
+	absPath := filepath.Clean(path)
+
+	if !strings.HasSuffix(absCwd, string(filepath.Separator)) {
+		absCwd += string(filepath.Separator)
+	}
+
+	// If path starts with cwd, it's inside; otherwise, it's outside
+	return !strings.HasPrefix(absPath+string(filepath.Separator), absCwd)
+}
+
+// volumeMountExists checks if a volume mount already exists in DockerConfig
+func volumeMountExists(volumeMount string) bool {
+	for _, existingMount := range DockerConfig.VolumeMounts {
+		if existingMount == volumeMount {
+			return true
+		}
+	}
+	return false
 }
 
 var Logo = `
