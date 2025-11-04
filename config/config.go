@@ -246,25 +246,60 @@ func SetSelectedTestSets(conf *Config, testSets []string) {
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {
-	testSets := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == ' '
-	})
-	var tests []SelectedTests
-	if len(testSets) == 0 {
-		conf.Normalize.SelectedTests = tests
+	value = strings.TrimSpace(value)
+	// No tests provided -> clear selection and return
+	if value == "" {
+		conf.Normalize.SelectedTests = nil
 		return nil
 	}
-	for _, ts := range testSets {
-		parts := strings.Split(ts, ":")
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid format: %s", ts)
+
+	// Split on comma or whitespace: "ts1,ts2:tc1 tc2" -> ["ts1", "ts2:tc1", "tc2"] (tc2 handled below)
+	tokens := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
+
+	var selected []SelectedTests
+
+	for _, tok := range tokens {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
 		}
-		testCases := strings.Split(parts[1], " ")
-		tests = append(tests, SelectedTests{
-			TestSet: parts[0],
-			Tests:   testCases,
+
+		// Case 1: "test-set-4:test-1 test-3"
+		if strings.Contains(tok, ":") {
+			parts := strings.SplitN(tok, ":", 2)
+			testSetName := strings.TrimSpace(parts[0])
+			if testSetName == "" {
+				return fmt.Errorf("invalid format (missing test set name): %q", tok)
+			}
+
+			var testCases []string
+			if strings.TrimSpace(parts[1]) != "" {
+				for _, tc := range strings.Fields(parts[1]) {
+					tc = strings.TrimSpace(tc)
+					if tc != "" {
+						testCases = append(testCases, tc)
+					}
+				}
+			}
+
+			selected = append(selected, SelectedTests{
+				TestSet: testSetName,
+				// If no testCases specified after ":", treat it as "all tests" in that set
+				Tests: testCases,
+			})
+			continue
+		}
+
+		// Case 2: only "test-set-4" -> normalize all tests in that test set
+		selected = append(selected, SelectedTests{
+			TestSet: tok,
+			// Empty slice means "all tests in this test set", mirroring SetSelectedTests behavior
+			Tests: []string{},
 		})
 	}
-	conf.Normalize.SelectedTests = tests
+
+	conf.Normalize.SelectedTests = selected
 	return nil
 }
