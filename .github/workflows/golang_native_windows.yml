@@ -105,7 +105,7 @@ jobs:
         shell: pwsh
         run: |
           cd samples-go/${{ matrix.app.path }}
-          & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-docker-windows.ps1"
+          & "$env:GITHUB_WORKSPACE\.github\workflows\test_workflow_scripts\golang\${{ matrix.app.script_dir }}\golang-native-windows.ps1"
 
       - name: Clean up git config
         if: always()
