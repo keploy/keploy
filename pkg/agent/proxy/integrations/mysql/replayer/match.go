@@ -467,10 +467,10 @@ func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual m
 	if expectedMessage.Status == actualMessage.Status {
 		matchCount++
 	}
-	// Match the statementID
-	if expectedMessage.StatementID == actualMessage.StatementID {
-		matchCount++
-	}
+	// // Match the statementID
+	// if expectedMessage.StatementID == actualMessage.StatementID {
+	// 	matchCount++
+	// }
 	// Match the flags
 	if expectedMessage.Flags == actualMessage.Flags {
 		matchCount++
