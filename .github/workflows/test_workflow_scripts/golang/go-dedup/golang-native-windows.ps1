@@ -164,6 +164,15 @@ Write-Host "=========================================================="
 Get-Content -Path $logPath -ErrorAction SilentlyContinue
 Write-Host "=========================================================="
 
+$agentRoot = Join-Path $workDir "keploy_agent.log"
+if (Test-Path -LiteralPath $agentRoot) {
+  Write-Host "`n=========================================================="
+  Write-Host "Dumping keploy agent log (root): '$agentRoot'"
+  Write-Host "=========================================================="
+  Get-Content -Path $agentRoot -ErrorAction SilentlyContinue
+  Write-Host "=========================================================="
+}
+
 # This function will print any new logs from the background job
 function Sync-Logs {
     param($job)
