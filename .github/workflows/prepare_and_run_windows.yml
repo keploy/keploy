@@ -108,3 +108,7 @@ jobs:
   run_golang_docker_windows:
     needs: [build-and-upload, docker-image-build]
     uses: ./.github/workflows/golang_docker_windows.yml
+  
+  run_golang_native_windows:
+    needs: [build-and-upload]
+    uses: ./.github/workflows/golang_native_windows.yml
