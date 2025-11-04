@@ -6,6 +6,8 @@ source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 git fetch origin
 git checkout native-linux
 
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
 # Start the postgres database
 docker compose up -d
 
@@ -52,10 +54,10 @@ send_request(){
     curl --location 'http://127.0.0.1:8000/user/'
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    sudo kill $pid
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 # Record and Test cycles

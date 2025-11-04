@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # safer bash, but we’ll locally disable -e around commands we want to inspect
 set -Eeuo pipefail
-
-# ----- helpers -----
-section()  { echo "::group::$*"; }
-endsec()   { echo "::endgroup::"; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 die() {
   rc=$?
   echo "::error::Pipeline failed (exit=$rc). Dumping context…"

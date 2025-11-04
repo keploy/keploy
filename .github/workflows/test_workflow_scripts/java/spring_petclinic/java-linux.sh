@@ -2,9 +2,9 @@
 # Safe, chatty CI script for Java + Postgres + Keploy with auto API-prefix detection
 
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
 
 die() {
   rc=$?
@@ -228,6 +228,25 @@ set -e
 echo "Replay exit code: $REPLAY_RC"
 cat test_logs.txt || true
 endsec
+
+# ✅ Extract and validate coverage percentage from log
+coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
+
+if [[ -z "$coverage_line" ]]; then
+  echo "::error::No coverage percentage found in test_logs.txt"
+  return 1
+fi
+
+coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
+echo "📊 Extracted coverage: ${coverage_percent}%"
+
+# Fail if coverage ≤ 0%
+if (( $(echo "$coverage_percent <= 0" | bc -l) )); then
+  echo "::error::Coverage below threshold (0%). Found: ${coverage_percent}%"
+  exit 1
+else
+  echo "✅ Coverage meets threshold (> 0%)"
+fi
 
 section "Check reports"
 RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)

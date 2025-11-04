@@ -10,8 +10,11 @@
 #   REPLAY_BIN          -> path to keploy test binary   (env)
 
 set -Eeuo pipefail
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 MODE=${1:-incoming}
+
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # --- Sanity Checks ---
 [ -x "${RECORD_BIN:-}" ] || { echo "RECORD_BIN not set or not executable"; exit 1; }
@@ -63,46 +66,6 @@ check_for_errors() {
   echo "No critical errors found in $logfile."
 }
 
-# Validates the Keploy test report to ensure all test sets passed
-check_test_report() {
-    echo "Checking test reports..."
-    if [ ! -d "./keploy/reports" ]; then
-        echo "Test report directory not found!"
-        return 1
-    fi
-
-    local latest_report_dir
-    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
-    if [ -z "$latest_report_dir" ]; then
-        echo "No test run directory found in ./keploy/reports/"
-        return 1
-    fi
-    
-    local all_passed=true
-    # Loop through all generated report files
-    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
-        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
-        
-        local test_set_name
-        test_set_name=$(basename "$report_file" -report.yaml)
-        local test_status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-        
-        echo "Status for ${test_set_name}: $test_status"
-        if [ "$test_status" != "PASSED" ]; then
-            all_passed=false
-            echo "Test set ${test_set_name} did not pass."
-        fi
-    done
-
-    if [ "$all_passed" = false ]; then
-        echo "One or more test sets failed."
-        return 1
-    fi
-
-    echo "All tests passed in reports."
-    return 0
-}
 
 # Sends HTTP requests to the client to trigger gRPC calls
 send_requests() {
@@ -133,7 +96,7 @@ wait_for_port() {
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
         # Use lsof to check for a listening TCP socket on the specified port
-        if sudo lsof -iTCP:"$port" -sTCP:LISTEN -t >/dev/null; then
+        if sudo nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
@@ -146,8 +109,10 @@ wait_for_port() {
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
-    pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
-    wait "$pid" 2>/dev/null || true
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
+    echo "Killing keploy"
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
 }
 
 # --- Main Logic ---

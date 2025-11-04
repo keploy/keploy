@@ -4,7 +4,8 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Build Docker Image
 docker compose build
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 
@@ -14,13 +15,6 @@ sudo -E env PATH=$PATH $RECORD_BIN config --generate
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
-
-container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID"
-    echo "Killing keploy"
-    sudo kill $pid
-}
 
 send_request(){
     sleep 10
@@ -55,9 +49,11 @@ send_request(){
     wait
 }
 
+
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
+    # get_container_health &
     sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
@@ -68,6 +64,7 @@ for i in {1..2}; do
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
+        cat "docker-compose-tmp.yaml"
         exit 1
     fi
     sleep 5
@@ -82,7 +79,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false --disableMockUpload &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
