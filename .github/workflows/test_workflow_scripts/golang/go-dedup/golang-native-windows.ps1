@@ -164,15 +164,6 @@ Write-Host "=========================================================="
 Get-Content -Path $logPath -ErrorAction SilentlyContinue
 Write-Host "=========================================================="
 
-$agentRoot = Join-Path $workDir "keploy_agent.log"
-if (Test-Path -LiteralPath $agentRoot) {
-  Write-Host "`n=========================================================="
-  Write-Host "Dumping keploy agent log (root): '$agentRoot'"
-  Write-Host "=========================================================="
-  Get-Content -Path $agentRoot -ErrorAction SilentlyContinue
-  Write-Host "=========================================================="
-}
-
 # This function will print any new logs from the background job
 function Sync-Logs {
     param($job)
@@ -220,7 +211,7 @@ $REC_PROC = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     ($_.CommandLine -and ($_.CommandLine -match 'keploy.*record' -or $_.CommandLine -match 'keploy-record' -or $_.CommandLine -match 'keploy(\.exe)?')) -or
     ($_.Name -and $_.Name -match 'keploy')
   } |
-  Select-Object -Last 1
+  Select-Object -First 1
 
 $REC_PID = if ($REC_PROC) { $REC_PROC.ProcessId } else { $null }
 
