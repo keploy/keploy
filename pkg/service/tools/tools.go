@@ -66,7 +66,6 @@ func (t *Tools) Import(ctx context.Context, path, basePath string) error {
 func (t *Tools) Update(ctx context.Context) error {
 	currentVersion := "v" + utils.Version
 
-	// Configure download URLs for each platform
 	downloadURLs := map[string]string{
 		"linux_amd64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz",
 		"linux_arm64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz",
@@ -89,7 +88,17 @@ func (t *Tools) Update(ctx context.Context) error {
 		Changelog:      releaseInfo.Body,
 	})
 
-	return updateMgr.CheckAndUpdate(ctx)
+	_, err = updateMgr.CheckAndUpdate(ctx)
+
+	// Handle .dmg error gracefully
+	if errors.Is(err, update.ErrUnsupportedFiletype) {
+		t.logger.Warn("Update downloaded but requires manual installation", zap.Error(err))
+		fmt.Println("\n[Keploy Update] New version downloaded.")
+		fmt.Println("Please find the .dmg file in your temporary directory and install it manually.")
+		return nil
+	}
+
+	return err
 }
 
 func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {

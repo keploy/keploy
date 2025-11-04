@@ -51,26 +51,30 @@ func NewUpdateManager(logger *zap.Logger, cfg Config) *UpdateManager {
 	}
 }
 
-func (u *UpdateManager) CheckAndUpdate(ctx context.Context) error {
+func (u *UpdateManager) CheckAndUpdate(ctx context.Context) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
+	u.Logger.Info("Checking for new version...", zap.String("current", u.Config.CurrentVersion), zap.String("latest", u.Config.LatestVersion))
+
 	if u.Config.IsInDocker {
-		return ErrInDockerEnv
+		u.Logger.Debug("Skipping update check: running in Docker.")
+		return false, nil
 	}
 
 	if u.Config.IsDevVersion {
-		return ErrDevVersion
+		u.Logger.Debug("Skipping update check: running 'dev' version.")
+		return false, nil
 	}
 
 	if u.Config.CurrentVersion == u.Config.LatestVersion {
 		fmt.Printf("✅ You are already on the latest version of %s: %s\n",
 			u.Config.BinaryName, u.Config.CurrentVersion)
-		return nil
+		return false, nil
 	}
 
-	u.Logger.Info("Updating to version", zap.String("version", u.Config.LatestVersion))
+	u.Logger.Info("New version found, downloading update...", zap.String("version", u.Config.LatestVersion))
 
 	osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
 	if runtime.GOOS == "darwin" {
@@ -82,14 +86,12 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) error {
 
 	downloadURL, ok := u.Config.DownloadURLs[osArch]
 	if !ok {
-		return fmt.Errorf("no download URL configured for platform: %s", osArch)
+		return false, fmt.Errorf("no download URL configured for platform: %s", osArch)
 	}
 
 	if err := u.downloadAndUpdate(ctx, downloadURL); err != nil {
-		return fmt.Errorf("update failed: %w", err)
+		return false, fmt.Errorf("update failed: %w", err)
 	}
-
-	u.Logger.Info("Update successful!", zap.String("binary", u.Config.BinaryName))
 
 	if u.Config.Changelog != "" {
 		if err := renderChangelog(u.Config.Changelog); err != nil {
@@ -97,7 +99,7 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) error {
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL string) error {
@@ -135,12 +137,15 @@ func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL strin
 	tmpFile.Close()
 
 	fileType := filepath.Ext(downloadURL)
+	if strings.HasSuffix(downloadURL, ".tar.gz") {
+		fileType = ".tar.gz"
+	}
 	if strings.Contains(fileType, ".dmg") {
 		fileType = ".dmg"
 	}
 
 	switch fileType {
-	case ".gz":
+	case ".tar.gz":
 		if err := u.extractTarGzAndApply(tmpFile.Name(), binPath); err != nil {
 			return fmt.Errorf("failed to extract and apply .tar.gz update: %w", err)
 		}
@@ -167,13 +172,13 @@ func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL strin
 func (u *UpdateManager) extractTarGzAndApply(tarballPath, finalBinPath string) error {
 	file, err := os.Open(tarballPath)
 	if err != nil {
-		return fmt.Errorf("failed to open downloaded tarball: %w", err)
+		return err
 	}
 	defer file.Close()
 
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
-		return fmt.Errorf("failed to create gzip reader (file may be corrupt): %w", err)
+		return err
 	}
 	defer gzipReader.Close()
 
@@ -185,7 +190,7 @@ func (u *UpdateManager) extractTarGzAndApply(tarballPath, finalBinPath string) e
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("failed to read tar header: %w", err)
+			return err
 		}
 
 		if header.Typeflag == tar.TypeReg && filepath.Clean(header.Name) == u.Config.BinaryName {
@@ -242,8 +247,7 @@ func (u *UpdateManager) extractZipAndApply(zipPath, finalBinPath string) error {
 			return nil
 		}
 	}
-
-	return fmt.Errorf("binary %q or %q not found in downloaded zip archive", u.Config.BinaryName, binaryBaseName)
+	return fmt.Errorf("binary %q not found in downloaded zip archive", u.Config.BinaryName)
 }
 
 func findBinaryPath(binaryName string) (string, error) {
@@ -253,6 +257,12 @@ func findBinaryPath(binaryName string) (string, error) {
 
 	execPath, err := os.Executable()
 	if err == nil && execPath != "" {
+		// Resolve symlinks to get the actual file path
+		resolvedPath, err := filepath.EvalSymlinks(execPath)
+		if err == nil && resolvedPath != "" {
+			return resolvedPath, nil
+		}
+		// Fallback to original execPath if symlink resolution fails
 		return execPath, nil
 	}
 
@@ -296,3 +306,4 @@ func renderChangelog(changelog string) error {
 	fmt.Println(out)
 	return nil
 }
+
