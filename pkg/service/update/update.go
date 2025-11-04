@@ -296,4 +296,3 @@ func renderChangelog(changelog string) error {
 	fmt.Println(out)
 	return nil
 }
-
