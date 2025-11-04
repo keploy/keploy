@@ -159,7 +159,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is bigger (%d) than the maximum for the struct (%d)", len(bin), EventBodyMaxSize+eventAttributesSize))
 					continue
 				}
-
+				l.Debug(fmt.Sprintf("Received socket data event of size: %d bytes", len(bin)))
 				var event SocketDataEvent
 
 				if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
