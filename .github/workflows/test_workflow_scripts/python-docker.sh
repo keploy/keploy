@@ -16,10 +16,6 @@ sleep 5  # Allow time for configuration to apply
 
 
 container_kill() {
-    # pid=$(pgrep -f "keploy record")
-    # echo "$pid Keploy PID" 
-    # echo "Killing keploy"
-    # sudo kill $pid
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"

@@ -4,7 +4,8 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Build Docker Image
 docker compose build
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 
@@ -14,13 +15,6 @@ sudo -E env PATH=$PATH $RECORD_BIN config --generate
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
-
-container_kill() {
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
-}
 
 send_request(){
     sleep 10

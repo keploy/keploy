@@ -2,9 +2,8 @@
 # Safe, chatty CI script for Node + Mongo + Keploy
 
 set -Eeuo pipefail
-
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 
 die() {
   rc=$?
@@ -48,7 +47,7 @@ wait_for_http() {
 send_request() {
   local kp_pid="$1"
 
-  if ! wait_for_http "http://localhost:8000/students" 120; then
+  if ! wait_for_url_response "http://localhost:8000/students" 120; then
     echo "::error::App did not become healthy at /students"
   else
     echo "good!App started"
