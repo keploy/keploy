@@ -1,9 +1,10 @@
-package replay
+package utils
 
 import (
 	"context"
 	"testing"
 
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -13,7 +14,7 @@ func TestProtoWireToJSONWithAnyTypes(t *testing.T) {
 	logger := zap.NewNop()
 
 	// Test with a proto that includes Any fields
-	pc := ProtoConfig{
+	pc := models.ProtoConfig{
 		ProtoFile:    "test.proto", // This would be the path to your proto file
 		ProtoInclude: []string{},
 		RequestURI:   "/fuzz.FuzzService/EchoAny",

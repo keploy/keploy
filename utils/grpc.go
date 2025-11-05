@@ -1,4 +1,4 @@
-package replay
+package utils
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/bufbuild/protocompile"
 	"github.com/bufbuild/protocompile/reporter"
 	"github.com/protocolbuffers/protoscope"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -20,14 +20,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-type ProtoConfig struct {
-	ProtoFile    string
-	ProtoDir     string
-	ProtoInclude []string
-	RequestURI   string
-}
-
-func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc ProtoConfig) (protoreflect.MessageDescriptor, []protoreflect.FileDescriptor, error) {
+func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc models.ProtoConfig) (protoreflect.MessageDescriptor, []protoreflect.FileDescriptor, error) {
 	if pc.ProtoFile == "" && pc.ProtoDir == "" {
 		return nil, nil, fmt.Errorf("protoFile or protoDir must be provided")
 	}
@@ -131,7 +124,7 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc Proto
 	}
 
 	// Parse :path -> service + method
-	svcFull, mName, err := utils.ParseGRPCPath(grpcPath)
+	svcFull, mName, err := ParseGRPCPath(grpcPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse :path: %v", err)
 	}
@@ -318,14 +311,14 @@ func ProtoWireToJSON(md protoreflect.MessageDescriptor, files []protoreflect.Fil
 func ProtoTextToJSON(md protoreflect.MessageDescriptor, files []protoreflect.FileDescriptor, text string, logger *zap.Logger) ([]byte, bool) {
 
 	if md == nil {
-		utils.LogError(logger, fmt.Errorf("message descriptor is nil"), "cannot convert grpc response to json")
+		LogError(logger, fmt.Errorf("message descriptor is nil"), "cannot convert grpc response to json")
 		return nil, false
 	}
 
 	// Protoscope text -> raw protobuf wire
 	wire, err := ProtoTextToWire(text)
 	if err != nil {
-		utils.LogError(logger, err, "failed to convert protoscope text to raw protobuf wire, cannot convert grpc response to json")
+		LogError(logger, err, "failed to convert protoscope text to raw protobuf wire, cannot convert grpc response to json")
 		return nil, false
 	}
 
@@ -333,7 +326,7 @@ func ProtoTextToJSON(md protoreflect.MessageDescriptor, files []protoreflect.Fil
 	j, err := ProtoWireToJSON(md, files, wire)
 	if err != nil {
 		// We don't know if it failed in unmarshal or marshal, so keep this generic.
-		utils.LogError(logger, err, "failed to convert wire to json, cannot convert grpc response to json")
+		LogError(logger, err, "failed to convert wire to json, cannot convert grpc response to json")
 		return nil, false
 	}
 

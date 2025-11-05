@@ -510,9 +510,9 @@ func TestRenderSingleFailedTest(t *testing.T) {
 		logger: newTestLogger(),
 		config: &config.Config{},
 	}
-
+	ctx := context.Background()
 	var sb strings.Builder
-	err := r.renderSingleFailedTest(&sb, testResult)
+	err := r.renderSingleFailedTest(ctx, &sb, testResult)
 	if err != nil {
 		t.Fatalf("renderSingleFailedTest failed: %v", err)
 	}
@@ -601,8 +601,8 @@ func TestProcessLegacyTestCaseFiltering(t *testing.T) {
 		},
 		out: bufio.NewWriterSize(os.Stdout, 4096),
 	}
-
-	err := r.processLegacyTestCaseFiltering(tests)
+	ctx := context.Background()
+	err := r.processLegacyTestCaseFiltering(ctx, tests)
 	if err != nil {
 		t.Fatalf("processLegacyTestCaseFiltering failed: %v", err)
 	}
