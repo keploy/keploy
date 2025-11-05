@@ -19,9 +19,9 @@ import (
 )
 
 var (
-	ErrInDockerEnv         = errors.New("updates are not supported in Docker - please pull the latest image instead")
-	ErrDevVersion          = errors.New("updates are not supported for development versions")
-	ErrUnsupportedFiletype = errors.New("unsupported file type for auto-update")
+	ErrInDockerEnv           = errors.New("updates are not supported in Docker - please pull the latest image instead")
+	ErrDevVersion            = errors.New("updates are not supported for development versions")
+	ErrUnsupportedFiletype   = errors.New("unsupported file type for auto-update")
 	ErrDmgNeedsManualInstall = errors.New("unsupported file type: .dmg files must be installed manually")
 )
 
