@@ -20,7 +20,6 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-
 func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc models.ProtoConfig) (protoreflect.MessageDescriptor, []protoreflect.FileDescriptor, error) {
 	if pc.ProtoFile == "" && pc.ProtoDir == "" {
 		return nil, nil, fmt.Errorf("protoFile or protoDir must be provided")
