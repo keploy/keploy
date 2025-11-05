@@ -121,9 +121,9 @@ ensure_success_phrase() {
 if [ "$MODE" = "incoming" ]; then
  echo "🧪 Testing with incoming requests"
 
-  # Start server with keploy in record mode
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
- 
+
+ # Start server with keploy in record mode
+ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
  sleep 10
 
 
