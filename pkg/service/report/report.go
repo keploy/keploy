@@ -736,6 +736,10 @@ func (r *Report) renderSingleFailedTest(ctx context.Context, sb *strings.Builder
 					zap.String("testCase", test.TestCaseID),
 					zap.Error(err))
 			}
+		} else {
+			r.logger.Warn("report: failed to convert gRPC bodies to JSON; falling back to raw body diff",
+				zap.String("testSet", test.Name),
+				zap.String("testCase", test.TestCaseID))
 		}
 	}
 
