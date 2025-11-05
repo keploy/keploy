@@ -44,6 +44,11 @@ type TestSetConfig interface {
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
 
+type TestSetDB interface {
+	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
+	Delete(ctx context.Context, testSetID string) error
+}
+
 type Telemetry interface {
 	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int)
 	RecordedTestCaseMock(mockType string)

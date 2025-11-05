@@ -122,3 +122,12 @@ func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]i
 
 	return secretConfig, nil
 }
+
+func (db *Db[T]) Delete(ctx context.Context, testSetID string) error {
+	err := yaml.DeleteFile(ctx, db.logger, db.path, testSetID)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to delete test-set configuration file", zap.String("testSet", testSetID))
+		return err
+	}
+	return nil
+}

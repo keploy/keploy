@@ -20,6 +20,7 @@ type Instrumentation interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
+	CloseConnections()
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
@@ -33,7 +34,7 @@ type Service interface {
 	Instrument(ctx context.Context) (*InstrumentState, error)
 	GetNextTestRunID(ctx context.Context) (string, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, runApp bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
@@ -117,4 +118,12 @@ type InstrumentState struct {
 type MappingDB interface {
 	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
 	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
+}
+
+type RequestMockHandler interface {
+	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
+	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
+	FetchMockName() string
+	ProcessMockFile(ctx context.Context, testSetID string)
+	AfterTestHook(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int) (*models.TestReport, error)
 }

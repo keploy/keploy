@@ -1013,7 +1013,6 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 	sections := []string{".go.buildinfo", ".gopclntab"}
 	for _, section := range sections {
 		if sect := f.Section(section); sect != nil {
-			fmt.Println(section)
 			return true
 		}
 	}
@@ -1021,9 +1020,9 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 }
 
 // DetectLanguage detects the language of the test command and returns the executable
-func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+func DetectLanguage(logger *zap.Logger, cmd string) config.Language {
 	if cmd == "" {
-		return models.Unknown, ""
+		return models.Unknown
 	}
 	fields := strings.Fields(cmd)
 
@@ -1040,31 +1039,31 @@ func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
 	}
 
 	if executable == "" {
-		return models.Unknown, ""
+		return models.Unknown
 	}
 
 	// Check for Python
 	pythonRegex := regexp.MustCompile(`(?i)(^|.*/)(python(\d+(\.\d+)*)?)$`)
 	if pythonRegex.MatchString(executable) {
-		return models.Python, executable
+		return models.Python
 	}
 
 	// Check for Node.js
 	if executable == "node" || executable == "npm" || executable == "yarn" {
-		return models.Javascript, executable
+		return models.Javascript
 	}
 
 	// Check for Java
 	if executable == "java" {
-		return models.Java, executable
+		return models.Java
 	}
 
 	// Check for Go
 	if executable == "go" || (isGoBinary(logger, executable)) {
-		return models.Go, executable
+		return models.Go
 	}
 
-	return models.Unknown, executable
+	return models.Unknown
 }
 
 // FileExists checks if a file exists and is not a directory at the given path.
