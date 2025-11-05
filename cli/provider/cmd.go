@@ -648,29 +648,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 
-		protoFile, err := cmd.Flags().GetString("proto-file")
+		protoCfg, err := parseProtoFlags(c.logger, cmd)
 		if err != nil {
-			errMsg := "failed to get the proto file"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+			return err
 		}
-		c.cfg.Report.ProtoFile = protoFile
 
-		protoDir, err := cmd.Flags().GetString("proto-dir")
-		if err != nil {
-			errMsg := "failed to get the proto dir"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Report.ProtoDir = protoDir
-
-		protoInclude, err := cmd.Flags().GetStringArray("proto-include")
-		if err != nil {
-			errMsg := "failed to get the proto include"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Report.ProtoInclude = protoInclude
+		c.cfg.Report.ProtoFile = protoCfg.ProtoFile
+		c.cfg.Report.ProtoDir = protoCfg.ProtoDir
+		c.cfg.Report.ProtoInclude = append(c.cfg.Report.ProtoInclude, protoCfg.ProtoInclude...)
 
 		// validate the report path if provided
 		if reportPath != "" {
@@ -1111,60 +1096,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			// parse and set proto related flags
-
-			protoFile, err := cmd.Flags().GetString("proto-file")
+			protoCfg, err := parseProtoFlags(c.logger, cmd)
 			if err != nil {
-				errMsg := "failed to get the proto-file flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+				return err
 			}
 
-			if protoFile != "" {
-				c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-file"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoDir, err := cmd.Flags().GetString("proto-dir")
-			if err != nil {
-				errMsg := "failed to get the proto-dir flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if protoDir != "" {
-				c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-dir"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoInclude, err := cmd.Flags().GetStringArray("proto-include")
-			if err != nil {
-				errMsg := "failed to get the proto-include flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if len(protoInclude) > 0 {
-				for _, dir := range protoInclude {
-					absDir, err := utils.GetAbsPath(dir)
-					if err != nil {
-						errMsg := "failed to get the absolute path of proto-include"
-						utils.LogError(c.logger, err, errMsg)
-						return errors.New(errMsg)
-					}
-					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
-				}
-			}
+			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
 		}
-
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
 			errMsg := "failed to read the global passthrough flag"
