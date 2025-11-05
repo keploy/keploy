@@ -18,6 +18,7 @@ import (
 
 type MockManager struct {
 	// legacy "all" trees (kept for compatibility with existing callers)
+	legacyMu   sync.RWMutex
 	filtered   *TreeDb
 	unfiltered *TreeDb
 
@@ -116,6 +117,8 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 // ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	m.legacyMu.RLock()
+	defer m.legacyMu.RUnlock()
 	results := make([]*models.Mock, 0, 64)
 	m.filtered.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -127,6 +130,8 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	m.legacyMu.RLock()
+	defer m.legacyMu.RUnlock()
 	results := make([]*models.Mock, 0, 128)
 	m.unfiltered.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -179,12 +184,13 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	// legacy rebuild
-	m.filtered.deleteAll()
+	// m.filtered.deleteAll()
 
 	// rebuild per-kind filtered maps from scratch to avoid stale entries
 	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
 	touched := map[models.Kind]struct{}{}
-
+	m.legacyMu.Lock()
+	m.filtered.deleteAll()
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
@@ -201,7 +207,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
 	}
-
+	m.legacyMu.Unlock()
 	// atomically swap the per-kind map
 	m.treesMu.Lock()
 	m.filteredByKind = newFilteredByKind
@@ -215,11 +221,14 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	// legacy rebuild
-	m.unfiltered.deleteAll()
+	// m.unfiltered.deleteAll()
 
 	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
 	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
 	touched := map[models.Kind]struct{}{}
+
+	m.legacyMu.Lock()
+	m.unfiltered.deleteAll()
 
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
@@ -238,6 +247,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		touched[k] = struct{}{}
 	}
 
+	m.legacyMu.Unlock()
 	// atomically swap the per-kind map
 	m.treesMu.Lock()
 	m.unfilteredByKind = newUnfilteredByKind
@@ -253,8 +263,9 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
 	// Update legacy/global tree first
+	m.legacyMu.Lock()
 	updatedGlobal := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
-
+	m.legacyMu.Unlock()
 	oldK, newK := old.Kind, new.Kind
 	var updatedOldKind, updatedNewKind bool
 
@@ -330,7 +341,9 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+	m.legacyMu.Lock()
 	deletedGlobal := m.filtered.delete(mock.TestModeInfo)
+	m.legacyMu.Unlock()
 
 	// per-kind
 	k := mock.Kind
@@ -361,7 +374,9 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+	m.legacyMu.Lock()
 	deletedGlobal := m.unfiltered.delete(mock.TestModeInfo)
+	m.legacyMu.Unlock()
 
 	// per-kind
 	k := mock.Kind
