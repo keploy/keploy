@@ -153,6 +153,8 @@ func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL strin
 		return fmt.Errorf("%w: %s", ErrUnsupportedFiletype, fileType)
 	}
 
+	// We skip setting execute permissions on Windows, as it doesn't use POSIX permissions.
+	// Files are executable based on their .exe extension.
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(binPath, 0755); err != nil {
 			return fmt.Errorf("failed to set permissions: %w", err)
@@ -186,6 +188,8 @@ func (u *UpdateManager) extractTarGzAndApply(tarballPath, finalBinPath string) e
 			return err
 		}
 
+		// Check if the file is a regular file and its cleaned name matches our target binary name.
+		// filepath.Clean is a security precaution to prevent path traversal (e.g., "../binary").
 		if header.Typeflag == tar.TypeReg && filepath.Clean(header.Name) == u.Config.BinaryName {
 			u.Logger.Info("Found binary in archive, applying safe update...",
 				zap.String("binary", header.Name),
