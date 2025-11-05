@@ -157,7 +157,7 @@ echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 
- sleep 10
+ sleep 5
 
  echo "Ensuring fuzzer server is stopped..."
  sleep 10

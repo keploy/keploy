@@ -174,7 +174,7 @@ if [ "$MODE" = "incoming" ]; then
     
     kill_keploy_process
 
-    sleep 10
+    sleep 5
 
     check_for_errors record_incoming.log
 
@@ -201,7 +201,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
     kill_keploy_process
     
-    sleep 10
+    sleep 5
     
     check_for_errors record_outgoing.log
 
