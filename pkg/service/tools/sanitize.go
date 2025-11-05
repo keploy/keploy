@@ -16,6 +16,7 @@ import (
 	"github.com/zricethezav/gitleaks/v8/config"
 	"github.com/zricethezav/gitleaks/v8/detect"
 	"github.com/zricethezav/gitleaks/v8/report"
+	"go.keploy.io/server/v3/pkg"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -329,7 +330,7 @@ func redactNode(
 			switch v.Kind {
 			case yaml.ScalarNode:
 				if v.Tag == "!!str" {
-					if looksLikeJSON(v.Value) {
+					if pkg.LooksLikeJSON(v.Value) {
 						changed, newVal, jsonRepls := redactJSONString(v.Value, key, secretSet, secrets)
 						if changed {
 							v.Value = newVal
@@ -381,13 +382,6 @@ func isReqHeaderPath(path []string) bool {
 	n := len(path)
 	return strings.EqualFold(path[n-3], "req") &&
 		strings.EqualFold(path[n-2], "header")
-}
-
-// ----- JSON-in-string -----
-func looksLikeJSON(s string) bool {
-	t := strings.TrimSpace(s)
-	return (strings.HasPrefix(t, "{") && strings.Contains(t, "}")) ||
-		(strings.HasPrefix(t, "[") && strings.Contains(t, "]"))
 }
 
 func redactJSONString(s string, parentKey string, secretSet map[string]struct{},
