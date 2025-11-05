@@ -94,7 +94,7 @@ send_request() {
   if [[ -z "${API_PREFIX}" ]]; then
     echo "::warning::Could not auto-detect API prefix. Trying both /petclinic/api and /api."
     # Try both paths to maximize coverage
-    local paths=( "/petclinic/api" )
+    local paths=( "/api" )
     for pref in "${paths[@]}"; do
       curl -sS "${base}${pref}/pettypes" || true
       curl -sS --request POST \
