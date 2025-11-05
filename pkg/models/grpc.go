@@ -77,3 +77,10 @@ func NewGrpcStream(streamID uint32) GrpcStream {
 		},
 	}
 }
+
+type ProtoConfig struct {
+	ProtoFile    string
+	ProtoDir     string
+	ProtoInclude []string
+	RequestURI   string
+}

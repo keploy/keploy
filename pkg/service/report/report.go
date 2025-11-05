@@ -18,8 +18,8 @@ import (
 	"go.keploy.io/server/v3/config"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
-	replay "go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -990,14 +990,14 @@ func (r *Report) grpcBodiesAsJSON(ctx context.Context, test models.TestResult) (
 		return "", "", false
 	}
 
-	pc := replay.ProtoConfig{
+	pc := models.ProtoConfig{
 		ProtoFile:    r.config.Test.ProtoFile,
 		ProtoDir:     r.config.Test.ProtoDir,
 		ProtoInclude: r.config.Test.ProtoInclude,
 		RequestURI:   method,
 	}
 
-	md, files, err := replay.GetProtoMessageDescriptor(ctx, r.logger, pc)
+	md, files, err := utils.GetProtoMessageDescriptor(ctx, r.logger, pc)
 	if err != nil {
 		r.logger.Warn("report: failed to get proto message descriptor; falling back to raw gRPC diff",
 			zap.String("testSet", test.Name),
@@ -1006,8 +1006,8 @@ func (r *Report) grpcBodiesAsJSON(ctx context.Context, test models.TestResult) (
 		return "", "", false
 	}
 
-	actJSON, actOK := replay.ProtoTextToJSON(md, files, protoActual, r.logger)
-	expJSON, expOK := replay.ProtoTextToJSON(md, files, protoExpected, r.logger)
+	actJSON, actOK := utils.ProtoTextToJSON(md, files, protoActual, r.logger)
+	expJSON, expOK := utils.ProtoTextToJSON(md, files, protoExpected, r.logger)
 
 	if !actOK || !expOK {
 		r.logger.Warn("report: failed to convert gRPC protoscope to JSON; falling back to raw gRPC diff",
