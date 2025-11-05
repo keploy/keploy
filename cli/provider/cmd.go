@@ -277,6 +277,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
+		cmd.Flags().String("proto-file", c.cfg.Report.ProtoFile, "Path of main proto file")
+		cmd.Flags().String("proto-dir", c.cfg.Report.ProtoDir, "Path of the directory where all protos of a service are located")
+		cmd.Flags().StringArray("proto-include", c.cfg.Report.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
@@ -639,6 +642,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+
+		protoCfg, err := parseProtoFlags(c.logger, cmd)
+		if err != nil {
+			return err
+		}
+
+		c.cfg.Report.ProtoFile = protoCfg.ProtoFile
+		c.cfg.Report.ProtoDir = protoCfg.ProtoDir
+		c.cfg.Report.ProtoInclude = append(c.cfg.Report.ProtoInclude, protoCfg.ProtoInclude...)
 
 		// validate the report path if provided
 		if reportPath != "" {
@@ -1115,10 +1127,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			// parse and set proto related flags
-			if err := parseProtoFlags(c.logger, c.cfg, cmd); err != nil {
+			protoCfg, err := parseProtoFlags(c.logger, cmd)
+			if err != nil {
 				return err
 			}
+
+			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
 		}
 
 		bigPayload, err := cmd.Flags().GetBool("bigPayload")
