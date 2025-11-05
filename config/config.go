@@ -253,7 +253,9 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 		return nil
 	}
 
-	// Split on comma or whitespace: "ts1,ts2:tc1 tc2" -> ["ts1", "ts2:tc1", "tc2"] (tc2 handled below)
+	// Split on comma or whitespace: e.g. "ts1,ts2:tc1 tc2" -> ["ts1", "ts2:tc1", "tc2"]
+	// Note: "tc2" becomes a standalone token and is treated as a separate test set (see Case 2 below),
+	// not as a test case associated with "ts2". This may be unintuitive; see logic below for details.
 	tokens := strings.FieldsFunc(value, func(r rune) bool {
 		return r == ',' || r == ' '
 	})
