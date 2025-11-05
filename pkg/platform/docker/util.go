@@ -73,6 +73,9 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
+// getActiveDockerContext detects the active Docker context and its socket path.
+// Supports different Docker contexts like default, colima, or custom contexts
+// to ensure proper Docker daemon connectivity.
 func getActiveDockerContext(ctx context.Context) (contextName, socketPath string, err error) {
 	// Get the Active Docker Context
 	cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -82,7 +85,8 @@ func getActiveDockerContext(ctx context.Context) (contextName, socketPath string
 		return "", "", fmt.Errorf("failed to get docker contexts: %w", err)
 	}
 
-	// Parse the output
+	// Parse docker context list output to find the active context
+	// Output format: "context_name\ttrue/false" where true indicates active context
 	lines := strings.SplitSeq(strings.TrimSpace(string(out)), "\n")
 
 	for line := range lines {
@@ -105,7 +109,8 @@ func getActiveDockerContext(ctx context.Context) (contextName, socketPath string
 		return "", "", fmt.Errorf("no active docker context found")
 	}
 
-	// Get socketPath for the active context
+	// Get the Docker daemon socket path for the active context
+	// This returns paths like "unix:///var/run/docker.sock" or "unix:///Users/.../docker.sock"
 	cmd = exec.CommandContext(ctx, "docker", "context", "inspect", contextName, "--format", "{{.Endpoints.docker.Host}}")
 	out, err = cmd.Output()
 	if err != nil {
@@ -179,7 +184,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		dpwd := convertPathToUnixStyle(pwd)
 
-		// Get active context and socket path
+		// Detect active Docker context to determine the correct socket path
 		activeContext, socketPath, err := getActiveDockerContext(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to detect docker context, falling back to default")
@@ -187,7 +192,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			socketPath = "/var/run/docker.sock"
 		}
 
-		// Extract socket path from URL format (e.g., unix:///path/to/socket)
+		// Extract filesystem path from Docker socket URL for volume mounting
 		socketMountPath := socketPath
 		if strings.HasPrefix(socketPath, "unix://") {
 			socketMountPath = strings.TrimPrefix(socketPath, "unix://")
@@ -235,7 +240,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 		return alias, nil
 	case "darwin":
-		// Get active context and socket path
+		// Detect active Docker context to determine the correct socket path
 		activeContext, socketPath, err := getActiveDockerContext(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to detect docker context, falling back to default")
@@ -243,7 +248,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			socketPath = "/var/run/docker.sock"
 		}
 
-		// Extract socket path from URL format (e.g., unix:///path/to/socket)
+		// Extract filesystem path from Docker socket URL for volume mounting
 		socketMountPath := socketPath
 		if strings.HasPrefix(socketPath, "unix://") {
 			socketMountPath = strings.TrimPrefix(socketPath, "unix://")

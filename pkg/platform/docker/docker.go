@@ -439,6 +439,7 @@ func (idc *Impl) parseExtendedPortMapping(portNode *yaml.Node) string {
 
 // generateKeployVolumes creates the standard volume mappings for Keploy containers
 // This function extracts the common volume logic used by both getAlias and Docker Compose generation
+// Accepts socketPath parameter to mount the correct Docker socket based on the active Docker context.
 func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) []string {
 	osName := runtime.GOOS
 	volumes := []string{}
@@ -446,11 +447,8 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 	// Working directory mount
 	volumes = append(volumes, fmt.Sprintf("%s:%s", workingDir, workingDir))
 
+	// Extract filesystem path from Docker socket URL for volume mounting
 	socketMountPath, _ := strings.CutPrefix(socketPath, "unix://")
-
-	// if strings.HasPrefix(socketPath, "unix://") {
-	// 	socketMountPath = strings.TrimPrefix(socketPath, "unix://")
-	// }
 
 	switch osName {
 	case "linux":
@@ -459,7 +457,7 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			// "/var/run/docker.sock:/var/run/docker.sock",
+			// Mount the detected Docker socket to enable container communication with the Docker daemon
 			fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 		)
 	case "darwin":
@@ -468,7 +466,7 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			// "/var/run/docker.sock:/var/run/docker.sock",
+			// Mount the detected Docker socket to enable container communication with the Docker daemon
 			fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 		)
 	case "windows":
@@ -483,7 +481,7 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					// "/var/run/docker.sock:/var/run/docker.sock",
+					// Mount the detected Docker socket to enable container communication with the Docker daemon
 					fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 				)
 			} else {
@@ -492,7 +490,7 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					// "/var/run/docker.sock:/var/run/docker.sock",
+					// Mount the detected Docker socket to enable container communication with the Docker daemon
 					fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 				)
 			}
@@ -554,10 +552,10 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	ports = append(ports, opts.AppPorts...)
 
-	// Get active contexts
+	// Detect active Docker context to determine the correct socket path
 	_, socketPath, err := getActiveDockerContext(context.Background())
 	if err != nil {
-		socketPath = "/var/run/docker.sock"
+		socketPath = "/var/run/docker.sock" // Use default socket if detection fails
 	}
 
 	// Generate volumes using the extracted function
