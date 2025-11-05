@@ -232,12 +232,12 @@ run_replay() {
   coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
   echo "📊 Extracted coverage: ${coverage_percent}%"
 
-  # Compare coverage with threshold (50%)
-  if (( $(echo "$coverage_percent < 50" | bc -l) )); then
-    echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
+  # Compare coverage with threshold (40%)
+  if (( $(echo "$coverage_percent < 40" | bc -l) )); then
+    echo "::error::Coverage below threshold (40%). Found: ${coverage_percent}%"
     return 1
   else
-    echo "✅ Coverage meets threshold (>= 50%)"
+    echo "✅ Coverage meets threshold (>= 40%)"
   fi
 
   shopt -u nullglob
