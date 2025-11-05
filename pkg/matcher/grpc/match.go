@@ -188,8 +188,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	})
 
 	// Handle noise configuration first - needed for JSON comparison
+	noise := tc.Noise
 
-	//TODO: Need to implement and test noisy feature for grpc
 	var (
 		bodyNoise   = noiseConfig["body"]
 		headerNoise = noiseConfig["header"] // need to handle noisy header separately (not implemented yet for grpc)
@@ -201,6 +201,17 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 	if headerNoise == nil {
 		headerNoise = map[string][]string{}
+	}
+
+	// Merge test-case-specific noise with global noise (similar to HTTP matcher)
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise[strings.ToLower(x)] = regexArr
+		} else if a[0] == "header" {
+			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
+		}
 	}
 
 	// Compare decoded data - use JSON comparison if both are valid JSON, otherwise use canonicalization
@@ -215,6 +226,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		logger.Debug("Both gRPC decoded data are valid JSON, using JSON comparison",
 			zap.String("expectedDecodedData", expectedDecodedData),
 			zap.String("actualDecodedData", actualDecodedData))
+
+		expectedDecodedData = matcher.NormalizeNestedJSONForNoise(expectedDecodedData, bodyNoise, logger)
+		actualDecodedData = matcher.NormalizeNestedJSONForNoise(actualDecodedData, bodyNoise, logger)
 
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &expectedDecodedData, &actualDecodedData)
 		if err != nil {
