@@ -1,31 +1,24 @@
 package tools
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/export"
 	postmanimport "go.keploy.io/server/v2/pkg/service/import"
-	"go.keploy.io/server/v2/pkg/service/update"
+	"go.keploy.io/server/v2/pkg/service/update" // <-- This is now the update service
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
+// NewTools now accepts the update.Service
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config, updater update.Service) Service {
 	return &Tools{
 		logger:      logger,
 		telemetry:   telemetry,
@@ -34,6 +27,7 @@ func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, re
 		testDB:      testDB,
 		reportDB:    reportDB,
 		config:      config,
+		update:      updater, // <-- Store the updater
 	}
 }
 
@@ -45,6 +39,7 @@ type Tools struct {
 	reportDB    ReportDB
 	config      *config.Config
 	auth        service.Auth
+	update      update.Service // <-- Holds the update service
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -62,183 +57,9 @@ func (t *Tools) Import(ctx context.Context, path, basePath string) error {
 	return postmanImport.Import(path, basePath)
 }
 
-// Update initiates the update process for the Keploy binary file.
+// Update now just delegates the call to the update service
 func (t *Tools) Update(ctx context.Context) error {
-	currentVersion := "v" + utils.Version
-
-	downloadURLs := map[string]string{
-		"linux_amd64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz",
-		"linux_arm64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz",
-		"darwin_all":  "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz",
-	}
-
-	// Get latest release info
-	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, t.logger)
-	if err != nil {
-		return fmt.Errorf("failed to fetch latest release info: %v", err)
-	}
-
-	updateMgr := update.NewUpdateManager(t.logger, update.Config{
-		BinaryName:     "keploy",
-		CurrentVersion: currentVersion,
-		IsDevVersion:   strings.HasSuffix(currentVersion, "-dev"),
-		IsInDocker:     len(os.Getenv("KEPLOY_INDOCKER")) > 0,
-		DownloadURLs:   downloadURLs,
-		LatestVersion:  releaseInfo.TagName,
-		Changelog:      releaseInfo.Body,
-	})
-
-	_, err = updateMgr.CheckAndUpdate(ctx)
-
-	// Handle .dmg error gracefully
-	if errors.Is(err, update.ErrUnsupportedFiletype) {
-		t.logger.Warn("Update downloaded but requires manual installation", zap.Error(err))
-		fmt.Println("\n[Keploy Update] New version downloaded.")
-		fmt.Println("Please find the .dmg file in your temporary directory and install it manually.")
-		return nil
-	}
-
-	return err
-}
-
-func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {
-	// Create a new request with context
-	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-
-	// Create a HTTP client and execute the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to download file: %v", err)
-	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			utils.LogError(logger, cerr, "failed to close response body")
-		}
-	}()
-
-	// Create a temporary file to store the downloaded tar.gz
-	tmpFile, err := os.CreateTemp("", "keploy-download-*.tar.gz")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary file: %v", err)
-	}
-	defer func() {
-		if err := tmpFile.Close(); err != nil {
-			utils.LogError(logger, err, "failed to close temporary file")
-		}
-		if err := os.Remove(tmpFile.Name()); err != nil {
-			utils.LogError(logger, err, "failed to remove temporary file")
-		}
-	}()
-
-	// Write the downloaded content to the temporary file
-	_, err = io.Copy(tmpFile, resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to write to temporary file: %v", err)
-	}
-
-	// Extract the tar.gz file
-	if err := extractTarGz(tmpFile.Name(), "/tmp"); err != nil {
-		return fmt.Errorf("failed to extract tar.gz file: %v", err)
-	}
-
-	// Determine the path based on the alias "keploy"
-	aliasPath := "/usr/local/bin/keploy" // Default path
-
-	keployPath, err := exec.LookPath("keploy")
-	if err == nil && keployPath != "" {
-		aliasPath = keployPath
-	}
-
-	// Check if the aliasPath is a valid path
-	_, err = os.Stat(aliasPath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("alias path %s does not exist", aliasPath)
-	}
-
-	// Check if the aliasPath is a directory
-	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
-		return fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
-	}
-
-	// Move the extracted binary to the alias path
-	if err := os.Rename("/tmp/keploy", aliasPath); err != nil {
-		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
-	}
-
-	if err := os.Chmod(aliasPath, 0777); err != nil {
-		return fmt.Errorf("failed to set execute permission on %s: %v", aliasPath, err)
-	}
-
-	return nil
-}
-
-func extractTarGz(gzipPath, destDir string) error {
-	file, err := os.Open(gzipPath)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err := file.Close(); err != nil {
-			utils.LogError(nil, err, "failed to close file")
-		}
-	}()
-
-	gzipReader, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err := gzipReader.Close(); err != nil {
-			utils.LogError(nil, err, "failed to close gzip reader")
-		}
-	}()
-
-	tarReader := tar.NewReader(gzipReader)
-
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		fileName := filepath.Clean(header.Name)
-		if strings.Contains(fileName, "..") {
-			return fmt.Errorf("invalid file path: %s", fileName)
-		}
-
-		target := filepath.Join(destDir, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0777); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			outFile, err := os.Create(target)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(outFile, tarReader); err != nil {
-				if err := outFile.Close(); err != nil {
-					return err
-				}
-				return err
-			}
-			if err := outFile.Close(); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return t.update.Update(ctx)
 }
 
 func (t *Tools) CreateConfig(_ context.Context, filePath string, configData string) error {
