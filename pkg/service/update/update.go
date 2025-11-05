@@ -204,7 +204,6 @@ func (u *UpdateManager) extractTarGzAndApply(tarballPath, finalBinPath string) e
 	return fmt.Errorf("binary %q not found in downloaded archive", u.Config.BinaryName)
 }
 
-
 func findBinaryPath(binaryName string) (string, error) {
 	if binaryName == "" {
 		return "", errors.New("binary name cannot be empty")
@@ -259,4 +258,3 @@ func renderChangelog(changelog string) error {
 	fmt.Println(out)
 	return nil
 }
-
