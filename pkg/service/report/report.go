@@ -701,6 +701,8 @@ func (r *Report) renderSingleFailedTest(ctx context.Context, sb *strings.Builder
 	// Header with risk level and categories
 	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
 
+	var err error
+
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
 		header += fmt.Sprintf(" [%s-RISK]", test.FailureInfo.Risk)
@@ -730,12 +732,11 @@ func (r *Report) renderSingleFailedTest(ctx context.Context, sb *strings.Builder
 				sb.WriteString("\n\n")
 				sb.WriteString("\n--------------------------------------------------------------------\n")
 				return nil
-			} else {
-				r.logger.Warn("report: failed to generate JSON table diff for gRPC; falling back to raw body diff",
-					zap.String("testSet", test.Name),
-					zap.String("testCase", test.TestCaseID),
-					zap.Error(err))
 			}
+			r.logger.Warn("report: failed to generate JSON table diff for gRPC; falling back to raw body diff",
+				zap.String("testSet", test.Name),
+				zap.String("testCase", test.TestCaseID),
+				zap.Error(err))
 		} else {
 			r.logger.Warn("report: failed to convert gRPC bodies to JSON; falling back to raw body diff",
 				zap.String("testSet", test.Name),
