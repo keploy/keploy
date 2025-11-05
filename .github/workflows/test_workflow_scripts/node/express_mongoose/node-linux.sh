@@ -211,6 +211,35 @@ run_replay() {
       any_fail=true
     fi
   done
+
+  local coverage_file="$RUN_DIR/coverage.yaml"
+  if [[ -f "$coverage_file" ]]; then
+    echo "✅ Coverage file found: $coverage_file"
+  else
+    echo "::error::Coverage file not found in $RUN_DIR"
+    return 1
+  fi
+
+  # ✅ Extract and validate coverage percentage from log
+  local coverage_line coverage_percent
+  coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "$logfile" | tail -n1 || true)
+
+  if [[ -z "$coverage_line" ]]; then
+    echo "::error::No coverage percentage found in $logfile"
+    return 1
+  fi
+
+  coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
+  echo "📊 Extracted coverage: ${coverage_percent}%"
+
+  # Compare coverage with threshold (40%)
+  if (( $(echo "$coverage_percent < 40" | bc -l) )); then
+    echo "::error::Coverage below threshold (40%). Found: ${coverage_percent}%"
+    return 1
+  else
+    echo "✅ Coverage meets threshold (>= 40%)"
+  fi
+
   shopt -u nullglob
 
   if ! $any_seen; then
