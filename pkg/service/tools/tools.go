@@ -5,20 +5,20 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"sync"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/export"
 	postmanimport "go.keploy.io/server/v2/pkg/service/import"
-	"go.keploy.io/server/v2/pkg/service/update" // <-- This is now the update service
+	"go.keploy.io/server/v2/pkg/service/update"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-// NewTools now accepts the update.Service
-func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config, updater update.Service) Service {
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
 	return &Tools{
 		logger:      logger,
 		telemetry:   telemetry,
@@ -27,7 +27,6 @@ func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, re
 		testDB:      testDB,
 		reportDB:    reportDB,
 		config:      config,
-		update:      updater, // <-- Store the updater
 	}
 }
 
@@ -39,7 +38,6 @@ type Tools struct {
 	reportDB    ReportDB
 	config      *config.Config
 	auth        service.Auth
-	update      update.Service // <-- Holds the update service
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -57,9 +55,42 @@ func (t *Tools) Import(ctx context.Context, path, basePath string) error {
 	return postmanImport.Import(path, basePath)
 }
 
-// Update now just delegates the call to the update service
+// Update initiates the update process for the Keploy binary file.
 func (t *Tools) Update(ctx context.Context) error {
-	return t.update.Update(ctx)
+	currentVersion := "v" + utils.Version
+
+	downloadURLs := map[string]string{
+		"linux_amd64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz",
+		"linux_arm64": "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz",
+		"darwin_all":  "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz",
+	}
+
+	// Get latest release info
+	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, t.logger)
+	if err != nil {
+		t.logger.Error("failed to fetch latest release info:", zap.Error(err))
+		return err
+	}
+
+	updateMgr := update.NewUpdateManager(t.logger, update.Config{
+		BinaryName:     "keploy",
+		CurrentVersion: currentVersion,
+		IsDevVersion:   strings.HasSuffix(currentVersion, "-dev"),
+		IsInDocker:     len(os.Getenv("KEPLOY_INDOCKER")) > 0,
+		DownloadURLs:   downloadURLs,
+		LatestVersion:  releaseInfo.TagName,
+		Changelog:      releaseInfo.Body,
+	})
+
+	_, err = updateMgr.CheckAndUpdate(ctx)
+
+	// Handle .dmg error gracefully
+	if errors.Is(err, update.ErrUnsupportedFiletype) {
+		t.logger.Warn("Update downloaded but requires manual installation. Please find the .dmg file in your temporary directory and install it manually.", zap.Error(err))
+		return nil
+	}
+
+	return err
 }
 
 func (t *Tools) CreateConfig(_ context.Context, filePath string, configData string) error {
