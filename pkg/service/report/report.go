@@ -958,7 +958,7 @@ func (r *Report) grpcBodiesAsJSON(ctx context.Context, test models.TestResult) (
 	}
 
 	// Proto config must be provided (same flags as `keploy test`)
-	if r.config.Test.ProtoFile == "" && r.config.Test.ProtoDir == "" {
+	if r.config.Report.ProtoFile == "" && r.config.Report.ProtoDir == "" {
 		return "", "", false
 	}
 
@@ -992,9 +992,9 @@ func (r *Report) grpcBodiesAsJSON(ctx context.Context, test models.TestResult) (
 	}
 
 	pc := models.ProtoConfig{
-		ProtoFile:    r.config.Test.ProtoFile,
-		ProtoDir:     r.config.Test.ProtoDir,
-		ProtoInclude: r.config.Test.ProtoInclude,
+		ProtoFile:    r.config.Report.ProtoFile,
+		ProtoDir:     r.config.Report.ProtoDir,
+		ProtoInclude: r.config.Report.ProtoInclude,
 		RequestURI:   method,
 	}
 

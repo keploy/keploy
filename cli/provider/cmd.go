@@ -272,9 +272,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
-		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
-		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
-		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
+		cmd.Flags().String("proto-file", c.cfg.Report.ProtoFile, "Path of main proto file")
+		cmd.Flags().String("proto-dir", c.cfg.Report.ProtoDir, "Path of the directory where all protos of a service are located")
+		cmd.Flags().StringArray("proto-include", c.cfg.Report.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
@@ -654,7 +654,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Test.ProtoFile = protoFile
+		c.cfg.Report.ProtoFile = protoFile
 
 		protoDir, err := cmd.Flags().GetString("proto-dir")
 		if err != nil {
@@ -662,7 +662,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Test.ProtoDir = protoDir
+		c.cfg.Report.ProtoDir = protoDir
 
 		protoInclude, err := cmd.Flags().GetStringArray("proto-include")
 		if err != nil {
@@ -670,7 +670,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Test.ProtoInclude = protoInclude
+		c.cfg.Report.ProtoInclude = protoInclude
 
 		// validate the report path if provided
 		if reportPath != "" {
