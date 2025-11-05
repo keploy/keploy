@@ -61,13 +61,8 @@ ensure_success_phrase() {
 if [ "$MODE" = "incoming" ]; then
  echo "🧪 Testing with incoming requests"
 
-  # Start server with keploy in record mode
-  if [[ "$RECORD_SRC" == "latest" ]]; then
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
-  else
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
-  fi
- 
+ # Start server with keploy in record mode
+ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
  sleep 10
 
 
@@ -92,10 +87,14 @@ if [ "$MODE" = "incoming" ]; then
 
  echo "Stopping keploy record and server"
 
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
-echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
+
+ # Stop keploy record
+ pid=$(pgrep keploy || true)
+ echo "$pid Keploy PID"
+ if [ -n "${pid:-}" ]; then
+   echo "Killing keploy"
+   sudo kill "$pid" || true
+ fi
 
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
@@ -181,11 +180,12 @@ elif [ "$MODE" = "outgoing" ]; then
  sleep 10
 
 
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
-echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
-
+ pid=$(pgrep keploy || true)
+ echo "$pid Keploy PID"
+ if [ -n "${pid:-}" ]; then
+   echo "Killing keploy"
+   sudo kill "$pid" || true
+ fi
  sleep 5
 
  echo "Ensuring fuzzer client is stopped..."

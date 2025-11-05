@@ -12,24 +12,6 @@ source "$SCRIPT_DIR/../../common.sh"
 
 # Creates a collapsible group in the GitHub Actions log
 
-wait_for_http() {
-  local host="localhost" # Assuming localhost
-  local port="$2"
-  section "Waiting for application on port $port..."
-  for i in {1..120}; do
-    # Use netcat (nc) to check if the port is open without sending app-level data
-    if nc -z "$host" "$port" >/dev/null 2>&1; then
-      echo "✅ Application port $port is open."
-      endsec
-      return 0
-    fi
-    sleep 1
-  done
-  echo "::error::Application did not become available on port $port in time."
-  endsec
-  return 1
-}
-
 dump_logs() {
   section "Record Log"
   cat record.txt 2>/dev/null || echo "Record log not found."
@@ -81,6 +63,24 @@ wait_for_mysql() {
   return 1
 }
 
+wait_for_http() {
+  local host="localhost" # Assuming localhost
+  local port="$2"
+  section "Waiting for application on port $port..."
+  for i in {1..120}; do
+    # Use netcat (nc) to check if the port is open without sending app-level data
+    if nc -z "$host" "$port" >/dev/null 2>&1; then
+      echo "✅ Application port $port is open."
+      endsec
+      return 0
+    fi
+    sleep 1
+  done
+  echo "::error::Application did not become available on port $port in time."
+  endsec
+  return 1
+}
+
 # Triggers the fuzzer, lets it run for a short time, and then kills the Keploy process.
 send_requests() {
   local kp_pid="$1"
@@ -112,8 +112,6 @@ echo "RECORD_KEPLOY_BIN: $RECORD_KEPLOY_BIN"
 echo "REPLAY_KEPLOY _BIN: $REPLAY_KEPLOY_BIN"
 rm -rf keploy/ keploy.yml golden/ record.txt test.txt
 mkdir -p golden/
-sudo chmod +x $MYSQL_FUZZER_BIN
-sudo chown -R $(whoami):$(whoami) golden
 
 # Start a MySQL instance for the recording session
 docker run --name mysql-container \
@@ -137,17 +135,13 @@ endsec
 section "Generate Fuzzer Traffic"
 # Trigger traffic and explicitly kill the Keploy process after a delay
 send_requests "$KEPLOY_PID"
-sleep 20
+sleep 5
 endsec
 
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
-echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
-
+pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+wait "$pid" 2>/dev/null || true
 sleep 5
 check_for_errors "record.txt"
 echo "Recording stopped."

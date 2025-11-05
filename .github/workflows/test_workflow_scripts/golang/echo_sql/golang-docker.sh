@@ -49,11 +49,9 @@ send_request(){
     wait
 }
 
-
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    # get_container_health &
     sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false |& tee "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
@@ -64,7 +62,6 @@ for i in {1..2}; do
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
-        cat "docker-compose-tmp.yaml"
         exit 1
     fi
     sleep 5
@@ -79,7 +76,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false --disableMockUpload &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

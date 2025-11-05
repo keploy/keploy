@@ -23,9 +23,6 @@ cleanup_keploy() {
 # Set trap to cleanup on script exit
 trap cleanup_keploy EXIT
 
-# Add coverage to requirements.txt
-echo "coverage" >> requirements.txt
-
 # Install dependencies
 pip3 install -r requirements.txt
 
@@ -245,40 +242,6 @@ if grep "WARNING: DATA RACE" "final_test_logs.txt"; then
     echo "Race condition detected in final test run..."
     cat "final_test_logs.txt"
     exit 1
-fi
-
-# Find the most recent test-run dir (don’t assume test-run-0)
-RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
-if [[ -z "${RUN_DIR:-}" ]]; then
-  echo "::error::No test-run directory found under ./keploy/reports"
-  [[ $REPLAY_RC -ne 0 ]] && exit "$REPLAY_RC" || exit 1
-fi
-
-coverage_file="$RUN_DIR/coverage.yaml"
-if [[ -f "$coverage_file" ]]; then
-  echo "✅ Coverage file found: $coverage_file"
-else
-  echo "::error::Coverage file not found in $RUN_DIR"
-  return 1
-fi
-
-# ✅ Extract and validate coverage percentage from log
-coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
-
-if [[ -z "$coverage_line" ]]; then
-  echo "::error::No coverage percentage found in test_logs.txt"
-  return 1
-fi
-
-coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
-echo "📊 Extracted coverage: ${coverage_percent}%"
-
-# Compare coverage with threshold (50%)
-if (( $(echo "$coverage_percent < 50" | bc -l) )); then
-  echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
-  return 1
-else
-  echo "✅ Coverage meets threshold (>= 50%)"
 fi
 
 # Validate the final test run report. Since we started fresh, there is only one test set.

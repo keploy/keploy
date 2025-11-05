@@ -39,7 +39,7 @@ jobs:
       - name: Calculate total coverage data and remove generated files
         run: |
           go tool covdata textfmt -i="./final-cov" -o="./unfiltered-cov.txt"
-          grep -v "go.keploy.io/server/v3/pkg/graph/generated.go" unfiltered-cov.txt > total-coverage.txt
+          grep -v "go.keploy.io/server/v2/pkg/graph/generated.go" unfiltered-cov.txt > total-coverage.txt
 
       - name: Display the coverage data
         run: |

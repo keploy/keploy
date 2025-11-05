@@ -13,7 +13,6 @@ die() {
   echo "== mongo logs (complete) =="; docker logs mongoDb || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
   echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
-  echo "== keploy_agent logs (complete) =="; for f in keploy_agent*; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
   echo "== *.txt logs (complete) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
   for f in test_logs*.txt; do [[ -f "$f" ]] && { echo "== $f (complete) =="; cat "$f"; }; done
   exit "$rc"
@@ -91,11 +90,6 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
-sudo "$RECORD_BIN" agent \
- > keploy_agent_record.log 2>&1 &
-AGENT_PID=$!
-echo "Keploy Agent PID: $AGENT_PID"
-
 for i in 1 2; do
   section "Record iteration $i"
   app_name="nodeApp_${i}"
@@ -107,8 +101,6 @@ for i in 1 2; do
 
   # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
   send_request "$KEPLOY_PID"
-
-  cat "${app_name}.txt"
 
   # Wait + capture rc
   set +e
@@ -209,35 +201,6 @@ run_replay() {
       any_fail=true
     fi
   done
-
-  local coverage_file="$RUN_DIR/coverage.yaml"
-  if [[ -f "$coverage_file" ]]; then
-    echo "✅ Coverage file found: $coverage_file"
-  else
-    echo "::error::Coverage file not found in $RUN_DIR"
-    return 1
-  fi
-
-  # ✅ Extract and validate coverage percentage from log
-  local coverage_line coverage_percent
-  coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "$logfile" | tail -n1 || true)
-
-  if [[ -z "$coverage_line" ]]; then
-    echo "::error::No coverage percentage found in $logfile"
-    return 1
-  fi
-
-  coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
-  echo "📊 Extracted coverage: ${coverage_percent}%"
-
-  # Compare coverage with threshold (50%)
-  if (( $(echo "$coverage_percent < 50" | bc -l) )); then
-    echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
-    return 1
-  else
-    echo "✅ Coverage meets threshold (>= 50%)"
-  fi
-
   shopt -u nullglob
 
   if ! $any_seen; then

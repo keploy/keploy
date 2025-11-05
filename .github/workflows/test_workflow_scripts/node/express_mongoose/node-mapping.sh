@@ -222,8 +222,8 @@ run_replay() {
 
   section "Replay #$idx (args: ${extra_args:-<none>})"
   set +e
-  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --disable-mapping=false --delay 10 $extra_args 
-    # > "$logfile" 2>&1
+  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --disable-mapping=false --delay 10 $extra_args \
+    > "$logfile" 2>&1
   local rc=$?
   set -e
   echo "Replay #$idx exit code: $rc"

@@ -35,7 +35,7 @@ sudo $RECORD_KEPLOY_BIN config --generate
 # --- 1. Record Phase ---
 section "Start Recording Server"
 # Start keploy record in the background using the RECORD binary
-sudo -E env PATH="$PATH" $RECORD_KEPLOY_BIN record -c $RERECORD_SERVER_BIN > record.log 2>&1 | tee record.log &
+sudo -E env PATH="$PATH" $RECORD_KEPLOY_BIN record -c $RERECORD_SERVER_BIN > record.log 2>&1 &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
@@ -52,14 +52,10 @@ sleep 10
 
 # --- 3. Stop Recording ---
 section "Stop Recording"
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
-echo "Killing keploy"
-if [ -n "$REC_PID" ]; then
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
-else
-    echo "No keploy process found to kill."
-fi
+echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
+sudo kill "$KEPLOY_PID"
+wait "$KEPLOY_PID" || true # Wait for it to exit, ignore error if already gone
+echo "Recording stopped."
 
 # Check recording logs for errors
 if grep -i "ERROR" record.log; then

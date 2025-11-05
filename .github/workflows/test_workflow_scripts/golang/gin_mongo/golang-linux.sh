@@ -1,12 +1,10 @@
 #!/bin/bash
 
-# source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
- 
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+
 # Checkout a different branch
 git fetch origin
 git checkout native-linux
-
-echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # Start mongo before starting keploy.
 docker run --rm -d -p27017:27017 --name mongoDb mongo
@@ -17,7 +15,7 @@ if [ -f "./keploy.yml" ]; then
 fi
 
 # Generate the keploy-config file.
-sudo "$RECORD_BIN" config --generate
+sudo $RECORD_BIN config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -29,12 +27,11 @@ sed -i 's/ports: 0/ports: 27017/' "$config_file"
 rm -rf keploy/
 
 # Build the binary.
-go build -cover -coverpkg=./... -o ginApp
+go build -o ginApp
 
 
 send_request(){
-    local kp_pid="$1"
-
+    sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
         if curl --request POST \
@@ -67,27 +64,17 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
     echo "Killing keploy"
-    if [ -n "$REC_PID" ]; then
-        sudo kill -INT "$REC_PID" 2>/dev/null || true
-    else
-        echo "No keploy process found to kill."
-    fi
+    sudo kill $pid
 }
 
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp"  \
-    > "${app_name}.txt" 2>&1 &
-    
-    KEPLOY_PID=$!
-
-    # Drive traffic and stop keploy (will fail the pipeline if health never comes up)
-    send_request "$KEPLOY_PID"
-
+    send_request &
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "./ginApp"    &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -110,28 +97,7 @@ docker rm mongoDb || true
 echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
-
-cat test_logs.txt || true
-
-# ✅ Extract and validate coverage percentage from log
-coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
-
-if [[ -z "$coverage_line" ]]; then
-  echo "::error::No coverage percentage found in test_logs.txt"
-  return 1
-fi
-
-coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
-echo "📊 Extracted coverage: ${coverage_percent}%"
-
-# Compare coverage with threshold (50%)
-if (( $(echo "$coverage_percent < 50" | bc -l) )); then
-  echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
-  return 1
-else
-  echo "✅ Coverage meets threshold (>= 50%)"
-fi
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./ginApp" --delay 7    &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."

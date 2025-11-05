@@ -14,8 +14,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../common.sh"
 MODE=${1:-incoming}
 
-echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
-
 # --- Sanity Checks ---
 [ -x "${RECORD_BIN:-}" ] || { echo "RECORD_BIN not set or not executable"; exit 1; }
 [ -x "${REPLAY_BIN:-}" ] || { echo "REPLAY_BIN not set or not executable"; exit 1; }
@@ -96,7 +94,7 @@ wait_for_port() {
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
         # Use lsof to check for a listening TCP socket on the specified port
-        if sudo nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
+        if sudo lsof -iTCP:"$port" -sTCP:LISTEN -t >/dev/null; then
             echo "Port $port is open."
             return 0
         fi
@@ -109,10 +107,8 @@ wait_for_port() {
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
+    pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+    wait "$pid" 2>/dev/null || true
 }
 
 # --- Main Logic ---
