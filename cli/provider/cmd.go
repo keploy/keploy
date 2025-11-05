@@ -974,7 +974,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			config.SetSelectedTests(c.cfg, testSets)
+			if len(testSets) != 0 {
+				config.SetSelectedTests(c.cfg, testSets)
+			}
 
 			// get disable-mapping flag value
 			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
