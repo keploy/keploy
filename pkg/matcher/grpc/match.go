@@ -96,7 +96,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 
 		if !exists {
-			differences["headers.ordinary_headers.:content-type"] = struct {
+			differences["headers.ordinary_headers.content-type"] = struct {
 				Expected string
 				Actual   string
 				Message  string
@@ -130,7 +130,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			headerResult.Normal = normalize(expectedContentType) == normalize(actualContentType)
 
 			if !headerResult.Normal {
-				differences["headers.ordinary_headers.:content-type"] = struct {
+				differences["headers.ordinary_headers.content-type"] = struct {
 					Expected string
 					Actual   string
 					Message  string
