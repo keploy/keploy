@@ -75,7 +75,8 @@ func TestPrintTests_Passed(t *testing.T) {
 		config: nil,
 		out:    bufio.NewWriterSize(os.Stdout, 4096),
 	}
-	if err := r.printTests(tests); err != nil {
+	ctx := context.Background()
+	if err := r.printTests(ctx, tests); err != nil {
 		t.Fatalf("printTests failed: %v", err)
 	}
 }
