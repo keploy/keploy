@@ -8,7 +8,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/spf13/cobra"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 func (c *CmdConfigurator) noCommandError() error {
@@ -98,4 +101,64 @@ func getLogoColor(i, j int) string {
 	default:
 		return gradientColors[0]
 	}
+}
+
+func parseProtoFlags(logger *zap.Logger, cmd *cobra.Command) (models.ProtoConfig, error) {
+	var protoCfg models.ProtoConfig
+
+	protoFile, err := cmd.Flags().GetString("proto-file")
+	if err != nil {
+		errMsg := "failed to get the proto-file flag"
+		utils.LogError(logger, err, errMsg)
+		return protoCfg, errors.New(errMsg)
+	}
+
+	if protoFile != "" {
+		protoFile, err = utils.GetAbsPath(protoFile)
+		if err != nil {
+			errMsg := "failed to get the absolute path of proto-file"
+			utils.LogError(logger, err, errMsg)
+			return protoCfg, errors.New(errMsg)
+		}
+	}
+
+	protoDir, err := cmd.Flags().GetString("proto-dir")
+	if err != nil {
+		errMsg := "failed to get the proto-dir flag"
+		utils.LogError(logger, err, errMsg)
+		return protoCfg, errors.New(errMsg)
+	}
+
+	if protoDir != "" {
+		protoDir, err = utils.GetAbsPath(protoDir)
+		if err != nil {
+			errMsg := "failed to get the absolute path of proto-dir"
+			utils.LogError(logger, err, errMsg)
+			return protoCfg, errors.New(errMsg)
+		}
+	}
+
+	protoInclude, err := cmd.Flags().GetStringArray("proto-include")
+	if err != nil {
+		errMsg := "failed to get the proto-include flag"
+		utils.LogError(logger, err, errMsg)
+		return protoCfg, errors.New(errMsg)
+	}
+
+	if len(protoInclude) > 0 {
+		for _, dir := range protoInclude {
+			absDir, err := utils.GetAbsPath(dir)
+			if err != nil {
+				errMsg := "failed to get the absolute path of proto-include"
+				utils.LogError(logger, err, errMsg)
+				return protoCfg, errors.New(errMsg)
+			}
+			protoInclude = append(protoInclude, absDir)
+		}
+	}
+
+	protoCfg.ProtoFile = protoFile
+	protoCfg.ProtoDir = protoDir
+	protoCfg.ProtoInclude = protoInclude
+	return protoCfg, nil
 }

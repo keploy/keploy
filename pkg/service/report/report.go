@@ -19,6 +19,7 @@ import (
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -115,7 +116,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 			continue
 		}
 		any = true
-		if err := r.printTests(sel); err != nil {
+		if err := r.printTests(ctx, sel); err != nil {
 			return fmt.Errorf("failed to print tests in printSpecificTestCases: %w", err)
 		}
 	}
@@ -130,10 +131,10 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 }
 
 // helper used by both file and DB paths
-func (r *Report) printTests(tests []models.TestResult) error {
+func (r *Report) printTests(ctx context.Context, tests []models.TestResult) error {
 	for _, t := range tests {
 		if t.Status == models.TestStatusFailed {
-			if err := r.printSingleTestReport(t); err != nil {
+			if err := r.printSingleTestReport(ctx, t); err != nil {
 				return fmt.Errorf("failed to print single test report in printTests: %w", err)
 			}
 			continue
@@ -430,7 +431,7 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 				r.logger.Warn("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
 				return nil
 			}
-			return r.printTests(sel)
+			return r.printTests(ctx, sel)
 		}
 		// Default: only failed tests
 		failed := r.extractFailedTestsFromResults(tr.Tests)
@@ -478,7 +479,7 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 	// Handle specific test case filtering for legacy format
 	if len(r.config.Report.TestCaseIDs) > 0 {
-		return r.processLegacyTestCaseFiltering(lg.Tests)
+		return r.processLegacyTestCaseFiltering(ctx, lg.Tests)
 	}
 
 	// Default: process failed tests for legacy format
@@ -513,13 +514,13 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 }
 
 // processLegacyTestCaseFiltering filters and displays specific test cases from legacy format
-func (r *Report) processLegacyTestCaseFiltering(tests []models.TestResult) error {
+func (r *Report) processLegacyTestCaseFiltering(ctx context.Context, tests []models.TestResult) error {
 	sel := r.filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
 	if len(sel) == 0 {
 		r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
 		return nil
 	}
-	return r.printTests(sel)
+	return r.printTests(ctx, sel)
 }
 
 // processLegacyFailedTests processes and displays failed tests from legacy format
@@ -632,7 +633,7 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 				defer wg.Done()
 				defer func() { <-sem }()
 				var sb strings.Builder
-				if err := r.renderSingleFullBodyFailedTest(&sb, failedTests[i]); err != nil {
+				if err := r.renderSingleFullBodyFailedTest(ctx, &sb, failedTests[i]); err != nil {
 					results[i] = item{idx: i, err: err}
 					return
 				}
@@ -671,7 +672,7 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 			defer wg.Done()
 			defer func() { <-sem }()
 			var sb strings.Builder
-			if err := r.renderSingleFailedTest(&sb, failedTests[i]); err != nil {
+			if err := r.renderSingleFailedTest(ctx, &sb, failedTests[i]); err != nil {
 				results[i] = item{idx: i, err: err}
 				return
 			}
@@ -696,9 +697,11 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 }
 
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
-func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestResult) error {
+func (r *Report) renderSingleFailedTest(ctx context.Context, sb *strings.Builder, test models.TestResult) error {
 	// Header with risk level and categories
 	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+
+	var err error
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
@@ -721,6 +724,25 @@ func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestRes
 	sb.WriteString(applyCliColorsToDiff(metaDiff))
 	sb.WriteString("\n")
 	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
+
+	if test.Kind == models.GRPC_EXPORT {
+		if expJSON, actJSON, ok := r.grpcBodiesAsJSON(ctx, test); ok {
+			if diff, err := GenerateTableDiff(expJSON, actJSON); err == nil {
+				sb.WriteString(applyCliColorsToDiff(diff))
+				sb.WriteString("\n\n")
+				sb.WriteString("\n--------------------------------------------------------------------\n")
+				return nil
+			}
+			r.logger.Warn("report: failed to generate JSON table diff for gRPC; falling back to raw body diff",
+				zap.String("testSet", test.Name),
+				zap.String("testCase", test.TestCaseID),
+				zap.Error(err))
+		} else {
+			r.logger.Warn("report: failed to convert gRPC bodies to JSON; falling back to raw body diff",
+				zap.String("testSet", test.Name),
+				zap.String("testCase", test.TestCaseID))
+		}
+	}
 
 	// Body diffs
 	for _, bodyResult := range test.Result.BodyResult {
@@ -754,10 +776,10 @@ type writerAdapter struct{ sb *strings.Builder }
 
 func (w *writerAdapter) Write(p []byte) (int, error) { return w.sb.Write(p) }
 
-func (r *Report) printSingleTestReport(test models.TestResult) error {
+func (r *Report) printSingleTestReport(ctx context.Context, test models.TestResult) error {
 	if r.config.Report.ShowFullBody {
 		var sb strings.Builder
-		if err := r.renderSingleFullBodyFailedTest(&sb, test); err != nil {
+		if err := r.renderSingleFullBodyFailedTest(ctx, &sb, test); err != nil {
 			return fmt.Errorf("failed to render full body test: %w", err)
 		}
 		if _, err := r.out.WriteString(sb.String()); err != nil {
@@ -772,7 +794,7 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 
 	// Non-full-body: unchanged
 	var sb strings.Builder
-	if err := r.renderSingleFailedTest(&sb, test); err != nil {
+	if err := r.renderSingleFailedTest(ctx, &sb, test); err != nil {
 		return fmt.Errorf("failed to render test report: %w", err)
 	}
 	if _, err := r.out.WriteString(sb.String()); err != nil {
@@ -786,7 +808,7 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 }
 
 // renderSingleFullBodyFailedTest renders a single failed test in full-body mode into sb.
-func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models.TestResult) error {
+func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings.Builder, test models.TestResult) error {
 	// Write header via printer.Sprintf (no stdout)
 	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
 	sb.WriteString(header)
@@ -802,7 +824,7 @@ func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models
 	if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
 		return fmt.Errorf("failed to add header diffs: %w", err)
 	}
-	if err := r.addBodyDiffs(test, &logDiffs); err != nil {
+	if err := r.addBodyDiffs(ctx, test, &logDiffs); err != nil {
 		return fmt.Errorf("failed to add body diffs: %w", err)
 	}
 
@@ -859,7 +881,14 @@ func (r *Report) addHeaderDiffs(test models.TestResult, logDiffs *matcherUtils.D
 }
 
 // addBodyDiffs adds body differences to the diff printer
-func (r *Report) addBodyDiffs(test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
+func (r *Report) addBodyDiffs(ctx context.Context, test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
+	if test.Kind == models.GRPC_EXPORT {
+		if expJSON, actJSON, ok := r.grpcBodiesAsJSON(ctx, test); ok {
+			logDiffs.PushBodyDiff(expJSON, actJSON, nil)
+			return nil
+		}
+	}
+
 	for _, bodyResult := range test.Result.BodyResult {
 		if !bodyResult.Normal {
 			actualValue, err := r.renderTemplateValue(bodyResult.Actual)
@@ -918,4 +947,75 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 		return fmt.Errorf("failed to render default body diffs: %w", err)
 	}
 	return nil
+}
+
+// grpcBodiesAsJSON converts the gRPC protoscope body (GRPC_DATA) to JSON
+// using the same proto config that replay uses. It returns (expectedJSON, actualJSON, ok).
+func (r *Report) grpcBodiesAsJSON(ctx context.Context, test models.TestResult) (string, string, bool) {
+	// We only care about gRPC_EXPORT results
+	if test.Kind != models.GRPC_EXPORT {
+		return "", "", false
+	}
+
+	// Proto config must be provided (same flags as `keploy test`)
+	if r.config.Report.ProtoFile == "" && r.config.Report.ProtoDir == "" {
+		return "", "", false
+	}
+
+	// gRPC method path comes from :path pseudo-header, same as in replay.RunTestSet
+	method := ""
+	if test.GrpcReq.Headers.PseudoHeaders != nil {
+		if m, ok := test.GrpcReq.Headers.PseudoHeaders[":path"]; ok {
+			method = m
+		}
+	}
+	if method == "" {
+		r.logger.Warn("report: missing :path header on gRPC request; cannot derive proto method",
+			zap.String("testSet", test.Name),
+			zap.String("testCase", test.TestCaseID))
+		return "", "", false
+	}
+
+	// Find the GRPC_DATA diff entry to get protoscope text
+	var protoExpected, protoActual string
+	for _, br := range test.Result.BodyResult {
+		// gRPC matcher uses bodyType like "GRPC_DATA"
+		if strings.EqualFold(string(br.Type), "GRPC_DATA") {
+			protoExpected = fmt.Sprint(br.Expected)
+			protoActual = fmt.Sprint(br.Actual)
+			break
+		}
+	}
+	if protoExpected == "" && protoActual == "" {
+		// nothing to convert
+		return "", "", false
+	}
+
+	pc := models.ProtoConfig{
+		ProtoFile:    r.config.Report.ProtoFile,
+		ProtoDir:     r.config.Report.ProtoDir,
+		ProtoInclude: r.config.Report.ProtoInclude,
+		RequestURI:   method,
+	}
+
+	md, files, err := utils.GetProtoMessageDescriptor(ctx, r.logger, pc)
+	if err != nil {
+		r.logger.Warn("report: failed to get proto message descriptor; falling back to raw gRPC diff",
+			zap.String("testSet", test.Name),
+			zap.String("testCase", test.TestCaseID),
+			zap.Error(err))
+		return "", "", false
+	}
+
+	actJSON, actOK := utils.ProtoTextToJSON(md, files, protoActual, r.logger)
+	expJSON, expOK := utils.ProtoTextToJSON(md, files, protoExpected, r.logger)
+
+	if !actOK || !expOK {
+		r.logger.Warn("report: failed to convert gRPC protoscope to JSON; falling back to raw gRPC diff",
+			zap.String("testSet", test.Name),
+			zap.String("testCase", test.TestCaseID))
+		return "", "", false
+	}
+
+	return string(expJSON), string(actJSON), true
 }

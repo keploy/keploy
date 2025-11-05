@@ -1094,7 +1094,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					goto compareResp
 				}
 
-				pc := ProtoConfig{
+				pc := models.ProtoConfig{
 					ProtoFile:    r.config.Test.ProtoFile,
 					ProtoDir:     r.config.Test.ProtoDir,
 					ProtoInclude: r.config.Test.ProtoInclude,
@@ -1102,15 +1102,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 
 				// get the proto message descriptor
-				md, files, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+				md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
 					goto compareResp
 				}
 
 				// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-				actJSON, actOK := ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-				testJSON, testOK := ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+				actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
+				testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
 
 				if actOK && testOK {
 					respCopy.Body.DecodedData = string(actJSON)
@@ -1726,7 +1726,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 				goto compareResp
 			}
 
-			pc := ProtoConfig{
+			pc := models.ProtoConfig{
 				ProtoFile:    r.config.Test.ProtoFile,
 				ProtoDir:     r.config.Test.ProtoDir,
 				ProtoInclude: r.config.Test.ProtoInclude,
@@ -1734,15 +1734,15 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			}
 
 			// get the proto message descriptor
-			md, files, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+			md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
 				goto compareResp
 			}
 
 			// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-			actJSON, actOK := ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-			testJSON, testOK := ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+			actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
+			testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
 
 			if actOK && testOK {
 				respCopy.Body.DecodedData = string(actJSON)
