@@ -908,10 +908,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// Only needed for test/rerecord commands before starting Docker
 		if (cmd.Name() == "test" || cmd.Name() == "rerecord") && !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
 			// Parse proto flags from command
-			err := parseProtoFlags(c.logger, c.cfg, cmd)
+			protoCfg, err := parseProtoFlags(c.logger, cmd)
 			if err != nil {
 				return err
 			}
+
+			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+			c.cfg.Test.ProtoInclude = protoCfg.ProtoInclude
 
 			// Mount proto paths that are outside current working directory
 			// Mount proto file (if specified)
