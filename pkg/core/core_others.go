@@ -63,7 +63,3 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 func (c *Core) GetErrorChannel() <-chan error {
 	return nil
 }
-
-func (c *Core) CloseConnections() {
-	c.logger.Warn("CloseConnections called on unsupported OS, no action taken")
-}

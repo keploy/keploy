@@ -20,7 +20,6 @@ type Instrumentation interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
-	CloseConnections()
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors

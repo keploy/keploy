@@ -48,7 +48,6 @@ type Proxy interface {
 	StartProxy(ctx context.Context, opts ProxyOptions) error
 	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
-	CloseAllClientConnections()
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	GetErrorChannel() <-chan error

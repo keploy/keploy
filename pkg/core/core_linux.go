@@ -283,7 +283,3 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 
 	return ip, nil
 }
-
-func (c *Core) CloseConnections() {
-	c.CloseAllClientConnections()
-}

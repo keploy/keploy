@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/agnivade/levenshtein"
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -37,17 +36,6 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 
 		// Fetch and filter HTTP mocks
 		mocks, err := mockDb.GetUnFilteredMocks()
-		fmt.Println("--- Printing All Unfiltered Mocks ---")
-
-		// Use a for...range loop to iterate over the slice
-		for index, mock := range mocks {
-			// 'index' is the numerical index (0, 1, 2, ...)
-			// 'mock' is the value at that index (which is a *models.Mock pointer)
-
-			// Use fmt.Printf with %+v to print the contents of the struct
-			// pointed to by 'mock', rather than just its memory address.
-			fmt.Printf("Index %d: %+v\n", index, mock)
-		}
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get unfilteredMocks mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
@@ -218,7 +206,6 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		if input.header.Get("Content-Type") != "" {
 			if !pkg.CompareMultiValueHeaders(mock.Spec.HTTPReq.Header["Content-Type"], input.header.Values("Content-Type")) {
 				h.Logger.Debug("The content type of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input header", input.header.Values("Content-Type")), zap.Any("mock header content-type", mock.Spec.HTTPReq.Header["Content-Type"]))
-				spew.Dump(mock)
 				continue
 			}
 		}

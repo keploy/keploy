@@ -346,15 +346,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			// if r.instrument {
-			// 	r.logger.Info("Test set finished, closing all proxy connections.")
 
-			// 	// You will need to add this method to your instrumentation interface
-			// 	r.instrumentation.CloseConnections()
-			// 	if err != nil {
-			// 		utils.LogError(r.logger, err, "failed to close client connections between test sets")
-			// 	}
-			// }
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false, runApp)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -492,7 +484,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
 			}
 		}
-		// time.Sleep(1 * time.Second)
 	}
 	if r.appCtxCancel != nil {
 		r.appCtxCancel()
@@ -887,25 +878,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
 	}
-	fmt.Println("setting mocks filtered : ", len(filteredMocks), " unfiltered : ", len(unfilteredMocks))
-	fmt.Println("--- Printing All Unfiltered Mocks ---")
 
-	// Use a for...range loop to iterate over the slice
-	for index, mock := range unfilteredMocks {
-		// 'index' is the numerical index (0, 1, 2, ...)
-		// 'mock' is the value at that index (which is a *models.Mock pointer)
-
-		// Use fmt.Printf with %+v to print the contents of the struct
-		// pointed to by 'mock', rather than just its memory address.
-		fmt.Printf("Index %d: %+v\n", index, mock)
-	}
 	// Initial mock setup - use empty mapping for initial setup
 	// For the initial setup, we always use mapping-based with empty mapping to get all unfiltered mocks
 	err = r.FilterAndSetMocksWithFallback(ctx, appID, filteredMocks, unfilteredMocks, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
-	time.Sleep(10 * time.Second)
+	time.Sleep(1 * time.Second)
 	if r.instrument {
 		if runApp && r.config.Test.SkipAppRestart {
 			fmt.Println("starting the application with appID :", appID)
@@ -1111,7 +1091,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to filter and set mocks")
 			break
 		}
-		// time.Sleep(10 * time.Second)
 
 		// Handle Docker environment IP replacement
 		if utils.IsDockerCmd(cmdType) {
