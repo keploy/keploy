@@ -16,6 +16,7 @@ import (
 
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/tools"
@@ -727,23 +728,28 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 		if bodyResult.Normal {
 			continue
 		}
+		
 		if bodyResult.Type == models.JSON || bodyResult.Type == models.GrpcData {
-			diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
-			if err == nil {
-				sb.WriteString(applyCliColorsToDiff(diff))
-				sb.WriteString("\n")
-			} else {
-				tmp := *r
-				tmp.out = bufio.NewWriterSize(&writerAdapter{sb: sb}, 64<<10)
-				_ = tmp.printDefaultBodyDiff(bodyResult)
-				_ = tmp.out.Flush()
+			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
+				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
+				if err == nil {
+					sb.WriteString(applyCliColorsToDiff(diff))
+					sb.WriteString("\n")
+				} else {
+					tmp := *r
+					tmp.out = bufio.NewWriterSize(&writerAdapter{sb: sb}, 64<<10)
+					_ = tmp.printDefaultBodyDiff(bodyResult)
+					_ = tmp.out.Flush()
+				}
+				continue
 			}
-		} else {
-			// Force the old compact format for non-JSON bodies (fast).
-			diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
-			sb.WriteString(applyCliColorsToDiff(diff))
-			sb.WriteString("\n\n")
 		}
+
+		// Force the old compact format for non-JSON bodies (fast).
+		diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
+		sb.WriteString(applyCliColorsToDiff(diff))
+		sb.WriteString("\n\n")
+
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
