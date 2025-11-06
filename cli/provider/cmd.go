@@ -904,37 +904,56 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		// Parse proto paths early for Docker volume mounting
-		// Only needed for test/rerecord commands before starting Docker
-		if (cmd.Name() == "test" || cmd.Name() == "rerecord") && !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
-			// Parse proto flags from command
-			protoCfg, err := parseProtoFlags(c.logger, cmd)
-			if err != nil {
-				return err
-			}
-
-			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
-			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
-			c.cfg.Test.ProtoInclude = protoCfg.ProtoInclude
-
-			// Mount proto paths that are outside current working directory
-			// Mount proto file (if specified)
-			err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoFile, true)
-			if err != nil {
-				return err
-			}
-
-			// Mount proto directory (if specified)
-			err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoDir, false)
-			if err != nil {
-				return err
-			}
-
-			// Mount proto include directories (if any)
-			for _, includePath := range c.cfg.Test.ProtoInclude {
-				err = mountPathIfExternal(c.logger, includePath, false)
+		// Mount config path and proto paths early for Docker volume mounting
+		// Only needed before starting Docker for record/test/rerecord commands
+		if !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
+			// Mount config path if it's outside current working directory.
+			// Note: PWD is already mounted in Docker, so paths inside PWD don't need additional mounts.
+			// mountPathIfExternal will use prefix matching to determine if config path is outside PWD.
+			if c.cfg.ConfigPath != "" {
+				absConfigPath, err := utils.GetAbsPath(c.cfg.ConfigPath)
+				if err != nil {
+					errMsg := "failed to get the absolute path of config path"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				err = mountPathIfExternal(c.logger, absConfigPath, false, "config")
 				if err != nil {
 					return err
+				}
+			}
+
+			// Parse and mount proto paths for test/rerecord commands
+			if cmd.Name() == "test" || cmd.Name() == "rerecord" {
+				// Parse proto flags from command
+				protoCfg, err := parseProtoFlags(c.logger, cmd)
+				if err != nil {
+					return err
+				}
+
+				c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+				c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+				c.cfg.Test.ProtoInclude = protoCfg.ProtoInclude
+
+				// Mount proto paths that are outside current working directory
+				// Mount proto file (if specified)
+				err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoFile, true, "proto")
+				if err != nil {
+					return err
+				}
+
+				// Mount proto directory (if specified)
+				err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoDir, false, "proto")
+				if err != nil {
+					return err
+				}
+
+				// Mount proto include directories (if any)
+				for _, includePath := range c.cfg.Test.ProtoInclude {
+					err = mountPathIfExternal(c.logger, includePath, false, "proto")
+					if err != nil {
+						return err
+					}
 				}
 			}
 
