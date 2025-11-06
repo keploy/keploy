@@ -80,8 +80,7 @@ func (u *UpdateManager) CheckAndUpdate(ctx context.Context) (bool, error) {
 	osArch := runtime.GOOS + "_" + runtime.GOARCH
 	if runtime.GOOS == "darwin" {
 		osArch = "darwin_all"
-	}
-	if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
+	} else if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
 		osArch = "windows_amd64"
 	}
 
