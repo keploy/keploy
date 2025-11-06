@@ -151,6 +151,9 @@ type Report struct {
 	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
 	Summary          bool                `json:"summary" yaml:"summary" mapstructure:"summary"`
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
+	ProtoFile        string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
+	ProtoDir         string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
+	ProtoInclude     []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 }
 
 type Globalnoise struct {
@@ -210,25 +213,64 @@ func SetSelectedTestSets(conf *Config, testSets []string) {
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {
-	testSets := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == ' '
-	})
-	var tests []SelectedTests
-	if len(testSets) == 0 {
-		conf.Normalize.SelectedTests = tests
+	value = strings.TrimSpace(value)
+
+	// No tests provided -> clear selection and return
+	if value == "" {
+		conf.Normalize.SelectedTests = nil
 		return nil
 	}
-	for _, ts := range testSets {
-		parts := strings.Split(ts, ":")
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid format: %s", ts)
+
+	// Split only on commas: each token represents one test-set specification.
+	// Examples:
+	//   "ts1, ts2:tc1 tc2" =>
+	//      "ts1"
+	//      "ts2:tc1 tc2"
+	parts := strings.Split(value, ",")
+
+	var selected []SelectedTests
+
+	for _, part := range parts {
+		spec := strings.TrimSpace(part)
+		if spec == "" {
+			continue
 		}
-		testCases := strings.Split(parts[1], " ")
-		tests = append(tests, SelectedTests{
-			TestSet: parts[0],
-			Tests:   testCases,
+
+		// Check if this spec has an explicit list of test cases, e.g. "ts2:tc1 tc2"
+		idx := strings.Index(spec, ":")
+
+		if idx != -1 {
+			testSetName := strings.TrimSpace(spec[:idx])
+			if testSetName == "" {
+				return fmt.Errorf("invalid format (missing test set name): %q", spec)
+			}
+
+			testsPart := strings.TrimSpace(spec[idx+1:])
+			var testCases []string
+			if testsPart != "" {
+				for _, tc := range strings.Fields(testsPart) {
+					tc = strings.TrimSpace(tc)
+					if tc != "" {
+						testCases = append(testCases, tc)
+					}
+				}
+			}
+
+			selected = append(selected, SelectedTests{
+				TestSet: testSetName,
+				// Empty testCases slice means "all tests" in that test set.
+				Tests: testCases,
+			})
+			continue
+		}
+
+		// No colon -> entire token is just the test-set name, implies "all tests in this set"
+		selected = append(selected, SelectedTests{
+			TestSet: spec,
+			Tests:   []string{}, // empty slice => all tests in this test set
 		})
 	}
-	conf.Normalize.SelectedTests = tests
+
+	conf.Normalize.SelectedTests = selected
 	return nil
 }
