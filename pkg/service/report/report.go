@@ -728,7 +728,7 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 		if bodyResult.Normal {
 			continue
 		}
-		
+
 		if bodyResult.Type == models.JSON || bodyResult.Type == models.GrpcData {
 			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
 				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
