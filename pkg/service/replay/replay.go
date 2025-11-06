@@ -252,43 +252,43 @@ func (r *Replayer) Start(ctx context.Context) error {
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
-		if !runApp && firstrun {
+		if !runApp && firstrun && r.config.Test.SkipAppRestart {
 			runApp = true
 			firstrun = false
 		}
 		// Reload hooks before each test set if this is not the first test set
 		// This ensures fresh eBPF state and prevents issues between test runs
-		// if i > 0 && r.instrument {
+		if i > 0 && r.instrument && !r.config.Test.SkipAppRestart {
 
-		// 	// Cancel the current hooks and wait for cleanup to complete
-		// 	if hookCancel != nil {
-		// 		hookCancel()
-		// 		// Wait for hooks to be completely unloaded using the channel signal
-		// 		// This ensures that all eBPF resources are properly released before we reload
-		// 		r.logger.Debug("Waiting for hooks to be completely unloaded", zap.String("testSet", testSet))
-		// 		<-inst.UnloadDone
-		// 		r.logger.Debug("Hooks unload completed", zap.String("testSet", testSet))
-		// 	}
+			// Cancel the current hooks and wait for cleanup to complete
+			if hookCancel != nil {
+				hookCancel()
+				// Wait for hooks to be completely unloaded using the channel signal
+				// This ensures that all eBPF resources are properly released before we reload
+				r.logger.Debug("Waiting for hooks to be completely unloaded", zap.String("testSet", testSet))
+				<-inst.UnloadDone
+				r.logger.Debug("Hooks unload completed", zap.String("testSet", testSet))
+			}
 
-		// 	r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
+			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
 
-		// 	// Reload hooks for the new test set with retry mechanism
-		// 	newInst, err := r.reloadHooks(ctx, inst.AppID)
-		// 	if err != nil {
-		// 		stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
-		// 		utils.LogError(r.logger, err, stopReason)
-		// 		if ctx.Err() == context.Canceled {
-		// 			return err
-		// 		}
-		// 		return fmt.Errorf("%s", stopReason)
-		// 	}
-		// 	hookCancel = newInst.HookCancel
-		// 	// Update the inst with the new hook cancel function, app ID, and unload done channel
-		// 	inst.HookCancel = newInst.HookCancel
-		// 	inst.AppID = newInst.AppID
-		// 	inst.UnloadDone = newInst.UnloadDone
-		// 	r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
-		// }
+			// Reload hooks for the new test set with retry mechanism
+			newInst, err := r.reloadHooks(ctx, inst.AppID)
+			if err != nil {
+				stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
+				utils.LogError(r.logger, err, stopReason)
+				if ctx.Err() == context.Canceled {
+					return err
+				}
+				return fmt.Errorf("%s", stopReason)
+			}
+			hookCancel = newInst.HookCancel
+			// Update the inst with the new hook cancel function, app ID, and unload done channel
+			inst.HookCancel = newInst.HookCancel
+			inst.AppID = newInst.AppID
+			inst.UnloadDone = newInst.UnloadDone
+			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
+		}
 
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
@@ -811,7 +811,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// var appErrChan = make(chan models.AppError, 1)
+	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
 	var success int
 	var failure int
@@ -907,7 +907,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 	time.Sleep(10 * time.Second)
 	if r.instrument {
-		if runApp {
+		if runApp && r.config.Test.SkipAppRestart {
 			fmt.Println("starting the application with appID :", appID)
 			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
 			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
@@ -923,19 +923,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				return nil
 			})
 		}
-		// if !serveTest {
-		// 	runTestSetErrGrp.Go(func() error {
-		// 		defer utils.Recover(r.logger)
-		// 		appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
-		// 			AppCommand: conf.AppCommand,
-		// 		})
-		// 		if appErr.AppErrorType == models.ErrCtxCanceled {
-		// 			return nil
-		// 		}
-		// 		appErrChan <- appErr
-		// 		return nil
-		// 	})
-		// }
+		if !serveTest && !r.config.Test.SkipAppRestart {
+			runTestSetErrGrp.Go(func() error {
+				defer utils.Recover(r.logger)
+				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+					AppCommand: conf.AppCommand,
+				})
+				if appErr.AppErrorType == models.ErrCtxCanceled {
+					return nil
+				}
+				appErrChan <- appErr
+				return nil
+			})
+		}
 
 		// Checking for errors in the mocking and application
 		runTestSetErrGrp.Go(func() error {
@@ -966,19 +966,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		})
 
 		// Delay for user application to run
-		if runApp {
+		if runApp && r.config.Test.SkipAppRestart {
 			fmt.Println("waiting for the application with appID :", appID)
 			select {
 			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
 			case <-runTestSetCtx.Done():
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
+		} else if !r.config.Test.SkipAppRestart {
+			select {
+			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			case <-runTestSetCtx.Done():
+				return models.TestSetStatusUserAbort, context.Canceled
+			}
 		}
-		// select {
-		// case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		// case <-runTestSetCtx.Done():
-		// 	return models.TestSetStatusUserAbort, context.Canceled
-		// }
+
 		fmt.Println("here is the apID :", appID)
 		if utils.IsDockerCmd(cmdType) {
 			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
@@ -1109,7 +1111,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to filter and set mocks")
 			break
 		}
-		time.Sleep(2 * time.Second)
 		// time.Sleep(10 * time.Second)
 
 		// Handle Docker environment IP replacement
