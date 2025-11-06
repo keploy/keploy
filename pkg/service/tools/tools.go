@@ -85,7 +85,7 @@ func (t *Tools) Update(ctx context.Context) error {
 	_, err = updateMgr.CheckAndUpdate(ctx)
 
 	// Handle .dmg error gracefully
-	if errors.Is(err, update.ErrUnsupportedFiletype) {
+	if errors.Is(err, update.ErrDmgNeedsManualInstall) {
 		t.logger.Warn("Update downloaded but requires manual installation. Please find the .dmg file in your temporary directory and install it manually.", zap.Error(err))
 		return nil
 	}
