@@ -22,6 +22,12 @@ jobs:
         run: |
           rm -rf ~/.gitconfig
       
+      - name: Create workflow start lock
+        run: |
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          mkdir -p "$LOCK_DIR"
+          echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+      
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -142,14 +148,56 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
-      - name: Docker Image Prune (unused only, wait if locked)
+      - name: Check for other running workflows
+        id: check_locks
         run: |
-          # Wait if another prune is running (lock file /var/lib/docker/tmp/docker-prune.lock may exist)
-          while lsof /var/lib/docker/tmp/docker-prune.lock >/dev/null 2>&1; do
-            echo "Waiting for existing docker prune operation to finish..."
-            sleep 5
-          done
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          
+          # Count existing lock files excluding our own
+          LOCK_COUNT=$(ls -1 "$LOCK_DIR"/prepare-macos-workflow-*.lock 2>/dev/null | grep -v "${{ github.run_id }}" | wc -l | tr -d ' ')
+          
+          echo "lock_count=$LOCK_COUNT" >> $GITHUB_OUTPUT
+          echo "Found $LOCK_COUNT other running workflow(s)"
+          
+          if [ "$LOCK_COUNT" -gt 0 ]; then
+            echo "Other workflows are still running. Listing lock files:"
+            ls -lh "$LOCK_DIR"/prepare-macos-workflow-*.lock 2>/dev/null | grep -v "${{ github.run_id }}" || true
+          fi
+
+      - name: Docker Image Prune (unused only, wait if locked)
+        if: steps.check_locks.outputs.lock_count == '0'
+        run: |
+          echo "No other workflows running. Proceeding with Docker cleanup..."
+          
           # Prune only dangling (untagged) images not in use
+          echo "Pruning Docker images..."
           docker image prune -a -f
+          
           # Prune dangling (unused) volumes as well
+          echo "Pruning Docker volumes..."
           docker volume prune -a -f
+          
+          echo "Docker cleanup completed successfully"
+
+      - name: Skip cleanup - other workflows running
+        if: steps.check_locks.outputs.lock_count != '0'
+        run: |
+          echo "⚠️ Skipping Docker cleanup - ${{ steps.check_locks.outputs.lock_count }} other workflow run(s) still in progress"
+          echo "This is expected behavior to prevent cleanup conflicts"
+
+      - name: Remove workflow lock file
+        if: always()
+        run: |
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          LOCK_FILE="$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+          
+          if [ -f "$LOCK_FILE" ]; then
+            echo "Removing workflow lock file: $LOCK_FILE"
+            rm -f "$LOCK_FILE"
+          else
+            echo "Lock file not found (may have been cleaned up already): $LOCK_FILE"
+          fi
+          
+          # Optional: Clean up old lock files (older than 24 hours)
+          echo "Cleaning up stale lock files older than 24 hours..."
+          find "$LOCK_DIR" -name "prepare-macos-workflow-*.lock" -type f -mtime +1 -delete 2>/dev/null || true
