@@ -8,6 +8,8 @@ name: Docker
 on:
   push:
     tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main ]
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -70,9 +72,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}},enable=${{ !contains(github.ref_name, '-') }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}},enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern=v{{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Show generated tags 
@@ -87,41 +89,41 @@ jobs:
         run: |
           echo "VERSION=$(echo ${GITHUB_REF#refs/tags/v})" >> $GITHUB_ENV
 
-      - name: Prepare Dockerfile for Release Build
-        run: |
-          # Add the SSH host key to trust github.com and configure git to use SSH
-          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' ./Dockerfile
+      # - name: Prepare Dockerfile for Release Build
+      #   run: |
+      #     # Add the SSH host key to trust github.com and configure git to use SSH
+      #     sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' ./Dockerfile
           
-          # Ensure the go mod download command uses the SSH agent mount
-          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile
+      #     # Ensure the go mod download command uses the SSH agent mount
+      #     sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile
 
       # Build and push Docker image with Buildx (don't push on PR)
       # https://github.com/docker/build-push-action
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
-        with:
-          context: .
-          ssh: default
-          platforms: linux/amd64, linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SENTRY_DSN_DOCKER=${{secrets.SENTRY_DSN_DOCKER}}
-            VERSION=${{ env.VERSION }}
-            SERVER_URL=https://api.keploy.io
-            GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+      # - name: Build and push Docker image
+      #   id: build-and-push
+      #   uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+      #   with:
+      #     context: .
+      #     ssh: default
+      #     platforms: linux/amd64, linux/arm64
+      #     push: ${{ github.event_name != 'pull_request' }}
+      #     tags: ${{ steps.meta.outputs.tags }}
+      #     labels: ${{ steps.meta.outputs.labels }}
+      #     build-args: |
+      #       SENTRY_DSN_DOCKER=${{secrets.SENTRY_DSN_DOCKER}}
+      #       VERSION=${{ env.VERSION }}
+      #       SERVER_URL=https://api.keploy.io
+      #       GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
 
       # Sign the resulting Docker image digest except on PRs.
       # This will only write to the public Rekor transparency log when the Docker
       # repository is public to avoid leaking data.  If you would like to publish
       # transparency data even for private images, pass --force to cosign below.
       # https://github.com/sigstore/cosign
-      - name: Sign the published Docker image
-        if: ${{ github.event_name != 'pull_request' }}
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-        # This step uses the identity token to provision an ephemeral certificate
-        # against the sigstore community Fulcio instance.
-        run: cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-and-push.outputs.digest }}
+      # - name: Sign the published Docker image
+      #   if: ${{ github.event_name != 'pull_request' }}
+      #   env:
+      #     COSIGN_EXPERIMENTAL: "true"
+      #   # This step uses the identity token to provision an ephemeral certificate
+      #   # against the sigstore community Fulcio instance.
+      #   run: cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-and-push.outputs.digest }}
