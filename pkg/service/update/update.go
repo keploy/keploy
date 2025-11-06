@@ -201,7 +201,7 @@ func (u *UpdateManager) extractTarGzAndApply(tarballPath, finalBinPath string) e
 			return err
 		}
 
-		if header.Typeflag == tar.TypeReg && filepath.Clean(header.Name) == u.Config.BinaryName {
+		if header.Typeflag == tar.TypeReg && filepath.Base(filepath.Clean(header.Name)) == u.Config.BinaryName {
 			u.Logger.Info("Found binary in archive, applying safe update...",
 				zap.String("binary", header.Name),
 				zap.String("targetPath", finalBinPath),
