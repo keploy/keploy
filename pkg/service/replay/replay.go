@@ -888,7 +888,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	time.Sleep(1 * time.Second)
 	if r.instrument {
 		if runApp && r.config.Test.SkipAppRestart {
-			fmt.Println("starting the application with appID :", appID)
 			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
 			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
 			r.appErrGrp.Go(func() error {
@@ -947,7 +946,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// Delay for user application to run
 		if runApp && r.config.Test.SkipAppRestart {
-			fmt.Println("waiting for the application with appID :", appID)
 			select {
 			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
 			case <-runTestSetCtx.Done():
@@ -961,7 +959,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		fmt.Println("here is the apID :", appID)
 		if utils.IsDockerCmd(cmdType) {
 			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
