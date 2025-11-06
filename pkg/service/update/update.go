@@ -168,7 +168,7 @@ func (u *UpdateManager) downloadAndUpdate(ctx context.Context, downloadURL strin
 	}
 
 	if runtime.GOOS != "windows" {
-		if err := os.Chmod(binPath, 0755); err != nil {
+		if err := os.Chmod(binPath, executablePermissions); err != nil {
 			u.Logger.Error("failed to set permissions", zap.Error(err))
 			return err
 		}
