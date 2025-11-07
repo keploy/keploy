@@ -27,7 +27,8 @@ func alreadyRunning(cmd, basePath string) bool {
 // mountPathIfExternal mounts a path if it's outside the current working directory
 // isFile indicates whether the path points to a file (if true, mount its parent directory)
 // path is expected to be an absolute path
-func mountPathIfExternal(logger *zap.Logger, path string, isFile bool) error {
+// pathType is used for logging (e.g., "proto", "config")
+func mountPathIfExternal(logger *zap.Logger, path string, isFile bool, pathType string) error {
 	if path == "" {
 		return nil
 	}
@@ -56,7 +57,7 @@ func mountPathIfExternal(logger *zap.Logger, path string, isFile bool) error {
 		volumeMount := dirToMount + ":" + dirToMount
 		if !volumeMountExists(volumeMount) {
 			DockerConfig.VolumeMounts = append(DockerConfig.VolumeMounts, volumeMount)
-			logger.Info("Mounting external proto path", zap.String("path", dirToMount))
+			logger.Debug(fmt.Sprintf("Mounting external %s path", pathType), zap.String("path", dirToMount))
 		}
 	}
 
