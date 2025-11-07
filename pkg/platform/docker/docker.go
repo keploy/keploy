@@ -454,7 +454,6 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			"/var/run/docker.sock:/var/run/docker.sock",
 		)
 	case "darwin":
 		// macOS volumes
@@ -462,7 +461,6 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			"/var/run/docker.sock:/var/run/docker.sock",
 		)
 	case "windows":
 		// Windows volumes - check if using default context or colima
@@ -476,7 +474,6 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					"/var/run/docker.sock:/var/run/docker.sock",
 				)
 			} else {
 				// Colima context
@@ -484,18 +481,10 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					"/var/run/docker.sock:/var/run/docker.sock",
 				)
 			}
 		}
 	}
-
-	// Keploy config and data directories
-	volumes = append(volumes,
-		fmt.Sprintf("%s/.keploy-config:/root/.keploy-config", homeDir),
-		fmt.Sprintf("%s/.keploy:/root/.keploy", homeDir),
-	)
-
 	return volumes
 }
 
