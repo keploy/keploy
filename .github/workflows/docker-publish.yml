@@ -66,7 +66,7 @@ jobs:
 
       - name: Simulate tag for testing
         run: |
-          echo "GITHUB_REF=refs/tags/v3.0.0-beta1" >> $GITHUB_ENV
+          echo "FORCE_REF_NAME=refs/tags/v3.0.0-beta1" >> $GITHUB_ENV
           echo "Simulating tag: v3.0.0-beta1"
 
       # Extract metadata (tags, labels) for Docker
@@ -76,11 +76,13 @@ jobs:
         uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}},enable=true
-            type=semver,pattern=v{{major}}.{{minor}},enable=true 
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern=v{{version}},value=${{ env.FORCE_REF_NAME || github.ref_name }}
+            type=semver,pattern=v{{major}},enable=true,value=${{ env.FORCE_REF_NAME || github.ref_name }}
+            type=semver,pattern=v{{major}}.{{minor}},enable=true,value=${{ env.FORCE_REF_NAME || github.ref_name }}
+            type=raw,value=latest,enable=${{ !contains(env.FORCE_REF_NAME || github.ref_name, '-') }}
 
       - name: Show generated tags 
         run: |
