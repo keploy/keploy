@@ -733,6 +733,9 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 }
 
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	fmt.Println("Setting mocks in proxy")
+	fmt.Println("Filtered mocks count:", len(filtered))
+	fmt.Println("Unfiltered mocks count:", len(unFiltered))
 	m, ok := p.MockManagers.Load(uint64(0))
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
