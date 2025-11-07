@@ -79,6 +79,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=false
+            prefix=v
           tags: |
             type=semver,pattern=v{{version}},value=${{ env.FORCE_REF_NAME || github.ref_name }}
             type=semver,pattern=v{{major}},enable=true,value=${{ env.FORCE_REF_NAME || github.ref_name }}
