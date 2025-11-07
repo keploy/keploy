@@ -16,13 +16,16 @@ type Spec struct {
 }
 
 type RequestYaml struct {
-	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
+	// Header holds the list of packet IDs for all packets in this request entry.
+	// Header  []string          `json:"header,omitempty" yaml:"header,flow,omitempty"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
 }
 
 type ResponseYaml struct {
-	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
+	// Header holds the list of packet IDs for all packets in this response entry.
+
+	// Header  []string          `json:"header,omitempty" yaml:"header,flow,omitempty"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
 }
@@ -53,5 +56,5 @@ type Packet struct {
 
 type Header struct {
 	PayloadLength uint32 `json:"payload_length" yaml:"payload_length"`
-	PacketID      uint8  `json:"packet_id" yaml:"packet_id"`
+	PacketID      string `json:"packet_id" yaml:"packet_id"`
 }
