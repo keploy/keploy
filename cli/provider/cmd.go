@@ -272,7 +272,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
-
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -647,11 +646,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// validate the report path if provided
 		if reportPath != "" {
-			if !filepath.IsAbs(reportPath) {
-				errMsg := fmt.Sprintf("report-path must be an absolute file path, got: %q", reportPath)
-				utils.LogError(c.logger, nil, errMsg)
+
+			//convert to absolute path
+			reportPath, err = utils.GetAbsPath(reportPath)
+			if err != nil {
+				errMsg := "failed to get the absolute report path"
+				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
+
 			fi, statErr := os.Stat(reportPath)
 			if statErr != nil {
 				errMsg := fmt.Sprintf("failed to stat report-path %q", reportPath)
@@ -947,7 +950,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			config.SetSelectedTests(c.cfg, testSets)
+			if len(testSets) != 0 {
+				config.SetSelectedTests(c.cfg, testSets)
+			}
 
 			// get disable-mapping flag value
 			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
@@ -1082,60 +1087,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			// parse and set proto related flags
-
-			protoFile, err := cmd.Flags().GetString("proto-file")
+			protoCfg, err := parseProtoFlags(c.logger, cmd)
 			if err != nil {
-				errMsg := "failed to get the proto-file flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+				return err
 			}
 
-			if protoFile != "" {
-				c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-file"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoDir, err := cmd.Flags().GetString("proto-dir")
-			if err != nil {
-				errMsg := "failed to get the proto-dir flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if protoDir != "" {
-				c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-dir"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoInclude, err := cmd.Flags().GetStringArray("proto-include")
-			if err != nil {
-				errMsg := "failed to get the proto-include flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if len(protoInclude) > 0 {
-				for _, dir := range protoInclude {
-					absDir, err := utils.GetAbsPath(dir)
-					if err != nil {
-						errMsg := "failed to get the absolute path of proto-include"
-						utils.LogError(c.logger, err, errMsg)
-						return errors.New(errMsg)
-					}
-					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
-				}
-			}
+			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
 		}
-
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
 			errMsg := "failed to read the global passthrough flag"
