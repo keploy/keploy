@@ -140,7 +140,7 @@ $workDir = Get-RunnerWorkPath
 $base = $env:APP_BASE_URL
 
 # Configure image for recording (optional override via DOCKER_IMAGE_RECORD)
-$env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
+# $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
 
 # 1. Correctly quote the docker command for Keploy
 $dockerCmd = "docker compose up"
@@ -252,7 +252,7 @@ $testContainer = "dedup-go"
 $testLog = "$testContainer.test.txt"
 
 # Configure image for replay (optional override via DOCKER_IMAGE_REPLAY)
-$env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_REPLAY) { $env:DOCKER_IMAGE_REPLAY } else { 'keploy:replay' }
+# $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_REPLAY) { $env:DOCKER_IMAGE_REPLAY } else { 'keploy:replay' }
 
 $testArgs = @(
   'test',

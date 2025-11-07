@@ -23,58 +23,58 @@ jobs:
 
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
-      - name: Aggressive Cleanup (Runner + Docker)  # ⚠️ Destructive
-        if: always()
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          Write-Host "== Kill stray Keploy processes =="
-          $procs = 'keploy.exe','keploy-record.exe','keploy-replay.exe','keploy-record','keploy-replay'
-          foreach ($p in $procs) {
-            cmd /c "taskkill /F /IM $p /T" 2>$null | Out-Null
-          }
+      # - name: Aggressive Cleanup (Runner + Docker)  # ⚠️ Destructive
+      #   if: always()
+      #   shell: pwsh
+      #   continue-on-error: true
+      #   run: |
+      #     Write-Host "== Kill stray Keploy processes =="
+      #     $procs = 'keploy.exe','keploy-record.exe','keploy-replay.exe','keploy-record','keploy-replay'
+      #     foreach ($p in $procs) {
+      #       cmd /c "taskkill /F /IM $p /T" 2>$null | Out-Null
+      #     }
 
-          Write-Host "== Docker cleanup (containers/images/volumes/networks) =="
-          # Stop/remove ALL containers (runner dedicated to CI)
-          $all = docker ps -aq
-          if ($all) { $all | ForEach-Object { docker rm -f $_ } 2>$null }
+      #     Write-Host "== Docker cleanup (containers/images/volumes/networks) =="
+      #     # Stop/remove ALL containers (runner dedicated to CI)
+      #     $all = docker ps -aq
+      #     if ($all) { $all | ForEach-Object { docker rm -f $_ } 2>$null }
 
-          # Anything started from keploy images (belt & suspenders)
-          $anc = docker ps -a --filter "ancestor=ghcr.io/keploy/keploy" --format "{{.ID}}"
-          if ($anc) { $anc | ForEach-Object { docker rm -f $_ } 2>$null }
+      #     # Anything started from keploy images (belt & suspenders)
+      #     $anc = docker ps -a --filter "ancestor=ghcr.io/keploy/keploy" --format "{{.ID}}"
+      #     if ($anc) { $anc | ForEach-Object { docker rm -f $_ } 2>$null }
 
-          # Known names from samples / agent
-          $names = @('keploy-v2','echoApp','ginMongoApp','grpcApp')
-          foreach ($n in $names) {
-            $cid = docker ps -a --filter "name=^/${n}$" --format "{{.ID}}"
-            if ($cid) { docker rm -f $cid 2>$null | Out-Null }
-          }
+      #     # Known names from samples / agent
+      #     $names = @('keploy-v2','echoApp','ginMongoApp','grpcApp')
+      #     foreach ($n in $names) {
+      #       $cid = docker ps -a --filter "name=^/${n}$" --format "{{.ID}}"
+      #       if ($cid) { docker rm -f $cid 2>$null | Out-Null }
+      #     }
 
-          # Volumes & networks commonly left behind
-          docker volume rm -f debugfs 2>$null | Out-Null
-          docker network rm keploy-network 2>$null | Out-Null
+      #     # Volumes & networks commonly left behind
+      #     docker volume rm -f debugfs 2>$null | Out-Null
+      #     docker network rm keploy-network 2>$null | Out-Null
 
-          # Prune everything (cache, images, volumes)
-          docker builder prune -af 2>$null | Out-Null
-          docker system prune -af --volumes 2>$null | Out-Null
+      #     # Prune everything (cache, images, volumes)
+      #     docker builder prune -af 2>$null | Out-Null
+      #     docker system prune -af --volumes 2>$null | Out-Null
 
-          # Remove tags we re-create in this workflow
-          docker rmi -f keploy:record keploy:replay ghcr.io/keploy/keploy:v2-dev 2>$null | Out-Null
+      #     # Remove tags we re-create in this workflow
+      #     docker rmi -f keploy:record keploy:replay ghcr.io/keploy/keploy:v2-dev 2>$null | Out-Null
 
-          Write-Host "== Workspace cleanup =="
-          $paths = @(
-            '.\bin',
-            '.\record-bin','.\replay-bin',
-            '.\record-image','.\replay-image',
-            '.\samples-go',
-            '.\keploy','.\keploy.yml'
-          )
-          foreach ($p in $paths) {
-            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
-          }
-          # temp crumbs
-          Get-ChildItem "$env:TEMP" -Filter "keploy*" -Recurse -Force -ErrorAction SilentlyContinue |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+      #     Write-Host "== Workspace cleanup =="
+      #     $paths = @(
+      #       '.\bin',
+      #       '.\record-bin','.\replay-bin',
+      #       '.\record-image','.\replay-image',
+      #       '.\samples-go',
+      #       '.\keploy','.\keploy.yml'
+      #     )
+      #     foreach ($p in $paths) {
+      #       Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+      #     }
+      #     # temp crumbs
+      #     Get-ChildItem "$env:TEMP" -Filter "keploy*" -Recurse -Force -ErrorAction SilentlyContinue |
+      #       Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -112,61 +112,67 @@ jobs:
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
 
       # --- Docker images ---
-      - name: Download Record Docker image (${{ matrix.config.record_src }})
-        uses: actions/download-artifact@v4
+      # - name: Download Record Docker image (${{ matrix.config.record_src }})
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: docker-${{ matrix.config.record_src }}
+      #     path: record-image
+
+      # - name: Load & Tag Record Docker image
+      #   id: record_img
+      #   shell: pwsh
+      #   run: |
+      #     $tar = Get-ChildItem .\record-image\*.tar | Select-Object -First 1
+      #     if (-not $tar) { throw "Record image tar not found." }
+      #     docker load -i $tar.FullName | Write-Output
+
+      #     $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
+      #               | Select-String "pr-" -SimpleMatch | Select-Object -First 1
+      #     if ($cand) {
+      #       docker tag $cand keploy:record
+      #     } else {
+      #       $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
+      #                 | Select-Object -First 1)
+      #       if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (record)." }
+      #       docker tag $first keploy:record
+      #     }
+      #     docker tag keploy:record ghcr.io/keploy/keploy:v2-dev
+      #     docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:record ghcr.io/keploy/keploy:v2-dev"
+      #     echo "image=keploy:record" >> $env:GITHUB_OUTPUT
+
+      # - name: Download Replay Docker image (${{ matrix.config.replay_src }})
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: docker-${{ matrix.config.replay_src }}
+      #     path: replay-image
+
+      # - name: Load & Tag Replay Docker image
+      #   id: replay_img
+      #   shell: pwsh
+      #   run: |
+      #     $tar = Get-ChildItem .\replay-image\*.tar | Select-Object -First 1
+      #     if (-not $tar) { throw "Replay image tar not found." }
+      #     docker load -i $tar.FullName | Write-Output
+
+      #     $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
+      #               | Select-String "pr-" -SimpleMatch | Select-Object -First 1
+      #     if ($cand) {
+      #       docker tag $cand keploy:replay
+      #     } else {
+      #       $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
+      #                 | Select-Object -First 1)
+      #       if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (replay)." }
+      #       docker tag $first keploy:replay
+      #     }
+      #     docker tag keploy:replay ghcr.io/keploy/keploy:v2-dev
+      #     docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:replay ghcr.io/keploy/keploy:v2-dev"
+      #     echo "image=keploy:replay" >> $env:GITHUB_OUTPUT
+
+      - id: image
+        uses: ./.github/actions/download-image
         with:
-          name: docker-${{ matrix.config.record_src }}
-          path: record-image
-
-      - name: Load & Tag Record Docker image
-        id: record_img
-        shell: pwsh
-        run: |
-          $tar = Get-ChildItem .\record-image\*.tar | Select-Object -First 1
-          if (-not $tar) { throw "Record image tar not found." }
-          docker load -i $tar.FullName | Write-Output
-
-          $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
-                    | Select-String "pr-" -SimpleMatch | Select-Object -First 1
-          if ($cand) {
-            docker tag $cand keploy:record
-          } else {
-            $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
-                      | Select-Object -First 1)
-            if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (record)." }
-            docker tag $first keploy:record
-          }
-          docker tag keploy:record ghcr.io/keploy/keploy:v2-dev
-          docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:record ghcr.io/keploy/keploy:v2-dev"
-          echo "image=keploy:record" >> $env:GITHUB_OUTPUT
-
-      - name: Download Replay Docker image (${{ matrix.config.replay_src }})
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-${{ matrix.config.replay_src }}
-          path: replay-image
-
-      - name: Load & Tag Replay Docker image
-        id: replay_img
-        shell: pwsh
-        run: |
-          $tar = Get-ChildItem .\replay-image\*.tar | Select-Object -First 1
-          if (-not $tar) { throw "Replay image tar not found." }
-          docker load -i $tar.FullName | Write-Output
-
-          $cand = (docker images --format "{{.Repository}}:{{.Tag}}" ghcr.io/keploy/keploy) `
-                    | Select-String "pr-" -SimpleMatch | Select-Object -First 1
-          if ($cand) {
-            docker tag $cand keploy:replay
-          } else {
-            $first = (docker images ghcr.io/keploy/keploy --format "{{.Repository}}:{{.Tag}}" `
-                      | Select-Object -First 1)
-            if (-not $first) { throw "No ghcr.io/keploy/keploy image found after load (replay)." }
-            docker tag $first keploy:replay
-          }
-          docker tag keploy:replay ghcr.io/keploy/keploy:v2-dev
-          docker images --format "{{.Repository}}:{{.Tag}}" | findstr /I "keploy:replay ghcr.io/keploy/keploy:v2-dev"
-          echo "image=keploy:replay" >> $env:GITHUB_OUTPUT
+          image_tag: ${{ inputs.image_tag }}
+          version: ${{ github.sha }}
 
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
@@ -180,8 +186,8 @@ jobs:
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
           REPLAY_BIN:  ${{ steps.setup_replay.outputs.bin_name }}
-          DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
-          DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
+          # DOCKER_IMAGE_RECORD: ${{ steps.record_img.outputs.image }}
+          # DOCKER_IMAGE_REPLAY: ${{ steps.replay_img.outputs.image }}
         shell: pwsh
         run: |
           cd samples-go/${{ matrix.app.path }}
