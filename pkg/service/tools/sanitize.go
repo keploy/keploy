@@ -148,7 +148,9 @@ func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		default:
 		}
 
-		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
+		testName := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f)) // e.g. "test-2"
+
+		if err := SanitizeFileInPlace(f, testName, aggSecrets); err != nil {
 			// Continue to next file
 			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
 			continue
@@ -243,7 +245,7 @@ func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
 // - Populates/extends aggSecrets (shared across files in a test-set)
 // - Writes placeholders into the YAML
 // - Handles JSON-in-string and curl header blobs
-func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) {
+func RedactYAML(yamlBytes []byte, aggSecrets map[string]string, testName string) ([]byte, error) {
 	// 1) Detect secrets
 	detector, err := detect.NewDetectorDefaultConfig()
 	if err != nil {
@@ -255,7 +257,7 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) 
 	}
 
 	findings := detector.DetectString(string(yamlBytes))
-	secretSet := collectSecrets(findings)
+	secretSet, secretNames := collectSecrets(findings)
 
 	// 2) Parse YAML
 	var root yaml.Node
@@ -268,7 +270,7 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) 
 	var repls []replacement                       // oldValue -> placeholder
 	headerKeyToPlaceholder := map[string]string{} // per-file
 
-	redactNode(&root, nil, secretSet, secretsMap, &repls, headerKeyToPlaceholder)
+	redactNode(&root, nil, secretSet, secretNames, secretsMap, &repls, headerKeyToPlaceholder, testName)
 
 	// 4) Patch any curl strings using only the mappings we already created
 	applyCurlUsingMaps(&root, repls, headerKeyToPlaceholder)
@@ -285,14 +287,36 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) 
 	return out.Bytes(), nil
 }
 
-func collectSecrets(findings []report.Finding) map[string]struct{} {
+// collectSecrets returns:
+//   - set: the set of secret strings detected by gitleaks
+//   - names: a mapping from secret string -> rule-based base name (CamelCase)
+func collectSecrets(findings []report.Finding) (map[string]struct{}, map[string]string) {
 	set := make(map[string]struct{})
+	names := make(map[string]string)
+
 	for _, f := range findings {
-		if s := strings.TrimSpace(f.Secret); s != "" {
-			set[s] = struct{}{}
+		s := strings.TrimSpace(f.Secret)
+		if s == "" {
+			continue
+		}
+
+		set[s] = struct{}{}
+
+		if _, ok := names[s]; !ok {
+			base := strings.TrimSpace(f.RuleID)
+			if base == "" {
+				base = strings.TrimSpace(f.Description)
+			}
+			if base != "" {
+				base = keyToSecretKey(base)
+			}
+			if base == "" {
+				base = "Secret"
+			}
+			names[s] = base
 		}
 	}
-	return set
+	return set, names
 }
 
 func lastPath(path []string) string {
@@ -302,18 +326,36 @@ func lastPath(path []string) string {
 	return path[len(path)-1]
 }
 
+// testPrefixedBase prefixes the base key with a test name ("test-2" -> "Test2_Base")
+func testPrefixedBase(testName, base string) string {
+	testName = strings.TrimSpace(testName)
+	if testName == "" {
+		return base
+	}
+	tn := keyToSecretKey(testName)
+	if tn == "" {
+		return base
+	}
+	if base == "" {
+		return tn
+	}
+	return tn + "_" + base
+}
+
 func redactNode(
 	n *yaml.Node,
 	path []string,
 	secretSet map[string]struct{},
+	secretNames map[string]string,
 	secrets map[string]string, // shared accumulator (key -> value)
 	repls *[]replacement,
 	headerKeyToPlaceholder map[string]string, // per-file
+	testName string,
 ) {
 	switch n.Kind {
 	case yaml.DocumentNode, yaml.SequenceNode:
 		for _, c := range n.Content {
-			redactNode(c, path, secretSet, secrets, repls, headerKeyToPlaceholder)
+			redactNode(c, path, secretSet, secretNames, secrets, repls, headerKeyToPlaceholder, testName)
 		}
 
 	case yaml.MappingNode:
@@ -323,7 +365,14 @@ func redactNode(
 			key := k.Value
 			newPath := append(path, key)
 
+			// skip curl here; handled in applyCurlUsingMaps
 			if strings.EqualFold(key, "curl") {
+				continue
+			}
+
+			// gRPC: decoded_data contains protoscope text; we want token-level redaction
+			if strings.EqualFold(key, "decoded_data") && v.Kind == yaml.ScalarNode && v.Tag == "!!str" {
+				redactGrpcDecodedData(v, key, secretSet, secretNames, secrets, repls, testName)
 				continue
 			}
 
@@ -331,7 +380,7 @@ func redactNode(
 			case yaml.ScalarNode:
 				if v.Tag == "!!str" {
 					if pkg.LooksLikeJSON(v.Value) {
-						changed, newVal, jsonRepls := redactJSONString(v.Value, key, secretSet, secrets)
+						changed, newVal, jsonRepls := redactJSONString(v.Value, key, secretSet, secretNames, secrets, testName)
 						if changed {
 							v.Value = newVal
 							*repls = append(*repls, jsonRepls...)
@@ -339,6 +388,8 @@ func redactNode(
 					} else if containsAnySecret(v.Value, secretSet) {
 						orig := v.Value
 						base := keyToSecretKey(key)
+						base = testPrefixedBase(testName, base)
+
 						secKey := uniqueKeyForValue(base, orig, secrets)
 
 						if !looksLikeTemplate(orig) {
@@ -356,7 +407,7 @@ func redactNode(
 					}
 				}
 			default:
-				redactNode(v, newPath, secretSet, secrets, repls, headerKeyToPlaceholder)
+				redactNode(v, newPath, secretSet, secretNames, secrets, repls, headerKeyToPlaceholder, testName)
 			}
 		}
 
@@ -364,6 +415,7 @@ func redactNode(
 		if n.Tag == "!!str" && containsAnySecret(n.Value, secretSet) && !looksLikeTemplate(n.Value) {
 			orig := n.Value
 			base := keyToSecretKey(lastPath(path))
+			base = testPrefixedBase(testName, base)
 			secKey := uniqueKeyForValue(base, orig, secrets)
 			secrets[secKey] = orig
 			ph := fmt.Sprintf("{{string .secret.%s }}", secKey)
@@ -375,24 +427,46 @@ func redactNode(
 }
 
 func isReqHeaderPath(path []string) bool {
-	// ... spec -> req -> header -> <HeaderName>
 	if len(path) < 4 {
 		return false
 	}
 	n := len(path)
-	return strings.EqualFold(path[n-3], "req") &&
-		strings.EqualFold(path[n-2], "header")
+
+	// HTTP: ... -> req -> header -> <HeaderName>
+	if strings.EqualFold(path[n-3], "req") && strings.EqualFold(path[n-2], "header") {
+		return true
+	}
+
+	// gRPC Request: ... -> grpcReq -> headers -> ordinary_headers/pseudo_headers -> <HeaderName>
+	if len(path) >= 5 && strings.EqualFold(path[n-4], "grpcReq") && strings.EqualFold(path[n-3], "headers") &&
+		(strings.EqualFold(path[n-2], "ordinary_headers") || strings.EqualFold(path[n-2], "pseudo_headers")) {
+		return true
+	}
+
+	// gRPC Response: ... -> grpcResp -> headers -> ordinary_headers/pseudo_headers -> <HeaderName>
+	if len(path) >= 5 && strings.EqualFold(path[n-4], "grpcResp") && strings.EqualFold(path[n-3], "headers") &&
+		(strings.EqualFold(path[n-2], "ordinary_headers") || strings.EqualFold(path[n-2], "pseudo_headers")) {
+		return true
+	}
+
+	// gRPC Response Trailers: ... -> grpcResp -> trailers -> ordinary_headers/pseudo_headers -> <HeaderName>
+	if len(path) >= 5 && strings.EqualFold(path[n-4], "grpcResp") && strings.EqualFold(path[n-3], "trailers") &&
+		(strings.EqualFold(path[n-2], "ordinary_headers") || strings.EqualFold(path[n-2], "pseudo_headers")) {
+		return true
+	}
+
+	return false
 }
 
 func redactJSONString(s string, parentKey string, secretSet map[string]struct{},
-	secrets map[string]string) (bool, string, []replacement) {
+	secretNames map[string]string, secrets map[string]string, testName string) (bool, string, []replacement) {
 
 	var v interface{}
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
 		return false, s, nil
 	}
 	var repls []replacement
-	changed := redactJSONValue(&v, parentKey, secretSet, secrets, &repls)
+	changed := redactJSONValue(&v, parentKey, secretSet, secretNames, secrets, &repls, testName)
 	if !changed {
 		return false, s, nil
 	}
@@ -404,27 +478,36 @@ func redactJSONString(s string, parentKey string, secretSet map[string]struct{},
 }
 
 func redactJSONValue(v *interface{}, parentKey string, secretSet map[string]struct{},
-	secrets map[string]string, repls *[]replacement) bool {
+	secretNames map[string]string, secrets map[string]string, repls *[]replacement, testName string) bool {
 
 	changed := false
 	switch x := (*v).(type) {
 	case map[string]interface{}:
 		for k, vv := range x {
-			if redactJSONValue(&vv, k, secretSet, secrets, repls) {
+			if redactJSONValue(&vv, k, secretSet, secretNames, secrets, repls, testName) {
 				changed = true
 			}
 			x[k] = vv
 		}
 	case []interface{}:
 		for i := range x {
-			if redactJSONValue(&x[i], parentKey, secretSet, secrets, repls) {
+			if redactJSONValue(&x[i], parentKey, secretSet, secretNames, secrets, repls, testName) {
 				changed = true
 			}
 		}
 	case string:
 		if containsAnySecret(x, secretSet) {
 			orig := x
-			base := keyToSecretKey(parentKey)
+
+			// Prefer gitleaks rule-based name if this exact string is a reported secret
+			base := ""
+			if bn, ok := secretNames[orig]; ok && bn != "" {
+				base = bn
+			} else {
+				base = keyToSecretKey(parentKey)
+			}
+			base = testPrefixedBase(testName, base)
+
 			secKey := uniqueKeyForValue(base, orig, secrets)
 
 			if !looksLikeTemplate(orig) {
@@ -528,15 +611,32 @@ func rewriteCurlHeaderLine(line string, headerKeyToPlaceholder map[string]string
 		return line
 	}
 	name := strings.TrimSpace(content[:colon])
+	currentValue := strings.TrimSpace(content[colon+1:])
+
 	ph, ok := headerKeyToPlaceholder[strings.ToLower(name)]
 	if !ok {
+		// If we don't have a specific placeholder for this header,
+		// the blanket replacement at line 507-509 should have already handled it
 		return line
 	}
 
+	// Check if the value has already been replaced by blanket replacement
+	// or if it needs to be replaced with the placeholder
 	want := fmt.Sprintf("%s: %s", name, ph)
-	if strings.TrimSpace(content) == want {
+
+	// If already correct, return as-is
+	if strings.TrimSpace(content) == strings.TrimSpace(want) {
 		return line
 	}
+
+	// If the current value contains a template placeholder, it might have been partially replaced
+	// by blanket replacement. In that case, use the full placeholder from the header mapping.
+	if looksLikeTemplate(currentValue) && !strings.EqualFold(currentValue, ph) {
+		// Partial replacement happened, use the header-specific placeholder
+		return line[:i1+1] + want + line[i2:]
+	}
+
+	// Otherwise, replace with the header-specific placeholder
 	return line[:i1+1] + want + line[i2:]
 }
 
@@ -645,15 +745,139 @@ func uniqueKeyForValue(base, val string, existing map[string]string) string {
 	}
 }
 
+// --- gRPC decoded_data helpers ---
+
+func isTokenByte(b byte) bool {
+	if b >= 'a' && b <= 'z' {
+		return true
+	}
+	if b >= 'A' && b <= 'Z' {
+		return true
+	}
+	if b >= '0' && b <= '9' {
+		return true
+	}
+	switch b {
+	case '-', '_', '.', '~',
+		':', '/', '?', '#', '[', ']', '@',
+		'!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=',
+		'%':
+		return true
+	default:
+		return false
+	}
+}
+
+func expandToken(text string, start, end int) (int, int) {
+	i := start
+	for i > 0 && isTokenByte(text[i-1]) {
+		i--
+	}
+	j := end
+	for j < len(text) && isTokenByte(text[j]) {
+		j++
+	}
+	return i, j
+}
+
+// redactGrpcDecodedData finds secrets inside a gRPC decoded_data protoscope blob and
+// replaces whole "tokens" (e.g., full URLs, full keys) rather than just the small
+// substrings that gitleaks reports.
+func redactGrpcDecodedData(
+	n *yaml.Node,
+	key string,
+	secretSet map[string]struct{},
+	secretNames map[string]string,
+	secrets map[string]string,
+	repls *[]replacement,
+	testName string,
+) {
+	if n.Kind != yaml.ScalarNode || n.Tag != "!!str" {
+		return
+	}
+	text := n.Value
+	if text == "" || len(secretSet) == 0 {
+		return
+	}
+
+	type cand struct {
+		val  string
+		base string
+	}
+
+	seen := make(map[string]string) // fullToken -> base
+	for s := range secretSet {
+		if s == "" {
+			continue
+		}
+		idx := strings.Index(text, s)
+		for idx != -1 {
+			start, end := expandToken(text, idx, idx+len(s))
+			if end <= start {
+				break
+			}
+			full := text[start:end]
+			if full == "" {
+				break
+			}
+			if _, ok := seen[full]; !ok {
+				base := secretNames[s]
+				if base == "" {
+					base = keyToSecretKey(key)
+				}
+				base = testPrefixedBase(testName, base)
+				seen[full] = base
+			}
+			next := strings.Index(text[idx+len(s):], s)
+			if next == -1 {
+				break
+			}
+			idx += len(s) + next
+		}
+	}
+
+	if len(seen) == 0 {
+		return
+	}
+
+	var cands []cand
+	for val, base := range seen {
+		cands = append(cands, cand{val: val, base: base})
+	}
+
+	// Replace longer tokens first
+	sort.Slice(cands, func(i, j int) bool {
+		return len(cands[i].val) > len(cands[j].val)
+	})
+
+	origStyle := n.Style
+
+	for _, c := range cands {
+		if !strings.Contains(text, c.val) {
+			continue
+		}
+		secKey := uniqueKeyForValue(c.base, c.val, secrets)
+		if !looksLikeTemplate(c.val) {
+			secrets[secKey] = c.val
+		}
+		ph := fmt.Sprintf("{{string .secret.%s }}", secKey)
+		text = strings.ReplaceAll(text, c.val, ph)
+		*repls = append(*repls, replacement{old: c.val, new: ph})
+	}
+
+	n.Value = text
+	n.Style = origStyle
+}
+
 // SanitizeFileInPlace reads a YAML file, redacts secrets, and writes back in-place.
 // aggSecrets is a shared map across the entire test-set (key -> original value).
-func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
+func SanitizeFileInPlace(path, testName string, aggSecrets map[string]string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
-	redacted, err := RedactYAML(raw, aggSecrets)
+	redacted, err := RedactYAML(raw, aggSecrets, testName)
 	if err != nil {
 		return fmt.Errorf("redact %s: %w", path, err)
 	}
