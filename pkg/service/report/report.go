@@ -16,10 +16,10 @@ import (
 
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/tools"
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -697,11 +697,9 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 }
 
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
-func (r *Report) renderSingleFailedTest(ctx context.Context, sb *strings.Builder, test models.TestResult) error {
+func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
 	// Header with risk level and categories
 	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
-
-	var err error
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
@@ -725,47 +723,33 @@ func (r *Report) renderSingleFailedTest(ctx context.Context, sb *strings.Builder
 	sb.WriteString("\n")
 	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
-	if test.Kind == models.GRPC_EXPORT {
-		if expJSON, actJSON, ok := r.grpcBodiesAsJSON(ctx, test); ok {
-			if diff, err := GenerateTableDiff(expJSON, actJSON); err == nil {
-				sb.WriteString(applyCliColorsToDiff(diff))
-				sb.WriteString("\n\n")
-				sb.WriteString("\n--------------------------------------------------------------------\n")
-				return nil
-			}
-			r.logger.Warn("report: failed to generate JSON table diff for gRPC; falling back to raw body diff",
-				zap.String("testSet", test.Name),
-				zap.String("testCase", test.TestCaseID),
-				zap.Error(err))
-		} else {
-			r.logger.Warn("report: failed to convert gRPC bodies to JSON; falling back to raw body diff",
-				zap.String("testSet", test.Name),
-				zap.String("testCase", test.TestCaseID))
-		}
-	}
-
 	// Body diffs
 	for _, bodyResult := range test.Result.BodyResult {
 		if bodyResult.Normal {
 			continue
 		}
-		if strings.EqualFold(string(bodyResult.Type), "JSON") {
-			diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
-			if err == nil {
-				sb.WriteString(applyCliColorsToDiff(diff))
-				sb.WriteString("\n")
-			} else {
-				tmp := *r
-				tmp.out = bufio.NewWriterSize(&writerAdapter{sb: sb}, 64<<10)
-				_ = tmp.printDefaultBodyDiff(bodyResult)
-				_ = tmp.out.Flush()
+
+		if bodyResult.Type == models.JSON || bodyResult.Type == models.GrpcData {
+			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
+				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
+				if err == nil {
+					sb.WriteString(applyCliColorsToDiff(diff))
+					sb.WriteString("\n")
+				} else {
+					tmp := *r
+					tmp.out = bufio.NewWriterSize(&writerAdapter{sb: sb}, 64<<10)
+					_ = tmp.printDefaultBodyDiff(bodyResult)
+					_ = tmp.out.Flush()
+				}
+				continue
 			}
-		} else {
-			// Force the old compact format for non-JSON bodies (fast).
-			diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
-			sb.WriteString(applyCliColorsToDiff(diff))
-			sb.WriteString("\n\n")
 		}
+
+		// Force the old compact format for non-JSON bodies (fast).
+		diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
+		sb.WriteString(applyCliColorsToDiff(diff))
+		sb.WriteString("\n\n")
+
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
@@ -881,14 +865,7 @@ func (r *Report) addHeaderDiffs(test models.TestResult, logDiffs *matcherUtils.D
 }
 
 // addBodyDiffs adds body differences to the diff printer
-func (r *Report) addBodyDiffs(ctx context.Context, test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
-	if test.Kind == models.GRPC_EXPORT {
-		if expJSON, actJSON, ok := r.grpcBodiesAsJSON(ctx, test); ok {
-			logDiffs.PushBodyDiff(expJSON, actJSON, nil)
-			return nil
-		}
-	}
-
+func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
 	for _, bodyResult := range test.Result.BodyResult {
 		if !bodyResult.Normal {
 			actualValue, err := r.renderTemplateValue(bodyResult.Actual)
@@ -947,75 +924,4 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 		return fmt.Errorf("failed to render default body diffs: %w", err)
 	}
 	return nil
-}
-
-// grpcBodiesAsJSON converts the gRPC protoscope body (GRPC_DATA) to JSON
-// using the same proto config that replay uses. It returns (expectedJSON, actualJSON, ok).
-func (r *Report) grpcBodiesAsJSON(ctx context.Context, test models.TestResult) (string, string, bool) {
-	// We only care about gRPC_EXPORT results
-	if test.Kind != models.GRPC_EXPORT {
-		return "", "", false
-	}
-
-	// Proto config must be provided (same flags as `keploy test`)
-	if r.config.Report.ProtoFile == "" && r.config.Report.ProtoDir == "" {
-		return "", "", false
-	}
-
-	// gRPC method path comes from :path pseudo-header, same as in replay.RunTestSet
-	method := ""
-	if test.GrpcReq.Headers.PseudoHeaders != nil {
-		if m, ok := test.GrpcReq.Headers.PseudoHeaders[":path"]; ok {
-			method = m
-		}
-	}
-	if method == "" {
-		r.logger.Warn("report: missing :path header on gRPC request; cannot derive proto method",
-			zap.String("testSet", test.Name),
-			zap.String("testCase", test.TestCaseID))
-		return "", "", false
-	}
-
-	// Find the GRPC_DATA diff entry to get protoscope text
-	var protoExpected, protoActual string
-	for _, br := range test.Result.BodyResult {
-		// gRPC matcher uses bodyType like "GRPC_DATA"
-		if strings.EqualFold(string(br.Type), "GRPC_DATA") {
-			protoExpected = fmt.Sprint(br.Expected)
-			protoActual = fmt.Sprint(br.Actual)
-			break
-		}
-	}
-	if protoExpected == "" && protoActual == "" {
-		// nothing to convert
-		return "", "", false
-	}
-
-	pc := models.ProtoConfig{
-		ProtoFile:    r.config.Report.ProtoFile,
-		ProtoDir:     r.config.Report.ProtoDir,
-		ProtoInclude: r.config.Report.ProtoInclude,
-		RequestURI:   method,
-	}
-
-	md, files, err := utils.GetProtoMessageDescriptor(ctx, r.logger, pc)
-	if err != nil {
-		r.logger.Warn("report: failed to get proto message descriptor; falling back to raw gRPC diff",
-			zap.String("testSet", test.Name),
-			zap.String("testCase", test.TestCaseID),
-			zap.Error(err))
-		return "", "", false
-	}
-
-	actJSON, actOK := utils.ProtoTextToJSON(md, files, protoActual, r.logger)
-	expJSON, expOK := utils.ProtoTextToJSON(md, files, protoExpected, r.logger)
-
-	if !actOK || !expOK {
-		r.logger.Warn("report: failed to convert gRPC protoscope to JSON; falling back to raw gRPC diff",
-			zap.String("testSet", test.Name),
-			zap.String("testCase", test.TestCaseID))
-		return "", "", false
-	}
-
-	return string(expJSON), string(actJSON), true
 }
