@@ -1,6 +1,11 @@
 name: Golang On Docker (Windows)
 on:
   workflow_call:
+    inputs:
+      image_tag:
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
 
 concurrency:
   group: windows-docker-runner
