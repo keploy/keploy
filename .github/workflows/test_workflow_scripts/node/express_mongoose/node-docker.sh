@@ -90,18 +90,18 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start keploy in test mode.
 test_container="nodeApp_test"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false
-# if grep "ERROR" "${test_container}.txt"; then
-#     echo "Error found in pipeline..."
-#     cat "${test_container}.txt"
-#     exit 1
-# fi
-# # Monitor Docker logs for race conditions during testing.
-# if grep "WARNING: DATA RACE" "${test_container}.txt"; then
-#     echo "Race condition detected in test, stopping pipeline..."
-#     cat "${test_container}.txt"
-#     exit 1
-# fi
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+# Monitor Docker logs for race conditions during testing.
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
 all_passed=true
 
 for i in {0..1}
@@ -128,6 +128,6 @@ if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    # cat "${test_container}.txt"
+    cat "${test_container}.txt"
     exit 1
 fi

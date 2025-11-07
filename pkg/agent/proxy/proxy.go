@@ -616,7 +616,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			fmt.Println("Using parser:", parserType)
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
@@ -733,9 +732,6 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 }
 
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	fmt.Println("Setting mocks in proxy")
-	fmt.Println("Filtered mocks count:", len(filtered))
-	fmt.Println("Unfiltered mocks count:", len(unFiltered))
 	m, ok := p.MockManagers.Load(uint64(0))
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)

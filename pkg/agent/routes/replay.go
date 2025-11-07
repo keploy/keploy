@@ -4,7 +4,6 @@ package routes
 import (
 	"encoding/gob"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/go-chi/render"
@@ -87,7 +86,6 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 
 func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Println("UpdateMockParams called")
 	var updateParamsReq models.UpdateMockParamsReq
 	err := json.NewDecoder(r.Body).Decode(&updateParamsReq)
 
