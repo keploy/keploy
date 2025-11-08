@@ -346,13 +346,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
 				testSetResult = false
-				abortTestRun = true
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = true
 			case models.TestSetStatusFaultUserApp:
 				testSetResult = false
-				abortTestRun = true
 			case models.TestSetStatusUserAbort:
 				return nil
 			case models.TestSetStatusFailed:
