@@ -106,6 +106,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	res.BodyResult[0].Normal = pass
 
+	if actualResponse.Header == nil {
+		actualResponse.Header = make(map[string]string)
+	}
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
 		pass = false
 	}
@@ -391,6 +394,9 @@ var fmtSprintf234 = fmt.Sprintf
 var strconvAtoi234 = strconv.Atoi
 
 func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
+	if actualResponse.Header == nil {
+		actualResponse.Header = make(map[string]string)
+	}
 	pass := true
 	res := &models.Result{
 		StatusCode: models.IntResult{
