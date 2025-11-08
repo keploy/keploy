@@ -1194,6 +1194,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.ProxyPort = proxyPort
 
+		dnsPort, err := cmd.Flags().GetUint32("dns-port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get dnsPort flag")
+			return nil
+		}
+		c.cfg.Agent.DnsPort = dnsPort
 	}
 
 	return nil
