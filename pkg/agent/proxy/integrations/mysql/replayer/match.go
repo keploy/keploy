@@ -9,17 +9,23 @@ import (
 	"strings"
 	"sync"
 
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/models/mysql"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
 var querySigCache sync.Map // map[string]string
+
+// recorded PREP registry per recorded connection
+type prepEntry struct { // minimal, enough for lookup
+	StatementID uint32
+	Query       string
+}
 
 // case-insensitive prefix check without allocation
 func hasPrefixFold(s, p string) bool {
@@ -101,11 +107,6 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	exp := expected.Message.(*mysql.HandshakeResponse41Packet)
 	act := actual.Message.(*mysql.HandshakeResponse41Packet)
 
-	// // Match the CapabilityFlags
-	// if exp.CapabilityFlags != act.CapabilityFlags {
-	// 	return fmt.Errorf("capability flags mismatch for handshake response, expected: %d, actual: %d", exp.CapabilityFlags, act.CapabilityFlags)
-	// }
-
 	// Match the MaxPacketSize
 	if exp.MaxPacketSize != act.MaxPacketSize {
 		return fmt.Errorf("max packet size mismatch for handshake response, expected: %d, actual: %d", exp.MaxPacketSize, act.MaxPacketSize)
@@ -126,10 +127,10 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 		return fmt.Errorf("username mismatch for handshake response, expected: %s, actual: %s", exp.Username, act.Username)
 	}
 
-	// Match the AuthResponse
-	if !bytes.Equal(exp.AuthResponse, act.AuthResponse) {
-		return fmt.Errorf("auth response mismatch for handshake response, expected: %v, actual: %v", exp.AuthResponse, act.AuthResponse)
-	}
+	// DO NOT compare AuthResponse (salt-dependent)
+	// if !bytes.Equal(exp.AuthResponse, act.AuthResponse) {
+	// 	return fmt.Errorf("auth response mismatch for handshake response, expected: %v, actual: %v", exp.AuthResponse, act.AuthResponse)
+	// }
 
 	// Match the Database (backward-compatible: ignore old mocks with junk bytes / off-by-one)
 	if !dbEqualCompat(exp.Database, act.Database) {
@@ -140,17 +141,6 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	if !pluginEqualCompat(exp.AuthPluginName, act.AuthPluginName) {
 		return fmt.Errorf("auth plugin name mismatch for handshake response, expected: %s, actual: %s", printable(exp.AuthPluginName), printable(act.AuthPluginName))
 	}
-
-	// // Match the ConnectionAttributes
-	// if len(exp.ConnectionAttributes) != len(act.ConnectionAttributes) {
-	// 	return fmt.Errorf("connection attributes length mismatch for handshake response, expected: %d, actual: %d", len(exp.ConnectionAttributes), len(act.ConnectionAttributes))
-	// }
-
-	// for key, value := range exp.ConnectionAttributes {
-	// 	if act.ConnectionAttributes[key] != value && key != "_pid" {
-	// 		return fmt.Errorf("connection attributes mismatch for handshake response, expected: %s, actual: %s", value, act.ConnectionAttributes[key])
-	// 	}
-	// }
 
 	// Match the ZstdCompressionLevel
 	if exp.ZstdCompressionLevel != act.ZstdCompressionLevel {
@@ -194,6 +184,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		return nil, false, fmt.Errorf("no mysql mocks found")
 	}
 
+	// Build recordedPrepByConn once (map[connID][]prepEntry) from recorded mocks
+	recordedPrepByConn := buildRecordedPrepIndex(unfiltered)
+
 	var (
 		maxMatchedCount int
 		matchedResp     *mysql.Response
@@ -217,25 +210,50 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			}
 			switch req.Header.Type {
 			case sCOM_STMT_CLOSE:
-				if c := matchClosePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+				// query-aware CLOSE matching via recordedPrepByConn + runtime map
+				var expectedQuery, actualQuery string
+				if expClose, _ := mockReq.PacketBundle.Message.(*mysql.StmtClosePacket); expClose != nil {
+					expectedQuery = lookupRecordedQuery(recordedPrepByConn, mock.Spec.Metadata["connID"], expClose.StatementID)
+				}
+				if actClose, _ := req.PacketBundle.Message.(*mysql.StmtClosePacket); actClose != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+					actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actClose.StatementID])
+				}
+				c := matchCloseWithQuery(mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery)
+				if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mysql.Response{}, mock
 				}
+
 			case sCOM_QUERY:
 				if ok, c := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
+
 			case sCOM_STMT_PREP:
 				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
+
 			case sCOM_STMT_EXEC:
-				if c := matchStmtExecutePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+				// query-aware EXEC matching via recordedPrepByConn + runtime map
+				expMsg, _ := mockReq.PacketBundle.Message.(*mysql.StmtExecutePacket)
+				actMsg, _ := req.PacketBundle.Message.(*mysql.StmtExecutePacket)
+
+				var expectedQuery, actualQuery string
+				if expMsg != nil {
+					expectedQuery = lookupRecordedQuery(recordedPrepByConn, mock.Spec.Metadata["connID"], expMsg.StatementID)
+				}
+				if actMsg != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+					actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actMsg.StatementID])
+				}
+
+				if c := matchStmtExecutePacketQueryAware(mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery); c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
+
 			case sCOM_INIT_DB:
 				if c := matchInitDbPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
@@ -274,7 +292,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					strings.EqualFold(q, "COMMIT"),
 					strings.EqualFold(q, "ROLLBACK"),
 					hasPrefixFold(q, "SET "),
-					// NEW: DDL/control that only expects an OK from server
+					// DDL/control that only expects an OK from server
 					hasPrefixFold(q, "ALTER "),
 					hasPrefixFold(q, "CREATE "),
 					hasPrefixFold(q, "DROP "),
@@ -319,6 +337,16 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	if req.Header.Type == sCOM_STMT_PREP {
 		if prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket); ok && prepareOkResp != nil {
 			decodeCtx.PreparedStatements[prepareOkResp.StatementID] = prepareOkResp
+			// also maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
+			if decodeCtx.StmtIDToQuery == nil {
+				decodeCtx.StmtIDToQuery = make(map[uint32]string)
+			}
+			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
+				decodeCtx.StmtIDToQuery[prepareOkResp.StatementID] = sp.Query
+				logger.Debug("Recorded runtime PREP mapping",
+					zap.Uint32("stmt_id", prepareOkResp.StatementID),
+					zap.String("query", strings.TrimSpace(sp.Query)))
+			}
 		}
 	}
 
@@ -330,25 +358,25 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	return matchedResp, true, nil
 }
 
-func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
-	matchCount := 0
-	// Match the type and return zero if the types are not equal
-	if expected.Header.Type != actual.Header.Type {
-		return 0
-	}
-	// Match the header
-	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
-	if ok {
-		matchCount += 2
-	}
-	expectedMessage, _ := expected.Message.(*mysql.StmtClosePacket)
-	actualMessage, _ := actual.Message.(*mysql.StmtClosePacket)
-	// Match the statementID
-	if expectedMessage.StatementID == actualMessage.StatementID {
-		matchCount++
-	}
-	return matchCount
-}
+// func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+// 	matchCount := 0
+// 	// Match the type and return zero if the types are not equal
+// 	if expected.Header.Type != actual.Header.Type {
+// 		return 0
+// 	}
+// 	// Match the header
+// 	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+// 	if ok {
+// 		matchCount += 2
+// 	}
+// 	expectedMessage, _ := expected.Message.(*mysql.StmtClosePacket)
+// 	actualMessage, _ := actual.Message.(*mysql.StmtClosePacket)
+// 	// Match the statementID
+// 	if expectedMessage.StatementID == actualMessage.StatementID {
+// 		matchCount++
+// 	}
+// 	return matchCount
+// }
 
 func getQueryStructure(sql string) (string, error) {
 
@@ -466,7 +494,13 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 	return matchQuery(ctx, log, expected, actual, getQuery)
 }
 
-func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+// query-aware EXEC scoring.
+//   - Keep the existing header/flags/params scoring.
+//   - Do NOT reward raw StatementID equality.
+//   - Reward query equality (or structural equality) resolved via:
+//     recorded (expected) -> recordedPrepByConn[connID] -> query
+//     runtime  (actual)   -> decodeCtx.StmtIDToQuery(stmtID) set during COM_STMT_PREP
+func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expectedQuery, actualQuery string) int {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
@@ -479,14 +513,14 @@ func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual m
 	}
 	expectedMessage, _ := expected.Message.(*mysql.StmtExecutePacket)
 	actualMessage, _ := actual.Message.(*mysql.StmtExecutePacket)
+
 	// Match the status
 	if expectedMessage.Status == actualMessage.Status {
 		matchCount++
 	}
-	// Match the statementID
-	if expectedMessage.StatementID == actualMessage.StatementID {
-		matchCount++
-	}
+	// DO NOT score StatementID equality (unstable across runs)
+	// if expectedMessage.StatementID == actualMessage.StatementID { matchCount++ }
+
 	// Match the flags
 	if expectedMessage.Flags == actualMessage.Flags {
 		matchCount++
@@ -518,6 +552,20 @@ func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual m
 			}
 		}
 	}
+
+	// Query bonus
+	eq := strings.TrimSpace(expectedQuery)
+	aq := strings.TrimSpace(actualQuery)
+	if eq != "" && aq != "" {
+		if strings.EqualFold(eq, aq) {
+			matchCount += 10
+		} else if sigE, errE := getQueryStructureCached(eq); errE == nil {
+			if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
+				matchCount += 6
+			}
+		}
+	}
+
 	return matchCount
 }
 
@@ -744,4 +792,88 @@ func pluginEqualCompat(exp, act string) bool {
 		return false
 	}
 	return true
+}
+
+// Build recorded PREP index per connection from recorded mocks.
+// We map each connID to the list of (stmtID,query) pairs found by pairing
+// StmtPrepareOkPacket(stmtID) with the nearest COM_STMT_PREPARE query.
+func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
+	out := make(map[string][]prepEntry)
+	for _, m := range unfiltered {
+		if m == nil || m.Kind != models.MySQL {
+			continue
+		}
+		if m.Spec.Metadata["type"] == "config" {
+			continue
+		}
+		connID := m.Spec.Metadata["connID"]
+
+		// collect all prepare OK stmtIDs in this mock
+		stmtIDs := make(map[uint32]struct{})
+		for _, r := range m.Spec.MySQLResponses {
+			if spok, ok := r.Message.(*mysql.StmtPrepareOkPacket); ok && spok != nil {
+				stmtIDs[spok.StatementID] = struct{}{}
+			}
+		}
+		if len(stmtIDs) == 0 {
+			continue
+		}
+
+		// try to find a (nearest) PREP query; fall back to the last PREP in the mock
+		// this is heuristic but robust across our recording layout
+		var lastPrepQuery string
+		for i := len(m.Spec.MySQLRequests) - 1; i >= 0; i-- {
+			if sp, ok := m.Spec.MySQLRequests[i].Message.(*mysql.StmtPreparePacket); ok && sp != nil {
+				lastPrepQuery = strings.TrimSpace(sp.Query)
+				break
+			}
+		}
+		if lastPrepQuery == "" {
+			continue
+		}
+
+		for stmtID := range stmtIDs {
+			out[connID] = append(out[connID], prepEntry{
+				StatementID: stmtID,
+				Query:       lastPrepQuery,
+			})
+		}
+	}
+	return out
+}
+
+// lookup helper on recordedPrepByConn
+func lookupRecordedQuery(index map[string][]prepEntry, connID string, stmtID uint32) string {
+	list := index[connID]
+	for _, e := range list {
+		if e.StatementID == stmtID {
+			return e.Query
+		}
+	}
+	return ""
+}
+
+// Query-aware CLOSE scoring (header + query bonus; no raw stmt-id equality)
+func matchCloseWithQuery(expected, actual mysql.PacketBundle, expectedQuery, actualQuery string) int {
+	score := 0
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		score += 2
+	}
+	eq := strings.TrimSpace(expectedQuery)
+	aq := strings.TrimSpace(actualQuery)
+	if eq == "" || aq == "" {
+		return score
+	}
+	if strings.EqualFold(eq, aq) {
+		return score + 10
+	}
+	if sigE, errE := getQueryStructureCached(eq); errE == nil {
+		if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
+			return score + 6
+		}
+	}
+	return score
 }

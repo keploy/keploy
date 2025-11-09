@@ -24,9 +24,9 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -1184,4 +1184,15 @@ func sanitizeTemplatedJSON(raw string, placeholderRe *regexp.Regexp) string {
 	}
 	b.WriteString(raw[last:])
 	return b.String()
+}
+
+// LooksLikeJSON checks if a string appears to be JSON by checking for opening and closing brackets/braces.
+// It trims whitespace and returns false for empty strings.
+func LooksLikeJSON(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	return (strings.HasPrefix(s, "{") && strings.Contains(s, "}")) ||
+		(strings.HasPrefix(s, "[") && strings.Contains(s, "]"))
 }

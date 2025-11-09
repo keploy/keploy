@@ -19,19 +19,19 @@ import (
 
 	"facette.io/natsort"
 	"github.com/k0kubun/pp/v3"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
-	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
-	grpcMatcher "go.keploy.io/server/v2/pkg/matcher/grpc"
-	httpMatcher "go.keploy.io/server/v2/pkg/matcher/http"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/coverage"
-	"go.keploy.io/server/v2/pkg/platform/coverage/golang"
-	"go.keploy.io/server/v2/pkg/platform/coverage/java"
-	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
-	"go.keploy.io/server/v2/pkg/platform/coverage/python"
-	"go.keploy.io/server/v2/pkg/service"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
+	grpcMatcher "go.keploy.io/server/v3/pkg/matcher/grpc"
+	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/coverage"
+	"go.keploy.io/server/v3/pkg/platform/coverage/golang"
+	"go.keploy.io/server/v3/pkg/platform/coverage/java"
+	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
+	"go.keploy.io/server/v3/pkg/platform/coverage/python"
+	"go.keploy.io/server/v3/pkg/service"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -1094,7 +1094,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					goto compareResp
 				}
 
-				pc := ProtoConfig{
+				pc := models.ProtoConfig{
 					ProtoFile:    r.config.Test.ProtoFile,
 					ProtoDir:     r.config.Test.ProtoDir,
 					ProtoInclude: r.config.Test.ProtoInclude,
@@ -1102,15 +1102,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 
 				// get the proto message descriptor
-				md, files, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+				md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
 					goto compareResp
 				}
 
 				// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-				actJSON, actOK := ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-				testJSON, testOK := ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+				actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
+				testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
 
 				if actOK && testOK {
 					respCopy.Body.DecodedData = string(actJSON)
@@ -1726,7 +1726,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 				goto compareResp
 			}
 
-			pc := ProtoConfig{
+			pc := models.ProtoConfig{
 				ProtoFile:    r.config.Test.ProtoFile,
 				ProtoDir:     r.config.Test.ProtoDir,
 				ProtoInclude: r.config.Test.ProtoInclude,
@@ -1734,15 +1734,15 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			}
 
 			// get the proto message descriptor
-			md, files, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+			md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
 				goto compareResp
 			}
 
 			// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-			actJSON, actOK := ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-			testJSON, testOK := ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+			actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
+			testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
 
 			if actOK && testOK {
 				respCopy.Body.DecodedData = string(actJSON)

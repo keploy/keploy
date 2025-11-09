@@ -15,10 +15,11 @@ import (
 	"time"
 
 	"github.com/k0kubun/pp/v3"
-	"go.keploy.io/server/v2/config"
-	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/tools"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -115,7 +116,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 			continue
 		}
 		any = true
-		if err := r.printTests(sel); err != nil {
+		if err := r.printTests(ctx, sel); err != nil {
 			return fmt.Errorf("failed to print tests in printSpecificTestCases: %w", err)
 		}
 	}
@@ -130,10 +131,10 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 }
 
 // helper used by both file and DB paths
-func (r *Report) printTests(tests []models.TestResult) error {
+func (r *Report) printTests(ctx context.Context, tests []models.TestResult) error {
 	for _, t := range tests {
 		if t.Status == models.TestStatusFailed {
-			if err := r.printSingleTestReport(t); err != nil {
+			if err := r.printSingleTestReport(ctx, t); err != nil {
 				return fmt.Errorf("failed to print single test report in printTests: %w", err)
 			}
 			continue
@@ -152,6 +153,9 @@ func (r *Report) printTests(tests []models.TestResult) error {
 // printSummary prints the grand summary + per test-set table.
 func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	var total, passed, failed int
+	var highRisk, mediumRisk, lowRisk int
+	categoryCounts := make(map[models.FailureCategory]int)
+
 	type row struct {
 		name              string
 		total, pass, fail int
@@ -163,6 +167,24 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		total += rep.Total
 		passed += rep.Success
 		failed += rep.Failure
+
+		// Count risk levels and categories for failed tests
+		for _, test := range rep.Tests {
+			if test.Status == models.TestStatusFailed && test.FailureInfo.Risk != "" {
+				switch test.FailureInfo.Risk {
+				case models.High:
+					highRisk++
+				case models.Medium:
+					mediumRisk++
+				case models.Low:
+					lowRisk++
+				}
+
+				for _, category := range test.FailureInfo.Category {
+					categoryCounts[category]++
+				}
+			}
+		}
 
 		// Use TimeTaken from TestReport if available, otherwise estimate from tests
 		var dur time.Duration
@@ -191,10 +213,39 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintf(r.out, "\tTotal tests: %d\n", total)
 	fmt.Fprintf(r.out, "\tTotal test passed: %d\n", passed)
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
+
+	// Add risk level statistics
+	if failed > 0 {
+		fmt.Fprintln(r.out, "\n\tFAILURE RISK DISTRIBUTION:")
+		fmt.Fprintf(r.out, "\t\tHigh Risk: %d\n", highRisk)
+		fmt.Fprintf(r.out, "\t\tMedium Risk: %d\n", mediumRisk)
+		fmt.Fprintf(r.out, "\t\tLow Risk: %d\n", lowRisk)
+
+		// Add failure category statistics
+		fmt.Fprintln(r.out, "\n\tFAILURE CATEGORIES:")
+		if len(categoryCounts) == 0 {
+			fmt.Fprintln(r.out, "\t\tNo specific categories identified")
+		} else {
+			// Sort categories alphabetically for consistent output
+			categories := make([]models.FailureCategory, 0, len(categoryCounts))
+			for cat := range categoryCounts {
+				categories = append(categories, cat)
+			}
+			sort.Slice(categories, func(i, j int) bool {
+				return string(categories[i]) < string(categories[j])
+			})
+
+			for _, category := range categories {
+				count := categoryCounts[category]
+				fmt.Fprintf(r.out, "\t\t%s: %d\n", category, count)
+			}
+		}
+	}
+
 	if grandDur > 0 {
-		fmt.Fprintf(r.out, "\tTotal time taken: %q\n", fmtDuration(grandDur))
+		fmt.Fprintf(r.out, "\n\tTotal time taken: %q\n", fmtDuration(grandDur))
 	} else {
-		fmt.Fprintf(r.out, "\tTotal time taken: %q\n", "N/A")
+		fmt.Fprintf(r.out, "\n\tTotal time taken: %q\n", "N/A")
 	}
 
 	// Tabwriter over the same buffered writer.
@@ -222,6 +273,21 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 			for _, t := range rep.Tests {
 				if t.Status == models.TestStatusFailed {
 					label := fmt.Sprintf("%s", t.TestCaseID)
+
+					// Add risk level if available and not NONE
+					if t.FailureInfo.Risk != "" && t.FailureInfo.Risk != models.None {
+						label += fmt.Sprintf(" [%s-RISK]", t.FailureInfo.Risk)
+					}
+
+					// Add categories if available
+					if len(t.FailureInfo.Category) > 0 {
+						categories := make([]string, len(t.FailureInfo.Category))
+						for i, cat := range t.FailureInfo.Category {
+							categories[i] = string(cat)
+						}
+						label += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
+					}
+
 					failedList = append(failedList, label)
 				}
 			}
@@ -365,7 +431,7 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 				r.logger.Warn("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
 				return nil
 			}
-			return r.printTests(sel)
+			return r.printTests(ctx, sel)
 		}
 		// Default: only failed tests
 		failed := r.extractFailedTestsFromResults(tr.Tests)
@@ -413,7 +479,7 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 	// Handle specific test case filtering for legacy format
 	if len(r.config.Report.TestCaseIDs) > 0 {
-		return r.processLegacyTestCaseFiltering(lg.Tests)
+		return r.processLegacyTestCaseFiltering(ctx, lg.Tests)
 	}
 
 	// Default: process failed tests for legacy format
@@ -448,13 +514,13 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 }
 
 // processLegacyTestCaseFiltering filters and displays specific test cases from legacy format
-func (r *Report) processLegacyTestCaseFiltering(tests []models.TestResult) error {
+func (r *Report) processLegacyTestCaseFiltering(ctx context.Context, tests []models.TestResult) error {
 	sel := r.filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
 	if len(sel) == 0 {
 		r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
 		return nil
 	}
-	return r.printTests(sel)
+	return r.printTests(ctx, sel)
 }
 
 // processLegacyFailedTests processes and displays failed tests from legacy format
@@ -567,7 +633,7 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 				defer wg.Done()
 				defer func() { <-sem }()
 				var sb strings.Builder
-				if err := r.renderSingleFullBodyFailedTest(&sb, failedTests[i]); err != nil {
+				if err := r.renderSingleFullBodyFailedTest(ctx, &sb, failedTests[i]); err != nil {
 					results[i] = item{idx: i, err: err}
 					return
 				}
@@ -606,7 +672,7 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 			defer wg.Done()
 			defer func() { <-sem }()
 			var sb strings.Builder
-			if err := r.renderSingleFailedTest(&sb, failedTests[i]); err != nil {
+			if err := r.renderSingleFailedTest(ctx, &sb, failedTests[i]); err != nil {
 				results[i] = item{idx: i, err: err}
 				return
 			}
@@ -631,39 +697,59 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 }
 
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
-func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestResult) error {
-	// Header (keep same text)
-	fmt.Fprintf(sb, "Testrun failed for %s/%s\n\n", test.Name, test.TestCaseID)
+func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
+	// Header with risk level and categories
+	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+
+	// Add risk level if available and not NONE
+	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
+		header += fmt.Sprintf(" [%s-RISK]", test.FailureInfo.Risk)
+	}
+
+	// Add categories if available
+	if len(test.FailureInfo.Category) > 0 {
+		categories := make([]string, len(test.FailureInfo.Category))
+		for i, cat := range test.FailureInfo.Category {
+			categories[i] = string(cat)
+		}
+		header += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
+	}
+
+	sb.WriteString(header + "\n")
 
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
 	sb.WriteString(applyCliColorsToDiff(metaDiff))
-	sb.WriteString("\n\n")
-
-	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n\n")
+	sb.WriteString("\n")
+	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
 	// Body diffs
 	for _, bodyResult := range test.Result.BodyResult {
 		if bodyResult.Normal {
 			continue
 		}
-		if strings.EqualFold(string(bodyResult.Type), "JSON") {
-			diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
-			if err == nil {
-				sb.WriteString(applyCliColorsToDiff(diff))
-				sb.WriteString("\n")
-			} else {
-				tmp := *r
-				tmp.out = bufio.NewWriterSize(&writerAdapter{sb: sb}, 64<<10)
-				_ = tmp.printDefaultBodyDiff(bodyResult)
-				_ = tmp.out.Flush()
+
+		if bodyResult.Type == models.JSON || bodyResult.Type == models.GrpcData {
+			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
+				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
+				if err == nil {
+					sb.WriteString(applyCliColorsToDiff(diff))
+					sb.WriteString("\n")
+				} else {
+					tmp := *r
+					tmp.out = bufio.NewWriterSize(&writerAdapter{sb: sb}, 64<<10)
+					_ = tmp.printDefaultBodyDiff(bodyResult)
+					_ = tmp.out.Flush()
+				}
+				continue
 			}
-		} else {
-			// Force the old compact format for non-JSON bodies (fast).
-			diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
-			sb.WriteString(applyCliColorsToDiff(diff))
-			sb.WriteString("\n\n")
 		}
+
+		// Force the old compact format for non-JSON bodies (fast).
+		diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
+		sb.WriteString(applyCliColorsToDiff(diff))
+		sb.WriteString("\n\n")
+
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
@@ -674,10 +760,10 @@ type writerAdapter struct{ sb *strings.Builder }
 
 func (w *writerAdapter) Write(p []byte) (int, error) { return w.sb.Write(p) }
 
-func (r *Report) printSingleTestReport(test models.TestResult) error {
+func (r *Report) printSingleTestReport(ctx context.Context, test models.TestResult) error {
 	if r.config.Report.ShowFullBody {
 		var sb strings.Builder
-		if err := r.renderSingleFullBodyFailedTest(&sb, test); err != nil {
+		if err := r.renderSingleFullBodyFailedTest(ctx, &sb, test); err != nil {
 			return fmt.Errorf("failed to render full body test: %w", err)
 		}
 		if _, err := r.out.WriteString(sb.String()); err != nil {
@@ -692,7 +778,7 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 
 	// Non-full-body: unchanged
 	var sb strings.Builder
-	if err := r.renderSingleFailedTest(&sb, test); err != nil {
+	if err := r.renderSingleFailedTest(ctx, &sb, test); err != nil {
 		return fmt.Errorf("failed to render test report: %w", err)
 	}
 	if _, err := r.out.WriteString(sb.String()); err != nil {
@@ -706,7 +792,7 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 }
 
 // renderSingleFullBodyFailedTest renders a single failed test in full-body mode into sb.
-func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models.TestResult) error {
+func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings.Builder, test models.TestResult) error {
 	// Write header via printer.Sprintf (no stdout)
 	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
 	sb.WriteString(header)
@@ -722,7 +808,7 @@ func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models
 	if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
 		return fmt.Errorf("failed to add header diffs: %w", err)
 	}
-	if err := r.addBodyDiffs(test, &logDiffs); err != nil {
+	if err := r.addBodyDiffs(ctx, test, &logDiffs); err != nil {
 		return fmt.Errorf("failed to add body diffs: %w", err)
 	}
 
@@ -736,7 +822,23 @@ func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models
 
 // createFormattedPrinter: use r.printer (initialized in New)
 func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPrinter) string {
-	return printer.Sprintf("Testrun failed for %s/%s\n\n", test.Name, test.TestCaseID)
+	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+
+	// Add risk level if available and not NONE
+	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
+		header += fmt.Sprintf(" [%s-RISK]", test.FailureInfo.Risk)
+	}
+
+	// Add categories if available
+	if len(test.FailureInfo.Category) > 0 {
+		categories := make([]string, len(test.FailureInfo.Category))
+		for i, cat := range test.FailureInfo.Category {
+			categories[i] = string(cat)
+		}
+		header += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
+	}
+
+	return printer.Sprintf(header + "\n")
 }
 
 // addStatusCodeDiffs adds status code differences to the diff printer
@@ -763,7 +865,7 @@ func (r *Report) addHeaderDiffs(test models.TestResult, logDiffs *matcherUtils.D
 }
 
 // addBodyDiffs adds body differences to the diff printer
-func (r *Report) addBodyDiffs(test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
+func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
 	for _, bodyResult := range test.Result.BodyResult {
 		if !bodyResult.Normal {
 			actualValue, err := r.renderTemplateValue(bodyResult.Actual)

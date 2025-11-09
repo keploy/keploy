@@ -6,8 +6,8 @@ import (
 	"net"
 	"sync"
 
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
 const RESET = 0x00
@@ -25,6 +25,9 @@ type DecodeContext struct {
 	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
 	RecordedClientCaps uint32 // caps from the recorded config mock
 	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
+
+	//runtime stmt-id → query mapping set when COM_STMT_PREP matches
+	StmtIDToQuery map[uint32]string
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
