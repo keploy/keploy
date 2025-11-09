@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // estimateDuration tries to compute sum of TimeTaken across tests if those fields exist.
@@ -120,8 +120,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 
 	hasDiff := false
 
-	// Status code
-	if !test.Result.StatusCode.Normal {
+	// Status code (only for HTTP tests as grpc status is part of headers)
+	if !test.Result.StatusCode.Normal && test.Kind == models.HTTP {
 		hasDiff = true
 		sb.WriteString("Path: status_code\n")
 		sb.WriteString(fmt.Sprintf("  Expected: %d\n", test.Result.StatusCode.Expected))

@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/v2/config"
-	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -29,13 +29,13 @@ func Normalize(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
-			var replay replaySvc.Service
+			var tools toolsSvc.Service
 			var ok bool
-			if replay, ok = svc.(replaySvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+			if tools, ok = svc.(toolsSvc.Service); !ok {
+				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
 				return nil
 			}
-			if err := replay.Normalize(ctx); err != nil {
+			if err := tools.Normalize(ctx); err != nil {
 				utils.LogError(logger, err, "failed to normalize test cases")
 				return nil
 			}

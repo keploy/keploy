@@ -5,12 +5,12 @@ import (
 	"errors"
 	"sync"
 
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/platform/telemetry"
-	"go.keploy.io/server/v2/pkg/service"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
+	"go.keploy.io/server/v3/pkg/service"
+	"go.keploy.io/server/v3/utils"
 
-	"go.keploy.io/server/v2/pkg/service/utgen"
+	"go.keploy.io/server/v3/pkg/service/utgen"
 	"go.uber.org/zap"
 )
 
@@ -45,6 +45,8 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
 	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report", "sanitize":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
+	case "agent":
+		return GetAgent(ctx, cmd, n.cfg, n.logger, n.auth)
 	default:
 		return nil, errors.New("invalid command")
 	}

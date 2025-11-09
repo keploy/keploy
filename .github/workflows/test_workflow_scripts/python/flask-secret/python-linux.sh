@@ -2,105 +2,307 @@
 
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
+# Function to cleanup any remaining keploy processes
+cleanup_keploy() {
+    echo "Cleaning up any remaining keploy processes..."
+    local pids=$(pgrep keploy)
+    if [ -n "$pids" ]; then
+        echo "Found keploy processes: $pids"
+        echo "$pids" | xargs -r sudo kill -9 2>/dev/null || true
+        sleep 1
+        if pgrep keploy >/dev/null; then
+            echo "Warning: Some keploy processes may still be running"
+        else
+            echo "All keploy processes cleaned up successfully"
+        fi
+    else
+        echo "No keploy processes found to cleanup"
+    fi
+}
+
+# Set trap to cleanup on script exit
+trap cleanup_keploy EXIT
+
+# Add coverage to requirements.txt
+echo "coverage" >> requirements.txt
+
 # Install dependencies
 pip3 install -r requirements.txt
 
+rm -rf keploy.yml
+
 # Database migrations
-sudo $RECORD_BIN config --generate
-sudo rm -rf keploy/  # Clean old test data
+$RECORD_BIN config --generate
+rm -rf keploy/  # Clean old test data
 sleep 5  # Allow time for configuration changes
 
 send_request(){
+    mode="$1"
+
+    # wait for app to be ready
     sleep 10
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://127.0.0.1:8000/; then
-            app_started=true
-        fi
-        sleep 3 # wait for 3 seconds before checking again.
+    until curl -fsS http://127.0.0.1:8000/health >/dev/null; do
+        sleep 3
     done
-    echo "App started"
-    curl -s http://localhost:8000/secret1
+    echo "App started for mode: $mode"
 
-    curl -s http://localhost:8000/secret2
+    if [ "$mode" = "astro" ]; then
+        curl -sS http://127.0.0.1:8000/astro >/dev/null
+    elif [ "$mode" = "secrets" ]; then
+        for ep in secret1 secret2 secret3; do
+            echo "GET /$ep"
+            curl -sS "http://127.0.0.1:8000/$ep" >/dev/null
+        done
+    else # This handles the "misc" case
+        for ep in jwtlab curlmix cdn; do
+            echo "GET /$ep"
+            curl -sS "http://127.0.0.1:8000/$ep" >/dev/null
+        done
+    fi
 
-    curl -s http://localhost:8000/secret3
-
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    # Wait for keploy to flush recordings, then stop it
     sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    sudo kill $pid
+    pid=$(pgrep keploy | head -n 1)
+    if [ -n "$pid" ]; then
+        echo "$pid Keploy PID"
+        echo "Killing keploy"
+        
+        # Try graceful shutdown first
+        if ! kill "$pid" 2>/dev/null; then
+            echo "Graceful kill failed, trying with sudo..."
+            if ! sudo kill "$pid" 2>/dev/null; then
+                echo "Sudo kill failed, trying SIGKILL..."
+                if ! sudo kill -9 "$pid" 2>/dev/null; then
+                    echo "Warning: Could not kill keploy process $pid"
+                else
+                    echo "Successfully killed keploy with SIGKILL"
+                fi
+            else
+                echo "Successfully killed keploy with sudo"
+            fi
+        else
+            echo "Successfully killed keploy gracefully"
+        fi
+        
+        # Wait a bit and verify the process is gone
+        sleep 2
+        if pgrep keploy >/dev/null; then
+            echo "Warning: Keploy process may still be running"
+            pgrep keploy | xargs -r sudo kill -9 2>/dev/null || true
+        fi
+    else
+        echo "No keploy process found to kill"
+    fi
 }
 
-# Record and Test cycles
-for i in {1..2}; do
+# --- Record cycles for secret endpoints (2 sets, unchanged behavior) ---
+for i in 1 2; do
     app_name="flaskSecret_${i}"
-    send_request &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "x=y"  &> "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
-        echo "Error found in pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
+    send_request "secrets" &
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
+    if grep "ERROR" "${app_name}.txt"; then exit 1; fi
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5
     wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-echo "Shutting down flask before test mode..."
-
 # Sanitize the testcases
-sudo -E env PATH="$PATH" $RECORD_BIN sanitize
-
+$RECORD_BIN sanitize 2>&1 | tee sanitize_logs.txt
+if grep "ERROR" "sanitize_logs.txt"; then exit 1; fi
 sleep 5
 
-# Testing phase
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10    &> test_logs.txt
+# --- Record cycle for the new /astro endpoint (its own test set) ---
+app_name="flaskAstro"
+send_request "astro" &
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
+if grep "ERROR" "${app_name}.txt"; then exit 1; fi
+if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
+sleep 5
+wait
+echo "Recorded astro test case and mocks"
 
-if grep "ERROR" "test_logs.txt"; then
-        echo "Error found in pipeline..."
-        cat "test_logs.txt"
-        exit 1
+echo "Shutting down flask before test mode..."
+
+# --- Create secret.yaml in the newly created astro test-set ---
+latest_set=$(ls -d ./keploy/test-set-* 2>/dev/null | sort -V | tail -n 1)
+if [ -n "$latest_set" ]; then
+    echo "Creating secret.yaml in ${latest_set}"
+    cat > "${latest_set}/secret.yaml" <<'EOF'
+AWS_KEY: xyz
+EOF
+else
+    echo "Could not locate the newly created test-set directory for astro."
+    exit 1
 fi
-if grep "WARNING: DATA RACE" "test_logs.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
+
+# Testing phase
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
+if grep "ERROR" "test_logs.txt"; then exit 1; fi
+if grep "WARNING: DATA RACE" "test_logs.txt"; then exit 1; fi
+
+all_passed=true
+# We now expect three test sets: test-set-0, test-set-1, test-set-2 (astro)
+for i in {0..2}; do
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+    if [ ! -f "$report_file" ] || [ "$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break
+    fi
+done
+
+if [ "$all_passed" = true ]; then
+    echo "All initial tests passed"
+else
     cat "test_logs.txt"
     exit 1
 fi
 
+# --- NORMALIZE WORKFLOW ---
+echo "Swapping main.py with temp_main.py for normalize test"
+# Save original main.py instead of deleting it
+mv main.py original_main.py
+mv temp_main.py main.py
+
+echo "Removing astro test-set-2 to focus normalize on secret sets"
+rm -rf keploy/test-set-2
+
+echo "Running test again, this will fail as expected"
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_fail.txt
+
+echo "Running the normalize command"
+sudo -E env PATH="$PATH" $REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
+if grep "ERROR" "normalize_logs.txt"; then exit 1; fi
+
+echo "Running test again, this time it will pass"
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_pass.txt
+if grep "ERROR" "test_logs_pass.txt"; then exit 1; fi
+
 all_passed=true
-
-for i in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
+for i in {0..1}; do
+    report_file="./keploy/reports/test-run-2/test-set-$i-report.yaml"
+    if [ ! -f "$report_file" ] || [ "$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')" != "PASSED" ]; then
         all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
+        echo "Test-set-$i did not pass after normalize."
+        break
     fi
 done
 
-# Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
-    echo "All tests passed"
+    echo "Normalize workflow completed successfully"
+else
+    cat "test_logs_pass.txt"
+    exit 1
+fi
+
+# --- FINAL RECORDING AND TESTING (FRESH START) ---
+
+# Restore the original main.py to record new tests against the original application code.
+echo "Restoring original application code for new recording session..."
+mv main.py temp_main.py      # Move the modified version back to its original filename
+mv original_main.py main.py  # Restore the original main.py
+
+# Remove all previous test data to start fresh
+echo "Removing all previous test data..."
+rm -rf keploy
+
+# Record the "misc" endpoints as a new test suite
+app_name="flaskMisc"
+send_request "misc" &
+sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
+if grep "ERROR" "${app_name}.txt"; then
+    echo "Error found in misc recording..."
+    cat "${app_name}.txt"
+    exit 1
+fi
+if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+    echo "Race condition detected in misc recording..."
+    cat "${app_name}.txt"
+    exit 1
+fi
+sleep 5
+wait
+echo "Recorded misc test case and mocks"
+
+# Sanitize the newly created test cases
+sudo -E env PATH="$PATH" $RECORD_BIN sanitize 2>&1 | tee sanitize_logs_misc.txt
+if grep "ERROR" "sanitize_logs_misc.txt"; then
+    echo "Error found in misc sanitize..."
+    cat "sanitize_logs_misc.txt"
+    exit 1
+fi
+
+# Final testing phase
+echo "Running test on the new 'misc' test suite..."
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs.txt
+if grep "ERROR" "final_test_logs.txt"; then
+    echo "Error found in final test run..."
+    cat "final_test_logs.txt"
+    exit 1
+fi
+if grep "WARNING: DATA RACE" "final_test_logs.txt"; then
+    echo "Race condition detected in final test run..."
+    cat "final_test_logs.txt"
+    exit 1
+fi
+
+# Find the most recent test-run dir (don’t assume test-run-0)
+RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
+if [[ -z "${RUN_DIR:-}" ]]; then
+  echo "::error::No test-run directory found under ./keploy/reports"
+  [[ $REPLAY_RC -ne 0 ]] && exit "$REPLAY_RC" || exit 1
+fi
+
+coverage_file="$RUN_DIR/coverage.yaml"
+if [[ -f "$coverage_file" ]]; then
+  echo "✅ Coverage file found: $coverage_file"
+else
+  echo "::error::Coverage file not found in $RUN_DIR"
+  return 1
+fi
+
+# ✅ Extract and validate coverage percentage from log
+coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
+
+if [[ -z "$coverage_line" ]]; then
+  echo "::error::No coverage percentage found in test_logs.txt"
+  return 1
+fi
+
+coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
+echo "📊 Extracted coverage: ${coverage_percent}%"
+
+# Compare coverage with threshold (50%)
+if (( $(echo "$coverage_percent < 50" | bc -l) )); then
+  echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
+  return 1
+else
+  echo "✅ Coverage meets threshold (>= 50%)"
+fi
+
+# Validate the final test run report. Since we started fresh, there is only one test set.
+final_test_passed=true
+report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
+echo "Checking final report: $report_file"
+
+if [ ! -f "$report_file" ]; then
+    echo "Final report missing: $report_file"
+    final_test_passed=false
+else
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    echo "Final test status for test-set-0: $test_status"
+    if [ "$test_status" != "PASSED" ]; then
+        final_test_passed=false
+    fi
+fi
+
+# Check the overall test status and exit accordingly
+if [ "$final_test_passed" = true ]; then
+    echo "All final tests passed successfully!"
     exit 0
 else
-    cat "test_logs.txt"
+    echo "The final test run failed."
+    cat "final_test_logs.txt"
     exit 1
 fi

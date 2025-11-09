@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"reflect"
@@ -20,8 +21,9 @@ import (
 	"github.com/fatih/color"
 	jsonDiff "github.com/keploy/jsonDiff"
 	"github.com/olekukonko/tablewriter"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -266,7 +268,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 					if used[j] {
 						continue
 					}
-					childKey := "" // by design: no index prefix at root mixed objects
+					childKey := key
 					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, ignoreOrdering)
 					if err == nil && res.matches {
 						if !res.isExact {
@@ -1483,4 +1485,139 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 		}
 	}
 	return true
+}
+
+// lowerMap returns a lower-cased copy of parameter keys.
+func lowerMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+// parseContentType tries strict parsing, then a tolerant fallback.
+// okStrict indicates whether strict parsing succeeded.
+func ParseContentType(raw string) (typ string, params map[string]string, okStrict bool, err error) {
+	if raw == "" {
+		return "", nil, false, nil
+	}
+	t, p, e := mime.ParseMediaType(raw)
+	if e == nil {
+		return strings.ToLower(t), lowerMap(p), true, nil
+	}
+	// tolerant fallback: take token before ';', trim, lowercase
+	token := strings.ToLower(strings.TrimSpace(strings.Split(raw, ";")[0]))
+	if token == "" || !strings.Contains(token, "/") {
+		// no usable fallback
+		return "", nil, false, e
+	}
+	return token, map[string]string{}, false, e
+}
+
+// compareSlicesIgnoreOrder checks if two string slices contain the same elements,
+// regardless of their order. It returns true if they do, and false otherwise.
+func CompareSlicesIgnoreOrder(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	// Create a frequency map of elements in the first slice.
+	freq := make(map[string]int, len(a))
+	for _, item := range a {
+		freq[item]++
+	}
+
+	// Decrement the frequency for each element in the second slice.
+	for _, item := range b {
+		if freq[item] == 0 {
+			// If an element is not in the map or its count is already zero,
+			// the slices are not identical.
+			return false
+		}
+		freq[item]--
+	}
+
+	// If the loop completes, the slices have the same elements.
+	return true
+}
+
+// NormalizeNestedJSONForNoise rewrites a JSON string so that any string fields
+// which themselves contain JSON are parsed into real JSON objects/arrays.
+// It only does this for fields that are hinted by the noise configuration,
+// i.e. when noise keys contain dotted paths like "json_response.timestamp".
+//
+// This lets noise entries such as "json_response.timestamp" work even when
+// the original payload encodes that inner JSON as a string.
+//
+// If raw is not JSON, noise is empty, or any error occurs, it returns raw
+// unchanged so it is safe to call in all conditions.
+func NormalizeNestedJSONForNoise(raw string, noise map[string][]string, log *zap.Logger) string {
+	if raw == "" || len(noise) == 0 {
+		return raw
+	}
+	// Fast rejection: not JSON at all → nothing to normalize
+	if !json.Valid([]byte(raw)) {
+		return raw
+	}
+
+	// Collect "root" keys from noise that indicate nested paths.
+	// Example: "json_response.timestamp" → root "json_response".
+	rootKeys := make(map[string]bool)
+	for k := range noise {
+		parts := strings.SplitN(k, ".", 2)
+		if len(parts) > 1 {
+			root := strings.ToLower(parts[0])
+			rootKeys[root] = true
+		}
+	}
+	if len(rootKeys) == 0 {
+		// No dotted paths → no need to rewrite nested JSON
+		return raw
+	}
+
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		utils.LogError(log, err, "failed to unmarshal decoded gRPC data for normalization")
+		return raw
+	}
+
+	normalizeNestedJSONValue(v, rootKeys)
+
+	buf, err := json.Marshal(v)
+	if err != nil {
+		utils.LogError(log, err, "failed to re-marshal decoded gRPC data after normalization")
+		return raw
+	}
+	return string(buf)
+}
+
+// normalizeNestedJSONValue walks the parsed JSON value and replaces any
+// string fields whose key is in rootKeys and whose value is itself valid
+// JSON with the parsed inner JSON.
+func normalizeNestedJSONValue(v interface{}, rootKeys map[string]bool) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			lowerKey := strings.ToLower(k)
+
+			// If this key is in rootKeys and the value is a JSON string, unwrap it.
+			if rootKeys[lowerKey] {
+				if s, ok := val.(string); ok && pkg.LooksLikeJSON(s) && json.Valid([]byte(s)) {
+					var inner interface{}
+					if err := json.Unmarshal([]byte(s), &inner); err == nil {
+						t[k] = inner
+						val = inner
+					}
+				}
+			}
+
+			// Recurse into children to handle deeper nested wrappers.
+			normalizeNestedJSONValue(val, rootKeys)
+		}
+
+	case []interface{}:
+		for i := range t {
+			normalizeNestedJSONValue(t[i], rootKeys)
+		}
+	}
 }

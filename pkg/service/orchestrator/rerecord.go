@@ -15,9 +15,9 @@ import (
 	"regexp"
 	"strings"
 
-	"go.keploy.io/server/v2/pkg"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -62,8 +62,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return testSets[i] < testSets[j]
 	})
 
-	var SelectedTests []string
-
+	var SelectedTests, ReRecordedTests []string
 	for _, testSet := range testSets {
 		if ctx.Err() != nil {
 			break
@@ -124,6 +123,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 				allRecorded, err := o.replayTests(recordCtx, testSet, mappingTestSet, isMappingEnabled)
 
 				if allRecorded && err == nil {
+					ReRecordedTests = append(ReRecordedTests, mappingTestSet)
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
 				}
 				if !allRecorded {
@@ -180,6 +180,13 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return nil
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
+
+	if !o.config.Test.DisableMockUpload {
+		o.replay.UploadMocks(ctx, ReRecordedTests)
+	} else {
+		o.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+	}
+
 	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
@@ -239,16 +246,10 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		return false, fmt.Errorf("%s", errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
-	var userIP string
 	delay := o.config.Test.Delay
 	time.Sleep(time.Duration(delay) * time.Second)
 	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
-		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
-		if err != nil {
-			utils.LogError(o.logger, err, "failed to get the app ip")
-			return false, err
-		}
 	}
 	timeout := time.Duration(120+delay) * time.Second
 
@@ -392,15 +393,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 				}
 			}
 		}(tc.Name)
-
-		if utils.IsDockerCmd(cmdType) {
-			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, userIP)
-			if err != nil {
-				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
-				break
-			}
-			o.logger.Debug("", zap.String("replaced_url_in_docker_env", tc.HTTPReq.URL))
-		}
 
 		if o.config.ReRecord.Host != "" {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, o.config.ReRecord.Host)

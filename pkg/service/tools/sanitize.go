@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,11 +12,17 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/spf13/viper"
+	"github.com/zricethezav/gitleaks/v8/config"
 	"github.com/zricethezav/gitleaks/v8/detect"
 	"github.com/zricethezav/gitleaks/v8/report"
+	"go.keploy.io/server/v3/pkg"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed custom_gitleaks_rules.toml
+var customGitleaksRules string
 
 func (t *Tools) Sanitize(ctx context.Context) error {
 	t.logger.Info("Starting sanitize process...")
@@ -62,7 +69,7 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 			continue
 		}
 
-		if err := t.sanitizeTestSetDir(ctx, testSetDir); err != nil {
+		if err := t.SanitizeTestSetDir(ctx, testSetDir); err != nil {
 			t.logger.Error("Sanitize failed for test set",
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir),
@@ -99,7 +106,7 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error {
+func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error {
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
 
@@ -162,6 +169,76 @@ type replacement struct {
 	new string
 }
 
+// loadCustomRules parses the custom gitleaks configuration from custom_gitleaks_rules.toml
+// and returns a Config. The TOML file is embedded at compile time for easy distribution.
+func loadCustomRules() (config.Config, error) {
+	viper.SetConfigType("toml")
+	if err := viper.ReadConfig(strings.NewReader(customGitleaksRules)); err != nil {
+		return config.Config{}, fmt.Errorf("failed to read custom rules config: %w", err)
+	}
+
+	var viperConfig config.ViperConfig
+	if err := viper.Unmarshal(&viperConfig); err != nil {
+		return config.Config{}, fmt.Errorf("failed to unmarshal custom rules config: %w", err)
+	}
+
+	cfg, err := viperConfig.Translate()
+	if err != nil {
+		return config.Config{}, fmt.Errorf("failed to translate custom rules config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// augmentDetector adds custom rules from custom_gitleaks_rules.toml to an existing Detector.
+// This approach allows easy maintenance - just update the TOML file to add/modify rules.
+func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
+	// Load custom rules from the TOML configuration
+	customCfg, err := loadCustomRules()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load custom rules: %w", err)
+	}
+
+	// Start with the base detector's config
+	cfg := det.Config
+	if cfg.Rules == nil {
+		cfg.Rules = make(map[string]config.Rule)
+	}
+	if cfg.Keywords == nil {
+		cfg.Keywords = make(map[string]struct{})
+	}
+
+	// Merge custom rules into the base config
+	for ruleID, rule := range customCfg.Rules {
+		// Add rule to config
+		cfg.Rules[ruleID] = rule
+		cfg.OrderedRules = append(cfg.OrderedRules, ruleID)
+
+		// Add keywords to the global keyword set
+		for _, kw := range rule.Keywords {
+			cfg.Keywords[strings.ToLower(kw)] = struct{}{}
+		}
+	}
+
+	// Ensure stable rule order
+	sort.Strings(cfg.OrderedRules)
+
+	// Create new detector with augmented config
+	newDet := detect.NewDetector(cfg)
+
+	// Preserve runtime knobs from original detector
+	newDet.Redact = det.Redact
+	newDet.Verbose = det.Verbose
+	newDet.MaxDecodeDepth = det.MaxDecodeDepth
+	newDet.MaxArchiveDepth = det.MaxArchiveDepth
+	newDet.MaxTargetMegaBytes = det.MaxTargetMegaBytes
+	newDet.FollowSymlinks = det.FollowSymlinks
+	newDet.NoColor = det.NoColor
+	newDet.IgnoreGitleaksAllow = det.IgnoreGitleaksAllow
+
+	return newDet, nil
+}
+
 // RedactYAML applies secret detection + redaction to a YAML blob.
 // - Populates/extends aggSecrets (shared across files in a test-set)
 // - Writes placeholders into the YAML
@@ -172,6 +249,11 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("gitleaks: %w", err)
 	}
+	detector, err = augmentDetector(detector)
+	if err != nil {
+		return nil, fmt.Errorf("augment gitleaks rules: %w", err)
+	}
+
 	findings := detector.DetectString(string(yamlBytes))
 	secretSet := collectSecrets(findings)
 
@@ -248,7 +330,7 @@ func redactNode(
 			switch v.Kind {
 			case yaml.ScalarNode:
 				if v.Tag == "!!str" {
-					if looksLikeJSON(v.Value) {
+					if pkg.LooksLikeJSON(v.Value) {
 						changed, newVal, jsonRepls := redactJSONString(v.Value, key, secretSet, secrets)
 						if changed {
 							v.Value = newVal
@@ -300,13 +382,6 @@ func isReqHeaderPath(path []string) bool {
 	n := len(path)
 	return strings.EqualFold(path[n-3], "req") &&
 		strings.EqualFold(path[n-2], "header")
-}
-
-// ----- JSON-in-string -----
-func looksLikeJSON(s string) bool {
-	t := strings.TrimSpace(s)
-	return (strings.HasPrefix(t, "{") && strings.Contains(t, "}")) ||
-		(strings.HasPrefix(t, "[") && strings.Contains(t, "]"))
 }
 
 func redactJSONString(s string, parentKey string, secretSet map[string]struct{},
@@ -597,17 +672,135 @@ func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(path, out.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(path, out.Bytes(), 0777); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
 
-// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with 0644 perms.
+// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with 0777 perms.
 func WriteSecretsYAML(path string, secrets map[string]string) error {
 	b, err := yaml.Marshal(secrets)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0644)
+	return os.WriteFile(path, b, 0777)
+}
+
+// DesanitizeFileInPlace reads a sanitized YAML file and replaces placeholders with actual secret values.
+func DesanitizeFileInPlace(path string, secrets map[string]string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	// Replace all placeholders with actual values
+	content := string(raw)
+	for key, value := range secrets {
+		// sanitize only follows this pattern as of now
+		placeholder := fmt.Sprintf("{{string .secret.%s }}", key)
+		content = strings.ReplaceAll(content, placeholder, value)
+	}
+
+	// Normalize YAML formatting
+	var root yaml.Node
+	err = yaml.Unmarshal([]byte(content), &root)
+	if err != nil {
+		return fmt.Errorf("parse desanitized yaml %s: %w", path, err)
+	}
+
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+
+	// to ensure the same formatting as the original file
+	err = enc.Encode(&root)
+	if err != nil {
+		_ = enc.Close()
+		return fmt.Errorf("encode desanitized yaml %s: %w", path, err)
+	}
+	_ = enc.Close()
+
+	err = os.WriteFile(path, out.Bytes(), 0777)
+	if err != nil {
+		return fmt.Errorf("write desanitized %s: %w", path, err)
+	}
+	return nil
+}
+
+// DesanitizeTestSet is a standalone function that desanitizes a test set directory.
+// It reads secret.yaml, desanitizes all test files, and removes the secret.yaml file.
+// Returns true if desanitization was performed, false if no secret.yaml was found.
+func (t *Tools) DesanitizeTestSet(testSetID string, path string) (bool, error) {
+	t.logger.Debug("Desanitizing test set", zap.String("testSetID", testSetID), zap.String("path", path))
+
+	testSetDir := filepath.Join(path, testSetID)
+	if !isDir(testSetDir) {
+		return false, fmt.Errorf("test set directory not found: %s", testSetDir)
+	}
+
+	secretPath := filepath.Join(testSetDir, "secret.yaml")
+
+	t.logger.Debug("Checking if secret.yaml exists", zap.String("path", secretPath))
+
+	// Check if secret.yaml exists
+	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
+		return false, nil
+	}
+
+	// Read secret.yaml
+	secretBytes, err := os.ReadFile(secretPath)
+	if err != nil {
+		return false, fmt.Errorf("read secret.yaml: %w", err)
+	}
+
+	// Parse secrets map
+	secrets := make(map[string]string)
+	err = yaml.Unmarshal(secretBytes, &secrets)
+	if err != nil {
+		return false, fmt.Errorf("parse secret.yaml: %w", err)
+	}
+
+	t.logger.Debug("Parsed secrets map for desanitization", zap.Any("secrets", secrets))
+
+	// Get all test files
+	testsDir := filepath.Join(testSetDir, "tests")
+	if !isDir(testsDir) {
+		return false, fmt.Errorf("tests directory not found: %s", testsDir)
+	}
+
+	ents, err := os.ReadDir(testsDir)
+	if err != nil {
+		return false, fmt.Errorf("read tests dir: %w", err)
+	}
+
+	var files []string
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".yaml") {
+			continue
+		}
+		files = append(files, filepath.Join(testsDir, name))
+	}
+
+	// Desanitize each file
+	for _, f := range files {
+		t.logger.Debug("Desanitizing file", zap.String("file", f))
+
+		err = DesanitizeFileInPlace(f, secrets)
+		if err != nil {
+			return false, fmt.Errorf("failed to desanitize file %s: %w", f, err)
+		}
+	}
+
+	// Remove secret.yaml after desanitization
+	err = os.Remove(secretPath)
+	if err != nil {
+		return false, fmt.Errorf("remove secret.yaml: %w", err)
+	}
+
+	return true, nil
 }

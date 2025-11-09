@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/v2/config"
-	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v3/config"
+	replaySvc "go.keploy.io/server/v3/pkg/service/replay"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -82,7 +82,7 @@ func UploadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Service
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			}
-			if err := replay.UploadMocks(ctx); err != nil {
+			if err := replay.UploadMocks(ctx, nil); err != nil {
 				utils.LogError(logger, err, "failed to upload mocks to the keploy registry")
 				return nil
 			}
