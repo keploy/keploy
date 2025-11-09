@@ -460,7 +460,7 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 		// macOS volumes - detect current Docker context and use correct socket
 		cmd := exec.Command("docker", "context", "inspect", "--format", "{{if .Metadata}}Name={{.Name}} {{end}}{{if .Endpoints.docker}}Endpoint={{.Endpoints.docker.Host}}{{end}}")
 		out, err := cmd.Output()
-		var dockerSocketPath string = "/var/run/docker.sock" // Default fallback
+		dockerSocketPath := "/var/run/docker.sock" // Default fallback
 		
 		if err == nil {
 			output := strings.TrimSpace(string(out))
