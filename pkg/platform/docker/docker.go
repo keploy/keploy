@@ -457,12 +457,39 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir string) []string {
 			"/var/run/docker.sock:/var/run/docker.sock",
 		)
 	case "darwin":
-		// macOS volumes
+		// macOS volumes - detect current Docker context and use correct socket
+		cmd := exec.Command("docker", "context", "inspect", "--format", "{{if .Metadata}}Name={{.Name}} {{end}}{{if .Endpoints.docker}}Endpoint={{.Endpoints.docker.Host}}{{end}}")
+		out, err := cmd.Output()
+		dockerSocketPath := "/var/run/docker.sock" // Default fallback
+		
+		if err == nil {
+			output := strings.TrimSpace(string(out))
+			var currentContext, dockerEndpoint string
+
+			// Parse the output for current context and endpoint
+			for _, part := range strings.Fields(output) {
+				if strings.HasPrefix(part, "Name=") {
+					currentContext = strings.TrimPrefix(part, "Name=")
+				} else if strings.HasPrefix(part, "Endpoint=") {
+					dockerEndpoint = strings.TrimPrefix(part, "Endpoint=")
+				}
+			}
+
+			// For non-default contexts, extract socket path from endpoint
+			if currentContext != "default" && dockerEndpoint != "" {
+				if strings.HasPrefix(dockerEndpoint, "unix://") {
+					dockerSocketPath = strings.TrimPrefix(dockerEndpoint, "unix://")
+				}
+				// Set DOCKER_HOST environment variable for non-default contexts
+				os.Setenv("DOCKER_HOST", dockerEndpoint)
+			}
+		}
+		
 		volumes = append(volumes,
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			"/var/run/docker.sock:/var/run/docker.sock",
+			dockerSocketPath+":/var/run/docker.sock",
 		)
 	case "windows":
 		// Windows volumes - check if using default context or colima
