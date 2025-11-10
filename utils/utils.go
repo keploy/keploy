@@ -292,6 +292,8 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		logger.Error(msg, append(fields, zap.Error(err))...)
+	} else {
+		println("context cancelled error:", msg, err.Error())
 	}
 }
 
