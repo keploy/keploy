@@ -139,10 +139,14 @@ jobs:
             return $false
           }
 
-          # Ask only for server version; if daemon is down, this returns non-zero
-          docker info --format '{{.ServerVersion}}' *>$null
-
-          return ($LASTEXITCODE -eq 0)
+          # Use Start-Process so failures don't raise a NativeCommandError in PowerShell
+          try {
+            $proc = Start-Process -FilePath $dockerCmd.Source -ArgumentList @('info','--format','{{.ServerVersion}}') -NoNewWindow -PassThru -Wait -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ExitCode -eq 0) { return $true }
+            return $false
+          } catch {
+            return $false
+          }
         }
 
         function Test-DockerDesktopProcess {
