@@ -110,6 +110,18 @@ func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
 
+	// Create Gitleaks detector once per test set (optimization)
+	detector, err := detect.NewDetectorDefaultConfig()
+	if err != nil {
+		return fmt.Errorf("failed to create gitleaks detector: %w", err)
+	}
+
+	// Augment with custom rules
+	detector, err = augmentDetector(detector)
+	if err != nil {
+		return fmt.Errorf("failed to augment detector with custom rules: %w", err)
+	}
+
 	testsDir := filepath.Join(testSetDir, "tests")
 	var files []string
 
@@ -148,7 +160,7 @@ func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		default:
 		}
 
-		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
+		if err := SanitizeFileInPlaceWithDetector(f, aggSecrets, detector); err != nil {
 			// Continue to next file
 			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
 			continue
@@ -239,21 +251,18 @@ func augmentDetector(det *detect.Detector) (*detect.Detector, error) {
 	return newDet, nil
 }
 
-// RedactYAML applies secret detection + redaction to a YAML blob.
+// RedactYAML applies secret detection + redaction to a YAML blob using provided detector.
 // - Populates/extends aggSecrets (shared across files in a test-set)
 // - Writes placeholders into the YAML
 // - Handles JSON-in-string and curl header blobs
-func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) {
-	// 1) Detect secrets
-	detector, err := detect.NewDetectorDefaultConfig()
-	if err != nil {
-		return nil, fmt.Errorf("gitleaks: %w", err)
-	}
-	detector, err = augmentDetector(detector)
-	if err != nil {
-		return nil, fmt.Errorf("augment gitleaks rules: %w", err)
-	}
+func RedactYAML(yamlBytes []byte, aggSecrets map[string]string, detector *detect.Detector) ([]byte, error) {
+	return RedactYAMLWithDetector(yamlBytes, aggSecrets, detector)
+}
 
+// RedactYAMLWithDetector applies secret detection + redaction using provided detector.
+// This is the optimized version that reuses detector instances.
+func RedactYAMLWithDetector(yamlBytes []byte, aggSecrets map[string]string, detector *detect.Detector) ([]byte, error) {
+	// 1) Detect secrets using provided detector
 	findings := detector.DetectString(string(yamlBytes))
 	secretSet := collectSecrets(findings)
 
@@ -645,18 +654,24 @@ func uniqueKeyForValue(base, val string, existing map[string]string) string {
 	}
 }
 
-// SanitizeFileInPlace reads a YAML file, redacts secrets, and writes back in-place.
-// aggSecrets is a shared map across the entire test-set (key -> original value).
-func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
+// SanitizeFileInPlaceWithDetector reads a YAML file, redacts secrets using provided detector, and writes back in-place.
+// This is the optimized version that reuses detector instances.
+func SanitizeFileInPlaceWithDetector(path string, aggSecrets map[string]string, detector *detect.Detector) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
-	redacted, err := RedactYAML(raw, aggSecrets)
+	redacted, err := RedactYAMLWithDetector(raw, aggSecrets, detector)
 	if err != nil {
 		return fmt.Errorf("redact %s: %w", path, err)
 	}
+
+	return writeRedactedFile(path, redacted)
+}
+
+// writeRedactedFile handles the common file writing logic
+func writeRedactedFile(path string, redacted []byte) error {
 
 	// Normalize YAML formatting
 	var root yaml.Node
