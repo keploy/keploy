@@ -184,7 +184,7 @@ $base = $env:APP_BASE_URL
 $dockerCmd = "docker compose up"
 $recArgs = @(
   'record',
-  '-c', $dockerCmd,
+  '-c', '"docker compose up"',
   '--container-name', $containerName,
   '--generate-github-actions=false',
   '--debug'
