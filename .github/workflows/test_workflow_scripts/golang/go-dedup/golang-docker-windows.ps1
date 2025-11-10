@@ -192,13 +192,16 @@ $recArgs = @(
 Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
-# 2. Start Keploy in a background job.
-# This allows the script to continue while Keploy runs.
-# We use Tee-Object to send output to BOTH the log file and the job's output stream.
-$recJob = Start-Job -ScriptBlock {
-    # Use the $using: scope to access variables from the parent script
-    & $using:env:RECORD_BIN @($using:recArgs) 2>&1 | Tee-Object -FilePath $using:logPath
-}
+# 2. Start Keploy using Start-Process and tail the log in a background job.
+# This gives us a reliable PID and still allows log streaming via a job.
+$argList = $recArgs -join ' '
+Write-Host "Starting keploy record via Start-Process..."
+$proc = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $argList -NoNewWindow -RedirectStandardOutput $logPath -RedirectStandardError $logPath -PassThru
+Write-Host "Keploy record started, PID: $($proc.Id)"
+$REC_PID = $proc.Id
+
+# Start a background job that tails the log file so Sync-Logs can Receive-Job from it
+$recJob = Start-Job -ScriptBlock { param($lp) Get-Content -Path $lp -Wait -ErrorAction SilentlyContinue } -ArgumentList $logPath
 
 Write-Host "`n=========================================================="
 Write-Host "Dumping full Keploy Record Logs from file: '$logPath'"
@@ -248,7 +251,16 @@ do {
 } while ((Get-Date) -lt $pollUntil -and $recJob.State -eq 'Running')
 
 
-$REC_PID = (Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%keploy record%'").ProcessId | Select-Object -Last 1
+
+# If we don't have a PID (some environments), try a short polling fallback to find the process
+if (-not $REC_PID -or $REC_PID -eq 0) {
+  $exeName = [System.IO.Path]::GetFileNameWithoutExtension($env:RECORD_BIN)
+  for ($i = 0; $i -lt 10; $i++) {
+    Start-Sleep -Seconds 1
+    $p = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending | Select-Object -First 1
+    if ($p) { $REC_PID = $p.Id; break }
+  }
+}
 
 if ($REC_PID -and $REC_PID -ne 0) {
     Write-Host "Found Keploy PID: $REC_PID"
