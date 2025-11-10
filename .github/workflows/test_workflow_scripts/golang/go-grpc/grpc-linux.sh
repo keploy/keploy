@@ -12,6 +12,13 @@
 set -Eeuo pipefail
 
 MODE=${1:-incoming}
+BIG_PAYLOAD=${2:-false}
+
+BIG_PAYLOAD_FLAG=""
+if [ "$BIG_PAYLOAD" = "true" ]; then
+  echo "🚀 Big payload mode enabled."
+  BIG_PAYLOAD_FLAG="--bigPayload"
+fi
 
 # --- Sanity Checks ---
 [ -x "${RECORD_BIN:-}" ] || { echo "RECORD_BIN not set or not executable"; exit 1; }
@@ -164,7 +171,7 @@ if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
     # Record: Keploy wraps the server to capture incoming gRPC calls. The client is just a driver.
     ./grpc-client &> client_incoming.log &
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" $BIG_PAYLOAD_FLAG --generateGithubActions=false 2>&1 | tee record_incoming.log &
     wait_for_port 50051
 
     sleep 5
@@ -192,7 +199,7 @@ elif [ "$MODE" = "outgoing" ]; then
     # Record: Keploy wraps the client to capture its outgoing gRPC calls. The server is a dependency.
     ./grpc-server &> server_outgoing.log &
     wait_for_port 50051
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" $BIG_PAYLOAD_FLAG --generateGithubActions=false 2>&1 | tee record_outgoing.log &
 
     send_requests
     sleep 15 # Allow time for traces to be recorded
