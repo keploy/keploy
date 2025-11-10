@@ -4,7 +4,7 @@
  
 # Checkout the gin-mongo-mail-server branch
 git fetch origin
-git checkout gin-mongo-mail-server-test
+git checkout native-linux
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
@@ -89,7 +89,7 @@ send_request(){
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp" --debug  \
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp"  \
     > "${app_name}.txt" 2>&1 &
     
     KEPLOY_PID=$!
@@ -128,7 +128,7 @@ coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)
 
 if [[ -z "$coverage_line" ]]; then
   echo "::error::No coverage percentage found in test_logs.txt"
-  exit 1
+  return 1
 fi
 
 coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
@@ -137,7 +137,7 @@ echo "📊 Extracted coverage: ${coverage_percent}%"
 # Compare coverage with threshold (50%)
 if (( $(echo "$coverage_percent < 50" | bc -l) )); then
   echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
-  exit 1
+  return 1
 else
   echo "✅ Coverage meets threshold (>= 50%)"
 fi
@@ -166,7 +166,7 @@ do
     # Extract the test status
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
-    # Print the status for debugging  
+    # Print the status for debugging
     echo "Test status for test-set-$i: $test_status"
 
     # Check if any test set did not pass
