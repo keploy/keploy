@@ -611,12 +611,9 @@ func rewriteCurlHeaderLine(line string, headerKeyToPlaceholder map[string]string
 		return line
 	}
 	name := strings.TrimSpace(content[:colon])
-	currentValue := strings.TrimSpace(content[colon+1:])
 
 	ph, ok := headerKeyToPlaceholder[strings.ToLower(name)]
 	if !ok {
-		// If we don't have a specific placeholder for this header,
-		// the blanket replacement at line 507-509 should have already handled it
 		return line
 	}
 
@@ -629,14 +626,7 @@ func rewriteCurlHeaderLine(line string, headerKeyToPlaceholder map[string]string
 		return line
 	}
 
-	// If the current value contains a template placeholder, it might have been partially replaced
-	// by blanket replacement. In that case, use the full placeholder from the header mapping.
-	if looksLikeTemplate(currentValue) && !strings.EqualFold(currentValue, ph) {
-		// Partial replacement happened, use the header-specific placeholder
-		return line[:i1+1] + want + line[i2:]
-	}
-
-	// Otherwise, replace with the header-specific placeholder
+	// Replace with the header-specific placeholder
 	return line[:i1+1] + want + line[i2:]
 }
 
