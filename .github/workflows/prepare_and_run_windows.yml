@@ -133,7 +133,7 @@ jobs:
           docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
   run_golang_docker_windows:
-    needs: [build-and-upload, docker-image-build]
+    needs: [build-and-upload, docker-image-build, pull-docker-image]
     uses: ./.github/workflows/golang_docker_windows.yml
     with:
       image_tag: ${{ needs.docker-image-build.outputs.image_tag }}
