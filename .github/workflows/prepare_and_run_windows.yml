@@ -31,10 +31,13 @@ jobs:
       #       go clean -cache -modcache -testcache -fuzzcache 2>$null
       #     }
       - name: Create workflow start lock
+        shell: powershell
         run: |
-          LOCK_DIR="$HOME/.github-workflow-locks"
-          mkdir -p "$LOCK_DIR"
-          echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
+          New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
+          $timestamp = (Get-Date -UFormat %s)
+          $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
+          Set-Content -Path $lockPath -Value "started-$timestamp"
 
       - name: Clean up git config (ensure HTTPS for checkout)
         if: always()

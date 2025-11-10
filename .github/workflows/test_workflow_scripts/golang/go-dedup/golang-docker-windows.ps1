@@ -77,7 +77,45 @@ function Remove-KeployDirs {
   }
 }
 
-# --- Build docker images from compose ---
+# --- Find a free port and generate a random container name, then patch docker-compose ---
+function Find-FreePort {
+  param([int]$start = 8080)
+  for ($p = $start; $p -le 65535; $p++) {
+    try {
+      $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $p)
+      $listener.Start()
+      $listener.Stop()
+      return $p
+    } catch {
+      continue
+    }
+  }
+  throw 'No free TCP port found'
+}
+
+$appPort = Find-FreePort -start 8080
+$id = ([guid]::NewGuid()).ToString().Split('-')[0]
+$containerName = "dedup-go-$id"
+
+$dcFile = Join-Path (Get-Location) 'docker-compose.yml'
+if (Test-Path $dcFile) {
+  Write-Host "Patching docker-compose.yml: replacing port 8080 -> $appPort and service name 'dedup-go' -> '$containerName'"
+  $dc = Get-Content -Path $dcFile -Raw -ErrorAction Stop
+
+  # Replace exact port occurrences (word boundary) and the service/container name
+  $dc = [regex]::Replace($dc, '\b8080\b', [string]$appPort)
+  $dc = $dc.Replace('dedup-go', $containerName)
+
+  Set-Content -Path $dcFile -Value $dc -Encoding UTF8
+} else {
+  Write-Warning "docker-compose.yml not found at $dcFile; continuing without patching."
+}
+
+# Update APP_BASE_URL to use the chosen port
+$env:APP_BASE_URL = "http://localhost:$appPort"
+Write-Host "Chosen app port: $appPort"
+Write-Host "Chosen container name: $containerName"
+
 Write-Host "Building Docker image(s) with docker compose..."
 docker compose build
 
@@ -133,7 +171,6 @@ function Kill-Tree {
 # =========================
 # ========== RECORD =======
 # =========================
-$containerName = "dedup-go"
 $logPath = "$containerName.record.txt"
 $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
@@ -248,7 +285,7 @@ Write-Host "Shutting down docker compose services before test mode (preserving v
 docker compose down
 Start-Sleep -Seconds 5
 
-$testContainer = "dedup-go"
+$testContainer = $containerName
 $testLog = "$testContainer.test.txt"
 
 # Configure image for replay (optional override via DOCKER_IMAGE_REPLAY)
