@@ -80,24 +80,6 @@ check_for_errors() {
     echo "No critical errors found in $logfile."
 }
 
-# Wait for gRPC port to be ready
-wait_for_grpc_port() {
-    local port=$1
-    echo "Waiting for gRPC port $port to be open..."
-    for i in {1..30}; do
-        if sudo nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1; then
-            echo "Port $port is open."
-            # Additional wait to ensure gRPC server is fully initialized
-            sleep 2
-            return 0
-        fi
-        echo "Port $port not yet open, retrying in 2 seconds... (attempt $i/30)"
-        sleep 2
-    done
-    echo "Timed out waiting for port $port."
-    exit 1
-}
-
 # Kills the keploy process gracefully
 kill_keploy_process() {
     pid=$(pgrep keploy | head -n 1)
@@ -136,7 +118,7 @@ kill_keploy_process() {
 # Send all 4 gRPC requests
 send_grpc_requests() {
     echo "Waiting for gRPC server to be ready..."
-    wait_for_grpc_port 50051
+    sleep 10
     
     echo "Sending all 4 gRPC requests..."
     
