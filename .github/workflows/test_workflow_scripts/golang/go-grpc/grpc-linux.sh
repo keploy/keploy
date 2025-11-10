@@ -11,18 +11,8 @@
 
 set -Eeuo pipefail
 
-# Function to create a collapsible section start in CI logs
-start_section() {
-    local name="$1"
-    local title="$2"
-    echo -e "section_start:$(date +%s):${name}\r\033[0K${title}"
-}
-
-# Function to create a collapsible section end in CI logs
-end_section() {
-    local name="$1"
-    echo -e "section_end:$(date +%s):${name}\r\033[0K"
-}
+section() { echo "::group::$*"; }
+endsec()  { echo "::endgroup::"; }
 
 MODE=${1:-incoming}
 BIG_PAYLOAD=${2:-false}
@@ -37,7 +27,7 @@ fi
 
 # Kills all running application and keploy processes
 cleanup() {
-    start_section "cleanup" "🧹 Cleaning up running processes..."
+    section "🧹 Cleaning up running processes..."
     pkill -f keploy || true
     pkill -f grpc-server || true
     pkill -f grpc-client || true
@@ -46,7 +36,7 @@ cleanup() {
     pkill -9 -f grpc-server || true
     pkill -9 -f grpc-client || true
     echo "Cleanup complete."
-    end_section "cleanup"
+    endsec
 }
 trap cleanup EXIT
 
@@ -159,7 +149,7 @@ kill_keploy_process() {
 
 # --- Main Logic ---
 
-start_section "setup" "🛠️ Setting up environment and building binaries..."
+section "🛠️ Setting up environment and building binaries..."
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
@@ -185,13 +175,13 @@ chmod +x ./grpc-server ./grpc-client
 rm -rf ./keploy*
 sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
 
-end_section "setup"
+endsec
 
 
 if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
     
-    start_section "record_incoming" "🔴 Recording incoming gRPC calls..."
+    section "🔴 Recording incoming gRPC calls..."
     ./grpc-client &> client_incoming.log &
     sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" $BIG_PAYLOAD_FLAG --generateGithubActions=false --debug 2>&1 | tee record_incoming.log &
     wait_for_port 50051
@@ -200,9 +190,9 @@ if [ "$MODE" = "incoming" ]; then
     sleep 15 # Allow time for traces to be recorded
     kill_keploy_process
     check_for_errors record_incoming.log
-    end_section "record_incoming"
+    endsec
 
-    start_section "test_incoming" "▶️ Replaying incoming gRPC calls..."
+    section "▶️ Replaying incoming gRPC calls..."
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
     check_for_errors test_incoming.log
     if ! check_test_report; then
@@ -210,14 +200,14 @@ if [ "$MODE" = "incoming" ]; then
         cat test_incoming.log
         exit 1
     fi
-    end_section "test_incoming"
+    endsec
     
     echo "✅ Incoming mode passed."
 
 elif [ "$MODE" = "outgoing" ]; then
     echo "🧪 Testing outgoing gRPC requests (testing grpc-client)"
 
-    start_section "record_outgoing" "🔴 Recording outgoing gRPC calls..."
+    section "🔴 Recording outgoing gRPC calls..."
     ./grpc-server &> server_outgoing.log &
     wait_for_port 50051
     sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" $BIG_PAYLOAD_FLAG --generateGithubActions=false --debug 2>&1 | tee record_outgoing.log &
@@ -225,9 +215,9 @@ elif [ "$MODE" = "outgoing" ]; then
     sleep 15 # Allow time for traces to be recorded
     kill_keploy_process
     check_for_errors record_outgoing.log
-    end_section "record_outgoing"
+    endsec
 
-    start_section "test_outgoing" "▶️ Replaying outgoing gRPC calls (with mocks)..."
+    section "▶️ Replaying outgoing gRPC calls (with mocks)..."
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
     check_for_errors test_outgoing.log
     if ! check_test_report; then
@@ -235,7 +225,7 @@ elif [ "$MODE" = "outgoing" ]; then
         cat test_outgoing.log
         exit 1
     fi
-    end_section "test_outgoing"
+    endsec
 
     echo "✅ Outgoing mode passed."
 
