@@ -352,7 +352,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 				if ctx.Err() == context.Canceled {
-					return err
+					continue
 				}
 				return fmt.Errorf("%s", stopReason)
 			}
@@ -363,13 +363,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
 				testSetResult = false
-				abortTestRun = true
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = true
 			case models.TestSetStatusFaultUserApp:
 				testSetResult = false
-				abortTestRun = true
 			case models.TestSetStatusUserAbort:
 				return nil
 			case models.TestSetStatusFailed:
@@ -1016,7 +1014,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	for idx, testCase := range testCases {
-
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
