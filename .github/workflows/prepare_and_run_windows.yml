@@ -226,7 +226,7 @@ jobs:
               $cutoff = (Get-Date).AddMinutes(-30)
 
               # Force array so $running is never $null
-              $running = @(docker ps -q 2>$null)
+              $running = @(docker ps -a -q 2>$null)
 
               if ($running.Count -gt 0) {
                 Write-Host "Checking running containers for uptime > 30 minutes..."

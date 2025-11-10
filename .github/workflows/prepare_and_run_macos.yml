@@ -213,13 +213,16 @@ jobs:
               docker rm -f "$cid" || true
               stopped_any=1
             fi
-          done < <(docker ps --format '{{.ID}} {{.Names}}')
+          done < <(docker ps -a --format '{{.ID}} {{.Names}}')
           echo "stopped_any=$stopped_any" >> $GITHUB_OUTPUT
 
       - name: Docker Image Prune (unused only, wait if locked)
         if: steps.check_locks.outputs.lock_count == '0' || steps.stop_longrunning.outputs.stopped_any == '1'
         run: |
-          echo "No other workflows running. Proceeding with Docker cleanup..."
+          echo "No other workflows running. Proceeding with cleanup..."
+
+          # Stop running scripts 
+          pkill -9 -f "actions-runner-.*_work/keploy/keploy/.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker-macos\.sh" || true
           
           # Prune only dangling (untagged) images not in use
           echo "Pruning Docker images..."
