@@ -118,7 +118,7 @@ kill_keploy_process() {
 # Send all 4 gRPC requests
 send_grpc_requests() {
     echo "Waiting for gRPC server to be ready..."
-    sleep 20
+    sleep 10
     
     echo "Sending all 4 gRPC requests..."
     
