@@ -5,6 +5,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -162,6 +163,10 @@ func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr strin
 
 	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			logger.Debug("Context cancelled, closing client connection")
+			return
+		}
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}

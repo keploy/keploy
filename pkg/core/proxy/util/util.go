@@ -190,6 +190,11 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 		return nil, readErr
 	}
 
+	if err != nil && errors.Is(err, context.Canceled) {
+		logger.Debug("context cancelled while reading the initial buffer", zap.Error(err))
+		return nil, readErr
+	}
+
 	if err != nil && err != io.EOF {
 		utils.LogError(logger, err, "failed to read the request message in proxy")
 		return nil, readErr
