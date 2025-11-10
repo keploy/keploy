@@ -118,7 +118,7 @@ fi
 
 all_passed=true
 
-for i in {0..2}
+for i in {0..1}
 do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"

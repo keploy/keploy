@@ -66,13 +66,13 @@ send_request(){
     curl -X GET http://localhost:8080/CJBKJd92
 
     # Test email verification endpoint
-    # curl --request GET \
-    #   --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
-    #   --header 'Accept: application/json'
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
+      --header 'Accept: application/json'
 
-    # curl --request GET \
-    #   --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
-    #   --header 'Accept: application/json'
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
+      --header 'Accept: application/json'
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
@@ -158,7 +158,7 @@ all_passed=true
 
 
 # Get the test results from the testReport file.
-for i in {0..2}
+for i in {0..1}
 do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
@@ -166,7 +166,7 @@ do
     # Extract the test status
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
-    # Print the status for debugging
+    # Print the status for debugging  
     echo "Test status for test-set-$i: $test_status"
 
     # Check if any test set did not pass
