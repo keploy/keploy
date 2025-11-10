@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -457,6 +459,37 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
 func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
+	// Render any template values in the test case before simulation
+	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
+		testCaseBytes, err := json.Marshal(tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the testcase for templating")
+			return nil, err
+		}
+
+		// Build the template data
+		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
+		for k, v := range utils.TemplatizedValues {
+			templateData[k] = v
+		}
+		if len(utils.SecretValues) > 0 {
+			templateData["secret"] = utils.SecretValues
+		}
+
+		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
+		// ignoring LaTeX/HTML like {{\pi}}.
+		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
+		if rerr != nil {
+			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
+		}
+
+		err = json.Unmarshal([]byte(renderedStr), &tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
+			return nil, err
+		}
+	}
+
 	grpcReq := tc.GrpcReq
 
 	logger.Info("starting test for", zap.String("test case", models.HighlightString(tc.Name)), zap.String("test set", models.HighlightString(testSetID)))
