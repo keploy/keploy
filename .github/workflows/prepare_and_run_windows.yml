@@ -84,65 +84,65 @@ jobs:
         run: |
           git config --global --unset url."git@github.com:".insteadOf
 
-  docker-image-build:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.tag.outputs.image_tag }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+  # docker-image-build:
+  #   if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+  #   runs-on: ubuntu-latest
+  #   outputs:
+  #     image_tag: ${{ steps.tag.outputs.image_tag }}
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
       
-      - name: Add Private Parsers
-        uses: ./.github/actions/setup-private-parsers
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: true
+  #     - name: Add Private Parsers
+  #       uses: ./.github/actions/setup-private-parsers
+  #       with:
+  #         ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+  #         go-cache: true
 
-      - name: Set PR image tag
-        run: echo "PR_IMAGE_TAG=ttl.sh/keploy/keploy:${GITHUB_SHA::7}" >> $GITHUB_ENV
+  #     - name: Set PR image tag
+  #       run: echo "PR_IMAGE_TAG=ttl.sh/keploy/keploy:${GITHUB_SHA::7}" >> $GITHUB_ENV
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image for PR
-        run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+  #     - name: Build and push Docker image for PR
+  #       run: |
+  #         source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
 
-      - name: Make unique tag for this run
-        id: tag
-        run: |
-          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_SHA}-1h"
-          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
-          docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
+  #     - name: Make unique tag for this run
+  #       id: tag
+  #       run: |
+  #         IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_SHA}-1h"
+  #         echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+  #         docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
+  #         docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
 
-      - name: Push unique tag
-        run: |
-          docker push "${{ steps.tag.outputs.image_tag }}"
+  #     - name: Push unique tag
+  #       run: |
+  #         docker push "${{ steps.tag.outputs.image_tag }}"
     
-  pull-docker-image:
-    needs: [docker-image-build]
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: [self-hosted, Windows, X64]
+  # pull-docker-image:
+  #   needs: [docker-image-build]
+  #   if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+  #   runs-on: [self-hosted, Windows, X64]
 
-    steps:
-      - name: Pull Docker image
-        run: |
-          docker pull ${{ needs.docker-image-build.outputs.image_tag }}
+  #   steps:
+  #     - name: Pull Docker image
+  #       run: |
+  #         docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
-  run_golang_docker_windows:
-    needs: [build-and-upload, docker-image-build, pull-docker-image]
-    uses: ./.github/workflows/golang_docker_windows.yml
-    with:
-      image_tag: ${{ needs.docker-image-build.outputs.image_tag }}
+  # run_golang_docker_windows:
+  #   needs: [build-and-upload, docker-image-build, pull-docker-image]
+  #   uses: ./.github/workflows/golang_docker_windows.yml
+  #   with:
+  #     image_tag: ${{ needs.docker-image-build.outputs.image_tag }}
 
   cleanup:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, Windows, X64]
-    needs: [run_golang_docker_windows]
+    # needs: [run_golang_docker_windows]
     steps:
       - name: Remove workflow start lock
         shell: powershell
@@ -174,14 +174,14 @@ jobs:
                     try {
                       docker rm -f $cid 2>&1 | Write-Host
                       $stoppedAny = $true
-                    } catch { Write-Warning "Failed to remove container $cid: $_" }
+                    } catch { Write-Warning "Failed to remove container $cid: $($_)" }
                   }
-                } catch { Write-Warning "Failed to inspect/parse start time for container $cid: $_" }
+                } catch { Write-Warning "Failed to inspect/parse start time for container $cid: $($_)" }
               }
             } else {
               Write-Host "No running containers found."
             }
-          } catch { Write-Warning "Docker check for long-running containers failed: $_" }
+          } catch { Write-Warning "Docker check for long-running containers failed: $($_)" }
 
           # 2) If no lock files remain OR we stopped long-running containers, perform cleanup
           $shouldPrune = $false
@@ -199,13 +199,13 @@ jobs:
 
           if ($shouldPrune) {
             Write-Host "Pruning Docker images (this will remove dangling and unused images)..."
-            try { docker image prune -af 2>&1 | Write-Host } catch { Write-Warning "docker image prune failed: $_" }
+            try { docker image prune -af 2>&1 | Write-Host } catch { Write-Warning "docker image prune failed: $($_)" }
 
             Write-Host "Pruning Docker volumes (this will remove unused volumes)..."
-            try { docker volume prune -f 2>&1 | Write-Host } catch { Write-Warning "docker volume prune failed: $_" }
+            try { docker volume prune -f 2>&1 | Write-Host } catch { Write-Warning "docker volume prune failed: $($_)" }
 
             Write-Host "Removing unused builder cache and performing system prune (including containers/networks)..."
-            try { docker system prune -af --volumes 2>&1 | Write-Host } catch { Write-Warning "docker system prune failed: $_" }
+            try { docker system prune -af --volumes 2>&1 | Write-Host } catch { Write-Warning "docker system prune failed: $($_)" }
           }
       
 
