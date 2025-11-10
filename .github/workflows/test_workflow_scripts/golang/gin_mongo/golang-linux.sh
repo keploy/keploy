@@ -47,7 +47,17 @@ send_request(){
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
-    echo "App started"      
+    echo "App started"  
+
+    # Test email verification endpoint
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
+      --header 'Accept: application/json'
+
+    curl --request GET \
+      --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
+      --header 'Accept: application/json'
+    
     # Start making curl calls to record the testcases and mocks.
     curl --request POST \
       --url http://localhost:8080/url \
@@ -63,18 +73,7 @@ send_request(){
       "url": "https://facebook.com"
     }'
 
-    sleep 3
-
     curl -X GET http://localhost:8080/CJBKJd92
-
-    # Test email verification endpoint
-    curl --request GET \
-      --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
-      --header 'Accept: application/json'
-
-    curl --request GET \
-      --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
-      --header 'Accept: application/json'
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
