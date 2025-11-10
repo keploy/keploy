@@ -4,7 +4,7 @@
  
 # Checkout the gin-mongo-mail-server branch
 git fetch origin
-git checkout gin-mongo-mail-server
+git checkout gin-mongo-mail-server-test
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
