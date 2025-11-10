@@ -61,7 +61,7 @@ send_request(){
 
     # Test email verification endpoint
     curl --request GET \
-      --url 'http://localhost:8080/verify-email?email=shanky74022@gmail.com' \
+      --url 'http://localhost:8080/verify-email?email=test@gmail.com' \
       --header 'Accept: application/json'
 
     curl --request GET \
