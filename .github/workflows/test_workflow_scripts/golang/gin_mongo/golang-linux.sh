@@ -63,6 +63,8 @@ send_request(){
       "url": "https://facebook.com"
     }'
 
+    sleep 3
+
     curl -X GET http://localhost:8080/CJBKJd92
 
     # Test email verification endpoint
