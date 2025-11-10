@@ -38,7 +38,10 @@ cleanup() {
     echo "Cleanup complete."
     endsec
 }
+
 trap cleanup EXIT
+
+cleanup
 
 # Checks a log file for critical errors or data races
 check_for_errors() {

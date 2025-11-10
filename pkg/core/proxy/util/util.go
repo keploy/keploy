@@ -192,7 +192,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	if err != nil && errors.Is(err, context.Canceled) {
 		logger.Debug("context cancelled while reading the initial buffer", zap.Error(err))
-		return nil, readErr
+		return nil, err
 	}
 
 	if err != nil && err != io.EOF {
