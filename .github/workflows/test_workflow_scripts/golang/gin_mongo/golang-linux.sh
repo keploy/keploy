@@ -63,7 +63,6 @@ send_request(){
       "url": "https://facebook.com"
     }'
 
-    sleep 10
     curl -X GET http://localhost:8080/CJBKJd92
 
     # Test email verification endpoint
@@ -129,7 +128,7 @@ coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)
 
 if [[ -z "$coverage_line" ]]; then
   echo "::error::No coverage percentage found in test_logs.txt"
-  return 1
+  exit 1
 fi
 
 coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
@@ -138,7 +137,7 @@ echo "📊 Extracted coverage: ${coverage_percent}%"
 # Compare coverage with threshold (50%)
 if (( $(echo "$coverage_percent < 50" | bc -l) )); then
   echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
-  return 1
+  exit 1
 else
   echo "✅ Coverage meets threshold (>= 50%)"
 fi
