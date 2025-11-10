@@ -20,6 +20,10 @@ command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
+  echo "📌 Setting up Keploy API Key..."
+  export KEPLOY_API_KEY="$KEPLOY_CI_API_KEY"
+fi
 
 # --- Build Application ---
 echo "Building gRPC server and client binaries..."
