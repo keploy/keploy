@@ -2,7 +2,7 @@
 
 # source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
  
-# Checkout the gin-mongo-mail-server branch
+# Checkout a different branch
 git fetch origin
 git checkout native-linux
 
