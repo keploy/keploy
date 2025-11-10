@@ -133,6 +133,13 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	totalLines := 0
 	totalCoveredLines := 0
 	for filename, lines := range coveragePerFileTmp {
+		// Skip mockery-generated files from coverage calculation
+		if g.isMockeryFile(filename) {
+			g.logger.Debug("Skipping mockery-generated file from coverage",
+				zap.String("file", filename))
+			continue
+		}
+
 		totalLines += lines[0]
 		totalCoveredLines += lines[1]
 		covPercentage := float64(lines[1]*100) / float64(lines[0])
