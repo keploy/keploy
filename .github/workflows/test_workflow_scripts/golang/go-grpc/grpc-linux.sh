@@ -187,7 +187,7 @@ if [ "$MODE" = "incoming" ]; then
     wait_for_port 50051
     sleep 5
     send_requests
-    sleep 15 # Allow time for traces to be recorded
+    sleep 25 # Allow time for traces to be recorded
     kill_keploy_process
     check_for_errors record_incoming.log
     endsec
