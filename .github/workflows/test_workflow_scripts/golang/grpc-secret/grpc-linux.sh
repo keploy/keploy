@@ -264,7 +264,7 @@ for i in 1 2; do
     # Check for errors and race conditions
     check_for_errors "${app_name}.txt"
     
-    sleep 5
+    sleep 10
     echo "✅ Recorded test set ${i}"
 done
 
