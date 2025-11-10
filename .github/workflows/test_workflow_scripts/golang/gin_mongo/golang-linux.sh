@@ -63,7 +63,8 @@ send_request(){
       "url": "https://facebook.com"
     }'
 
-    # curl -X GET http://localhost:8080/CJBKJd92
+    sleep 10
+    curl -X GET http://localhost:8080/CJBKJd92
 
     # Test email verification endpoint
     curl --request GET \
@@ -89,7 +90,7 @@ send_request(){
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp"  \
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp" --debug  \
     > "${app_name}.txt" 2>&1 &
     
     KEPLOY_PID=$!
