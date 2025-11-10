@@ -69,7 +69,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/grpc-linux.sh ${{ matrix.mode }}
         
   grpc_linux_secret:
-    runs-on: ${{ inputs.runner }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
