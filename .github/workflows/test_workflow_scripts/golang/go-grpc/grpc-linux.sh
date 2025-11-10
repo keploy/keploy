@@ -28,13 +28,13 @@ fi
 # Kills all running application and keploy processes
 cleanup() {
     section "🧹 Cleaning up running processes..."
-    pkill -f keploy || true
-    pkill -f grpc-server || true
-    pkill -f grpc-client || true
+    sudo pkill -f keploy || true
+    sudo pkill -f grpc-server || true
+    sudo pkill -f grpc-client || true
     sleep 2
-    pkill -9 -f keploy || true
-    pkill -9 -f grpc-server || true
-    pkill -9 -f grpc-client || true
+    sudo pkill -9 -f keploy || true
+    sudo pkill -9 -f grpc-server || true
+    sudo pkill -9 -f grpc-client || true
     echo "Cleanup complete."
     endsec
 }
@@ -196,7 +196,7 @@ if [ "$MODE" = "incoming" ]; then
     endsec
 
     section "▶️ Replaying incoming gRPC calls..."
-    pkill -f grpc-server || true
+    sudo pkill -f grpc-server || true
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
     check_for_errors test_incoming.log
     if ! check_test_report; then
@@ -222,7 +222,7 @@ elif [ "$MODE" = "outgoing" ]; then
     endsec
 
     section "▶️ Replaying outgoing gRPC calls (with mocks)..."
-    pkill -f grpc-client || true
+    sudo pkill -f grpc-client || true
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
     check_for_errors test_outgoing.log
     if ! check_test_report; then
