@@ -34,7 +34,6 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 
 		// Fetch and filter HTTP mocks
 		mocks, err := mockDb.GetUnFilteredMocks()
-
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get unfilteredMocks mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
