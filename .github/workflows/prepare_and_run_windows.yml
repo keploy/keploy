@@ -68,7 +68,7 @@ jobs:
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
           $env:CGO_ENABLED = "0"
-          go build -tags=viper_bind_struct -o keploy.exe ./main.go
+          go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy.exe ./main.go
 
       - name: Upload build artifact (Windows CLI)
         uses: actions/upload-artifact@v4
