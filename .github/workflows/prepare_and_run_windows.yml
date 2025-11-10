@@ -129,9 +129,50 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-      - name: Pull Docker image
-        run: |
-          docker pull ${{ needs.docker-image-build.outputs.image_tag }}
+    - name: Check if Docker Desktop is running / If not then Start
+      shell: powershell
+      run: |
+        function Test-Docker {
+            try {
+                docker info *>$null
+                return $true
+            } catch {
+                return $false
+            }
+        }
+
+        function Test-DockerDesktopProcess {
+            $process = Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue
+            return $process -ne $null
+        }
+
+        if (Test-Docker) {
+            Write-Host "✅ Docker is already running."
+        } else {
+            if (Test-DockerDesktopProcess) {
+                Write-Host "⏳ Docker Desktop process found but engine not ready. Waiting..."
+            } else {
+                Write-Host "🚀 Starting Docker Desktop..."
+                Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe" -WindowStyle Hidden
+            }
+
+            # Wait for Docker to become ready
+            $timeout = (Get-Date).AddSeconds(90)
+            while (-not (Test-Docker)) {
+                if ((Get-Date) -gt $timeout) {
+                    Write-Error "❌ Docker did not start within 90 seconds."
+                    exit 1
+                }
+                Start-Sleep -Seconds 3
+            }
+
+            Write-Host "✅ Docker Desktop is now running."
+        }
+
+    - name: Pull Docker image
+      shell: powershell
+      run: |
+        docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
   run_golang_docker_windows:
     needs: [build-and-upload, docker-image-build, pull-docker-image]

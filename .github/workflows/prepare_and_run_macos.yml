@@ -27,6 +27,7 @@ jobs:
           LOCK_DIR="$HOME/.github-workflow-locks"
           mkdir -p "$LOCK_DIR"
           echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+          echo "Created workflow lock file: $LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
       
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -148,6 +149,23 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
+      - name: Remove workflow lock file
+        if: always()
+        run: |
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          LOCK_FILE="$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+          
+          if [ -f "$LOCK_FILE" ]; then
+            echo "Removing workflow lock file: $LOCK_FILE"
+            rm -f "$LOCK_FILE"
+          else
+            echo "Lock file not found (may have been cleaned up already): $LOCK_FILE"
+          fi
+          
+          # Optional: Clean up old lock files (older than 24 hours)
+          echo "Cleaning up stale lock files older than 24 hours..."
+          find "$LOCK_DIR" -name "prepare-macos-workflow-*.lock" -type f -mtime +1 -delete 2>/dev/null || true
+          
       - name: Check for other running workflows
         id: check_locks
         run: |
@@ -185,19 +203,3 @@ jobs:
           echo "⚠️ Skipping Docker cleanup - ${{ steps.check_locks.outputs.lock_count }} other workflow run(s) still in progress"
           echo "This is expected behavior to prevent cleanup conflicts"
 
-      - name: Remove workflow lock file
-        if: always()
-        run: |
-          LOCK_DIR="$HOME/.github-workflow-locks"
-          LOCK_FILE="$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
-          
-          if [ -f "$LOCK_FILE" ]; then
-            echo "Removing workflow lock file: $LOCK_FILE"
-            rm -f "$LOCK_FILE"
-          else
-            echo "Lock file not found (may have been cleaned up already): $LOCK_FILE"
-          fi
-          
-          # Optional: Clean up old lock files (older than 24 hours)
-          echo "Cleaning up stale lock files older than 24 hours..."
-          find "$LOCK_DIR" -name "prepare-macos-workflow-*.lock" -type f -mtime +1 -delete 2>/dev/null || true
