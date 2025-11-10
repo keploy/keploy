@@ -1,0 +1,91 @@
+name: Prepare Binary and Run Workflows
+on:
+  workflow_call:
+    inputs:
+      integration-ref:
+        description: 'The git ref (branch, tag, or commit) of the integrations repo to use.'
+        required: false
+        type: string
+        default: 'main' # Use main branch if nothing is sent**
+      runner:
+        description: 'The type of runner to use'
+        type: string
+        required: false
+        default: 'ubuntu-latest' # The original GitHub runner
+
+jobs:
+  build-and-upload:
+    runs-on: ${{ inputs.runner }} 
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Installing build Essentials and gcc
+        run: |
+          sudo apt -y update
+          sudo apt -y install build-essential gcc libc-dev     
+
+      - name: Add Private Parsers
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+          integration-ref: ${{ inputs.integration-ref }}
+
+      - name: Build Keploy (non-race)
+        run: |
+          mkdir -p out/build-no-race
+          go build -tags=viper_bind_struct -o out/build-no-race/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-no-race
+          path: out/build-no-race/keploy
+
+      - name: Build Keploy (race)
+        env:
+          CGO_ENABLED: "1"   # race requires cgo; on ubuntu-latest it's fine
+        run: |
+          mkdir -p out/build
+          go build -race -tags=viper_bind_struct -o out/build/keploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: out/build/keploy
+
+
+  upload-latest:
+    runs-on: ${{ inputs.runner }} 
+    steps:
+      - name: Upload latest release
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
+          URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_linux_amd64.tar.gz"
+          curl -L "$URL" -o keploy.tar.gz
+          tar -xzf keploy.tar.gz
+          chmod +x keploy
+      - uses: actions/upload-artifact@v4
+        with: { name: latest, path: keploy }
+
+  run_golang_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/golang_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
+      jobs_to_run: 'private_only'
+  run_python_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/python_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
+      jobs_to_run: 'private_only'
+  run_fuzzer_linux:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/fuzzer_linux.yml
+    with:
+      runner: ${{ inputs.runner }}
+      jobs-to-run: 'postgres_fuzzer,grpc_fuzzer'
+    secrets:
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
