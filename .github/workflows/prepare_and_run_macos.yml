@@ -88,7 +88,7 @@ jobs:
       - name: Make unique tag for this run
         id: tag
         run: |
-          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_SHA}-1h"
+          IMAGE_TAG="ttl.sh/keploy/keploy:arm-${GITHUB_SHA}-1h"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
           docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
