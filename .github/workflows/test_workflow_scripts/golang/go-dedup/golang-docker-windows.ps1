@@ -172,6 +172,7 @@ function Kill-Tree {
 # ========== RECORD =======
 # =========================
 $logPath = "$containerName.record.txt"
+$errLogPath = "$containerName.record.err.txt"
 $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
 $base = $env:APP_BASE_URL
@@ -195,18 +196,19 @@ Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 # 2. Start Keploy using Start-Process and tail the log in a background job.
 # This gives us a reliable PID and still allows log streaming via a job.
 $argList = $recArgs -join ' '
+# Start a background job that tails the log file so Sync-Logs can Receive-Job from it
 Write-Host "Starting keploy record via Start-Process..."
-$proc = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $argList -NoNewWindow -RedirectStandardOutput $logPath -RedirectStandardError $logPath -PassThru
+$proc = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $argList -NoNewWindow -RedirectStandardOutput $logPath -RedirectStandardError $errLogPath -PassThru
 Write-Host "Keploy record started, PID: $($proc.Id)"
 $REC_PID = $proc.Id
 
-# Start a background job that tails the log file so Sync-Logs can Receive-Job from it
-$recJob = Start-Job -ScriptBlock { param($lp) Get-Content -Path $lp -Wait -ErrorAction SilentlyContinue } -ArgumentList $logPath
+# Start a background job that tails both stdout and stderr log files so Sync-Logs can Receive-Job from it
+$recJob = Start-Job -ScriptBlock { param($out,$err) Get-Content -Path @($out,$err) -Wait -ErrorAction SilentlyContinue } -ArgumentList $logPath,$errLogPath
 
 Write-Host "`n=========================================================="
-Write-Host "Dumping full Keploy Record Logs from file: '$logPath'"
+Write-Host "Dumping full Keploy Record Logs from files: '$logPath' and '$errLogPath'"
 Write-Host "=========================================================="
-Get-Content -Path $logPath -ErrorAction SilentlyContinue
+Get-Content -Path @($logPath,$errLogPath) -ErrorAction SilentlyContinue
 Write-Host "=========================================================="
 
 # This function will print any new logs from the background job
