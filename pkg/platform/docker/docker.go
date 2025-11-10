@@ -666,7 +666,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// interval
 			{Kind: yaml.ScalarNode, Value: "interval"},
-			{Kind: yaml.ScalarNode, Value: "5s"},
+			{Kind: yaml.ScalarNode, Value: "1s"},
 
 			// timeout
 			{Kind: yaml.ScalarNode, Value: "timeout"},
@@ -678,7 +678,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},
-			{Kind: yaml.ScalarNode, Value: "10s"},
+			{Kind: yaml.ScalarNode, Value: "5s"},
 		},
 	}
 
