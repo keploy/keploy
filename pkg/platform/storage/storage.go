@@ -202,3 +202,54 @@ func (s *Storage) Download(ctx context.Context, mockName string, appName string,
 
 	return resp.Body, nil
 }
+func (s *Storage) DownloadByRegistryID(ctx context.Context, registryID string, appName string, jwtToken string) (io.Reader, error) {
+	// Create the HTTP request with registry ID
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		fmt.Sprintf("%s/mock/download?mockName=%s&appName=%s",
+			s.serverURL, registryID, appName), nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	req.Header.Set("Accept-Encoding", "gzip") // Request gzip encoding
+
+	// Execute the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(s.logger, err, "failed to close the http response body")
+			}
+		}()
+		// Read the response body to get the error message
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body and the resp code is: %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("download failed with status code: %d, message: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Check if the response is gzipped
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		s.logger.Debug("mock response is gzipped")
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			defer func() {
+				err := resp.Body.Close()
+				if err != nil {
+					utils.LogError(s.logger, err, "failed to close the http response body")
+				}
+			}()
+			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		return gr, nil
+	}
+
+	return resp.Body, nil
+}

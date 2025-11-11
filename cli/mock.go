@@ -51,9 +51,21 @@ func DownloadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Servi
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			}
-			if err := replay.DownloadMocks(ctx); err != nil {
-				utils.LogError(logger, err, "failed to download mocks from keploy registry")
-				return nil
+
+			// Check for registry-id flag
+			registryID, _ := cmd.Flags().GetString("registry-id")
+			appName, _ := cmd.Flags().GetString("app")
+
+			if registryID != "" {
+				if err := replay.DownloadMocksByRegistryID(ctx, registryID, appName); err != nil {
+					utils.LogError(logger, err, "failed to download mocks from keploy registry using registry-id")
+					return nil
+				}
+			} else {
+				if err := replay.DownloadMocks(ctx); err != nil {
+					utils.LogError(logger, err, "failed to download mocks from keploy registry")
+					return nil
+				}
 			}
 			return nil
 		},
