@@ -145,12 +145,10 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					}
 					p.logger.Debug("sending default SRV record response")
 				case dns.TypeTXT:
-					// Try a simple default TXT record if resolution failed
-					answers = []dns.RR{&dns.TXT{
-						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-						Txt: []string{"keploy-proxy"},
-					}}
-					p.logger.Debug("sending default TXT record response")
+					// Always return no TXT records (empty answer). This avoids sending bogus
+					// TXT payloads that clients (e.g. mongodb+srv) might try to parse.
+					p.logger.Debug("skipping TXT answer (configured to always return empty TXT)")
+				// answers stays nil/empty so no TXT record will be returned.
 				default:
 					p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 				}
@@ -158,11 +156,17 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			}
 			p.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
 
-			// Cache the answer
-			cache.Lock()
-			cache.m[key] = answers
-			cache.Unlock()
-			p.logger.Debug(fmt.Sprintf("Answers[after caching it]:\n%v\n", answers))
+			// Cache the answer only if we actually have answers to cache.
+			// This prevents caching empty slices (e.g., TXT intentionally empty)
+			// and allows future lookups to re-resolve upstream.
+			if len(answers) > 0 {
+				cache.Lock()
+				cache.m[key] = answers
+				cache.Unlock()
+				p.logger.Debug(fmt.Sprintf("Answers[after caching it]:\n%v\n", answers))
+			} else {
+				p.logger.Debug("Nothing to cache for this query (empty answers)")
+			}
 		}
 
 		p.logger.Debug(fmt.Sprintf("Answers[before appending to msg]:\n%v\n", answers))
