@@ -27,7 +27,7 @@ sed -i 's/ports: 0/ports: 27017/' "$config_file"
 rm -rf keploy/
 
 # Build the binary.
-go build -o ginApp
+go build -cover -coverpkg=./... -o ginApp
 
 
 send_request(){
@@ -98,6 +98,27 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./ginApp" --delay 7    &> test_logs.txt
+
+cat test_logs.txt || true
+
+# ✅ Extract and validate coverage percentage from log
+coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)?%" "test_logs.txt" | tail -n1 || true)
+
+if [[ -z "$coverage_line" ]]; then
+  echo "::error::No coverage percentage found in test_logs.txt"
+  return 1
+fi
+
+coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
+echo "📊 Extracted coverage: ${coverage_percent}%"
+
+# Compare coverage with threshold (50%)
+if (( $(echo "$coverage_percent < 50" | bc -l) )); then
+  echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
+  return 1
+else
+  echo "✅ Coverage meets threshold (>= 50%)"
+fi
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."

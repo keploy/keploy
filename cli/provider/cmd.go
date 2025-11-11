@@ -277,7 +277,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
-
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -487,14 +486,23 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		return errors.New(errMsg)
 	}
 
-	// 4) Use provided configPath as-is (your default is already ".")
+	// 4) Use provided configPath and convert to absolute path
 	configPath, err := cmd.Flags().GetString("configPath")
 	if err != nil {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
 	}
 
-	// 5) Read base keploy.yml exactly like before
+	// Convert configPath to absolute path for consistency
+	absConfigPath, err := utils.GetAbsPath(configPath)
+	if err != nil {
+		errMsg := "failed to get absolute config path"
+		utils.LogError(c.logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+	configPath = absConfigPath
+
+	// 5) Read base keploy.yml from the configPath
 	viper.SetConfigName("keploy")
 	viper.SetConfigType("yml")
 	viper.AddConfigPath(configPath)
@@ -509,15 +517,24 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		IsConfigFileFound = false
 		c.logger.Info("config file not found; proceeding with flags only")
 	} else {
-		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
+		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the application folder (current working directory)
 		lastDir, err := utils.GetLastDirectory()
 		if err != nil {
-			errMsg := fmt.Sprintf("failed to get last directory name for override config file in path '%s'", configPath)
+			errMsg := "failed to get last directory name for override config file"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		// overridePath is <configPath>/<lastDir>.keploy.yml
-		overridePath := filepath.Join(configPath, fmt.Sprintf("%s.keploy.yml", lastDir))
+
+		// Get current working directory (application folder) for override file
+		appDir, err := os.Getwd()
+		if err != nil {
+			errMsg := "failed to get current working directory for override config file"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		// overridePath is <appDir>/<lastDir>.keploy.yml (in application folder, not configPath)
+		overridePath := filepath.Join(appDir, fmt.Sprintf("%s.keploy.yml", lastDir))
 
 		if _, statErr := os.Stat(overridePath); statErr == nil {
 			viper.SetConfigFile(overridePath)
@@ -642,11 +659,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// validate the report path if provided
 		if reportPath != "" {
-			if !filepath.IsAbs(reportPath) {
-				errMsg := fmt.Sprintf("report-path must be an absolute file path, got: %q", reportPath)
-				utils.LogError(c.logger, nil, errMsg)
+
+			//convert to absolute path
+			reportPath, err = utils.GetAbsPath(reportPath)
+			if err != nil {
+				errMsg := "failed to get the absolute report path"
+				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
+
 			fi, statErr := os.Stat(reportPath)
 			if statErr != nil {
 				errMsg := fmt.Sprintf("failed to stat report-path %q", reportPath)
@@ -892,33 +913,56 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		// Parse proto paths early for Docker volume mounting
-		// Only needed for test/rerecord commands before starting Docker
-		if (cmd.Name() == "test" || cmd.Name() == "rerecord") && !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
-			// Parse proto flags from command
-			err := parseProtoFlags(c.logger, c.cfg, cmd)
-			if err != nil {
-				return err
-			}
-
-			// Mount proto paths that are outside current working directory
-			// Mount proto file (if specified)
-			err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoFile, true)
-			if err != nil {
-				return err
-			}
-
-			// Mount proto directory (if specified)
-			err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoDir, false)
-			if err != nil {
-				return err
-			}
-
-			// Mount proto include directories (if any)
-			for _, includePath := range c.cfg.Test.ProtoInclude {
-				err = mountPathIfExternal(c.logger, includePath, false)
+		// Mount config path and proto paths early for Docker volume mounting
+		// Only needed before starting Docker for record/test/rerecord commands
+		if !c.cfg.InDocker && utils.IsDockerCmd(utils.FindDockerCmd(c.cfg.Command)) {
+			// Mount config path if it's outside current working directory.
+			// Note: PWD is already mounted in Docker, so paths inside PWD don't need additional mounts.
+			// mountPathIfExternal will use prefix matching to determine if config path is outside PWD.
+			if c.cfg.ConfigPath != "" {
+				absConfigPath, err := utils.GetAbsPath(c.cfg.ConfigPath)
+				if err != nil {
+					errMsg := "failed to get the absolute path of config path"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				err = mountPathIfExternal(c.logger, absConfigPath, false, "config")
 				if err != nil {
 					return err
+				}
+			}
+
+			// Parse and mount proto paths for test/rerecord commands
+			if cmd.Name() == "test" || cmd.Name() == "rerecord" {
+				// Parse proto flags from command
+				protoCfg, err := parseProtoFlags(c.logger, cmd)
+				if err != nil {
+					return err
+				}
+
+				c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+				c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+				c.cfg.Test.ProtoInclude = protoCfg.ProtoInclude
+
+				// Mount proto paths that are outside current working directory
+				// Mount proto file (if specified)
+				err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoFile, true, "proto")
+				if err != nil {
+					return err
+				}
+
+				// Mount proto directory (if specified)
+				err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoDir, false, "proto")
+				if err != nil {
+					return err
+				}
+
+				// Mount proto include directories (if any)
+				for _, includePath := range c.cfg.Test.ProtoInclude {
+					err = mountPathIfExternal(c.logger, includePath, false, "proto")
+					if err != nil {
+						return err
+					}
 				}
 			}
 
@@ -1115,10 +1159,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			// parse and set proto related flags
-			if err := parseProtoFlags(c.logger, c.cfg, cmd); err != nil {
+			protoCfg, err := parseProtoFlags(c.logger, cmd)
+			if err != nil {
 				return err
 			}
+
+			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
 		}
 
 		bigPayload, err := cmd.Flags().GetBool("bigPayload")
