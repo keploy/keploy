@@ -60,7 +60,7 @@ message SocketDataEvent {
 	uint64 time_stamp_nano = 2;    
   uint32 pid = 3;
   bool direction = 4;   
-  uint32 msg_size = 5;
+  uint64 msg_size = 5;
   bytes msg = 6;
   int64 validate_read_bytes = 7;  
 	int64 Validate_written_bytes = 8;

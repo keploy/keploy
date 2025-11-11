@@ -163,19 +163,37 @@ func (h *Hooks) GetEvents(ctx context.Context) error {
 			if msg.SocketDataEvent.GetDirection() {
 				direction = conn.IngressTraffic
 			}
-			var msgArray [16384]byte
-			copy(msgArray[:], msg.SocketDataEvent.GetMsg())
-			event := conn.SocketDataEvent{
-				TimestampNano:        msg.SocketDataEvent.GetTimeStampNano(),
-				ConnID:               conn.ID{TGID: msg.SocketDataEvent.GetPid()},
-				EntryTimestampNano:   msg.SocketDataEvent.GetEntryTimeStampNano(),
-				Direction:            direction,
-				MsgSize:              msg.SocketDataEvent.GetMsgSize(),
-				Msg:                  msgArray,
-				ValidateReadBytes:    msg.SocketDataEvent.GetValidateReadBytes(),
-				ValidateWrittenBytes: msg.SocketDataEvent.GetValidateWrittenBytes(),
+			// Chunk the incoming message into EventBodyMaxSize-sized events so
+			// we don't lose data when the incoming proto msg is larger than the
+			// fixed-size buffer used by the Tracker/conn structs.
+			fullMsg := msg.SocketDataEvent.GetMsg()
+			total := len(fullMsg)
+			// iterate over fullMsg in chunks of conn.EventBodyMaxSize
+			for offset := 0; offset < total; {
+				end := offset + int(conn.EventBodyMaxSize)
+				if end > total {
+					end = total
+				}
+				var msgArray [conn.EventBodyMaxSize]byte
+				chunk := fullMsg[offset:end]
+				copy(msgArray[:], chunk)
+
+				event := conn.SocketDataEvent{
+					TimestampNano:      msg.SocketDataEvent.GetTimeStampNano(),
+					ConnID:             conn.ID{TGID: msg.SocketDataEvent.GetPid()},
+					EntryTimestampNano: msg.SocketDataEvent.GetEntryTimeStampNano(),
+					Direction:          direction,
+					// MsgSize here represents the size of this chunk
+					MsgSize:              uint64(len(chunk)),
+					Pos:                  uint64(offset),
+					Msg:                  msgArray,
+					ValidateReadBytes:    msg.SocketDataEvent.GetValidateReadBytes(),
+					ValidateWrittenBytes: msg.SocketDataEvent.GetValidateWrittenBytes(),
+				}
+				h.dataEventChan <- event
+
+				offset = end
 			}
-			h.dataEventChan <- event
 		default:
 			h.logger.Error("received unknown message type")
 		}
