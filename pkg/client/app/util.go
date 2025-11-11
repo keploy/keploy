@@ -110,6 +110,15 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 	return false
 }
 
+// ensureComposeExitOnAppFailure ensures that the docker-compose command will exit when the application
+// container stops by injecting --abort-on-container-exit and --exit-code-from flags if not already present.
+// It inserts these flags immediately after the "up" subcommand if found, otherwise appends them to the end.
+//
+// Parameters:
+//   - appCmd: the docker-compose command to modify
+//   - serviceName: the name of the service whose exit code should be monitored (empty string skips --exit-code-from)
+//
+// Returns: the modified command with the necessary flags added
 func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
 	// If the user already passed one of these flags, don't touch the command.
 	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--exit-code-from") {
