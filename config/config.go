@@ -48,6 +48,8 @@ type Config struct {
 	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
+	RegistryID            string              `json:"registryId" yaml:"registryId" mapstructure:"registryId"`
+	AppNameOverride       string              `json:"appNameOverride" yaml:"appNameOverride" mapstructure:"appNameOverride"`
 }
 
 type Agent struct {

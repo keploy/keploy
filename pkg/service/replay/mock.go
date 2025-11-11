@@ -409,3 +409,91 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 
 	return nil
 }
+
+// downloadByRegistryID downloads mocks directly using a registry ID
+func (m *mock) downloadByRegistryID(ctx context.Context, registryID string, appName string) error {
+	// Add nil check protection
+	if m.storage == nil {
+		m.logger.Error("Storage service is not initialized, cannot download mocks")
+		return fmt.Errorf("storage service is not initialized")
+	}
+
+	// If app name is empty, get it from current directory
+	if appName == "" {
+		var err error
+		appName, err = utils.GetLastDirectory()
+		if err != nil {
+			m.logger.Error("Failed to get app name from current directory", zap.Error(err))
+			return fmt.Errorf("failed to get app name: %w", err)
+		}
+		m.logger.Info("Using current directory name as app name", zap.String("app", appName))
+	}
+
+	// Determine the output path - save at repository root
+	outputPath := fmt.Sprintf("%s.mocks.yaml", registryID)
+
+	m.logger.Info("Downloading mock file from cloud using registry ID...",
+		zap.String("registryID", registryID),
+		zap.String("app", appName),
+		zap.String("outputPath", outputPath))
+
+	// Download the mock file from cloud using registry ID
+	cloudFile, err := m.storage.DownloadByRegistryID(ctx, registryID, appName, m.token)
+	if err != nil {
+		m.logger.Error("Failed to download mock file using registry ID",
+			zap.String("registryID", registryID),
+			zap.Error(err))
+		return err
+	}
+
+	// Save the downloaded mock file to the repository root
+	file, err := osCreate224(outputPath)
+	if err != nil {
+		m.logger.Error("Failed to create local file", zap.String("path", outputPath), zap.Error(err))
+		return err
+	}
+	defer func() {
+		err := file.Close()
+		if err != nil {
+			utils.LogError(m.logger, err, "failed to close the file")
+		}
+	}()
+
+	done := make(chan struct{})
+
+	// Spinner goroutine
+	go func() {
+		spinnerChars := []rune{'|', '/', '-', '\\'}
+		i := 0
+		for {
+			select {
+			case <-done:
+				fmt.Print("\r") // Clear spinner line after done
+				return
+			default:
+				fmt.Printf("\rDownloading... %c", spinnerChars[i%len(spinnerChars)])
+				i++
+				timeSleep224(100 * time.Millisecond)
+			}
+		}
+	}()
+
+	_, err = io.Copy(file, cloudFile)
+	if err != nil {
+		close(done)
+		return err
+	}
+	close(done)
+
+	m.logger.Info("Mock file downloaded successfully",
+		zap.String("registryID", registryID),
+		zap.String("savedAs", outputPath))
+
+	// Add to .gitignore if needed
+	err = utils.AddToGitIgnore(m.logger, ".", "*.mocks.yaml")
+	if err != nil {
+		utils.LogError(m.logger, err, "failed to add *.mocks.yaml to .gitignore file")
+	}
+
+	return nil
+}
