@@ -31,7 +31,7 @@ type NetworkInfo struct {
 
 // ComposeServiceInfo represents information about a service found in a Docker Compose file
 type ComposeServiceInfo struct {
-	ServiceName string
+	ServiceName string   // Service name in the compose file, used for --exit-code-from flag
 	ComposePath string   // Path to the docker-compose file
 	Networks    []string // Networks that the service is connected to
 	Ports       []string // Port mappings for the service
