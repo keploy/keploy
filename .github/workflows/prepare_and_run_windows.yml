@@ -10,26 +10,6 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
     steps:
-      # - name: Aggressive Cleanup (Workspace + Keploy procs)
-      #   if: always()
-      #   shell: powershell
-      #   continue-on-error: true
-      #   run: |
-      #     # Kill any lingering Keploy processes
-      #     $procs = 'keploy.exe','keploy-record.exe','keploy-replay.exe','keploy-record','keploy-replay'
-      #     foreach ($p in $procs) { cmd /c "taskkill /F /IM $p /T" 2>$null | Out-Null }
-
-      #     # Clean workspace artifacts that could affect the build
-      #     $paths = @('.\bin','.\\keploy.exe','.\\keploy','.\\keploy.yml','.\\record-bin','.\\replay-bin')
-      #     foreach ($p in $paths) {
-      #       Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
-      #     }
-
-      #     # Optional: clean Go caches to avoid stale behavior
-      #     go version 2>$null | Out-Null
-      #     if ($LASTEXITCODE -eq 0) {
-      #       go clean -cache -modcache -testcache -fuzzcache 2>$null
-      #     }
       - name: Create workflow start lock
         shell: powershell
         run: |
