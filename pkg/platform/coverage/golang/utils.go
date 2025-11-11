@@ -63,17 +63,16 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 func (g *Golang) isMockeryFile(filename string) bool {
 	baseName := filepath.Base(filename)
 
-	// Fast path: pattern check (eliminates 99% of files immediately)
+	// eliminating files by file names pattern of mockery
 	if !strings.HasPrefix(baseName, "mock_") || !strings.HasSuffix(baseName, ".go") {
 		return false
 	}
 
-	// Slow path: verify mockery header (only for mock_*.go files)
 	file, err := os.Open(filename)
 	if err != nil {
 		g.logger.Warn("Failed to verify mockery file",
 			zap.Error(err), zap.String("file", filename))
-		return false // Conservative: don't filter if can't read
+		return false
 	}
 	defer file.Close()
 
