@@ -386,8 +386,6 @@ func (m *MockDockerClient) BuildCachePruneReport(ctx context.Context, cfg types.
 	return types.BuildCachePruneReport{}, nil
 }
 
-const testVolumeName = "keploy-sockets-vol"
-
 // TestCreateVolumeVolumeInUse replicates the exact error scenario from the user:
 //
 //	ERROR: "Error response from daemon: remove keploy-sockets-vol: volume is in use - [container-id1, container-id2]"
