@@ -51,8 +51,13 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 		case <-ctx.Done():
 			return
 		default:
+			// Lock tracker for reading protocol
+			tracker.mutex.RLock()
+			trackerProtocol := tracker.protocol
+			tracker.mutex.RUnlock()
+
 			// For gRPC (HTTP2) requests, handle them natively
-			if tracker.protocol == HTTP2 {
+			if trackerProtocol == HTTP2 {
 				// Get the completed stream
 				stream := tracker.getHTTP2CompletedStream()
 				if stream != nil {
