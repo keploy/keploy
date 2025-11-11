@@ -109,3 +109,31 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 
 	return false
 }
+
+func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
+	// If the user already passed one of these flags, don't touch the command.
+	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--exit-code-from") {
+		return appCmd
+	}
+
+	// Arguments we want to inject.
+	args := []string{"--abort-on-container-exit"}
+	if serviceName != "" {
+		args = append(args, "--exit-code-from", serviceName)
+	}
+
+	parts := strings.Fields(appCmd)
+	for i, p := range parts {
+		if p == "up" {
+			// Insert flags immediately after "up"
+			newParts := make([]string, 0, len(parts)+len(args))
+			newParts = append(newParts, parts[:i+1]...)
+			newParts = append(newParts, args...)
+			newParts = append(newParts, parts[i+1:]...)
+			return strings.Join(newParts, " ")
+		}
+	}
+
+	// Fallback: no explicit "up" token detected — append flags at the end.
+	return appCmd + " " + strings.Join(args, " ")
+}
