@@ -143,6 +143,6 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
 		}
 	}
 
-	// Fallback: no explicit "up" token detected — append flags at the end.
-	return appCmd + " " + strings.Join(args, " ")
+	// Fallback: no explicit "up" token detected — do not append flags.
+	return appCmd
 }
