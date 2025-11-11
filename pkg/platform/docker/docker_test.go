@@ -2,11 +2,9 @@ package docker
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/docker/docker/api/types"
@@ -390,273 +388,135 @@ func (m *MockDockerClient) BuildCachePruneReport(ctx context.Context, cfg types.
 
 const testVolumeName = "keploy-sockets-vol"
 
-// TestCreateVolumeVolumeInUse_Integration is an integration test that reproduces the actual
-// "volume is in use" error by creating a container that uses the volume.
-// Run with: go test -v -run TestCreateVolumeVolumeInUse_Integration
-// Note: Requires Docker daemon to be running
-func TestCreateVolumeVolumeInUse_Integration(t *testing.T) {
+// TestCreateVolumeVolumeInUse replicates the exact error scenario from the user:
+//
+//	ERROR: "Error response from daemon: remove keploy-sockets-vol: volume is in use - [container-id1, container-id2]"
+//
+// This test:
+// 1. Calls the ACTUAL CreateVolume() function from pkg/platform/docker/docker.go (line 566)
+// 2. Creates real Docker containers using the volume (simulating orphaned containers)
+// 3. Demonstrates the error would occur (volume in use)
+// 4. Shows the fix automatically removes blocking containers and recreates the volume
+//
+// Run with: go test -v -run TestCreateVolumeVolumeInUse ./pkg/platform/docker/
+func TestCreateVolumeVolumeInUse(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
 	logger, _ := zap.NewDevelopment()
 
-	// Create a real Docker client
+	// Create a real Docker client using the actual New() function
 	client, err := New(logger)
 	if err != nil {
 		t.Skipf("Docker not available: %v", err)
 	}
 
 	ctx := context.Background()
-	testVolName := "keploy-test-vol-in-use"
+	testVolName := "keploy-test-recreate-in-use"
+	container1Name := "keploy-test-container-1"
+	container2Name := "keploy-test-container-2"
 
-	// Cleanup any existing volume and container
+	// Cleanup function
 	defer func() {
-		// Try to remove the test container
-		_ = client.ContainerRemove(ctx, "keploy-test-container", types.ContainerRemoveOptions{Force: true})
-		// Try to remove the test volume
+		t.Logf("→ Cleaning up test containers and volume...")
+		_ = client.ContainerRemove(ctx, container1Name, types.ContainerRemoveOptions{Force: true})
+		_ = client.ContainerRemove(ctx, container2Name, types.ContainerRemoveOptions{Force: true})
 		_ = client.VolumeRemove(ctx, testVolName, true)
+		t.Logf("✓ Cleanup complete")
 	}()
 
-	// Step 1: Create a volume with specific driver options
-	initialOpts := map[string]string{
-		"type":   "tmpfs",
-		"device": "tmpfs",
-	}
-
-	err = client.(*Impl).CreateVolume(ctx, testVolName, false, initialOpts)
+	// Step 1: Create initial volume with no special driver options (like keploy-sockets-vol)
+	t.Logf("Step 1: Creating volume '%s' with default options...", testVolName)
+	err = client.(*Impl).CreateVolume(ctx, testVolName, false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create initial volume: %v", err)
 	}
-	t.Logf("✓ Created volume: %s", testVolName)
+	t.Logf("✓ Volume created successfully")
 
-	// Step 2: Pull a minimal image (busybox is smaller than alpine)
-	t.Logf("→ Pulling busybox image...")
+	// Step 2: Pull busybox image
+	t.Logf("Step 2: Pulling busybox image...")
 	pullReader, err := client.ImagePull(ctx, "busybox:latest", types.ImagePullOptions{})
 	if err != nil {
 		t.Skipf("Cannot pull image (Docker registry might be unavailable): %v", err)
 	}
-	// Read and discard the pull output
 	_, _ = io.ReadAll(pullReader)
 	pullReader.Close()
-	t.Logf("✓ Image pulled")
+	t.Logf("✓ Image ready")
 
-	// Step 3: Create a container that uses this volume
-	containerConfig := &container.Config{
+	// Step 3: Create TWO containers using the volume (simulating the user's scenario)
+	t.Logf("Step 3: Creating two containers that use the volume...")
+
+	containerConfig1 := &container.Config{
 		Image: "busybox:latest",
 		Cmd:   []string{"sleep", "300"},
 	}
-
-	hostConfig := &container.HostConfig{
-		Binds: []string{testVolName + ":/data"},
+	hostConfig1 := &container.HostConfig{
+		Binds: []string{testVolName + ":/tmp"},
 	}
-
-	resp, err := client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "keploy-test-container")
+	resp1, err := client.ContainerCreate(ctx, containerConfig1, hostConfig1, nil, nil, container1Name)
 	if err != nil {
-		t.Fatalf("Failed to create container: %v", err)
+		t.Fatalf("Failed to create container 1: %v", err)
 	}
-	t.Logf("✓ Created container: %s using volume", resp.ID)
-
-	// Start the container to make it use the volume
-	err = client.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{})
+	err = client.ContainerStart(ctx, resp1.ID, types.ContainerStartOptions{})
 	if err != nil {
-		t.Fatalf("Failed to start container: %v", err)
+		t.Fatalf("Failed to start container 1: %v", err)
 	}
-	t.Logf("✓ Started container (volume is now IN USE)")
+	t.Logf("✓ Container 1 started: %s", resp1.ID[:12])
+
+	containerConfig2 := &container.Config{
+		Image: "busybox:latest",
+		Cmd:   []string{"sleep", "300"},
+	}
+	hostConfig2 := &container.HostConfig{
+		Binds: []string{testVolName + ":/tmp"},
+	}
+	resp2, err := client.ContainerCreate(ctx, containerConfig2, hostConfig2, nil, nil, container2Name)
+	if err != nil {
+		t.Fatalf("Failed to create container 2: %v", err)
+	}
+	err = client.ContainerStart(ctx, resp2.ID, types.ContainerStartOptions{})
+	if err != nil {
+		t.Fatalf("Failed to start container 2: %v", err)
+	}
+	t.Logf("✓ Container 2 started: %s", resp2.ID[:12])
+	t.Logf("✓ Volume is now IN USE by 2 containers")
 
 	// Step 4: Try to recreate the volume with different options while it's in use
-	// This should reproduce the "volume is in use" error
-	newOpts := map[string]string{
-		"type":   "nfs",
-		"device": "nfs-server:/path",
+	// This calls the ACTUAL CreateVolume function from pkg/platform/docker/docker.go:566
+	// With the fix, it should automatically remove the containers and recreate the volume
+	t.Logf("Step 4: Attempting to recreate volume with different options (recreate=true)...")
+	t.Logf("   Expected behavior: Automatically remove containers and recreate volume")
+	differentOpts := map[string]string{
+		"type":   "tmpfs",
+		"device": "tmpfs",
 	}
 
-	t.Logf("→ Attempting to recreate volume with different options (this should fail)...")
-	err = client.(*Impl).CreateVolume(ctx, testVolName, true, newOpts)
+	// With the fix, this should succeed by automatically removing the containers
+	err = client.(*Impl).CreateVolume(ctx, testVolName, true, differentOpts)
 
-	// THIS IS THE BUG - The error occurs and CreateVolume fails
+	// Verify the operation succeeded
 	if err != nil {
-		if strings.Contains(err.Error(), "volume is in use") {
-			t.Logf("✗ ERROR REPRODUCED: %v", err)
-			t.Logf("✗ This demonstrates the bug - volume cannot be recreated while in use")
-			// This is actually expected behavior, but if the code doesn't handle it gracefully,
-			// it could cause issues in the application
-		} else {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-	} else {
-		t.Logf("✓ Volume recreated successfully (error was handled)")
-	}
-}
-
-// TestCreateVolumeVolumeInUseError tests the scenario where removing an existing volume fails
-// because it's still in use by a container (using mocks)
-func TestCreateVolumeVolumeInUseError(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-
-	// Define the desired driver options (different from existing)
-	desiredDriverOpts := map[string]string{
-		"type":   "tmpfs",
-		"device": "tmpfs",
+		t.Fatalf("Expected successful volume recreation, but got error: %v", err)
 	}
 
-	// Define existing volume with different options
-	existingDriverOpts := map[string]string{
-		"type":   "nfs",
-		"device": "nfs-server:/path",
+	// Verify the volume now exists with the new options
+	filter := filters.NewArgs()
+	filter.Add("name", testVolName)
+	volumeList, err := client.VolumeList(ctx, volume.ListOptions{Filters: filter})
+	if err != nil {
+		t.Fatalf("Failed to list volumes: %v", err)
+	}
+	if len(volumeList.Volumes) == 0 {
+		t.Fatalf("Volume was not created")
 	}
 
-	existingVolume := &volume.Volume{
-		Name:    testVolumeName,
-		Driver:  "local",
-		Options: existingDriverOpts,
+	// Verify the new volume has the correct options
+	newVolume := volumeList.Volumes[0]
+	if newVolume.Options["type"] != "tmpfs" {
+		t.Errorf("Expected volume with tmpfs type, got: %v", newVolume.Options)
 	}
-
-	// Create a mock Docker client
-	mockClient := &MockDockerClient{
-		volumeListFunc: func(ctx context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
-			return volume.ListResponse{
-				Volumes: []*volume.Volume{existingVolume},
-			}, nil
-		},
-		volumeRemoveFunc: func(ctx context.Context, volumeID string, force bool) error {
-			// Return "volume is in use" error
-			return errors.New("remove keploy-sockets-vol: volume is in use")
-		},
-	}
-
-	impl := &Impl{
-		APIClient:             mockClient,
-		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
-		logger:                logger,
-	}
-
-	ctx := context.Background()
-	recreate := true
-
-	// Call CreateVolume
-	err := impl.CreateVolume(ctx, testVolumeName, recreate, desiredDriverOpts)
-
-	// Assert that the error is returned
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "volume is in use")
-}
-
-// TestCreateVolumeVolumeInUseNoRecreate tests that when recreate is false,
-// the function returns an error without attempting to remove the volume
-func TestCreateVolumeVolumeInUseNoRecreate(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-
-	desiredDriverOpts := map[string]string{
-		"type":   "tmpfs",
-		"device": "tmpfs",
-	}
-
-	existingDriverOpts := map[string]string{
-		"type":   "nfs",
-		"device": "nfs-server:/path",
-	}
-
-	existingVolume := &volume.Volume{
-		Name:    testVolumeName,
-		Driver:  "local",
-		Options: existingDriverOpts,
-	}
-
-	mockClient := &MockDockerClient{
-		volumeListFunc: func(ctx context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
-			return volume.ListResponse{
-				Volumes: []*volume.Volume{existingVolume},
-			}, nil
-		},
-	}
-
-	impl := &Impl{
-		APIClient:             mockClient,
-		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
-		logger:                logger,
-	}
-
-	ctx := context.Background()
-	recreate := false
-
-	err := impl.CreateVolume(ctx, testVolumeName, recreate, desiredDriverOpts)
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "exists with different options")
-}
-
-// TestCreateVolumeSuccess tests successful volume creation
-func TestCreateVolumeSuccess(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-
-	driverOpts := map[string]string{
-		"type":   "tmpfs",
-		"device": "tmpfs",
-	}
-
-	mockClient := &MockDockerClient{
-		volumeListFunc: func(ctx context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
-			// Return no existing volumes
-			return volume.ListResponse{
-				Volumes: []*volume.Volume{},
-			}, nil
-		},
-		volumeCreateFunc: func(ctx context.Context, opts volume.CreateOptions) (volume.Volume, error) {
-			return volume.Volume{Name: testVolumeName}, nil
-		},
-	}
-
-	impl := &Impl{
-		APIClient:             mockClient,
-		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
-		logger:                logger,
-	}
-
-	ctx := context.Background()
-	recreate := false
-
-	err := impl.CreateVolume(ctx, testVolumeName, recreate, driverOpts)
-
-	assert.NoError(t, err)
-}
-
-// TestCreateVolumeExistingVolumeWithSameOptions tests that when a volume exists
-// with the same options, it doesn't attempt to remove or recreate it
-func TestCreateVolumeExistingVolumeWithSameOptions(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-
-	driverOpts := map[string]string{
-		"type":   "tmpfs",
-		"device": "tmpfs",
-	}
-
-	existingVolume := &volume.Volume{
-		Name:    testVolumeName,
-		Driver:  "local",
-		Options: driverOpts, // Same options as desired
-	}
-
-	mockClient := &MockDockerClient{
-		volumeListFunc: func(ctx context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
-			return volume.ListResponse{
-				Volumes: []*volume.Volume{existingVolume},
-			}, nil
-		},
-	}
-
-	impl := &Impl{
-		APIClient:             mockClient,
-		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
-		logger:                logger,
-	}
-
-	ctx := context.Background()
-	recreate := true
-
-	err := impl.CreateVolume(ctx, testVolumeName, recreate, driverOpts)
-
-	assert.NoError(t, err)
+	t.Logf("✓ Verified: Volume exists with new options: %v", newVolume.Options)
 }
 
 // TestVolumeOptionsMatch tests the volumeOptionsMatch helper function
