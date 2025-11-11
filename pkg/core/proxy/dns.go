@@ -156,17 +156,11 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			}
 			p.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
 
-			// Cache the answer only if we actually have answers to cache.
-			// This prevents caching empty slices (e.g., TXT intentionally empty)
-			// and allows future lookups to re-resolve upstream.
-			if len(answers) > 0 {
-				cache.Lock()
-				cache.m[key] = answers
-				cache.Unlock()
-				p.logger.Debug(fmt.Sprintf("Answers[after caching it]:\n%v\n", answers))
-			} else {
-				p.logger.Debug("Nothing to cache for this query (empty answers)")
-			}
+			// Cache the answer
+			cache.Lock()
+			cache.m[key] = answers
+			cache.Unlock()
+			p.logger.Debug(fmt.Sprintf("Answers[after caching it]:\n%v\n", answers))
 		}
 
 		p.logger.Debug(fmt.Sprintf("Answers[before appending to msg]:\n%v\n", answers))
