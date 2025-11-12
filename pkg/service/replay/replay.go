@@ -245,17 +245,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	// setting the appId for the first test-set.
-	runApp := false
-	firstrun := true
+	runApp := true
 	inst.AppID = r.config.AppID
 
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
-		if !runApp && firstrun && r.config.Test.SkipAppRestart {
-			runApp = true
-			firstrun = false
-		}
+		
 		// Reload hooks before each test set if this is not the first test set
 		// This ensures fresh eBPF state and prevents issues between test runs
 		if i > 0 && r.instrument && !r.config.Test.SkipAppRestart {
@@ -346,20 +342,31 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false, runApp)
 			if err != nil {
-				if err == context.Canceled {
+				if err == context.Canceled {   // case where application crashes immediately 
+					runApp = true
 					continue
 				}
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
-			}
+			} else if r.config.Test.SkipAppRestart { // if app crashes while --skip-app-restart is set, we don't RESTART the app for next test-set
+				switch testSetStatus {
+				case models.TestSetStatusFaultUserApp,
+					models.TestSetStatusAppHalted:
+					r.logger.Warn("Application halted or crashed during test set, will restart for next run.",
+						zap.String("testSet", testSet),
+						zap.String("status", string(testSetStatus)))
+					runApp = true
 
-			if !firstrun {
+				default:
+					runApp = false
+				}
+			} else {
 				runApp = false
 			}
+
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
 				testSetResult = false
@@ -914,11 +921,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 
-		// Checking for errors in the mocking and application
+		var channelToMonitor <-chan models.AppError
+		if r.config.Test.SkipAppRestart {
+			channelToMonitor = r.appErrChan // Use the persistent channel
+		} else {
+			channelToMonitor = appErrChan // Use the local, per-run channel
+		}
 		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			select {
-			case err := <-r.appErrChan:
+			case err := <-channelToMonitor:
 				switch err.AppErrorType {
 				case models.ErrCommandError:
 					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
@@ -942,14 +954,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
+		needsDelay := (runApp && r.config.Test.SkipAppRestart) || (!r.config.Test.SkipAppRestart)
 		// Delay for user application to run
-		if runApp && r.config.Test.SkipAppRestart {
-			select {
-			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-			case <-runTestSetCtx.Done():
-				return models.TestSetStatusUserAbort, context.Canceled
-			}
-		} else if !r.config.Test.SkipAppRestart {
+		if needsDelay {
 			select {
 			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
 			case <-runTestSetCtx.Done():
