@@ -109,6 +109,10 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
 
     steps:
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
     - name: Ensure Docker is running
       shell: powershell
       run: |
@@ -131,6 +135,10 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     needs: [run_golang_docker_windows]
     steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Remove workflow start lock
         shell: powershell
         run: |
