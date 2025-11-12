@@ -145,12 +145,10 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					}
 					p.logger.Debug("sending default SRV record response")
 				case dns.TypeTXT:
-					// Try a simple default TXT record if resolution failed
-					answers = []dns.RR{&dns.TXT{
-						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-						Txt: []string{"keploy-proxy"},
-					}}
-					p.logger.Debug("sending default TXT record response")
+					// Always return no TXT records (empty answer). This avoids sending bogus
+					// TXT payloads that clients (e.g. mongodb+srv) might try to parse.
+					p.logger.Debug("skipping TXT answer (configured to always return empty TXT)")
+				// answers stays nil/empty so no TXT record will be returned.
 				default:
 					p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 				}
