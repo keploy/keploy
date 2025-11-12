@@ -349,11 +349,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false, runApp)
 			if err != nil {
-				stopReason = fmt.Sprintf("failed to run test set: %v", err)
-				utils.LogError(r.logger, err, stopReason)
-				if ctx.Err() == context.Canceled {
+				if err == context.Canceled {
 					continue
 				}
+				stopReason = fmt.Sprintf("failed to run test set: %v", err)
+				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
 			}
 
