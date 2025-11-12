@@ -1,0 +1,180 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Smooth color transitions */
+* {
+  @apply transition-colors duration-200;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* Remove transition from specific elements that shouldn't transition */
+button,
+a {
+  @apply transition-colors;
+}
+
+/* Code block styling */
+code {
+  @apply bg-gray-100 dark:bg-gray-900 px-1.5 py-0.5 rounded text-sm font-mono;
+  @apply border border-gray-200 dark:border-gray-700;
+}
+
+pre {
+  @apply bg-gray-900 dark:bg-black text-gray-100 p-4 rounded-lg overflow-x-auto;
+  @apply border border-gray-700 dark:border-gray-600;
+}
+
+pre code {
+  @apply bg-transparent border-0 px-0 py-0 text-inherit;
+}
+
+/* Blog post prose styles */
+.prose {
+  @apply dark:prose-invert;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  @apply text-gray-900 dark:text-white;
+  @apply font-bold;
+}
+
+.prose p {
+  @apply text-gray-700 dark:text-gray-300 leading-7;
+}
+
+.prose a {
+  @apply text-keploy-primary dark:text-blue-400;
+  @apply hover:underline;
+}
+
+.prose blockquote {
+  @apply border-l-4 border-keploy-primary dark:border-blue-400;
+  @apply pl-4 italic text-gray-600 dark:text-gray-400;
+}
+
+.prose ul,
+.prose ol {
+  @apply text-gray-700 dark:text-gray-300;
+}
+
+/* Images styling */
+img {
+  @apply rounded-lg;
+  @apply dark:opacity-90;
+}
+
+/* Table styling */
+table {
+  @apply border-collapse w-full text-sm;
+}
+
+table th {
+  @apply bg-gray-100 dark:bg-gray-800;
+  @apply border border-gray-300 dark:border-gray-700;
+  @apply px-4 py-2 text-left font-semibold;
+}
+
+table td {
+  @apply border border-gray-300 dark:border-gray-700;
+  @apply px-4 py-2;
+}
+
+table tbody tr:hover {
+  @apply bg-gray-50 dark:bg-gray-800/50;
+}
+
+/* Card styling */
+.card {
+  @apply bg-white dark:bg-slate-900;
+  @apply border border-gray-200 dark:border-slate-800;
+  @apply rounded-lg p-4 shadow-sm;
+  @apply hover:shadow-md transition-shadow;
+}
+
+.card:hover {
+  @apply border-keploy-primary dark:border-blue-400;
+}
+
+/* Button styling */
+button {
+  @apply transition-colors duration-200;
+}
+
+/* Input styling */
+input,
+textarea,
+select {
+  @apply bg-white dark:bg-slate-900;
+  @apply border border-gray-300 dark:border-slate-700;
+  @apply text-gray-900 dark:text-white;
+  @apply focus:outline-none focus:ring-2 focus:ring-keploy-primary;
+}
+
+input::placeholder,
+textarea::placeholder {
+  @apply text-gray-500 dark:text-gray-400;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  @apply w-2 h-2;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-100 dark:bg-slate-900;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-400 dark:bg-slate-700;
+  @apply rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-500 dark:bg-slate-600;
+}
+
+/* Link styling */
+a {
+  @apply text-keploy-primary dark:text-blue-400;
+  @apply hover:underline transition-colors;
+}
+
+a:hover {
+  @apply text-keploy-primary-dark dark:text-blue-300;
+}
+
+/* Selection styling */
+::selection {
+  @apply bg-keploy-primary text-white;
+}
+
+::-moz-selection {
+  @apply bg-keploy-primary text-white;
+}
+
+/* Loading skeleton */
+.skeleton {
+  @apply animate-pulse bg-gray-200 dark:bg-gray-800 rounded;
+}
+
+/* Utility classes */
+.text-muted {
+  @apply text-gray-600 dark:text-gray-400;
+}
+
+.bg-muted {
+  @apply bg-gray-100 dark:bg-gray-800;
+}
+
+.border-muted {
+  @apply border-gray-200 dark:border-gray-700;
+}
