@@ -9,9 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
-    "strings"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
@@ -22,10 +22,10 @@ import (
 )
 
 type MockYaml struct {
-	MockPath  string
-	MockName  string
-	Logger    *zap.Logger
-	idCounter int64
+	MockPath       string
+	MockName       string
+	Logger         *zap.Logger
+	idCounter      int64
 	expiryDuration time.Duration
 }
 

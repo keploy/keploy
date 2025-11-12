@@ -21,8 +21,8 @@ import (
 )
 
 type TestYaml struct {
-	TcsPath string
-	logger  *zap.Logger
+	TcsPath        string
+	logger         *zap.Logger
 	expiryDuration time.Duration
 }
 
