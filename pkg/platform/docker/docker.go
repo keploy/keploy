@@ -593,7 +593,55 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 		}
 
 		idc.logger.Debug("removing existing volume with different options", zap.String("volume", volumeName))
-		err := idc.VolumeRemove(ctx, volumeName, false)
+
+		// Find and remove ALL containers using this volume via a Docker API filter.
+		// These are orphaned containers from previous runs that are blocking volume recreation.
+		containerFilters := filters.NewArgs()
+		containerFilters.Add("volume", volumeName)
+		containers, err := idc.ContainerList(ctx, types.ContainerListOptions{
+			All:     true,
+			Filters: containerFilters,
+		})
+
+		if err != nil {
+			// Log a warning but proceed, as we might still be able to remove the volume.
+			idc.logger.Warn("failed to list containers using the volume", zap.String("volume", volumeName), zap.Error(err))
+		} else if len(containers) > 0 {
+			idc.logger.Warn("found containers using the volume, will remove them to free it",
+				zap.String("volume", volumeName),
+				zap.Int("count", len(containers)))
+
+			// Remove all containers that were found.
+			for _, container := range containers {
+				containerName := container.Names[0]
+				if len(containerName) > 0 && containerName[0] == '/' {
+					containerName = containerName[1:] // Remove leading slash
+				}
+
+				idc.logger.Info("removing container to free up volume",
+					zap.String("container", container.ID[:12]),
+					zap.String("name", containerName),
+					zap.String("status", container.State),
+					zap.String("image", container.Image))
+
+				removeErr := idc.ContainerRemove(ctx, container.ID, types.ContainerRemoveOptions{
+					Force:         true,  // Force removal even if running
+					RemoveVolumes: false, // Don't remove volumes yet, we'll do that explicitly
+				})
+				if removeErr != nil {
+					idc.logger.Error("failed to remove container using volume",
+						zap.String("container", container.ID[:12]),
+						zap.String("volume", volumeName),
+						zap.Error(removeErr))
+				} else {
+					idc.logger.Info("successfully removed container",
+						zap.String("container", container.ID[:12]))
+				}
+			}
+		}
+
+		// Now try to remove the volume
+		err = idc.VolumeRemove(ctx, volumeName, true)
 		if err != nil {
 			idc.logger.Error("failed to remove existing volume", zap.String("volume", volumeName), zap.Error(err))
 			cancel()
