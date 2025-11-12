@@ -109,55 +109,11 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
 
     steps:
-    - name: Check if Docker Desktop is running / If not then Start
+    - name: Ensure Docker is running
       shell: powershell
       run: |
-        function Test-Docker {
-          # Check if Docker CLI exists at all
-          $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
-          if (-not $dockerCmd) {
-            return $false
-          }
-
-          # Use Start-Process so failures don't raise a NativeCommandError in PowerShell
-          try {
-            $proc = Start-Process -FilePath $dockerCmd.Source -ArgumentList @('info','--format','{{.ServerVersion}}') -NoNewWindow -PassThru -Wait -ErrorAction SilentlyContinue
-            if ($proc -and $proc.ExitCode -eq 0) { return $true }
-            return $false
-          } catch {
-            return $false
-          }
-        }
-
-        function Test-DockerDesktopProcess {
-          $process = Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue
-          return $process -ne $null
-        }
-
-        if (Test-Docker) {
-          Write-Host "✅ Docker engine is already running."
-        } else {
-          if (Test-DockerDesktopProcess) {
-            Write-Host "⏳ Docker Desktop process found but engine not ready. Waiting..."
-          } else {
-            Write-Host "🚀 Starting Docker Desktop..."
-            Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe" -WindowStyle Hidden
-          }
-
-          # Wait for Docker to become ready
-          $timeout = (Get-Date).AddSeconds(90)
-          while (-not (Test-Docker)) {
-            if ((Get-Date) -gt $timeout) {
-              Write-Error "❌ Docker did not start within 90 seconds."
-              exit 1
-            }
-            Start-Sleep -Seconds 3
-          }
-
-          Write-Host "✅ Docker Desktop is now running and engine is ready."
-          Write-Host "Waiting an additional 60 seconds for Docker to stabilize..."
-          Start-Sleep -Seconds 60
-        }
+        $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
+        if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
     - name: Pull Docker image
       shell: powershell
@@ -182,111 +138,17 @@ jobs:
           $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
           Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
     
-      - name: Check if the count of lock files is zero (and stop long-running containers)
+      - name: Check and cleanup long-running containers (Windows helper)
+        id: count_stash
+        continue-on-error: true
         shell: powershell
         run: |
-          # Ensure we don't blow up on missing vars/paths
-          $ErrorActionPreference = 'Stop'
-
-          # 1) Resolve lock directory and lock files safely
-          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
-
-          # Always initialize as an array so later checks don't hit null
-          $lockFiles = @()
-          if (Test-Path -LiteralPath $lockDir) {
-            $lockFiles = Get-ChildItem -Path $lockDir -Filter '*.lock' -ErrorAction SilentlyContinue
-          }
-
-          # 2) Check if Docker is available
-          $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
-          if (-not $dockerCmd) {
-            Write-Warning "Docker CLI not found on PATH. Skipping Docker cleanup."
-            # You can 'return' here if this is a script file
-            # return
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/cleanup-windows.ps1'
+          if (Test-Path $script) {
+            & $script
           } else {
-            # 3) Find containers running longer than 30 minutes and stop/remove them
-            $stoppedAny = $false
-            try {
-              $cutoff = (Get-Date).AddMinutes(-30)
-
-              # Force array so $running is never $null
-              $running = @(docker ps -a -q 2>$null)
-
-              if ($running.Count -gt 0) {
-                Write-Host "Checking running containers for uptime > 30 minutes..."
-                foreach ($cid in $running) {
-                  if (-not $cid) { continue }
-
-                  try {
-                    # use double-quotes to avoid odd parsing, but nothing is interpolated here
-                    $started = docker inspect --format "{{.State.StartedAt}}" $cid 2>$null
-                    if (-not $started) { continue }
-
-                    # Be tolerant of Z/UTC format
-                    $startedDt = [DateTime]::Parse($started, $null, [System.Globalization.DateTimeStyles]::AssumeUniversal)
-
-                    if ($startedDt -lt $cutoff) {
-                      Write-Host "Container $cid started at $startedDt (older than 30m). Stopping and removing..."
-                      try {
-                        docker rm -f $cid 2>&1 | Write-Host
-                        $stoppedAny = $true
-                      } catch {
-                        Write-Warning "Failed to remove container ${cid}: $($_.Exception.Message)"
-                      }
-                    }
-                  } catch {
-                    Write-Warning "Failed to inspect/parse start time for container ${cid}: $($_.Exception.Message)"
-                  }
-                }
-              } else {
-                Write-Host "No running containers found."
-              }
-            } catch {
-              Write-Warning "Docker check for long-running containers failed: $($_.Exception.Message)"
-            }
-
-            # 4) Decide whether to prune
-            $shouldPrune = $false
-
-            if (-not $lockFiles -or $lockFiles.Count -eq 0) {
-              Write-Host "No lock files found. Will perform Docker cleanup."
-
-              if (Test-Path -LiteralPath $lockDir) {
-                Remove-Item -Path $lockDir -Recurse -Force -ErrorAction SilentlyContinue
-              }
-
-              $shouldPrune = $true
-            } elseif ($stoppedAny) {
-              Write-Host "Stopped long-running containers. Will perform Docker cleanup despite lock files."
-              $shouldPrune = $true
-            } else {
-              $count = $lockFiles.Count
-              Write-Host "Lock files still present ($count). Skipping Docker cleanup."
-            }
-
-            # 5) Perform prune if needed
-            if ($shouldPrune) {
-              Write-Host "Pruning Docker images (this will remove dangling and unused images)..."
-              try {
-                docker image prune -af 2>&1 | Write-Host
-              } catch {
-                Write-Warning "docker image prune failed: $($_.Exception.Message)"
-              }
-
-              Write-Host "Pruning Docker volumes (this will remove unused volumes)..."
-              try {
-                docker volume prune -f 2>&1 | Write-Host
-              } catch {
-                Write-Warning "docker volume prune failed: $($_.Exception.Message)"
-              }
-
-              Write-Host "Removing unused builder cache and performing system prune (including containers/networks)..."
-              try {
-                docker system prune -af --volumes 2>&1 | Write-Host
-              } catch {
-                Write-Warning "docker system prune failed: $($_.Exception.Message)"
-              }
-            }
+            Write-Error "Cleanup script not found at $script"
+            exit 1
           }
       
 
