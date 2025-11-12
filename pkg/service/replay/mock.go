@@ -134,51 +134,15 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 	}
 
 	m.logger.Info("Downloading mock file from cloud...", zap.String("testSetID", testSetID))
-	cloudFile, err := m.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, m.token)
-	if err != nil {
-		m.logger.Error("Failed to download mock file", zap.Error(err))
-		return err
+	downloadFunc := func() (io.Reader, error) {
+		return m.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, m.token)
 	}
 
-	// Save the downloaded mock file to local
-	file, err := osCreate224(localMockPath)
+	err = m.downloadAndSaveMock(downloadFunc, localMockPath)
 	if err != nil {
-		m.logger.Error("Failed to create local file", zap.String("path", localMockPath), zap.Error(err))
+		// The error is already logged by the helper function.
 		return err
 	}
-	defer func() {
-		err := file.Close()
-		if err != nil {
-			utils.LogError(m.logger, err, "failed to close the http response body")
-		}
-	}()
-
-	done := make(chan struct{})
-
-	// Spinner goroutine
-	go func() {
-		spinnerChars := []rune{'|', '/', '-', '\\'}
-		i := 0
-		for {
-			select {
-			case <-done:
-				fmt.Print("\r") // Clear spinner line after done
-				return
-			default:
-				fmt.Printf("\rDownloading... %c", spinnerChars[i%len(spinnerChars)])
-				i++
-				timeSleep224(100 * time.Millisecond)
-			}
-		}
-	}()
-
-	_, err = io.Copy(file, cloudFile)
-	if err != nil {
-		close(done)
-		return err
-	}
-	close(done)
-	m.logger.Info("Mock file downloaded successfully")
 
 	err = utils.AddToGitIgnore(m.logger, m.cfg.Path, "/*/mocks.yaml")
 	if err != nil {
@@ -438,7 +402,12 @@ func (m *mock) downloadByRegistryID(ctx context.Context, registryID string, appN
 		zap.String("outputPath", outputPath))
 
 	// Download the mock file from cloud using registry ID
-	cloudFile, err := m.storage.DownloadByRegistryID(ctx, registryID, appName, m.token)
+	downloadFunc := func() (io.Reader, error) {
+		// We pass registryID as mockName and an empty string for userName
+		return m.storage.Download(ctx, registryID, appName, "", m.token)
+	}
+
+	err := m.downloadAndSaveMock(downloadFunc, outputPath)
 	if err != nil {
 		m.logger.Error("Failed to download mock file using registry ID",
 			zap.String("registryID", registryID),
@@ -446,7 +415,28 @@ func (m *mock) downloadByRegistryID(ctx context.Context, registryID string, appN
 		return err
 	}
 
-	// Save the downloaded mock file to the repository root
+	m.logger.Info("Mock file downloaded successfully",
+		zap.String("registryID", registryID),
+		zap.String("savedAs", outputPath))
+
+	// Add to .gitignore if needed
+	err = utils.AddToGitIgnore(m.logger, ".", "*.mocks.yaml")
+	if err != nil {
+		utils.LogError(m.logger, err, "failed to add *.mocks.yaml to .gitignore file")
+	}
+
+	return nil
+}
+
+// downloadAndSaveMock is a helper function to download from a reader and save to a file.
+func (m *mock) downloadAndSaveMock(downloadFunc func() (io.Reader, error), outputPath string) error {
+	cloudFile, err := downloadFunc()
+	if err != nil {
+		m.logger.Error("Failed to download mock file from storage", zap.Error(err))
+		return err
+	}
+
+	// Save the downloaded mock file to the specified path
 	file, err := osCreate224(outputPath)
 	if err != nil {
 		m.logger.Error("Failed to create local file", zap.String("path", outputPath), zap.Error(err))
@@ -479,20 +469,9 @@ func (m *mock) downloadByRegistryID(ctx context.Context, registryID string, appN
 	}()
 
 	_, err = io.Copy(file, cloudFile)
-	if err != nil {
-		close(done)
-		return err
-	}
 	close(done)
-
-	m.logger.Info("Mock file downloaded successfully",
-		zap.String("registryID", registryID),
-		zap.String("savedAs", outputPath))
-
-	// Add to .gitignore if needed
-	err = utils.AddToGitIgnore(m.logger, ".", "*.mocks.yaml")
 	if err != nil {
-		utils.LogError(m.logger, err, "failed to add *.mocks.yaml to .gitignore file")
+		return err
 	}
 
 	return nil

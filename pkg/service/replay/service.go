@@ -49,7 +49,7 @@ type Service interface {
 
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context, testSets []string) error
-	DownloadMocksByRegistryID(ctx context.Context, registryID string, appName string) error
+	DownloadMocksByRegistryID(ctx context.Context, registryIDs []string, appName string) error
 
 	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
 
@@ -107,7 +107,6 @@ type TestHooks interface {
 type Storage interface {
 	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error // 3
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)
-	DownloadByRegistryID(ctx context.Context, registryID string, appName string, jwtToken string) (io.Reader, error)
 }
 
 type InstrumentState struct {
