@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -73,9 +72,6 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
-// getActiveDockerContext detects the active Docker context and its socket path.
-// Supports different Docker contexts like default, colima, or custom contexts
-// to ensure proper Docker daemon connectivity.
 func getActiveDockerContext(ctx context.Context) (contextName, socketPath string, err error) {
 	// Get the Active Docker Context
 	cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -85,8 +81,7 @@ func getActiveDockerContext(ctx context.Context) (contextName, socketPath string
 		return "", "", fmt.Errorf("failed to get docker contexts: %w", err)
 	}
 
-	// Parse docker context list output to find the active context
-	// Output format: "context_name\ttrue/false" where true indicates active context
+	// Parse the output
 	lines := strings.SplitSeq(strings.TrimSpace(string(out)), "\n")
 
 	for line := range lines {
@@ -109,8 +104,7 @@ func getActiveDockerContext(ctx context.Context) (contextName, socketPath string
 		return "", "", fmt.Errorf("no active docker context found")
 	}
 
-	// Get the Docker daemon socket path for the active context
-	// This returns paths like "unix:///var/run/docker.sock" or "unix:///Users/.../docker.sock"
+	// Get socketPath for the active context
 	cmd = exec.CommandContext(ctx, "docker", "context", "inspect", contextName, "--format", "{{.Endpoints.docker.Host}}")
 	out, err = cmd.Output()
 	if err != nil {
@@ -161,12 +155,13 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 
 	switch osName {
 	case "linux":
+
 		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-			" --privileged " + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
-			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") +
-			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode)
+			" --privileged " + Volumes +
+			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -177,14 +172,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		return alias, nil
 	case "windows":
 
-		// Get the current working directory
-		pwd, err := os.Getwd()
-		if err != nil {
-			utils.LogError(logger, err, "failed to get the current working directory")
-		}
-		dpwd := convertPathToUnixStyle(pwd)
-
-		// Detect active Docker context to determine the correct socket path
+		// Get active context and socket path
 		activeContext, socketPath, err := getActiveDockerContext(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to detect docker context, falling back to default")
@@ -192,7 +180,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			socketPath = "/var/run/docker.sock"
 		}
 
-		// Extract filesystem path from Docker socket URL for volume mounting
+		// Extract socket path from URL format (e.g., unix:///path/to/socket)
 		socketMountPath := socketPath
 		if strings.HasPrefix(socketPath, "unix://") {
 			socketMountPath = strings.TrimPrefix(socketPath, "unix://")
@@ -206,10 +194,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-				" --privileged " + Volumes + "-v " + pwd + ":" + dpwd + " -w " + dpwd +
-				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
-				"\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode)
+				" --privileged " + Volumes +
+				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock" +
+				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -228,10 +216,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-			" --privileged " + Volumes + "-v " + pwd + ":" + dpwd + " -w " + dpwd +
-			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("USERPROFILE") +
-			"\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode)
+			" --privileged " + Volumes +
+			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock" +
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -240,7 +228,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 		return alias, nil
 	case "darwin":
-		// Detect active Docker context to determine the correct socket path
+		// Get active context and socket path
 		activeContext, socketPath, err := getActiveDockerContext(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to detect docker context, falling back to default")
@@ -248,7 +236,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			socketPath = "/var/run/docker.sock"
 		}
 
-		// Extract filesystem path from Docker socket URL for volume mounting
+		// Extract socket path from URL format (e.g., unix:///path/to/socket)
 		socketMountPath := socketPath
 		if strings.HasPrefix(socketPath, "unix://") {
 			socketMountPath = strings.TrimPrefix(socketPath, "unix://")
@@ -264,10 +252,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-				" --privileged " + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
-				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("HOME") +
-				"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode)
+				" --privileged " + Volumes +
+				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock" +
+				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -287,10 +275,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-			" --privileged " + Volumes + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") +
-			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock -v " + os.Getenv("HOME") +
-			"/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode)
+			" --privileged " + Volumes +
+			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v " + socketMountPath + ":/var/run/docker.sock" +
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"

@@ -439,16 +439,9 @@ func (idc *Impl) parseExtendedPortMapping(portNode *yaml.Node) string {
 
 // generateKeployVolumes creates the standard volume mappings for Keploy containers
 // This function extracts the common volume logic used by both getAlias and Docker Compose generation
-// Accepts socketPath parameter to mount the correct Docker socket based on the active Docker context.
-func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) []string {
+func (idc *Impl) generateKeployVolumes() []string {
 	osName := runtime.GOOS
 	volumes := []string{}
-
-	// Working directory mount
-	volumes = append(volumes, fmt.Sprintf("%s:%s", workingDir, workingDir))
-
-	// Extract filesystem path from Docker socket URL for volume mounting
-	socketMountPath, _ := strings.CutPrefix(socketPath, "unix://")
 
 	switch osName {
 	case "linux":
@@ -457,8 +450,6 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			// Mount the detected Docker socket to enable container communication with the Docker daemon
-			fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 		)
 	case "darwin":
 		// macOS volumes
@@ -466,8 +457,6 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			// Mount the detected Docker socket to enable container communication with the Docker daemon
-			fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 		)
 	case "windows":
 		// Windows volumes - check if using default context or colima
@@ -481,8 +470,6 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					// Mount the detected Docker socket to enable container communication with the Docker daemon
-					fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 				)
 			} else {
 				// Colima context
@@ -490,47 +477,16 @@ func (idc *Impl) generateKeployVolumes(workingDir, homeDir, socketPath string) [
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					// Mount the detected Docker socket to enable container communication with the Docker daemon
-					fmt.Sprintf("%s:/var/run/docker.sock", socketMountPath),
 				)
 			}
 		}
 	}
-
-	// Keploy config and data directories
-	volumes = append(volumes,
-		fmt.Sprintf("%s/.keploy-config:/root/.keploy-config", homeDir),
-		fmt.Sprintf("%s/.keploy:/root/.keploy", homeDir),
-	)
-
 	return volumes
 }
 
 // GenerateKeployAgentService creates a Docker Compose service configuration for keploy-agent
 // based on the SetupOptions and returns it as a yaml.Node that can be appended to a compose file
 func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Node, error) {
-	osName := runtime.GOOS
-
-	// Get working directory and home directory
-	workingDir := os.Getenv("PWD")
-	if workingDir == "" {
-		var err error
-		workingDir, err = os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get working directory: %w", err)
-		}
-	}
-
-	homeDir := os.Getenv("HOME")
-	if osName == "windows" {
-		homeDir = os.Getenv("USERPROFILE")
-		if homeDir != "" {
-			homeDir = strings.ReplaceAll(homeDir, "\\", "/")
-		}
-		// Convert working directory for Windows
-		workingDir = convertPathToUnixStyleForCompose(workingDir)
-	}
-
 	// Build the Docker image name
 	img := DockerConfig.DockerImage + ":v" + utils.Version
 
@@ -552,14 +508,8 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	ports = append(ports, opts.AppPorts...)
 
-	// Detect active Docker context to determine the correct socket path
-	_, socketPath, err := getActiveDockerContext(context.Background())
-	if err != nil {
-		socketPath = "/var/run/docker.sock" // Use default socket if detection fails
-	}
-
 	// Generate volumes using the extracted function
-	volumes := idc.generateKeployVolumes(workingDir, homeDir, socketPath)
+	volumes := idc.generateKeployVolumes()
 
 	clientPid := int(os.Getpid())
 	// Build command arguments
@@ -594,10 +544,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			// privileged
 			{Kind: yaml.ScalarNode, Value: "privileged"},
 			{Kind: yaml.ScalarNode, Value: "true"},
-
-			// working_dir
-			{Kind: yaml.ScalarNode, Value: "working_dir"},
-			{Kind: yaml.ScalarNode, Value: workingDir},
 		},
 	}
 
