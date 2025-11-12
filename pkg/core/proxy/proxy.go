@@ -707,7 +707,6 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		OutgoingOptions: opts,
 	})
 	p.MockManagers.LoadOrStore(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
-	// p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")

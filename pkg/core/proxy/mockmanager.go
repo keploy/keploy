@@ -184,7 +184,6 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	// legacy rebuild
-	// m.filtered.deleteAll()
 
 	// rebuild per-kind filtered maps from scratch to avoid stale entries
 	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
@@ -221,7 +220,6 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	// legacy rebuild
-	// m.unfiltered.deleteAll()
 
 	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
 	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
