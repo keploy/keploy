@@ -75,7 +75,7 @@ The README in GitHub's [first-contributions repo](https://github.com/firstcontri
 
 <br/>
 
-2. Clone the repository with the following command. Replace the <GITHUB_USERNAME> with your username
+2. Clone the repository with the following command. Replace the <GITHUB_USERNAME> with your username. Follow the issue process for further changes
 
 ```sh
 git clone https://github.com/<GITHUB_USERNAME>/keploy.git
