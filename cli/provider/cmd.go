@@ -187,8 +187,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" { // for downloading mocks
 			cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
 			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
-			cmd.Flags().String("registry-ids", "", "Registry ID for direct mock download (e.g., xxxx-xxxx-xxxx)")
-			cmd.Flags().String("app", "", "App name (defaults to current directory name if not provided)")
+			cmd.Flags().StringSlice("registry-ids", c.cfg.MockDownload.RegistryIDs, "Registry IDs for direct mock download")
+			cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 			return nil
 		}
 
@@ -459,8 +459,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Info("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
-		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + "). using current directory name as appName")
-		c.cfg.AppName = appName
+		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
 	if !IsConfigFileFound {
@@ -741,33 +740,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
 
-			// Get registry-id and app flags
-			registryIDs, err := cmd.Flags().GetStringArray("registry-ids")
+			registryIDs, err := cmd.Flags().GetStringSlice("registry-ids")
 			if err != nil {
-				errMsg := "failed to get the registry-id"
+				errMsg := "failed to get the registry-ids"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			c.cfg.RegistryIDs = registryIDs
-
-			appName, err := cmd.Flags().GetString("app")
-			if err != nil {
-				errMsg := "failed to get the app name"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			// If app name not provided and registry-id is set, use current directory name
-			if appName == "" && len(registryIDs) > 0 {
-				appName, err = utils.GetLastDirectory()
-				if err != nil {
-					errMsg := "failed to get current directory name for app"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.logger.Info("Using current directory name as app name", zap.String("app", appName))
-			}
-			c.cfg.AppName = appName
+			c.cfg.MockDownload.RegistryIDs = registryIDs
 
 			return nil
 		}
