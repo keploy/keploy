@@ -210,7 +210,7 @@ func (s *Storage) DownloadByRegistryID(ctx context.Context, registryID string, a
 	if err != nil {
 		return nil, err
 	}
-	
+
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept-Encoding", "gzip") // Request gzip encoding
 
