@@ -187,7 +187,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" { // for downloading mocks
 			cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
 			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
-			cmd.Flags().String("registry-id", "", "Registry ID for direct mock download (e.g., xxxx-xxxx-xxxx)")
+			cmd.Flags().String("registry-ids", "", "Registry ID for direct mock download (e.g., xxxx-xxxx-xxxx)")
 			cmd.Flags().String("app", "", "App name (defaults to current directory name if not provided)")
 			return nil
 		}
@@ -742,13 +742,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			config.SetSelectedTests(c.cfg, testSets)
 
 			// Get registry-id and app flags
-			registryID, err := cmd.Flags().GetString("registry-id")
+			registryIDs, err := cmd.Flags().GetStringArray("registry-ids")
 			if err != nil {
 				errMsg := "failed to get the registry-id"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			c.cfg.RegistryID = registryID
+			c.cfg.RegistryIDs = registryIDs
 
 			appName, err := cmd.Flags().GetString("app")
 			if err != nil {
@@ -758,7 +758,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// If app name not provided and registry-id is set, use current directory name
-			if appName == "" && registryID != "" {
+			if appName == "" && len(registryIDs) > 0 {
 				appName, err = utils.GetLastDirectory()
 				if err != nil {
 					errMsg := "failed to get current directory name for app"
@@ -767,7 +767,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 				c.logger.Info("Using current directory name as app name", zap.String("app", appName))
 			}
-			c.cfg.AppNameOverride = appName
+			c.cfg.AppName = appName
 
 			return nil
 		}

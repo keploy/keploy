@@ -35,7 +35,7 @@ func DownloadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Servi
 	var cmd = &cobra.Command{
 		Use:     "download",
 		Short:   "Download mocks from the keploy registry",
-		Example: `keploy mock download`,
+		Example: `keploy mock download --registry-ids "d93b6393-5498-464a-8e12-a82414282352,801591f4-34e1-4598-a257-4185a538a25a"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -52,20 +52,9 @@ func DownloadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Servi
 				return nil
 			}
 
-			// Check for registry-id flag
-			registryID, _ := cmd.Flags().GetString("registry-id")
-			appName, _ := cmd.Flags().GetString("app")
-
-			if registryID != "" {
-				if err := replay.DownloadMocksByRegistryID(ctx, registryID, appName); err != nil {
-					utils.LogError(logger, err, "failed to download mocks from keploy registry using registry-id")
+			if err := replay.DownloadMocks(ctx); err != nil {
+				utils.LogError(logger, err, "failed to download mocks from keploy registry")
 					return nil
-				}
-			} else {
-				if err := replay.DownloadMocks(ctx); err != nil {
-					utils.LogError(logger, err, "failed to download mocks from keploy registry")
-					return nil
-				}
 			}
 			return nil
 		},

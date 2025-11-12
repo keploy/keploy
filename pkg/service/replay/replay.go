@@ -1846,12 +1846,16 @@ func (r *Replayer) authenticateUser(ctx context.Context) error {
 	r.mock.setToken(token)
 	return nil
 }
-
 func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	// Authenticate the user for mock registry
 	err := r.authenticateUser(ctx)
 	if err != nil {
 		return err
+	}
+
+	// If registry IDs are provided via flags, download them directly.
+	if len(r.config.RegistryIDs) > 0 {
+		return r.DownloadMocksByRegistryID(ctx, r.config.RegistryIDs, r.config.AppName)
 	}
 
 	testSets, err := r.GetSelectedTestSets(ctx)
@@ -1875,31 +1879,35 @@ func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	}
 	return nil
 }
-func (r *Replayer) DownloadMocksByRegistryID(ctx context.Context, registryID string, appName string) error {
+
+func (r *Replayer) DownloadMocksByRegistryID(ctx context.Context, registryIDs []string, appName string) error {
 	// Authenticate the user for mock registry
 	err := r.authenticateUser(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Use the registry ID to download mocks directly
-	r.logger.Info("Downloading mocks using registry ID",
-		zap.String("registryID", registryID),
-		zap.String("app", appName))
+	for _, registryID := range registryIDs {
+		// Use the registry ID to download mocks directly
+		r.logger.Info("Downloading mocks using registry ID",
+			zap.String("registryID", registryID),
+			zap.String("app", appName))
 
-	err = r.mock.downloadByRegistryID(ctx, registryID, appName)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		err = r.mock.downloadByRegistryID(ctx, registryID, appName)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
 			return err
+			}
+			utils.LogError(r.logger, err, "failed to download mocks using registry ID",
+				zap.String("registryID", registryID))
+			// Continue to the next ID on failure
+			continue
 		}
-		utils.LogError(r.logger, err, "failed to download mocks using registry ID",
-			zap.String("registryID", registryID))
-		return fmt.Errorf("failed to download mocks with registry ID %s: %w", registryID, err)
-	}
 
-	r.logger.Info("Successfully downloaded mocks using registry ID",
-		zap.String("registryID", registryID),
-		zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
+		r.logger.Info("Successfully downloaded mocks using registry ID",
+			zap.String("registryID", registryID),
+			zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
+	}
 
 	return nil
 }
