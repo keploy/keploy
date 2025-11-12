@@ -23,12 +23,84 @@ import (
 type TestYaml struct {
 	TcsPath string
 	logger  *zap.Logger
+	expiryDuration time.Duration
 }
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
-	return &TestYaml{
-		TcsPath: tcsPath,
-		logger:  logger,
+	ts := &TestYaml{
+		TcsPath:        tcsPath,
+		logger:         logger,
+		expiryDuration: 18 * time.Hour,
+	}
+	// start background cleanup of expired testcases
+	go ts.startExpiredCleanup()
+	return ts
+}
+
+// startExpiredCleanup kicks off a background goroutine that periodically
+// removes expired testcases moved to the "expired" folder. It runs once
+// for the lifetime of the process.
+func (ts *TestYaml) startExpiredCleanup() {
+	ticker := time.NewTicker(time.Hour)
+	// run cleanup once immediately to remove any stale files from previous runs
+	ts.cleanupExpired()
+	for range ticker.C {
+		ts.cleanupExpired()
+	}
+}
+
+// cleanupExpired scans all testset "expired" directories and removes any
+// testcase files whose expiry metadata indicates they have passed their TTL.
+func (ts *TestYaml) cleanupExpired() {
+	base := ts.TcsPath
+	// list testset directories
+	dirs, err := os.ReadDir(base)
+	if err != nil {
+		ts.logger.Debug("failed to read tests base dir for cleanup", zap.Error(err), zap.String("path", base))
+		return
+	}
+	now := time.Now()
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		expiredPath := filepath.Join(base, d.Name(), "expired")
+		edirs, err := os.ReadDir(expiredPath)
+		if err != nil {
+			// ignore missing expired directories
+			continue
+		}
+		for _, f := range edirs {
+			// skip metadata files if any
+			if f.IsDir() {
+				continue
+			}
+			name := f.Name()
+			// metadata files use .expiry suffix
+			if strings.HasSuffix(name, ".expiry") {
+				// pair with the actual testcase file name
+				baseName := strings.TrimSuffix(name, ".expiry")
+				metaPath := filepath.Join(expiredPath, name)
+				data, err := os.ReadFile(metaPath)
+				if err != nil {
+					// if meta unreadable, fallback to file modtime
+					ts.logger.Debug("failed to read expiry meta, will fallback to file modtime", zap.Error(err), zap.String("meta", metaPath))
+					continue
+				}
+				expTime, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+				if err != nil {
+					ts.logger.Debug("invalid expiry timestamp, skipping", zap.Error(err), zap.String("meta", metaPath))
+					continue
+				}
+				if now.After(expTime) {
+					// delete both meta and testcase file (if exists)
+					tcPath := filepath.Join(expiredPath, baseName)
+					_ = os.Remove(tcPath)
+					_ = os.Remove(metaPath)
+					ts.logger.Info("removed expired testcase", zap.String("file", tcPath))
+				}
+			}
+		}
 	}
 }
 
@@ -208,24 +280,80 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 }
 
 func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
-	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+	testsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	expiredPath := filepath.Join(ts.TcsPath, testSetID, "expired")
+	if err := os.MkdirAll(expiredPath, 0o755); err != nil {
+		ts.logger.Error("failed to create expired dir", zap.Error(err), zap.String("path", expiredPath))
+		return err
+	}
+
+	expiry := time.Now().Add(ts.expiryDuration)
+
 	for _, testCaseID := range testCaseIDs {
-		err := yaml.DeleteFile(ctx, ts.logger, path, testCaseID)
-		if err != nil {
-			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+		// move the testcase yaml to expired folder instead of deleting
+		src := filepath.Join(testsPath, testCaseID+".yaml")
+		dst := filepath.Join(expiredPath, testCaseID+".yaml")
+		if _, err := os.Stat(src); err != nil {
+			if os.IsNotExist(err) {
+				ts.logger.Warn("testcase file not found while trying to expire", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+				continue
+			}
+			ts.logger.Error("failed to stat testcase file", zap.Error(err), zap.String("file", src))
 			return err
 		}
+
+		if err := os.Rename(src, dst); err != nil {
+			// fallback to delete if move fails
+			ts.logger.Error("failed to move testcase to expired folder, attempting delete", zap.Error(err), zap.String("src", src), zap.String("dst", dst))
+			if err := yaml.DeleteFile(ctx, ts.logger, testsPath, testCaseID); err != nil {
+				ts.logger.Error("failed to delete testcase after failed move", zap.Error(err), zap.String("testcase id", testCaseID))
+				return err
+			}
+			continue
+		}
+
+		// write expiry metadata alongside the file
+		metaPath := filepath.Join(expiredPath, testCaseID+".expiry")
+		if err := os.WriteFile(metaPath, []byte(expiry.Format(time.RFC3339)), 0o644); err != nil {
+			ts.logger.Warn("failed to write expiry metadata for testcase", zap.Error(err), zap.String("meta", metaPath))
+			// do not fail the whole operation for metadata write failure
+		}
+		ts.logger.Info("expired testcase (moved) — will be removed after expiry", zap.String("testcase", dst), zap.Time("expiresAt", expiry))
 	}
 	return nil
 }
 
 func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
-	path := filepath.Join(ts.TcsPath, testSetID)
-	err := yaml.DeleteDir(ctx, ts.logger, path)
-	if err != nil {
-		ts.logger.Error("failed to delete the testset", zap.String("testset id", testSetID))
-		return err
+	// Instead of immediate deletion, move the whole testset directory to an
+	// "expired" area and write an expiry timestamp. A background cleaner
+	// (started in New) will permanently remove expired files after
+	// ts.expiryDuration. This prevents accidental immediate loss of
+	// artifacts when a user requests deletion while some tests are failing.
+	src := filepath.Join(ts.TcsPath, testSetID)
+	expiredBase := filepath.Join(ts.TcsPath, "expired")
+	if err := os.MkdirAll(expiredBase, 0o755); err != nil {
+		ts.logger.Error("failed to create expired dir", zap.Error(err), zap.String("path", expiredBase))
+		// fallback to direct delete
+		return yaml.DeleteDir(ctx, ts.logger, src)
 	}
+
+	// create a stable destination name to avoid collisions
+	dst := filepath.Join(expiredBase, testSetID+"-"+time.Now().UTC().Format("20060102150405"))
+
+	if err := os.Rename(src, dst); err != nil {
+		ts.logger.Error("failed to move testset to expired folder, attempting delete", zap.Error(err), zap.String("src", src), zap.String("dst", dst))
+		// fallback to delete if move fails
+		return yaml.DeleteDir(ctx, ts.logger, src)
+	}
+
+	// write expiry metadata alongside the moved directory
+	metaPath := dst + ".expiry"
+	expiry := time.Now().Add(ts.expiryDuration)
+	if err := os.WriteFile(metaPath, []byte(expiry.Format(time.RFC3339)), 0o644); err != nil {
+		ts.logger.Warn("failed to write expiry metadata for testset", zap.Error(err), zap.String("meta", metaPath))
+		// do not fail the whole operation for metadata write failure
+	}
+	ts.logger.Info("expired testset (moved) — will be removed after expiry", zap.String("testset", dst), zap.Time("expiresAt", expiry))
 	return nil
 }
 func (ts *TestYaml) ChangePath(path string) {

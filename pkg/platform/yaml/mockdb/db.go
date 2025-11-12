@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"time"
+    "strings"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
@@ -25,14 +26,70 @@ type MockYaml struct {
 	MockName  string
 	Logger    *zap.Logger
 	idCounter int64
+	expiryDuration time.Duration
 }
 
 func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
-	return &MockYaml{
-		MockPath:  mockPath,
-		MockName:  mockName,
-		Logger:    Logger,
-		idCounter: -1,
+	ys := &MockYaml{
+		MockPath:       mockPath,
+		MockName:       mockName,
+		Logger:         Logger,
+		idCounter:      -1,
+		expiryDuration: 18 * time.Hour,
+	}
+	// start background cleanup of expired mocks
+	go ys.startExpiredMockCleanup()
+	return ys
+}
+
+// startExpiredMockCleanup runs a background goroutine that periodically
+// scans the expired area for mock directories that have passed their
+// expiry timestamp and removes them permanently.
+func (ys *MockYaml) startExpiredMockCleanup() {
+	ticker := time.NewTicker(time.Hour)
+	// run cleanup once immediately
+	ys.cleanupExpiredMocks()
+	for range ticker.C {
+		ys.cleanupExpiredMocks()
+	}
+}
+
+func (ys *MockYaml) cleanupExpiredMocks() {
+	base := ys.MockPath
+	now := time.Now()
+	expiredBase := filepath.Join(base, "expired")
+	edirs, err := os.ReadDir(expiredBase)
+	if err != nil {
+		// nothing to cleanup or directory missing
+		return
+	}
+	for _, f := range edirs {
+		if !f.IsDir() {
+			// look for .expiry files next to directories
+			name := f.Name()
+			if strings.HasSuffix(name, ".expiry") {
+				baseName := strings.TrimSuffix(name, ".expiry")
+				metaPath := filepath.Join(expiredBase, name)
+				data, err := os.ReadFile(metaPath)
+				if err != nil {
+					ys.Logger.Debug("failed to read expiry meta, will fallback to file modtime", zap.Error(err), zap.String("meta", metaPath))
+					continue
+				}
+				expTime, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+				if err != nil {
+					ys.Logger.Debug("invalid expiry timestamp, skipping", zap.Error(err), zap.String("meta", metaPath))
+					continue
+				}
+				if now.After(expTime) {
+					// remove the directory and meta (if it exists)
+					dirPath := filepath.Join(expiredBase, baseName)
+					_ = os.RemoveAll(dirPath)
+					_ = os.Remove(metaPath)
+					ys.Logger.Info("removed expired mocks", zap.String("dir", dirPath))
+				}
+			}
+			continue
+		}
 	}
 }
 
@@ -40,11 +97,7 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 //
 // mockNames is a map which contains the name of the mocks as key and a isConfig boolean as value
 func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error {
-	mockFileName := "mocks"
-	if ys.MockName != "" {
-		mockFileName = ys.MockName
-	}
-	path := filepath.Join(ys.MockPath, testSetID)
+	// no-op: we operate on the entire testSet mocks directory
 	ys.Logger.Debug("logging the names of the unused mocks to be removed", zap.Any("mockNames", mockNames), zap.String("for testset", testSetID), zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
 
 	// Read the mocks from the yaml file
@@ -323,22 +376,42 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-
-	// Read the mocks from the yaml file
-	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
-		return err
+	// Instead of deleting mocks immediately, move the testSet mocks directory
+	// to an expired area and write an expiry timestamp. The background cleaner
+	// will remove expired directories after ys.expiryDuration.
+	src := filepath.Join(ys.MockPath, testSetID)
+	expiredBase := filepath.Join(ys.MockPath, "expired")
+	if err := os.MkdirAll(expiredBase, 0o755); err != nil {
+		ys.Logger.Error("failed to create expired dir", zap.Error(err), zap.String("path", expiredBase))
+		// fallback to direct remove
+		if rmErr := os.RemoveAll(src); rmErr != nil {
+			utils.LogError(ys.Logger, rmErr, "failed to delete old mocks (fallback)", zap.String("path", src))
+			return rmErr
+		}
+		ys.Logger.Info("Successfully cleared old mocks for refresh (fallback delete).", zap.String("testSet", testSetID))
+		return nil
 	}
 
-	// Delete all contents of the mocks directory
-	err = os.RemoveAll(mockPath)
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to delete old mocks", zap.String("path", mockPath))
-		return err
+	dst := filepath.Join(expiredBase, testSetID+"-"+time.Now().UTC().Format("20060102150405"))
+	if err := os.Rename(src, dst); err != nil {
+		ys.Logger.Error("failed to move mocks to expired folder, attempting delete", zap.Error(err), zap.String("src", src), zap.String("dst", dst))
+		if rmErr := os.RemoveAll(src); rmErr != nil {
+			utils.LogError(ys.Logger, rmErr, "failed to delete old mocks after failed move", zap.String("path", src))
+			return rmErr
+		}
+		ys.Logger.Info("Successfully cleared old mocks for refresh (deleted after move failure).", zap.String("testSet", testSetID))
+		return nil
 	}
 
-	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))
+	// write expiry metadata alongside the moved directory
+	metaPath := dst + ".expiry"
+	expiry := time.Now().Add(ys.expiryDuration)
+	if err := os.WriteFile(metaPath, []byte(expiry.Format(time.RFC3339)), 0o644); err != nil {
+		ys.Logger.Warn("failed to write expiry metadata for mocks", zap.Error(err), zap.String("meta", metaPath))
+		// do not fail the whole operation for metadata write failure
+	}
+
+	ys.Logger.Info("expired mocks (moved) — will be removed after expiry", zap.String("mocksDir", dst), zap.Time("expiresAt", expiry))
 	return nil
 }
 
