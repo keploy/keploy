@@ -1876,34 +1876,33 @@ func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	return nil
 }
 func (r *Replayer) DownloadMocksByRegistryID(ctx context.Context, registryID string, appName string) error {
-    // Authenticate the user for mock registry
-    err := r.authenticateUser(ctx)
-    if err != nil {
-        return err
-    }
+	// Authenticate the user for mock registry
+	err := r.authenticateUser(ctx)
+	if err != nil {
+		return err
+	}
 
-    // Use the registry ID to download mocks directly
-    r.logger.Info("Downloading mocks using registry ID", 
-        zap.String("registryID", registryID),
-        zap.String("app", appName))
+	// Use the registry ID to download mocks directly
+	r.logger.Info("Downloading mocks using registry ID",
+		zap.String("registryID", registryID),
+		zap.String("app", appName))
 
-    err = r.mock.downloadByRegistryID(ctx, registryID, appName)
-    if err != nil {
-        if errors.Is(err, context.Canceled) {
-            return err
-        }
-        utils.LogError(r.logger, err, "failed to download mocks using registry ID", 
-            zap.String("registryID", registryID))
-        return fmt.Errorf("failed to download mocks with registry ID %s: %w", registryID, err)
-    }
+	err = r.mock.downloadByRegistryID(ctx, registryID, appName)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		utils.LogError(r.logger, err, "failed to download mocks using registry ID",
+			zap.String("registryID", registryID))
+		return fmt.Errorf("failed to download mocks with registry ID %s: %w", registryID, err)
+	}
 
-    r.logger.Info("Successfully downloaded mocks using registry ID",
-        zap.String("registryID", registryID),
-        zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
-    
-    return nil
+	r.logger.Info("Successfully downloaded mocks using registry ID",
+		zap.String("registryID", registryID),
+		zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
+
+	return nil
 }
-
 
 func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
 	// Authenticate the user for mock registry
