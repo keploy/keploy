@@ -736,8 +736,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		config.SetSelectedTests(c.cfg, testSets)
 
-	
-
 	case "generate", "download":
 		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
 			path, err := cmd.Flags().GetString("path")
