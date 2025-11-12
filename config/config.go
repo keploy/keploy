@@ -151,9 +151,6 @@ type Report struct {
 	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
 	Summary          bool                `json:"summary" yaml:"summary" mapstructure:"summary"`
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
-	ProtoFile        string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
-	ProtoDir         string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
-	ProtoInclude     []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 }
 
 type Globalnoise struct {
