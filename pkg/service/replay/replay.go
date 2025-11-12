@@ -966,7 +966,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	for idx, testCase := range testCases {
-		time.Sleep(1 * time.Second)
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
