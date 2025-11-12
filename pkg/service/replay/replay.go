@@ -251,7 +251,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
-		
+
 		// Reload hooks before each test set if this is not the first test set
 		// This ensures fresh eBPF state and prevents issues between test runs
 		if i > 0 && r.instrument && !r.config.Test.SkipAppRestart {
@@ -344,7 +344,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false, runApp)
 			if err != nil {
-				if err == context.Canceled {   // case where application crashes immediately 
+				if err == context.Canceled { // case where application crashes immediately
 					runApp = true
 					continue
 				}
