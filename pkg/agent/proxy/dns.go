@@ -254,7 +254,6 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 					Mx:         dns.Fqdn(mx.Host),
 				})
 			}
-			logger.Debug("resolved MX records successfully", zap.Int("count", len(mxRecords)))
 			if len(answers) > 0 {
 				logger.Debug("resolved the dns records successfully")
 			}
