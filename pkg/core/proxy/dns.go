@@ -249,7 +249,6 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 		return answers
 	}
 
-
 	// For A/AAAA records
 	ips, err := resolver.LookupIPAddr(ctx, domain)
 	// Perform the lookup with the context
