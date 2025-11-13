@@ -378,30 +378,30 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 // PassThrough function is used to pass the network traffic to the destination connection.
 // It also closes the destination connection if the function returns an error.
 func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
-	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+	logger.Info("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 	// making destConn
 	var destConn net.Conn
 	var err error
 	if dstCfg.TLSCfg != nil {
-		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+		logger.Info("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 
 		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr))
 			return nil, err
 		}
-		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+		logger.Info("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	} else {
-		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+		logger.Info("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 		destConn, err = net.Dial("tcp", dstCfg.Addr)
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the destination server")
 			return nil, err
 		}
-		logger.Debug("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+		logger.Info("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	}
 
-	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+	logger.Info("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	for _, v := range requestBuffer {
 		_, err := destConn.Write(v)
 		if err != nil {
@@ -442,7 +442,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			return nil, err
 		}
 
-		logger.Debug("the iteration for the generic response ends with responses:"+strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
+		logger.Info("the iteration for the generic response ends with responses:"+strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
 	case err := <-errChannel:
 		// Applied this nolint to ignore the staticcheck error here because of readability
 		// nolint:staticcheck
