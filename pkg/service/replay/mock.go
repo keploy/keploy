@@ -409,8 +409,14 @@ func (m *mock) downloadByRegistryID(ctx context.Context, registryID string, appN
 		return err
 	}
 
-	// username may be empty
-	username, _ := claims["username"].(string)
+	var (
+		username string
+		ok       bool
+	)
+	if username, ok = claims["username"].(string); !ok {
+		m.logger.Error("Username not found in the token, skipping mock download")
+		return fmt.Errorf("failed to download mock file: username not found in the token")
+	}
 
 	// Download the mock file from cloud using registry ID
 	downloadFunc := func() (io.Reader, error) {
