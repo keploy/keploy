@@ -102,7 +102,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			// If not found in cache, resolve the DNS query only in case of record mode
 			//TODO: Add support for passThrough here using the src<->dst mapping
 			if models.GetMode() == models.MODE_RECORD {
-				answers = resolveDNSQuery(p.logger, question.Name)
+				answers = resolveDNSQuery(p.logger, question.Name,question.Qtype)
 			}
 
 			if len(answers) == 0 {
@@ -184,7 +184,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 // TODO: passThrough the dns queries rather than resolving them.
-func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
+func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 	// Remove the last dot from the domain name if it exists
 	domain = strings.TrimSuffix(domain, ".")
 
@@ -195,86 +195,94 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 
 	var answers []dns.RR
 
-	// For SRV records, handle MongoDB specific queries
-	if strings.HasPrefix(domain, "_mongodb._tcp.") {
-		baseDomain := strings.TrimPrefix(domain, "_mongodb._tcp.")
-		_, addrs, err := resolver.LookupSRV(ctx, "mongodb", "tcp", baseDomain)
-		if err == nil && len(addrs) > 0 {
-			for _, addr := range addrs {
-				answers = append(answers, &dns.SRV{
-					Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
-					Priority: addr.Priority,
-					Weight:   addr.Weight,
-					Port:     addr.Port,
-					Target:   dns.Fqdn(addr.Target),
+	// Optimize resolution based on query type
+	switch qtype {
+	case dns.TypeSRV:
+		// Handle MongoDB specific SRV queries
+		if strings.HasPrefix(domain, "_mongodb._tcp.") {
+			baseDomain := strings.TrimPrefix(domain, "_mongodb._tcp.")
+			_, addrs, err := resolver.LookupSRV(ctx, "mongodb", "tcp", baseDomain)
+			if err == nil && len(addrs) > 0 {
+				for _, addr := range addrs {
+					answers = append(answers, &dns.SRV{
+						Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+						Priority: addr.Priority,
+						Weight:   addr.Weight,
+						Port:     addr.Port,
+						Target:   dns.Fqdn(addr.Target),
+					})
+				}
+				return answers
+			}
+			// If resolution fails, return a default SRV record
+			return []dns.RR{&dns.SRV{
+				Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+				Priority: 0,
+				Weight:   0,
+				Port:     27017, // Default MongoDB port
+				Target:   dns.Fqdn("mongodb." + baseDomain),
+			}}
+		}
+
+	case dns.TypeTXT:
+		// For TXT records, try to resolve them directly
+		txtRecords, err := resolver.LookupTXT(ctx, domain)
+		if err == nil && len(txtRecords) > 0 {
+			for _, txt := range txtRecords {
+				answers = append(answers, &dns.TXT{
+					Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+					Txt: []string{txt},
 				})
 			}
 			return answers
 		}
-		// If resolution fails, return a default SRV record with a target that matches the domain suffix
-		return []dns.RR{&dns.SRV{
-			Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
-			Priority: 0,
-			Weight:   0,
-			Port:     27017, // Default MongoDB port
-			Target:   dns.Fqdn("mongodb." + baseDomain),
-		}}
-	}
 
-	// For TXT records, try to resolve them directly
-	txtRecords, err := resolver.LookupTXT(ctx, domain)
-	if err == nil && len(txtRecords) > 0 {
-		for _, txt := range txtRecords {
-			answers = append(answers, &dns.TXT{
-				Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-				Txt: []string{txt},
-			})
+	case dns.TypeMX:
+		// For MX records, try to resolve them directly
+		mxRecords, err := resolver.LookupMX(ctx, domain)
+		if err == nil && len(mxRecords) > 0 {
+			for _, mx := range mxRecords {
+				answers = append(answers, &dns.MX{
+					Hdr:        dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
+					Preference: mx.Pref,
+					Mx:         dns.Fqdn(mx.Host),
+				})
+			}
+			logger.Debug("resolved MX records successfully", zap.Int("count", len(mxRecords)))
+			return answers
+		}
+
+	case dns.TypeA, dns.TypeAAAA:
+		// For A/AAAA records
+		ips, err := resolver.LookupIPAddr(ctx, domain)
+		if err != nil {
+			logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
+			return nil
+		}
+
+		// Convert the resolved IPs to dns.RR
+		for _, ip := range ips {
+			if ipv4 := ip.IP.To4(); ipv4 != nil {
+				answers = append(answers, &dns.A{
+					Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+					A:   ipv4,
+				})
+			} else {
+				answers = append(answers, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+					AAAA: ip.IP,
+				})
+			}
+		}
+
+		if len(answers) > 0 {
+			logger.Debug("resolved the dns records successfully")
 		}
 		return answers
-	}
 
-	// For MX records, try to resolve them directly
-	mxRecords, err := resolver.LookupMX(ctx, domain)
-	if err == nil && len(mxRecords) > 0 {
-		for _, mx := range mxRecords {
-			answers = append(answers, &dns.MX{
-				Hdr:        dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
-				Preference: mx.Pref,
-				Mx:         dns.Fqdn(mx.Host),
-			})
-		}
-		logger.Debug("resolved MX records successfully", zap.Int("count", len(mxRecords)))
-		return answers
-	}
-
-	// For A/AAAA records
-	ips, err := resolver.LookupIPAddr(ctx, domain)
-	// Perform the lookup with the context
-	// ips, err := resolver.LookupIPAddr(context.Background(), domain)
-
-	if err != nil {
-		logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
+	default:
+		logger.Debug("unsupported DNS query type for resolution", zap.Int("query type", int(qtype)))
 		return nil
-	}
-
-	// Convert the resolved IPs to dns.RR
-	// var answers []dns.RR
-	for _, ip := range ips {
-		if ipv4 := ip.IP.To4(); ipv4 != nil {
-			answers = append(answers, &dns.A{
-				Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-				A:   ipv4,
-			})
-		} else {
-			answers = append(answers, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-				AAAA: ip.IP,
-			})
-		}
-	}
-
-	if len(answers) > 0 {
-		logger.Debug("resolved the dns records successfully")
 	}
 
 	return answers
