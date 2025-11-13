@@ -1,7 +1,8 @@
 #!/bin/bash
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
-echo "iid.sh executed"
+# Checkout a different branch
+git fetch origin
+git checkout native-linux
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
