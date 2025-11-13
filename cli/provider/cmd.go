@@ -181,11 +181,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "upload": //for uploading mocks
 		cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
-	case "generate", "download":
 
+	case "generate", "download":
 		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" { // for downloading mocks
 			cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
 			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
+			cmd.Flags().StringSlice("registry-ids", c.cfg.MockDownload.RegistryIDs, "Registry IDs for direct mock download")
+			cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 			return nil
 		}
 
@@ -452,8 +454,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Info("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
-		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + "). using current directory name as appName")
-		c.cfg.AppName = appName
+		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
 	}
 
 	if !IsConfigFileFound {
@@ -735,7 +736,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
-
 		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
@@ -752,6 +752,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
+
+			registryIDs, err := cmd.Flags().GetStringSlice("registry-ids")
+			if err != nil {
+				errMsg := "failed to get the registry-ids"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.MockDownload.RegistryIDs = registryIDs
+
 			return nil
 		}
 
