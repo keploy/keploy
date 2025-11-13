@@ -24,6 +24,11 @@ jobs:
           - name: echo-mysql
             path: echo-mysql
             script_dir: echo_mysql
+            enable_ssl: true
+          - name: echo-mysql
+            path: echo-mysql
+            script_dir: echo_mysql
+            enable_ssl: false
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
@@ -40,7 +45,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})${{ matrix.app.enable_ssl != null && format(' ssl-{0}', matrix.app.enable_ssl) || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -77,6 +82,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          ENABLE_SSL: ${{ matrix.app.enable_ssl || 'false' }}
         run: |
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
