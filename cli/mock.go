@@ -54,7 +54,7 @@ func DownloadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Servi
 
 			if err := replay.DownloadMocks(ctx); err != nil {
 				utils.LogError(logger, err, "failed to download mocks from keploy registry")
-					return nil
+				return nil
 			}
 			return nil
 		},
