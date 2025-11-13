@@ -102,7 +102,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			// If not found in cache, resolve the DNS query only in case of record mode
 			//TODO: Add support for passThrough here using the src<->dst mapping
 			if models.GetMode() == models.MODE_RECORD {
-				answers = resolveDNSQuery(p.logger, question.Name,question.Qtype)
+				answers = resolveDNSQuery(p.logger, question.Name, question.Qtype)
 			}
 
 			if len(answers) == 0 {
@@ -212,6 +212,9 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 						Target:   dns.Fqdn(addr.Target),
 					})
 				}
+				if len(answers) > 0 {
+					logger.Debug("resolved the dns records successfully")
+				}
 				return answers
 			}
 			// If resolution fails, return a default SRV record
@@ -234,6 +237,9 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 					Txt: []string{txt},
 				})
 			}
+			if len(answers) > 0 {
+				logger.Debug("resolved the dns records successfully")
+			}
 			return answers
 		}
 
@@ -249,6 +255,9 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 				})
 			}
 			logger.Debug("resolved MX records successfully", zap.Int("count", len(mxRecords)))
+			if len(answers) > 0 {
+				logger.Debug("resolved the dns records successfully")
+			}
 			return answers
 		}
 
@@ -278,7 +287,6 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 		if len(answers) > 0 {
 			logger.Debug("resolved the dns records successfully")
 		}
-		return answers
 
 	default:
 		logger.Debug("unsupported DNS query type for resolution", zap.Int("query type", int(qtype)))
