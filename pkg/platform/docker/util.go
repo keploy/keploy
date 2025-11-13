@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/config"
@@ -121,6 +122,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
 
 		return alias, nil
 	case "windows":
@@ -155,6 +170,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
+			if opts.BuildDelay > 0 {
+				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+				for i, port := range opts.PassThroughPorts {
+					portStrings[i] = strconv.Itoa(int(port))
+				}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -173,6 +202,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
 		return alias, nil
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -205,6 +248,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
+			if opts.BuildDelay > 0 {
+				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if len(opts.PassThroughPorts) > 0 {
+				portStrings := make([]string, len(opts.PassThroughPorts))
+				for i, port := range opts.PassThroughPorts {
+					portStrings[i] = strconv.Itoa(int(port))
+				}
+			// Note the "=" sign, which is good practice for docker run
+				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -224,6 +281,20 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")

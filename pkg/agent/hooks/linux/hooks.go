@@ -21,6 +21,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/davecgh/go-spew/spew"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
@@ -269,7 +270,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
-	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
+	err = h.RegisterClient(ctx, setupOpts, opts.PassThroughPorts)
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
 	}
@@ -294,6 +295,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
 	agentInfo.Proxy = proxyInfo
+	spew.Dump(agentInfo)
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
@@ -371,7 +373,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	h.logger.Info("eBPF resources released successfully...")
 }
 
-func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
+func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, passThroughPorts []uint32) error {
 	h.logger.Info("Registering the client Info with keploy")
 	// Register the client and start processing
 
@@ -386,15 +388,17 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 		clientInfo.Mode = uint32(0)
 	}
 
-	ports := agent.GetPortToSendToKernel(ctx, rules)
 	for i := 0; i < 10; i++ {
-		if len(ports) <= i {
-			clientInfo.PassThroughPorts[i] = -1
+		if i >= len(passThroughPorts) {
+			clientInfo.PassThroughPorts[i] = -1 // Fill the rest with -1
 			continue
 		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
+		// Copy the port, casting from uint32 to int32
+		clientInfo.PassThroughPorts[i] = int32(passThroughPorts[i])
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
+
+	spew.Dump(clientInfo)
 	return h.SendClientInfo(clientInfo)
 }
 
