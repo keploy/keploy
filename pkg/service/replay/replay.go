@@ -1463,7 +1463,7 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 		return nil
 	}
 
-	fmt.Sprintln("tcs filtering from: %s to: %s ", afterTime.String(), beforeTime.String())
+	println("tcs filtering from: " + afterTime.String() + " to: " + beforeTime.String())
 
 	filtered = pkg.FilterTcsMocks(ctx, r.logger, filtered, afterTime, beforeTime)
 	unfiltered = pkg.FilterConfigMocks(ctx, r.logger, unfiltered, afterTime, beforeTime)
