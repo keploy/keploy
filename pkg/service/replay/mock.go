@@ -144,6 +144,8 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 		return err
 	}
 
+	m.logger.Info("Mock file downloaded successfully")
+
 	err = utils.AddToGitIgnore(m.logger, m.cfg.Path, "/*/mocks.yaml")
 	if err != nil {
 		utils.LogError(m.logger, err, "failed to add /*/mocks.yaml to .gitignore file")
@@ -401,13 +403,22 @@ func (m *mock) downloadByRegistryID(ctx context.Context, registryID string, appN
 		zap.String("app", appName),
 		zap.String("outputPath", outputPath))
 
+	claims, err := extractClaimsWithoutVerification224(m.token)
+	if err != nil {
+		m.logger.Error("Failed to extract claims from token for mock download by registry ID", zap.Error(err))
+		return err
+	}
+
+	// username may be empty
+	username, _ := claims["username"].(string)
+
 	// Download the mock file from cloud using registry ID
 	downloadFunc := func() (io.Reader, error) {
 		// We pass registryID as mockName and an empty string for userName
-		return m.storage.Download(ctx, registryID, appName, "", m.token)
+		return m.storage.Download(ctx, registryID, appName, username, m.token)
 	}
 
-	err := m.downloadAndSaveMock(downloadFunc, outputPath)
+	err = m.downloadAndSaveMock(downloadFunc, outputPath)
 	if err != nil {
 		m.logger.Error("Failed to download mock file using registry ID",
 			zap.String("registryID", registryID),
