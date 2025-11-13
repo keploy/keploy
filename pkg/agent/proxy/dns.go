@@ -268,18 +268,23 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 			return nil
 		}
 
-		// Convert the resolved IPs to dns.RR
 		for _, ip := range ips {
 			if ipv4 := ip.IP.To4(); ipv4 != nil {
-				answers = append(answers, &dns.A{
-					Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-					A:   ipv4,
-				})
+				// Only add A record if TypeA was requested
+				if qtype == dns.TypeA {
+					answers = append(answers, &dns.A{
+						Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+						A:   ipv4,
+					})
+				}
 			} else {
-				answers = append(answers, &dns.AAAA{
-					Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-					AAAA: ip.IP,
-				})
+				// Only add AAAA record if TypeAAAA was requested
+				if qtype == dns.TypeAAAA {
+					answers = append(answers, &dns.AAAA{
+						Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+						AAAA: ip.IP,
+					})
+				}
 			}
 		}
 
