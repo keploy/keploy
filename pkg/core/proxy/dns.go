@@ -149,6 +149,14 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					// TXT payloads that clients (e.g. mongodb+srv) might try to parse.
 					p.logger.Debug("skipping TXT answer (configured to always return empty TXT)")
 				// answers stays nil/empty so no TXT record will be returned.
+				case dns.TypeMX:
+					// Default MX record response
+					answers = []dns.RR{&dns.MX{
+						Hdr:        dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
+						Preference: 10,
+						Mx:         dns.Fqdn("mail." + question.Name),
+					}}
+					p.logger.Debug("sending default MX record response")
 				default:
 					p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 				}
@@ -226,6 +234,21 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 		}
 		return answers
 	}
+
+	// For MX records, try to resolve them directly
+	mxRecords, err := resolver.LookupMX(ctx, domain)
+	if err == nil && len(mxRecords) > 0 {
+		for _, mx := range mxRecords {
+			answers = append(answers, &dns.MX{
+				Hdr:        dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
+				Preference: mx.Pref,
+				Mx:         dns.Fqdn(mx.Host),
+			})
+		}
+		logger.Debug("resolved MX records successfully", zap.Int("count", len(mxRecords)))
+		return answers
+	}
+
 
 	// For A/AAAA records
 	ips, err := resolver.LookupIPAddr(ctx, domain)
