@@ -855,6 +855,7 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	isNonKeploy := false
 
 	for _, mock := range m {
+		println("filtering by timestamp mock time:", mock.Name, mock.Spec.ReqTimestampMock, mock.Spec.ResTimestampMock)
 		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
 		// field in this for loop, and write in mockmanager functions.
 		tmp := *mock
