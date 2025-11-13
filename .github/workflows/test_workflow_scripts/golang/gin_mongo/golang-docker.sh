@@ -1,7 +1,8 @@
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # Start mongo before starting keploy.
 docker network create keploy-network
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
@@ -20,13 +21,6 @@ docker logs mongoDb &
 # Start keploy in record mode.
 docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
-
-container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    sudo kill $pid
-}
 
 send_request(){
     sleep 10

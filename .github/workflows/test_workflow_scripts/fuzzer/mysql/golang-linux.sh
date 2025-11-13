@@ -6,12 +6,11 @@
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../common.sh"
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
-section() { echo "::group::$*"; }
-endsec()  { echo "::endgroup::"; }
 
 dump_logs() {
   section "Record Log"
@@ -45,68 +44,7 @@ final_cleanup() {
 
 trap final_cleanup EXIT
 
-# Checks a log file for critical errors or data races
-check_for_errors() {
-  local logfile=$1
-  echo "Checking for errors in $logfile..."
-  if [ -f "$logfile" ]; then
-    # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
-      echo "::error::Critical error found in $logfile. Failing the build."
-      # Print the specific errors that caused the failure
-      echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
-      echo "----------------------"
-      exit 1
-    fi
-    if grep -q "WARNING: DATA RACE" "$logfile"; then
-      echo "::error::Race condition detected in $logfile"
-      exit 1
-    fi
-  fi
-  echo "No critical errors found in $logfile."
-}
-
 # Validates the Keploy test report to ensure all test sets passed
-check_test_report() {
-    echo "Checking test reports..."
-    if [ ! -d "./keploy/reports" ]; then
-        echo "Test report directory not found!"
-        return 1
-    fi
-
-    local latest_report_dir
-    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
-    if [ -z "$latest_report_dir" ]; then
-        echo "No test run directory found in ./keploy/reports/"
-        return 1
-    fi
-    
-    local all_passed=true
-    # Loop through all generated report files
-    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
-        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
-        
-        local test_set_name
-        test_set_name=$(basename "$report_file" -report.yaml)
-        local test_status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-        
-        echo "Status for ${test_set_name}: $test_status"
-        if [ "$test_status" != "PASSED" ]; then
-            all_passed=false
-            echo "Test set ${test_set_name} did not pass."
-        fi
-    done
-
-    if [ "$all_passed" = false ]; then
-        echo "One or more test sets failed."
-        return 1
-    fi
-
-    echo "All tests passed in reports."
-    return 0
-}
 
 # Waits for the MySQL container to become ready and accept connections
 wait_for_mysql() {
@@ -125,7 +63,6 @@ wait_for_mysql() {
   return 1
 }
 
-# Waits for an HTTP endpoint to become available
 wait_for_http() {
   local host="localhost" # Assuming localhost
   local port="$2"
