@@ -891,10 +891,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	if r.config.Test.SkipAppRestart {   // adding a small delay between test-sets in case when dont restart app
+	if r.config.Test.SkipAppRestart { // adding a small delay between test-sets in case when dont restart app
 		time.Sleep(1 * time.Second)
 	}
-	
+
 	if r.instrument {
 		if runApp && r.config.Test.SkipAppRestart {
 			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
@@ -958,7 +958,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
-		needsDelay := (runApp && r.config.Test.SkipAppRestart) || (!r.config.Test.SkipAppRestart)	// no delay is needed multiple times when app is already running
+		needsDelay := (runApp && r.config.Test.SkipAppRestart) || (!r.config.Test.SkipAppRestart) // no delay is needed multiple times when app is already running
 		// Delay for user application to run
 		if needsDelay {
 			select {
