@@ -1463,6 +1463,25 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 		return nil
 	}
 
+	println("Initial filtered mocks count:", len(filtered))
+	println("Initial unfiltered mocks count:", len(unfiltered))
+
+	println("filtered mocks before time-based filterinng: ", func() string {
+		var names []string
+		for _, m := range filtered {
+			names = append(names, m.Name)
+		}
+		return strings.Join(names, ", ")
+	}())
+
+	println("unfiltered mocks before time-based filterinng: ", func() string {
+		var names []string
+		for _, m := range unfiltered {
+			names = append(names, m.Name)
+		}
+		return strings.Join(names, ", ")
+	}())
+
 	println("tcs filtering from: " + afterTime.String() + " to: " + beforeTime.String())
 
 	filtered = pkg.FilterTcsMocks(ctx, r.logger, filtered, afterTime, beforeTime)
