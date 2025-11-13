@@ -336,7 +336,7 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 		return nil, 0, fmt.Errorf("invalid DATETIME length %d (expected 0|4|7|11) - likely misaligned buffer", l)
 	}
 	if len(b) < 1+l {
-		return nil, 0, io.ErrUnexpectedEOF
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading DATETIME value , len(b)=%d, expected at least %d", len(b), 1+l)
 	}
 
 	p := b[1:] // start of payload after length

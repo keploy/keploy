@@ -17,7 +17,7 @@ import (
 
 // COM_STMT_EXECUTE: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_execute.html
 
-func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32) (*mysql.StmtExecutePacket, error) {
+func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32) (*mysql.StmtExecutePacket, error) {
 	if len(data) < 10 {
 		return &mysql.StmtExecutePacket{}, fmt.Errorf("packet length too short for COM_STMT_EXECUTE")
 	}
@@ -28,6 +28,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 
 	// Read Status
 	if pos+1 > len(data) {
+		logger.Error("unexpected end of data while reading status", zap.Int("position", pos), zap.Int("data_length", len(data)))
 		return nil, io.ErrUnexpectedEOF
 	}
 	//data[0] is COM_STMT_EXECUTE (0x17)
@@ -36,6 +37,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 
 	// Read StatementID
 	if pos+4 > len(data) {
+		logger.Error("unexpected end of data while reading statement ID", zap.Int("position", pos), zap.Int("data_length", len(data)))
 		return nil, io.ErrUnexpectedEOF
 	}
 	packet.StatementID = binary.LittleEndian.Uint32(data[pos : pos+4])
@@ -48,6 +50,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 
 	// Read Flags
 	if pos+1 > len(data) {
+		logger.Error("unexpected end of data while reading flags", zap.Int("position", pos), zap.Int("data_length", len(data)))
 		return nil, io.ErrUnexpectedEOF
 	}
 	packet.Flags = data[pos]
@@ -55,6 +58,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 
 	// Read IterationCount
 	if pos+4 > len(data) {
+		logger.Error("unexpected end of data while reading iteration count", zap.Int("position", pos), zap.Int("data_length", len(data)))
 		return nil, io.ErrUnexpectedEOF
 	}
 	packet.IterationCount = binary.LittleEndian.Uint32(data[pos : pos+4])
@@ -79,6 +83,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 		// Read NULL bitmap
 		nullBitmapLength := (packet.ParameterCount + 7) / 8
 		if pos+nullBitmapLength > len(data) {
+			logger.Error("unexpected end of data while reading NULL bitmap", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("null_bitmap_length", nullBitmapLength))
 			return nil, io.ErrUnexpectedEOF
 		}
 		packet.NullBitmap = data[pos : pos+nullBitmapLength]
@@ -86,6 +91,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 
 		// Read NewParamsBindFlag
 		if pos+1 > len(data) {
+			logger.Error("unexpected end of data while reading NewParamsBindFlag", zap.Int("position", pos), zap.Int("data_length", len(data)))
 			return nil, io.ErrUnexpectedEOF
 		}
 		packet.NewParamsBindFlag = data[pos]
@@ -98,6 +104,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 		if packet.NewParamsBindFlag == 1 {
 			for i := 0; i < packet.ParameterCount; i++ {
 				if pos+2 > len(data) {
+					logger.Error("unexpected end of data while reading parameter type", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i))
 					return nil, io.ErrUnexpectedEOF
 				}
 				packet.Parameters[i].Type = binary.LittleEndian.Uint16(data[pos : pos+2])
@@ -125,6 +132,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 			}
 
 			if pos >= len(data) {
+				logger.Error("unexpected end of data while reading parameter value", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i))
 				return nil, io.ErrUnexpectedEOF
 			}
 
@@ -138,6 +146,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 				length, _, n := utils.ReadLengthEncodedInteger(data[pos:])
 				pos += n
 				if pos+int(length) > len(data) {
+					logger.Error("unexpected end of data while reading length-encoded parameter value", zap.Int("position", pos), zap.Int("data_length", len(data)), zap.Int("parameter_index", i), zap.Uint64("length", length))
 					return nil, io.ErrUnexpectedEOF
 				}
 
