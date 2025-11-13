@@ -398,11 +398,6 @@ func (m *mock) downloadByRegistryID(ctx context.Context, registryID string, appN
 	// Determine the output path - save at repository root
 	outputPath := fmt.Sprintf("%s.mocks.yaml", registryID)
 
-	m.logger.Info("Downloading mock file from cloud using registry ID...",
-		zap.String("registryID", registryID),
-		zap.String("app", appName),
-		zap.String("outputPath", outputPath))
-
 	claims, err := extractClaimsWithoutVerification224(m.token)
 	if err != nil {
 		m.logger.Error("Failed to extract claims from token for mock download by registry ID", zap.Error(err))
