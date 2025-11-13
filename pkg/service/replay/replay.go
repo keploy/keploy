@@ -890,7 +890,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
-	time.Sleep(1 * time.Second)
+
+	if r.config.Test.SkipAppRestart {   // adding a small delay between test-sets in case when dont restart app
+		time.Sleep(1 * time.Second)
+	}
+	
 	if r.instrument {
 		if runApp && r.config.Test.SkipAppRestart {
 			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
@@ -921,16 +925,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 
-		var channelToMonitor <-chan models.AppError
+		var AppErrChan <-chan models.AppError
 		if r.config.Test.SkipAppRestart {
-			channelToMonitor = r.appErrChan // Use the persistent channel
+			AppErrChan = r.appErrChan // Use the persistent channel
 		} else {
-			channelToMonitor = appErrChan // Use the local, per-run channel
+			AppErrChan = appErrChan // Use the local, per-run channel
 		}
 		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			select {
-			case err := <-channelToMonitor:
+			case err := <-AppErrChan:
 				switch err.AppErrorType {
 				case models.ErrCommandError:
 					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
@@ -954,7 +958,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
-		needsDelay := (runApp && r.config.Test.SkipAppRestart) || (!r.config.Test.SkipAppRestart)
+		needsDelay := (runApp && r.config.Test.SkipAppRestart) || (!r.config.Test.SkipAppRestart)	// no delay is needed multiple times when app is already running
 		// Delay for user application to run
 		if needsDelay {
 			select {
