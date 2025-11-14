@@ -77,7 +77,45 @@ function Remove-KeployDirs {
   }
 }
 
-# --- Build docker images from compose ---
+# --- Find a free port and generate a random container name, then patch docker-compose ---
+function Find-FreePort {
+  param([int]$start = 8080)
+  for ($p = $start; $p -le 65535; $p++) {
+    try {
+      $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $p)
+      $listener.Start()
+      $listener.Stop()
+      return $p
+    } catch {
+      continue
+    }
+  }
+  throw 'No free TCP port found'
+}
+
+$appPort = Find-FreePort -start 8080
+$id = ([guid]::NewGuid()).ToString().Split('-')[0]
+$containerName = "dedup-go-$id"
+
+$dcFile = Join-Path (Get-Location) 'docker-compose.yml'
+if (Test-Path $dcFile) {
+  Write-Host "Patching docker-compose.yml: replacing port 8080 -> $appPort and service name 'dedup-go' -> '$containerName'"
+  $dc = Get-Content -Path $dcFile -Raw -ErrorAction Stop
+
+  # Replace exact port occurrences (word boundary) and the service/container name
+  $dc = [regex]::Replace($dc, '\b8080\b', [string]$appPort)
+  $dc = $dc.Replace('dedup-go', $containerName)
+
+  Set-Content -Path $dcFile -Value $dc -Encoding UTF8
+} else {
+  Write-Warning "docker-compose.yml not found at $dcFile; continuing without patching."
+}
+
+# Update APP_BASE_URL to use the chosen port
+$env:APP_BASE_URL = "http://localhost:$appPort"
+Write-Host "Chosen app port: $appPort"
+Write-Host "Chosen container name: $containerName"
+
 Write-Host "Building Docker image(s) with docker compose..."
 docker compose build
 
@@ -133,20 +171,20 @@ function Kill-Tree {
 # =========================
 # ========== RECORD =======
 # =========================
-$containerName = "dedup-go"
 $logPath = "$containerName.record.txt"
+$errLogPath = "$containerName.record.err.txt"
 $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
 $base = $env:APP_BASE_URL
 
 # Configure image for recording (optional override via DOCKER_IMAGE_RECORD)
-$env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
+# $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_RECORD } else { 'keploy:record' }
 
 # 1. Correctly quote the docker command for Keploy
 $dockerCmd = "docker compose up"
 $recArgs = @(
   'record',
-  '-c', $dockerCmd,
+  '-c', '"docker compose up"',
   '--container-name', $containerName,
   '--generate-github-actions=false',
   '--debug'
@@ -155,18 +193,22 @@ $recArgs = @(
 Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
-# 2. Start Keploy in a background job.
-# This allows the script to continue while Keploy runs.
-# We use Tee-Object to send output to BOTH the log file and the job's output stream.
-$recJob = Start-Job -ScriptBlock {
-    # Use the $using: scope to access variables from the parent script
-    & $using:env:RECORD_BIN @($using:recArgs) 2>&1 | Tee-Object -FilePath $using:logPath
-}
+# 2. Start Keploy using Start-Process and tail the log in a background job.
+# This gives us a reliable PID and still allows log streaming via a job.
+$argList = $recArgs -join ' '
+# Start a background job that tails the log file so Sync-Logs can Receive-Job from it
+Write-Host "Starting keploy record via Start-Process..."
+$proc = Start-Process -FilePath $env:RECORD_BIN -ArgumentList $argList -NoNewWindow -RedirectStandardOutput $logPath -RedirectStandardError $errLogPath -PassThru
+Write-Host "Keploy record started, PID: $($proc.Id)"
+$REC_PID = $proc.Id
+
+# Start a background job that tails both stdout and stderr log files so Sync-Logs can Receive-Job from it
+$recJob = Start-Job -ScriptBlock { param($out,$err) Get-Content -Path @($out,$err) -Wait -ErrorAction SilentlyContinue } -ArgumentList $logPath,$errLogPath
 
 Write-Host "`n=========================================================="
-Write-Host "Dumping full Keploy Record Logs from file: '$logPath'"
+Write-Host "Dumping full Keploy Record Logs from files: '$logPath' and '$errLogPath'"
 Write-Host "=========================================================="
-Get-Content -Path $logPath -ErrorAction SilentlyContinue
+Get-Content -Path @($logPath,$errLogPath) -ErrorAction SilentlyContinue
 Write-Host "=========================================================="
 
 # This function will print any new logs from the background job
@@ -211,7 +253,16 @@ do {
 } while ((Get-Date) -lt $pollUntil -and $recJob.State -eq 'Running')
 
 
-$REC_PID = (Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%keploy record%'").ProcessId | Select-Object -Last 1
+
+# If we don't have a PID (some environments), try a short polling fallback to find the process
+if (-not $REC_PID -or $REC_PID -eq 0) {
+  $exeName = [System.IO.Path]::GetFileNameWithoutExtension($env:RECORD_BIN)
+  for ($i = 0; $i -lt 10; $i++) {
+    Start-Sleep -Seconds 1
+    $p = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending | Select-Object -First 1
+    if ($p) { $REC_PID = $p.Id; break }
+  }
+}
 
 if ($REC_PID -and $REC_PID -ne 0) {
     Write-Host "Found Keploy PID: $REC_PID"
@@ -248,11 +299,11 @@ Write-Host "Shutting down docker compose services before test mode (preserving v
 docker compose down
 Start-Sleep -Seconds 5
 
-$testContainer = "dedup-go"
+$testContainer = $containerName
 $testLog = "$testContainer.test.txt"
 
 # Configure image for replay (optional override via DOCKER_IMAGE_REPLAY)
-$env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_REPLAY) { $env:DOCKER_IMAGE_REPLAY } else { 'keploy:replay' }
+# $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_REPLAY) { $env:DOCKER_IMAGE_REPLAY } else { 'keploy:replay' }
 
 $testArgs = @(
   'test',
