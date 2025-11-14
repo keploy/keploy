@@ -1,7 +1,6 @@
 # Binaries for programs and plugins
-*.exe
+keploy.exe
 *.exe~
-*.dll
 *.so
 *.dylib
 
