@@ -134,7 +134,7 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	totalCoveredLines := 0
 	for filename, lines := range coveragePerFileTmp {
 		// Skip mockery-generated files from coverage calculation
-		if g.isMockeryFile(filename) {
+		if isMockeryFile(filename, g.logger) {
 			g.logger.Debug("Skipping mockery-generated file from coverage",
 				zap.String("file", filename))
 			continue

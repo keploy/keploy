@@ -1,7 +1,6 @@
 package golang
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,10 +12,6 @@ func TestIsMockeryFile(t *testing.T) {
 	logger, _, err := log.New()
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
-	}
-	g := &Golang{
-		ctx:    context.Background(),
-		logger: logger,
 	}
 
 	tests := []struct {
@@ -85,7 +80,7 @@ func TestIsMockeryFile(t *testing.T) {
 				t.Fatalf("Failed to create test file: %v", err)
 			}
 
-			got := g.isMockeryFile(tmpFile)
+			got := isMockeryFile(tmpFile, logger)
 			if got != tt.want {
 				t.Errorf("isMockeryFile() = %v, want %v", got, tt.want)
 			}
@@ -98,21 +93,17 @@ func TestIsMockeryFile_ErrorHandling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
-	g := &Golang{
-		ctx:    context.Background(),
-		logger: logger,
-	}
 
 	t.Run("Non-existent file", func(t *testing.T) {
 		// Test non-existent file (should return false, not panic)
-		result := g.isMockeryFile("/nonexistent/mock_file.go")
+		result := isMockeryFile("/nonexistent/mock_file.go", logger)
 		if result != false {
 			t.Errorf("Expected false for non-existent file, got %v", result)
 		}
 	})
 
 	t.Run("Empty filename", func(t *testing.T) {
-		result := g.isMockeryFile("")
+		result := isMockeryFile("", logger)
 		if result != false {
 			t.Errorf("Expected false for empty filename, got %v", result)
 		}
@@ -125,7 +116,7 @@ func TestIsMockeryFile_ErrorHandling(t *testing.T) {
 			t.Fatalf("Failed to create directory: %v", err)
 		}
 
-		result := g.isMockeryFile(mockDir)
+		result := isMockeryFile(mockDir, logger)
 		if result != false {
 			t.Errorf("Expected false for directory, got %v", result)
 		}
@@ -136,10 +127,6 @@ func TestIsMockeryFile_RealKeployFiles(t *testing.T) {
 	logger, _, err := log.New()
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
-	}
-	g := &Golang{
-		ctx:    context.Background(),
-		logger: logger,
 	}
 
 	// Test with actual Keploy mockery files (if they exist)
@@ -168,7 +155,7 @@ func TestIsMockeryFile_RealKeployFiles(t *testing.T) {
 				return
 			}
 
-			result := g.isMockeryFile(tt.path)
+			result := isMockeryFile(tt.path, logger)
 			if result != tt.shouldFilter {
 				t.Errorf("isMockeryFile(%s) = %v, want %v", tt.path, result, tt.shouldFilter)
 			}
@@ -181,12 +168,7 @@ func TestIsMockeryFile_PerformancePattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
-	g := &Golang{
-		ctx:    context.Background(),
-		logger: logger,
-	}
 
-	// Test that non-mock files are quickly filtered without file I/O
 	testCases := []string{
 		"user.go",
 		"service.go",
@@ -197,11 +179,11 @@ func TestIsMockeryFile_PerformancePattern(t *testing.T) {
 
 	for _, filename := range testCases {
 		t.Run(filename, func(t *testing.T) {
-			// These shouldn't trigger file I/O (fast path)
+			// These shouldn't trigger file I/O for non-.go files (fast path)
 			// We can verify by not creating the file at all
-			result := g.isMockeryFile("/nonexistent/path/" + filename)
+			result := isMockeryFile("/nonexistent/path/"+filename, logger)
 			if result != false {
-				t.Errorf("Non-mock file %s incorrectly identified as mockery file", filename)
+				t.Errorf("File %s incorrectly identified as mockery file", filename)
 			}
 		})
 	}
