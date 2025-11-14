@@ -14,7 +14,7 @@ import (
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
-	//pprof for debugging
+	// pprof for debugging
 	// "net/http"
 	// _ "net/http/pprof"
 )
@@ -22,10 +22,12 @@ import (
 // version is the version of the server and will be injected during build by ldflags, same with dsn
 // see https://goreleaser.com/customization/build/
 
-var version string
-var dsn string
-var apiServerURI = "http://localhost:8083"
-var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
+var (
+	version        string
+	dsn            string
+	apiServerURI   = "http://localhost:8083"
+	gitHubClientID = "Iv23liFBvIVhL29i9BAp"
+)
 
 func main() {
 	// Uncomment the following code to enable pprof for debugging
@@ -90,7 +92,7 @@ func start(ctx context.Context) {
 
 	if dsn != "" {
 		utils.SentryInit(logger, dsn)
-		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
+		// logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
 	conf := config.New()
 	conf.APIServerURL = apiServerURI

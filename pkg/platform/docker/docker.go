@@ -105,7 +105,7 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 
 	// write data to file
 
-	err = os.WriteFile(path, data, 0644)
+	err = os.WriteFile(path, data, 0o644)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,6 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 
 // IsContainerRunning check if the container is already running or not, required for docker start command.
 func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
-
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
