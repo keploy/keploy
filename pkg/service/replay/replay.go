@@ -336,13 +336,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
 			if err != nil {
-				stopReason = fmt.Sprintf("failed to run test set: %v", err)
-				utils.LogError(r.logger, err, stopReason)
-				if ctx.Err() == context.Canceled {
+				if err == context.Canceled {
 					continue
 				}
+				stopReason = fmt.Sprintf("failed to run test set: %v", err)
+				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
 			}
+
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
 				testSetResult = false
@@ -2027,12 +2028,34 @@ func (r *Replayer) authenticateUser(ctx context.Context) error {
 	r.mock.setToken(token)
 	return nil
 }
-
 func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	// Authenticate the user for mock registry
 	err := r.authenticateUser(ctx)
 	if err != nil {
 		return err
+	}
+
+	if len(r.config.MockDownload.RegistryIDs) > 0 {
+		for _, registryID := range r.config.MockDownload.RegistryIDs {
+			// Use the registry ID to download mocks directly
+			r.logger.Info("Downloading mocks using registry ID",
+				zap.String("registryID", registryID),
+				zap.String("app", r.config.AppName))
+
+			err = r.mock.downloadByRegistryID(ctx, registryID, r.config.AppName)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return err
+				}
+				utils.LogError(r.logger, err, "failed to download mocks using registry ID", zap.String("registryID", registryID))
+				continue
+			}
+
+			r.logger.Info("Successfully downloaded mocks using registry ID",
+				zap.String("registryID", registryID),
+				zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
+		}
+		return nil
 	}
 
 	testSets, err := r.GetSelectedTestSets(ctx)
