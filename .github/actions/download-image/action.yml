@@ -12,7 +12,8 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Pull Image
+    - name: Pull Image (Unix)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         set -euo pipefail
@@ -24,3 +25,16 @@ runs:
         # Works for both tag refs and digest refs
         docker tag "${IMAGE_REF}" ghcr.io/keploy/keploy:v${{ inputs.version }}
         docker images | awk 'NR==1 || /keploy\/keploy/ {print}'
+
+    - name: Pull Image (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $IMAGE_REF = "${{ inputs.image_tag }}"
+        Write-Host "Pulling $IMAGE_REF ..."
+        docker pull $IMAGE_REF
+
+        # Retag to the name your stack expects (works for tags and digests)
+        docker tag $IMAGE_REF ghcr.io/keploy/keploy:v${{ inputs.version }}
+        docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "keploy/keploy" -SimpleMatch
