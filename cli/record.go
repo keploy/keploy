@@ -19,6 +19,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 	var cmd = &cobra.Command{
 		Use:   "record",
 		Short:   "record the keploy testcases from the API calls",
+		Example: `keploy record -c "/path/to/user/app"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
