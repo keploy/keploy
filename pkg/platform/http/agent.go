@@ -747,39 +747,37 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	cmd.Stderr = os.Stderr
 	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))
 
-if err := cmd.Run(); err != nil {
+	if err := cmd.Run(); err != nil {
+		// Case 1: Detect docker exit code
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code := exitErr.ExitCode()
 
-    // Case 1: Detect docker exit code
-    if exitErr, ok := err.(*exec.ExitError); ok {
-        code := exitErr.ExitCode()
+			// User pressed Ctrl+C -> exit status 130
+			if code == 130 {
+				logger.Warn("Keploy docker agent stopped by user (Ctrl+C)")
+				return nil // clean exit, no extra logs
+			}
 
-        // User pressed Ctrl+C -> exit status 130
-        if code == 130 {
-            logger.Warn("🟡 Keploy stopped by user (Ctrl+C)")
-            os.Exit(130) // clean exit, no extra logs
-        }
+			// Container or compose failure
+			return fmt.Errorf("keploy agent docker container exited with status %d", code)
+		}
 
-        // Container or compose failure
-        return fmt.Errorf("❌ Keploy agent docker container exited with status %d", code)
-    }
+		// Case 2: Context cancellation (example: parent process shutdown)
+		if ctx.Err() == context.Canceled {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			logger.Info("Keploy agent in docker stopped gracefully after context cancellation.")
+			return nil
+		}
 
-    // Case 2: Context cancellation (example: parent process shutdown)
-    if ctx.Err() == context.Canceled {
-        if cmd.Process != nil {
-            cmd.Process.Kill()
-        }
-        logger.Info("Keploy agent in docker stopped gracefully.")
-        return nil
-    }
+		// Case 3: Unknown fallback error
+		utils.LogError(logger, err, "failed to run keploy agent in docker")
+		return err
+	}
 
-    // Case 3: Unknown fallback error
-    utils.LogError(logger, err, "failed to run keploy agent in docker")
-    return err
+	return nil
 }
-
-return nil
-}
-
 
 // This function should be implemented such that we listen to the mock not found errors on the proxy side and send it back to the client from agent
 // Currently, we are sending the nil chan and it is handled for the nil check in the monitorProxyErrors function
