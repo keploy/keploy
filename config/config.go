@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+type MockDownload struct {
+	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
+}
+
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
@@ -40,6 +44,7 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	MockDownload          MockDownload `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
