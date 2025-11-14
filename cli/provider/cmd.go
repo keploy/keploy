@@ -248,7 +248,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
-		cmd.Flags().Bool("skip-app-restart", c.cfg.Test.SkipAppRestart, "Skip restarting the application for each test set during test mode")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
@@ -314,6 +313,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
+		cmd.Flags().Bool("skip-app-restart", c.cfg.Test.SkipAppRestart, "Skip restarting the application for each test set during test mode")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
@@ -1010,13 +1010,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
 
-			skipAppRestart, err := cmd.Flags().GetBool("skip-app-restart")
-			if err != nil {
-				errMsg := "failed to get the skip-app-restart flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			if skipAppRestart {
+			if !c.cfg.Test.SkipAppRestart {
+				skipAppRestart, err := cmd.Flags().GetBool("skip-app-restart")
+				if err != nil {
+					errMsg := "failed to get the skip-app-restart flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 				c.cfg.Test.SkipAppRestart = skipAppRestart
 			}
 			//check if the keploy folder exists
