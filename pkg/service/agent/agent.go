@@ -54,10 +54,17 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
 
+	passPortsUint := a.config.Agent.PassThroughPorts
+	passPortsUint32 := make([]uint32, len(passPortsUint))
+	for i, port := range passPortsUint {
+		passPortsUint32[i] = uint32(port)
+	}
+
 	err := a.Hook(ctx, models.HookOptions{
-		Mode:          a.config.Agent.Mode,
-		IsDocker:      a.config.Agent.IsDocker,
-		EnableTesting: a.config.Agent.EnableTesting,
+		Mode:             a.config.Agent.Mode,
+		IsDocker:         a.config.Agent.IsDocker,
+		EnableTesting:    a.config.Agent.EnableTesting,
+		PassThroughPorts: passPortsUint32,
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -154,6 +161,8 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		Pid:      0,
 		IsDocker: opts.IsDocker,
 		Mode:     opts.Mode,
+		Rules:            opts.Rules,
+		PassThroughPorts: opts.PassThroughPorts,
 	}, a.config.Agent)
 
 	if err != nil {

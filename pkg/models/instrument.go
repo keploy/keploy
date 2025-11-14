@@ -26,13 +26,14 @@ const (
 )
 
 type HookOptions struct {
-	Rules         []BypassRule
-	Mode          Mode
-	EnableTesting bool
-	Port          uint32 // used for e2e filtering
-	IsDocker      bool
-	ProxyPort     uint32
-	ServerPort    uint32
+	Rules            []BypassRule
+	Mode             Mode
+	EnableTesting    bool
+	Port             uint32 // used for e2e filtering
+	IsDocker         bool
+	ProxyPort        uint32
+	ServerPort       uint32
+	PassThroughPorts []uint32
 }
 
 type IngressEvent struct {
@@ -82,6 +83,8 @@ type SetupOptions struct {
 	AgentPort         uint32
 	AppPorts          []string
 	AppNetworks       []string
+	BuildDelay        uint64
+	PassThroughPorts  []uint
 }
 
 type RunOptions struct {
