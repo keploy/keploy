@@ -172,6 +172,8 @@ func (a *App) SetupCompose() error {
 	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
 	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath)
 
+	a.cmd = ensureComposeExitOnAppFailure(a.cmd, serviceInfo.ServiceName)
+
 	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
 
 	return nil

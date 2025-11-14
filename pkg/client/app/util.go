@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/google/shlex"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -108,4 +109,48 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 	}
 
 	return false
+}
+
+// ensureComposeExitOnAppFailure ensures that the docker-compose command will exit when the application
+// container stops by injecting --abort-on-container-exit and --exit-code-from flags if not already present.
+// It inserts these flags immediately after the "up" subcommand if found, otherwise appends them to the end.
+//
+// Parameters:
+//   - appCmd: the docker-compose command to modify
+//   - serviceName: the name of the service whose exit code should be monitored (empty string skips --exit-code-from)
+//
+// Returns: the modified command with the necessary flags added
+func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
+	parts, err := shlex.Split(appCmd)
+	if err != nil {
+		// Fallback to original command on parsing error.
+		// Consider logging this error if a logger is available.
+		return appCmd
+	}
+	// If the user already passed one of these flags, don't touch the command.
+	for _, part := range parts {
+		if part == "--abort-on-container-exit" || strings.HasPrefix(part, "--exit-code-from") {
+			return appCmd
+		}
+	}
+
+	// Arguments we want to inject.
+	args := []string{"--abort-on-container-exit"}
+	if serviceName != "" {
+		args = append(args, "--exit-code-from", serviceName)
+	}
+
+	for i, p := range parts {
+		if p == "up" {
+			// Insert flags immediately after "up"
+			newParts := make([]string, 0, len(parts)+len(args))
+			newParts = append(newParts, parts[:i+1]...)
+			newParts = append(newParts, args...)
+			newParts = append(newParts, parts[i+1:]...)
+			return strings.Join(newParts, " ")
+		}
+	}
+
+	// Fallback: no explicit "up" token detected — do not append flags.
+	return appCmd
 }

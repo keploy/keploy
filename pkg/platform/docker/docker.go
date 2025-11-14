@@ -234,13 +234,14 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 		}
 
 		// Search through services using the existing Compose structure
-		networks, ports, found := idc.findContainerInServices(compose, containerName)
+		networks, ports, service, found := idc.findContainerInServices(compose, containerName)
 		if found {
 			return &ComposeServiceInfo{
 				ComposePath: composePath,
 				Networks:    networks,
 				Ports:       ports,
 				Compose:     compose,
+				ServiceName: service,
 			}, nil
 		}
 	}
@@ -250,9 +251,9 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 
 // findContainerInServices searches for a container within the services of a compose file
 // This reuses the same iteration pattern as existing functions like SetPidContainer
-func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, bool) {
+func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, string, bool) {
 	if compose.Services.Content == nil {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 
 	// Use the same iteration pattern as existing compose functions (services are key-value pairs)
@@ -279,11 +280,11 @@ func (idc *Impl) findContainerInServices(compose *Compose, containerName string)
 		if containerNameMatch || serviceName == containerName {
 			networks := idc.extractServiceNetworks(serviceContentNode, serviceName)
 			ports := idc.extractServicePorts(serviceContentNode)
-			return networks, ports, true
+			return networks, ports, serviceName, true
 		}
 	}
 
-	return nil, nil, false
+	return nil, nil, "", false
 }
 
 // extractServiceNetworks extracts network names from a service's network configuration
