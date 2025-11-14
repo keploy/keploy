@@ -52,7 +52,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-          clean: true
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: powershell

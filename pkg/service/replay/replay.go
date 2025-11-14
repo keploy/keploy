@@ -64,6 +64,10 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
+	appCtx          context.Context
+	appCtxCancel    context.CancelFunc
+	appErrGrp       *errgroup.Group
+	appErrChan      chan models.AppError
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -82,6 +86,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 
 	instrument := config.Command != ""
+	appErrChan := make(chan models.AppError, 1)
 	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -90,6 +95,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		reportDB:        reportDB,
 		testSetConf:     testSetConf,
 		telemetry:       telemetry,
+		appErrChan:      appErrChan,
 		instrumentation: instrumentation,
 		config:          config,
 		instrument:      instrument,
@@ -107,7 +113,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
 
-	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
+	// defering the stop function to stop keploy in case of any error in replay or in case of context cancellation
 	defer func() {
 		select {
 		case <-ctx.Done():
@@ -239,14 +245,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	// setting the appId for the first test-set.
+	runApp := true
 	inst.AppID = r.config.AppID
+
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
 
 		// Reload hooks before each test set if this is not the first test set
 		// This ensures fresh eBPF state and prevents issues between test runs
-		if i > 0 && r.instrument {
+		if i > 0 && r.instrument && !r.config.Test.SkipAppRestart {
 
 			// Cancel the current hooks and wait for cleanup to complete
 			if hookCancel != nil {
@@ -334,14 +342,29 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false, runApp)
 			if err != nil {
-				if err == context.Canceled {
+				if err == context.Canceled { // case where application crashes immediately
+					runApp = true
 					continue
 				}
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
+			} else if r.config.Test.SkipAppRestart { // if app crashes while --skip-app-restart is set, we don't RESTART the app for next test-set
+				switch testSetStatus {
+				case models.TestSetStatusFaultUserApp,
+					models.TestSetStatusAppHalted:
+					r.logger.Warn("Application halted or crashed during test set, will restart for next run.",
+						zap.String("testSet", testSet),
+						zap.String("status", string(testSetStatus)))
+					runApp = true
+
+				default:
+					runApp = false
+				}
+			} else {
+				runApp = false
 			}
 
 			switch testSetStatus {
@@ -464,6 +487,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
+			}
+		}
+	}
+	if r.appCtxCancel != nil {
+		r.appCtxCancel()
+		if r.appErrGrp != nil {
+			err := r.appErrGrp.Wait()
+			if err != nil {
+				utils.LogError(r.logger, err, "error in context cancellation of test set")
 			}
 		}
 	}
@@ -676,7 +708,7 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
-func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool, runApp bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -859,8 +891,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
+	if r.config.Test.SkipAppRestart { // adding a small delay between test-sets in case when dont restart app
+		time.Sleep(1 * time.Second)
+	}
+
 	if r.instrument {
-		if !serveTest {
+		if runApp && r.config.Test.SkipAppRestart {
+			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
+			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
+			r.appErrGrp.Go(func() error {
+				defer utils.Recover(r.logger)
+				appErr = r.RunApplication(r.appCtx, appID, models.RunOptions{
+					AppCommand: conf.AppCommand,
+				})
+				if appErr.AppErrorType == models.ErrCtxCanceled {
+					return nil
+				}
+				r.appErrChan <- appErr
+				return nil
+			})
+		}
+		if !serveTest && !r.config.Test.SkipAppRestart {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
 				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
@@ -874,11 +925,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 		}
 
-		// Checking for errors in the mocking and application
+		var AppErrChan <-chan models.AppError
+		if r.config.Test.SkipAppRestart {
+			AppErrChan = r.appErrChan // Use the persistent channel
+		} else {
+			AppErrChan = appErrChan // Use the local, per-run channel
+		}
 		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			select {
-			case err := <-appErrChan:
+			case err := <-AppErrChan:
 				switch err.AppErrorType {
 				case models.ErrCommandError:
 					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
@@ -902,11 +958,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
+		needsDelay := (runApp && r.config.Test.SkipAppRestart) || (!r.config.Test.SkipAppRestart) // no delay is needed multiple times when app is already running
 		// Delay for user application to run
-		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
-			return models.TestSetStatusUserAbort, context.Canceled
+		if needsDelay {
+			select {
+			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			case <-runTestSetCtx.Done():
+				return models.TestSetStatusUserAbort, context.Canceled
+			}
 		}
 
 		if utils.IsDockerCmd(cmdType) {

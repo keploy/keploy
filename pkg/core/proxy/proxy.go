@@ -292,7 +292,6 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
-
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
 
@@ -707,7 +706,7 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	p.MockManagers.LoadOrStore(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")

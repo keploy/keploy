@@ -315,6 +315,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
+		cmd.Flags().Bool("skip-app-restart", c.cfg.Test.SkipAppRestart, "Skip restarting the application for each test set during test mode")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
@@ -1017,6 +1018,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
+
+			if !c.cfg.Test.SkipAppRestart {
+				skipAppRestart, err := cmd.Flags().GetBool("skip-app-restart")
+				if err != nil {
+					errMsg := "failed to get the skip-app-restart flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Test.SkipAppRestart = skipAppRestart
+			}
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
 				recordCmd := models.HighlightGrayString("keploy record")
