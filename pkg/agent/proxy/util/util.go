@@ -94,6 +94,7 @@ func IsHTTPReq(buf []byte) bool {
 // - "use of closed network connection": Connection already closed
 // - "closeNotify alert": TLS graceful shutdown after remote closed
 // - "broken pipe": Remote peer closed connection before graceful shutdown
+// - "connection reset by peer": TCP connection reset during close
 // - syscall.EPIPE: Broken pipe at syscall level
 // - syscall.ECONNRESET: Connection reset by peer at syscall level
 // - "remote error: tls:": TLS errors from remote peer during connection close
@@ -111,6 +112,7 @@ func IsExpectedCloseError(err error) bool {
 	return strings.Contains(errStr, "use of closed network connection") ||
 		strings.Contains(errStr, "closeNotify alert") ||
 		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset by peer") ||
 		strings.Contains(errStr, "remote error: tls:")
 }
 
