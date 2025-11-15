@@ -12,7 +12,6 @@ import (
 	"io"
 	"net"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -265,7 +264,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			defer utils.Recover(p.logger)
 			conn, err := listener.Accept()
 			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
+				if util.IsExpectedCloseError(err) {
 					errCh <- nil
 					return
 				}
@@ -368,7 +367,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if srcConn != nil {
 			err := srcConn.Close()
 			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				if !util.IsExpectedCloseError(err) {
 					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 				}
 				return
@@ -379,7 +378,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err = dstConn.Close()
 			if err != nil {
 				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				if !util.IsExpectedCloseError(err) {
 					// Log other errors
 					utils.LogError(p.logger, err, "failed to close the destination connection")
 				}
