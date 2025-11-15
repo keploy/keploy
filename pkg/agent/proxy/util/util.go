@@ -26,7 +26,6 @@ import (
 	"go.keploy.io/server/v3/utils"
 
 	"go.uber.org/zap"
-
 	// "math/rand"
 )
 
@@ -652,7 +651,6 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		if client != nil {
 			err := client.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
 				if !IsExpectedCloseError(err) {
 					// Log other errors
 					utils.LogError(logger, err, "failed to close the client connection")
@@ -663,7 +661,6 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		if dest != nil {
 			err := dest.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
 				if !IsExpectedCloseError(err) {
 					// Log other errors
 					utils.LogError(logger, err, "failed to close the destination connection")

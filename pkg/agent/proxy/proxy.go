@@ -377,7 +377,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if dstConn != nil {
 			err = dstConn.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
 				if !util.IsExpectedCloseError(err) {
 					// Log other errors
 					utils.LogError(p.logger, err, "failed to close the destination connection")
