@@ -19,7 +19,7 @@ import (
 
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
-	logger.Debug("Into the generic parser in test mode")
+	logger.Info("Into the generic parser in test mode")
 	errCh := make(chan error, 1)
 	go func(errCh chan error, genericRequests [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
@@ -43,14 +43,14 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					return
 				}
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
-					logger.Debug("the timeout for the client read in generic or EOF")
+					logger.Info("the timeout for the client read in generic or EOF")
 					break
 				}
 				genericRequests = append(genericRequests, buffer)
 			}
 
 			if len(genericRequests) == 0 {
-				logger.Debug("the generic request buffer is empty")
+				logger.Info("the generic request buffer is empty")
 				continue
 			}
 
@@ -68,9 +68,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					return
 				}
 
-				logger.Debug("the genericRequests before pass through are", zap.Int("length", len(genericRequests)))
+				logger.Info("the genericRequests before pass through are", zap.Int("length", len(genericRequests)))
 				for _, genReq := range genericRequests {
-					logger.Debug("the genericRequests are:", zap.String("h", string(genReq)))
+					logger.Info("the genericRequests are:", zap.String("h", string(genReq)))
 				}
 
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
@@ -80,11 +80,11 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				}
 
 				genericRequests = [][]byte{}
-				logger.Debug("the request buffer after pass through in generic", zap.String("buffer", string(reqBuffer)))
+				logger.Info("the request buffer after pass through in generic", zap.String("buffer", string(reqBuffer)))
 				if len(reqBuffer) > 0 {
 					genericRequests = [][]byte{reqBuffer}
 				}
-				logger.Debug("the length of genericRequests after passThrough ", zap.Int("length", len(genericRequests)))
+				logger.Info("the length of genericRequests after passThrough ", zap.Int("length", len(genericRequests)))
 				continue
 			}
 			for _, genericResponse := range genericResponses {
@@ -108,7 +108,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			// Clear the genericRequests buffer for the next dependency call
 			genericRequests = [][]byte{}
-			logger.Debug("the genericRequests after the iteration", zap.Int("length", len(genericRequests)))
+			logger.Info("the genericRequests after the iteration", zap.Int("length", len(genericRequests)))
 		}
 	}(errCh, genericRequests)
 
