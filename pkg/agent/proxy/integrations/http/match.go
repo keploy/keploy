@@ -140,6 +140,31 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
 	return parsedURL.Path == reqPath
 }
 
+// relaxed header key matcher (presence-only)
+func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header) bool {
+	shouldIgnore := func(k string) bool {
+		lk := strings.ToLower(k)
+		return strings.HasPrefix(lk, "keploy")
+	}
+
+	// Build a case-insensitive set of actual header keys
+	actualKeys := make(map[string]struct{}, len(actual))
+	for k := range actual {
+		actualKeys[strings.ToLower(k)] = struct{}{}
+	}
+
+	// Ensure every non-ignored expected key exists in the request
+	for k := range expected {
+		if shouldIgnore(k) {
+			continue
+		}
+		if _, ok := actualKeys[strings.ToLower(k)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	// Helper function to check if a header should be ignored
 	shouldIgnoreHeader := func(key string) bool {
@@ -225,10 +250,13 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			continue
 		}
 
-		// Header key match
-		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.Header, input.header) {
-			h.Logger.Debug("headers are", zap.Any("mock header", mock.Spec.HTTPReq.Header), zap.Any("input header", input.header))
-			h.Logger.Debug("The header keys of mock and request aren't the same", zap.String("mock name", mock.Name))
+		// Header key match (presence-only; extra request headers allowed)
+		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header) {
+			h.Logger.Debug("headers missing required keys",
+				zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
+				zap.Any("input header", input.header))
+			h.Logger.Debug("The required header keys of mock are not present in the request",
+				zap.String("mock name", mock.Name))
 			continue
 		}
 
