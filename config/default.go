@@ -26,6 +26,7 @@ containerName: ""
 networkName: ""
 buildDelay: 30
 test:
+  skipAppRestart: false
   selectedTests: {}
   ignoredTests: {}
   globalNoise:
