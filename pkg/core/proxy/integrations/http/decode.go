@@ -116,7 +116,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				zap.Any("body", string(input.body)),
 				zap.Any("raw", string(input.raw)))
 
-			ok, stub, err := h.match(ctx, input, mockDb) // calling match function to match mocks
+			// Extract header noise from noise configuration
+			var headerNoise map[string][]string
+			if opts.NoiseConfig != nil {
+				if hn, ok := opts.NoiseConfig["header"]; ok {
+					headerNoise = hn
+				}
+			}
+
+			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
+
+			ok, stub, err := h.match(ctx, input, mockDb, headerNoise) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
