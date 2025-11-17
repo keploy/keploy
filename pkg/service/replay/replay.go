@@ -351,7 +351,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
-			} else if r.config.Test.SkipAppRestart { // if app crashes while --skip-app-restart is set, we don't RESTART the app for next test-set
+			} else if r.config.Test.SkipAppRestart {
 				switch testSetStatus {
 				case models.TestSetStatusFaultUserApp,
 					models.TestSetStatusAppHalted:
