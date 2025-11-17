@@ -252,7 +252,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// Header key match (presence-only; extra request headers allowed)
 		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header) {
-			h.Logger.Debug("headers missing required keys",
+			h.Logger.Debug("headers missing required keys for mock name",
+				zap.String("mock name", mock.Name),
 				zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
 				zap.Any("input header", input.header))
 			h.Logger.Debug("The required header keys of mock are not present in the request",
