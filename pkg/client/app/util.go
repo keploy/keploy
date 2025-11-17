@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/google/shlex"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -126,17 +125,9 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 //
 // Returns: the modified command with the necessary flags added
 func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
-	parts, err := shlex.Split(appCmd)
-	if err != nil {
-		// Fallback to original command on parsing error.
-		// Consider logging this error if a logger is available.
-		return appCmd
-	}
 	// If the user already passed one of these flags, don't touch the command.
-	for _, part := range parts {
-		if part == "--abort-on-container-exit" || strings.HasPrefix(part, "--exit-code-from") {
-			return appCmd
-		}
+	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--exit-code-from") {
+		return appCmd
 	}
 
 	// Arguments we want to inject.
@@ -145,6 +136,7 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
 		args = append(args, "--exit-code-from", serviceName)
 	}
 
+	parts := strings.Fields(appCmd)
 	for i, p := range parts {
 		if p == "up" {
 			// Insert flags immediately after "up"
