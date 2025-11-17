@@ -267,7 +267,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 				zap.String("mock name", mock.Name),
 				zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
 				zap.Any("input header", input.header))
-
+			continue
 		}
 
 		// Query parameter match
