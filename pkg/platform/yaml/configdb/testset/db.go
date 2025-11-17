@@ -122,3 +122,20 @@ func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]i
 
 	return secretConfig, nil
 }
+
+// GetTemplateCandidatesPath returns the absolute path to the template-candidates.yaml file.
+func (db *Db[T]) GetTemplateCandidatesPath(ctx context.Context, testSetID string) (string, error) {
+	// This logic assumes a test set's files are stored in a directory
+	// named after the testSetID, located at the root Keploy path.
+	// e.g., <keploy_path>/<testSetID>/template-candidates.yaml
+
+	// db.path is the root path (e.g., ".")
+	// testSetID is the directory (e.g., "test-set-1")
+	// "template-candidates.yaml" is the file.
+	
+	absPath, err := filepath.Abs(filepath.Join(db.path, testSetID, "template-candidates.yaml"))
+	if err != nil {
+		return "", err
+	}
+	return absPath, nil
+}

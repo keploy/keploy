@@ -92,8 +92,8 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 		_ = decoderResp.Decode(&respBodies[i])
 	}
 
-	valueIndex := t.buildValueIndexV2(ctx, tcs, reqBodies, respBodies)
-	chains := t.applyTemplatesFromIndexV2(ctx, valueIndex, utils.TemplatizedValues)
+	valueIndex := t.buildValueIndexV2(tcs, reqBodies, respBodies)
+	chains := t.applyTemplatesFromIndexV2(valueIndex, utils.TemplatizedValues)
 
 	for i, tc := range tcs {
 		if reqBodies[i] != nil {
@@ -191,7 +191,7 @@ func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
 	}
 }
 
-func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, reqBodies, respBodies []interface{}) map[string][]*ValueLocation {
+func (t *Tools) buildValueIndexV2(tcs []*models.TestCase, reqBodies, respBodies []interface{}) map[string][]*ValueLocation {
 	valueIndex := make(map[string][]*ValueLocation)
 	for i := range tcs {
 		for k, val := range tcs[i].HTTPReq.Header {
@@ -303,7 +303,7 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 	}
 }
 
-func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
+func (t *Tools) applyTemplatesFromIndexV2(index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
 	// We need deterministic variable naming so that earlier producer test cases
 	// receive the base key without suffix and later ones get incremental suffixes.
 	// Strategy:
@@ -525,9 +525,6 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 	return resultChains
 }
 
-// Utility function to safely marshal JSON and log errors
-var jsonMarshal987 = json.Marshal
-
 func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.TestCase, fuzzerYamlPath string) {
 	fmt.Println("\n🔎 Chain Assertion against Fuzzer Output")
 	fmt.Println("==========================================")
@@ -555,7 +552,7 @@ func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.
 	fmt.Printf("✅ Loaded %d chains from fuzzer baseline file.\n", len(fuzzerChains))
 
 	// 2. Convert and Normalize Keploy's detected chains.
-	canonicalKeployChains := t.convertToCanonical(keployChains, testCases)
+	canonicalKeployChains := t.convertToCanonical(keployChains)
 	normalizeCanonicalChains(canonicalKeployChains)
 	fmt.Printf("✅ Converted and Normalized %d detected Keploy chains for comparison.\n", len(canonicalKeployChains))
 
@@ -637,7 +634,7 @@ func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain,
 }
 
 // convertToCanonical transforms Keploy's internal chain representation to the common format.
-func (t *Tools) convertToCanonical(chains []*TemplateChain, tcs []*models.TestCase) []CanonicalChain {
+func (t *Tools) convertToCanonical(chains []*TemplateChain) []CanonicalChain {
 	var canonicalChains []CanonicalChain
 	for _, chain := range chains {
 		producerReqID := fmt.Sprintf("test-%d", chain.Producer.TestCaseIndex+1)
@@ -1155,4 +1152,320 @@ func typesCompatible(p, c *ValueLocation) bool {
 		return true
 	}
 	return p.OriginalType == c.OriginalType
+}
+// CandidateConfig is the top-level struct saved to template-candidates.yaml
+type CandidateConfig struct {
+    // Candidates maps a TestCase ID (e.g., "test-case-5") to its list of potential variables.
+    Candidates map[string][]TemplateCandidate `yaml:"candidates"`
+}
+
+// TemplateCandidate represents a single field in a request (a consumer)
+// and all the possible producers it could get its value from.
+type TemplateCandidate struct {
+    ConsumerPath  string            `yaml:"consumer_path"`  // e.g., "body.userId"
+    ConsumerValue string            `yaml:"consumer_value"` // e.g., "12345"
+    Options       []*ProducerOption `yaml:"options"`
+}
+
+// ProducerOption represents one possible source (a producer) for a candidate.
+type ProducerOption struct {
+    ProducerKey  ProducerKey `yaml:"producer_key"`  // e.g., "tc-1.resp-body.user.id"
+    ProducerValue string      `yaml:"producer_value"`
+    TemplateName  string      `yaml:"template_name"` // e.g., "userId"
+    OriginalType  string      `yaml:"original_type"` // e.g., "int"
+}
+
+// ProducerKey uniquely identifies a variable source by its location.
+type ProducerKey string
+
+// ProducerInfo holds the value and location of a variable source.
+type ProducerInfo struct {
+    Key          ProducerKey
+    Value        string
+    Location     *ValueLocation // Re-using V2 struct
+    TemplateName string
+    OriginalType string
+}
+
+// ConsumerInfo holds the location of a field in a request that might be a variable.
+type ConsumerInfo struct {
+    Value    string
+    Location *ValueLocation // Re-using V2 struct
+}
+
+// AnalyzeTemplateCandidates performs the analysis-only step.
+// It finds all producers and consumers, matches them, and saves the "options"
+// to a template-candidates.yaml file for the `test` command to use.
+func (t *Tools) AnalyzeTemplateCandidates(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
+    producerIndex := make(map[ProducerKey]*ProducerInfo)
+    allCandidates := make(map[string][]TemplateCandidate)
+
+    // Pre-process all test cases to parse bodies
+    reqBodies := make([]interface{}, len(tcs))
+    respBodies := make([]interface{}, len(tcs))
+    for i, tc := range tcs {
+        decoderReq := json.NewDecoder(strings.NewReader(tc.HTTPReq.Body))
+        decoderReq.UseNumber()
+        _ = decoderReq.Decode(&reqBodies[i])
+        decoderResp := json.NewDecoder(strings.NewReader(tc.HTTPResp.Body))
+        decoderResp.UseNumber()
+        _ = decoderResp.Decode(&respBodies[i])
+    }
+
+    // Iterate through each test case one by one
+    for i, tc := range tcs {
+        t.logger.Debug("Analyzing test case", zap.Int("index", i), zap.String("name", tc.Name))
+
+        // --- Step 1: Find all potential CONSUMERS in the *current* request ---
+        currentConsumers := t.findConsumersInRequest(i, tc, reqBodies[i])
+
+        // --- Step 2: Match Consumers to available Producers ---
+        var tcCandidates []TemplateCandidate
+        for _, consumer := range currentConsumers {
+            // Requirement #2: Do not templatize "0".
+            if consumer.Value == "0" {
+                continue
+            }
+
+            var options []*ProducerOption
+            for _, producer := range producerIndex {
+                // Check for value equality
+                if consumer.Value == producer.Value {
+                    options = append(options, &ProducerOption{
+                        ProducerKey:   producer.Key,
+                        ProducerValue: producer.Value,
+                        TemplateName:  producer.TemplateName,
+                        OriginalType:  producer.OriginalType,
+                    })
+                }
+            }
+
+            if len(options) > 0 {
+                tcCandidates = append(tcCandidates, TemplateCandidate{
+                    ConsumerPath:  consumer.Location.Path,
+                    ConsumerValue: consumer.Value,
+                    Options:       options,
+                })
+            }
+        }
+
+        if len(tcCandidates) > 0 {
+            allCandidates[tc.Name] = tcCandidates
+        }
+
+        // --- Step 3: Add *this* response's fields to the Producer Index ---
+        // This response is now available to be a producer for *future* test cases.
+        t.addProducersFromResponse(i, tc, respBodies[i], producerIndex)
+    }
+
+    // --- Step 4: Save the candidates to a file ---
+    if len(allCandidates) == 0 {
+        t.logger.Info("No template candidates found", zap.String("testSet", testSetID))
+        return nil
+    }
+
+    candidateConfig := CandidateConfig{
+        Candidates: allCandidates,
+    }
+
+    yamlData, err := yaml.Marshal(candidateConfig)
+    if err != nil {
+        utils.LogError(t.logger, err, "Failed to marshal template candidates")
+        return err
+    }
+
+    // Save to keploy-path/test-set-ID/template-candidates.yaml
+    candidateFilePath, err := t.testSetConf.GetTemplateCandidatesPath(ctx, testSetID)
+    if err != nil {
+        utils.LogError(t.logger, err, "Failed to get path for template candidates file")
+        return err
+    }
+
+    err = os.WriteFile(candidateFilePath, yamlData, 0644)
+    if err != nil {
+        utils.LogError(t.logger, err, "Failed to write template candidates file")
+        return err
+    }
+    
+    // Add to .gitignore
+    err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/template-candidates.yaml")
+    if err != nil {
+        t.logger.Warn("Failed to add template-candidates.yaml to .gitignore", zap.Error(err))
+    }
+
+    t.logger.Info(fmt.Sprintf("Generated template candidates file at: %s", candidateFilePath))
+    return nil
+}
+
+// --- V3 Analysis Helper Functions ---
+
+// (findConsumersInRequest, addProducersFromResponse, and findValuesInInterfaceV3
+// are identical to the helper functions from the previous answer, as they are
+// correct for the analysis phase. I've included them here for completeness.)
+
+// findConsumersInRequest scans a request and returns all potential consumers
+func (t *Tools) findConsumersInRequest(tcIndex int, tc *models.TestCase, reqBody interface{}) []*ConsumerInfo {
+    var consumers []*ConsumerInfo
+
+    // 1. Request Headers
+    for k, val := range tc.HTTPReq.Header {
+         if strings.EqualFold(k, "Cookie") {
+             kvs := parseCookiePairs(val)
+             for _, kv := range kvs {
+                 if kv.Name == "" { continue }
+                 loc := &ValueLocation{
+                     TestCaseIndex: tcIndex, Part: RequestHeader,
+                     Path: fmt.Sprintf("Cookie.%s", kv.Name),
+                     Pointer: &tc.HTTPReq.Header, OriginalType: "string",
+                 }
+                 consumers = append(consumers, &ConsumerInfo{Value: kv.Value, Location: loc})
+             }
+             continue
+         }
+         
+         loc := &ValueLocation{
+             TestCaseIndex: tcIndex, Part: RequestHeader,
+             Path: k, Pointer: &tc.HTTPReq.Header, OriginalType: "string",
+         }
+         
+         if k == "Authorization" && strings.HasPrefix(val, "Bearer ") {
+             token := strings.TrimPrefix(val, "Bearer ")
+             consumers = append(consumers, &ConsumerInfo{Value: token, Location: loc})
+         } else {
+             consumers = append(consumers, &ConsumerInfo{Value: val, Location: loc})
+         }
+    }
+    
+    // 2. Request URL Path Segments
+    parsedURL, err := url.Parse(tc.HTTPReq.URL)
+    if err == nil {
+         pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+         for j, segment := range pathSegments {
+             if segment != "" {
+                 path := fmt.Sprintf("path.%d", j)
+                 loc := &ValueLocation{TestCaseIndex: tcIndex, Part: RequestURL, Path: path, Pointer: &tc.HTTPReq.URL, OriginalType: "string"}
+                 consumers = append(consumers, &ConsumerInfo{Value: segment, Location: loc})
+             }
+         }
+    }
+    
+    // 3. Request Body
+    if reqBody != nil {
+        findValuesInInterfaceV3(reqBody, []string{}, &consumers, nil, tcIndex, RequestBody, &reqBody)
+    }
+
+    return consumers
+}
+
+// addProducersFromResponse scans a response and adds its fields to the producer index
+func (t *Tools) addProducersFromResponse(tcIndex int, tc *models.TestCase, respBody interface{}, producerIndex map[ProducerKey]*ProducerInfo) {
+    // 1. Response Headers
+    for k, val := range tc.HTTPResp.Header {
+         if strings.EqualFold(k, "Set-Cookie") {
+             cookies := splitSetCookie(val)
+             for _, sc := range cookies {
+                 name, cval := splitSetCookieNameValue(sc)
+                 if name == "" { continue }
+                 
+                 path := fmt.Sprintf("Set-Cookie.%s", name)
+                 key := ProducerKey(fmt.Sprintf("tc-%d.resp-header.%s", tcIndex, path))
+                 loc := &ValueLocation{
+                     TestCaseIndex: tcIndex, Part: ResponseHeader,
+                     Path: path, Pointer: &tc.HTTPResp.Header, OriginalType: "string",
+                 }
+                 producerIndex[key] = &ProducerInfo{
+                     Key: key, Value: cval, Location: loc,
+                     TemplateName: normalizeBaseKey(name), OriginalType: "string",
+                 }
+             }
+             continue
+         }
+         
+         key := ProducerKey(fmt.Sprintf("tc-%d.resp-header.%s", tcIndex, k))
+         loc := &ValueLocation{
+            //  TestCaseIndex: i, Part: ResponseHeader,
+			 TestCaseIndex: tcIndex, Part: ResponseHeader,
+             Path: k, Pointer: &tc.HTTPResp.Header, OriginalType: "string",
+         }
+         producerIndex[key] = &ProducerInfo{
+             Key: key, Value: val, Location: loc,
+             TemplateName: normalizeBaseKey(k), OriginalType: "string",
+         }
+    }
+    
+    // 2. Response Body
+    if respBody != nil {
+        findValuesInInterfaceV3(respBody, []string{}, nil, producerIndex, tcIndex, ResponseBody, &respBody)
+    }
+}
+
+// findValuesInInterfaceV3 is a recursive scanner for request (consumer) or response (producer) bodies.
+func findValuesInInterfaceV3(data interface{}, path []string, consumers *[]*ConsumerInfo, producers map[ProducerKey]*ProducerInfo, tcIndex int, part PartType, containerPtr interface{}) {
+    if data == nil {
+        return
+    }
+    if m, ok := data.(map[string]interface{}); ok {
+        for k, v := range m {
+            newPath := append(path, k)
+            findValuesInInterfaceV3(v, newPath, consumers, producers, tcIndex, part, containerPtr)
+        }
+        return
+    }
+    if s, ok := data.([]interface{}); ok {
+        for i, v := range s {
+            newPath := append(path, strconv.Itoa(i))
+            findValuesInInterfaceV3(v, newPath, consumers, producers, tcIndex, part, containerPtr)
+        }
+        return
+    }
+
+    currentPath := strings.Join(path, ".")
+    var valueStr, originalType string
+
+    switch v := data.(type) {
+    case string:
+        valueStr = v
+        originalType = "string"
+    case json.Number:
+        valueStr = v.String()
+        if strings.Contains(v.String(), ".") {
+            originalType = "float"
+        } else {
+            originalType = "int"
+        }
+    default:
+        return
+    }
+    
+    if consumers != nil {
+        loc := &ValueLocation{TestCaseIndex: tcIndex, Part: part, Path: currentPath, Pointer: containerPtr, OriginalType: originalType}
+        *consumers = append(*consumers, &ConsumerInfo{Value: valueStr, Location: loc})
+    }
+    
+    if producers != nil {
+        var key ProducerKey
+        if part == ResponseBody {
+            key = ProducerKey(fmt.Sprintf("tc-%d.resp-body.%s", tcIndex, currentPath))
+        } else {
+            return
+        }
+
+        loc := &ValueLocation{TestCaseIndex: tcIndex, Part: part, Path: currentPath, Pointer: containerPtr, OriginalType: originalType}
+        
+        baseKey := currentPath
+        parts := strings.Split(baseKey, ".")
+        if len(parts) > 0 {
+             baseKey = parts[len(parts)-1]
+        }
+        if _, err := strconv.Atoi(baseKey); err == nil {
+             if len(parts) >= 2 {
+                 baseKey = parts[len(parts)-2]
+             }
+        }
+
+        producers[key] = &ProducerInfo{
+            Key: key, Value: valueStr, Location: loc,
+            TemplateName: normalizeBaseKey(baseKey), OriginalType: originalType,
+        }
+    }
 }
