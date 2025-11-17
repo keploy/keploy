@@ -1,9 +1,22 @@
 name: Golang On Linux
 on:
   workflow_call:
+    inputs:
+      runner:
+        description: 'The type of runner to use for this job'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        description: 'Controls which jobs to run. "all" runs everything.'
+        type: string
+        required: false
+        default: 'all'
+
 jobs:
   golang_linux:
-    runs-on: ubuntu-latest
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -11,6 +24,11 @@ jobs:
           - name: echo-mysql
             path: echo-mysql
             script_dir: echo_mysql
+            enable_ssl: true
+          - name: echo-mysql
+            path: echo-mysql
+            script_dir: echo_mysql
+            enable_ssl: false
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
@@ -27,10 +45,23 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})${{ matrix.app.enable_ssl != null && format(' ssl-{0}', matrix.app.enable_ssl) || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Install yq
+        run: |
+          curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -47,18 +78,18 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
-          ref: risk-profile
       - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          ENABLE_SSL: ${{ matrix.app.enable_ssl || 'false' }}
         run: |
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
   golang_linux_private:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +111,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
 
       - id: record
         uses: ./.github/actions/download-binary

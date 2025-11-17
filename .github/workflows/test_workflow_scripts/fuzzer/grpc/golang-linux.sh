@@ -121,9 +121,13 @@ ensure_success_phrase() {
 if [ "$MODE" = "incoming" ]; then
  echo "🧪 Testing with incoming requests"
 
-
- # Start server with keploy in record mode
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+  # Start server with keploy in record mode
+  if [[ "$RECORD_SRC" == "latest" ]]; then
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
+  else
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+  fi
+ 
  sleep 10
 
 
@@ -152,6 +156,8 @@ REC_PID="$(pgrep -n -f 'keploy record' || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
+
+ sleep 5
 
  echo "Ensuring fuzzer server is stopped..."
  sleep 10

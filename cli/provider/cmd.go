@@ -272,7 +272,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
-
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -473,53 +472,85 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 }
 
 func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
+	// 1) Bind flags (highest precedence in Viper)
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
-	err := viper.BindPFlags(cmd.Flags())
-	if err != nil {
+	if err := viper.BindPFlags(cmd.Flags()); err != nil {
 		errMsg := "failed to bind flags to config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 
-	// used to bind flags with environment variables
+	// 2) Env: KEPLOY_*
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("KEPLOY")
 
-	//used to bind flags specific to the command for eg: testsets, delay, recordTimer etc. (nested flags)
-	err = utils.BindFlagsToViper(c.logger, cmd, "")
-	if err != nil {
+	// 3) Nested flag binding (your existing util)
+	if err := utils.BindFlagsToViper(c.logger, cmd, ""); err != nil {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
+	// 4) Use provided configPath as-is (your default is already ".")
 	configPath, err := cmd.Flags().GetString("configPath")
 	if err != nil {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
 	}
+
+	// 5) Read base keploy.yml exactly like before
 	viper.SetConfigName("keploy")
 	viper.SetConfigType("yml")
 	viper.AddConfigPath(configPath)
+
 	if err := viper.ReadInConfig(); err != nil {
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
 		IsConfigFileFound = false
 		c.logger.Info("config file not found; proceeding with flags only")
+	} else {
+		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
+		lastDir, err := utils.GetLastDirectory()
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to get last directory name for override config file in path '%s'", configPath)
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		// overridePath is <configPath>/<lastDir>.keploy.yml
+		overridePath := filepath.Join(configPath, fmt.Sprintf("%s.keploy.yml", lastDir))
+
+		if _, statErr := os.Stat(overridePath); statErr == nil {
+			viper.SetConfigFile(overridePath)
+			if err := viper.MergeInConfig(); err != nil {
+				errMsg := fmt.Sprintf("failed to merge override config file: %s", overridePath)
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.logger.Info("merged override config file", zap.String("file", overridePath))
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			errMsg := fmt.Sprintf("failed to stat override config file: %s", overridePath)
+			utils.LogError(c.logger, statErr, errMsg)
+			return errors.New(errMsg)
+		}
+		IsConfigFileFound = true
 	}
 
+	// 7) Unmarshal
 	if err := viper.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
 
+	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
 	return nil
 }
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
@@ -615,11 +646,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// validate the report path if provided
 		if reportPath != "" {
-			if !filepath.IsAbs(reportPath) {
-				errMsg := fmt.Sprintf("report-path must be an absolute file path, got: %q", reportPath)
-				utils.LogError(c.logger, nil, errMsg)
+
+			//convert to absolute path
+			reportPath, err = utils.GetAbsPath(reportPath)
+			if err != nil {
+				errMsg := "failed to get the absolute report path"
+				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
+
 			fi, statErr := os.Stat(reportPath)
 			if statErr != nil {
 				errMsg := fmt.Sprintf("failed to stat report-path %q", reportPath)
@@ -915,7 +950,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			config.SetSelectedTests(c.cfg, testSets)
+			if len(testSets) != 0 {
+				config.SetSelectedTests(c.cfg, testSets)
+			}
 
 			// get disable-mapping flag value
 			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
@@ -1050,60 +1087,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			// parse and set proto related flags
-
-			protoFile, err := cmd.Flags().GetString("proto-file")
+			protoCfg, err := parseProtoFlags(c.logger, cmd)
 			if err != nil {
-				errMsg := "failed to get the proto-file flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+				return err
 			}
 
-			if protoFile != "" {
-				c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-file"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoDir, err := cmd.Flags().GetString("proto-dir")
-			if err != nil {
-				errMsg := "failed to get the proto-dir flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if protoDir != "" {
-				c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
-				if err != nil {
-					errMsg := "failed to get the absolute path of proto-dir"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-			}
-
-			protoInclude, err := cmd.Flags().GetStringArray("proto-include")
-			if err != nil {
-				errMsg := "failed to get the proto-include flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-
-			if len(protoInclude) > 0 {
-				for _, dir := range protoInclude {
-					absDir, err := utils.GetAbsPath(dir)
-					if err != nil {
-						errMsg := "failed to get the absolute path of proto-include"
-						utils.LogError(c.logger, err, errMsg)
-						return errors.New(errMsg)
-					}
-					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
-				}
-			}
+			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
+			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
+			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
 		}
-
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
 			errMsg := "failed to read the global passthrough flag"
@@ -1202,6 +1194,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.ProxyPort = proxyPort
 
+		dnsPort, err := cmd.Flags().GetUint32("dns-port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get dnsPort flag")
+			return nil
+		}
+		c.cfg.Agent.DnsPort = dnsPort
 	}
 
 	return nil
