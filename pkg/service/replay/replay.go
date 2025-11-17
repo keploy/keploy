@@ -722,15 +722,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Prepare header noise configuration for mock matching
-		noiseConfig := r.config.Test.GlobalNoise.Global
-		if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-			noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
-		}
-		// Extract only header noise for mock matching
-		headerNoiseConfig := map[string]map[string][]string{}
-		if headerNoise, ok := noiseConfig["header"]; ok {
-			headerNoiseConfig["header"] = headerNoise
-		}
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
@@ -812,15 +804,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
 		// Prepare header noise configuration for mock matching
-		noiseConfig := r.config.Test.GlobalNoise.Global
-		if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-			noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
-		}
-		// Extract only header noise for mock matching
-		headerNoiseConfig := map[string]map[string][]string{}
-		if headerNoise, ok := noiseConfig["header"]; ok {
-			headerNoiseConfig["header"] = headerNoise
-		}
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
