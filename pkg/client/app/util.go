@@ -40,12 +40,13 @@ func findComposeFile(cmd string) []string {
 	return []string{}
 }
 
-func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath string) string {
+func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, serviceName string) string {
 	// Ensure newComposeFile starts with ./
 	if !strings.HasPrefix(newComposeFile, "./") {
 		newComposeFile = "./" + newComposeFile
 	}
 
+	var modifiedCmd string
 	// Define a regular expression pattern to match "-f <file>"
 	pattern := `(-f\s+("[^"]+"|'[^']+'|\S+))`
 	re := regexp.MustCompile(pattern)
@@ -69,21 +70,25 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath string) s
 
 				// Check if this file matches the appComposePath
 				if actualFile == appComposePath {
-					return strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
+					modifiedCmd = strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
+					return ensureComposeExitOnAppFailure(modifiedCmd, serviceName)
 				}
 			}
 		}
 		// If no matching compose path found, return original command
-		return appCmd
+		modifiedCmd = appCmd
+		return ensureComposeExitOnAppFailure(modifiedCmd, serviceName)
 	}
 
 	// If the pattern doesn't exist, inject the new Compose file right after "docker-compose" or "docker compose"
 	upIdx := strings.Index(appCmd, " up")
 	if upIdx != -1 {
-		return fmt.Sprintf("%s -f %s%s", appCmd[:upIdx], newComposeFile, appCmd[upIdx:])
+		modifiedCmd = fmt.Sprintf("%s -f %s%s", appCmd[:upIdx], newComposeFile, appCmd[upIdx:])
+		return ensureComposeExitOnAppFailure(modifiedCmd, serviceName)
 	}
 
-	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
+	modifiedCmd = fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
+	return ensureComposeExitOnAppFailure(modifiedCmd, serviceName)
 }
 
 func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
