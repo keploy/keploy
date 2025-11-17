@@ -721,6 +721,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-agentReadyCh:
 		}
 
+		// Prepare header noise configuration for mock matching
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -728,6 +731,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -799,6 +803,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
+		// Prepare header noise configuration for mock matching
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -806,6 +813,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
