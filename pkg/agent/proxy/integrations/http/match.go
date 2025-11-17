@@ -26,7 +26,7 @@ type req struct {
 	raw    []byte
 }
 
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string) (bool, *models.Mock, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, ctx.Err()
@@ -50,7 +50,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		h.Logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
 
 		// Matching process
-		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks)
+		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise)
 		if err != nil {
 			return false, nil, err
 		}
@@ -141,10 +141,20 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
 }
 
 // relaxed header key matcher (presence-only)
-func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header) bool {
+func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header, headerNoise map[string][]string) bool {
 	shouldIgnore := func(k string) bool {
 		lk := strings.ToLower(k)
-		return strings.HasPrefix(lk, "keploy")
+		// Ignore keploy headers
+		if strings.HasPrefix(lk, "keploy") {
+			return true
+		}
+		// Ignore headers that are in noise configuration
+		if headerNoise != nil {
+			if _, exists := headerNoise[lk]; exists {
+				return true
+			}
+		}
+		return false
 	}
 
 	// Build a case-insensitive set of actual header keys
@@ -156,6 +166,7 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	// Ensure every non-ignored expected key exists in the request
 	for k := range expected {
 		if shouldIgnore(k) {
+			h.Logger.Debug("header key is ignored", zap.String("header key", k))
 			continue
 		}
 		if _, ok := actualKeys[strings.ToLower(k)]; !ok {
@@ -217,7 +228,7 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 }
 
 // SchemaMatch match the schema of the request with the mocks
-func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock) ([]*models.Mock, error) {
+func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
 	for _, mock := range unfilteredMocks {
@@ -251,14 +262,12 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		}
 
 		// Header key match (presence-only; extra request headers allowed)
-		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header) {
+		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header, headerNoise) {
 			h.Logger.Debug("headers missing required keys for mock name",
 				zap.String("mock name", mock.Name),
 				zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
 				zap.Any("input header", input.header))
-			h.Logger.Debug("The required header keys of mock are not present in the request",
-				zap.String("mock name", mock.Name))
-			continue
+
 		}
 
 		// Query parameter match
