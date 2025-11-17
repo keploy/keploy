@@ -237,11 +237,11 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 		networks, ports, service, found := idc.findContainerInServices(compose, containerName)
 		if found {
 			return &ComposeServiceInfo{
-				ComposePath: composePath,
-				Networks:    networks,
-				Ports:       ports,
-				Compose:     compose,
-				ServiceName: service,
+				ComposePath:    composePath,
+				Networks:       networks,
+				Ports:          ports,
+				Compose:        compose,
+				AppServiceName: service,
 			}, nil
 		}
 	}
