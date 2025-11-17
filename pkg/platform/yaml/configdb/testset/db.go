@@ -107,7 +107,6 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 		return nil
 	}
 
-	// Fallback for other types (though in practice T should be *models.TestSet)
 	data, err := yamlLib.Marshal(config)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
