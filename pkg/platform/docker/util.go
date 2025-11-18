@@ -138,6 +138,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
@@ -192,7 +193,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if debug {
 				alias += " --debug"
-        
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
@@ -231,7 +232,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
-
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
@@ -284,7 +285,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if debug {
 				alias += " --debug"
-
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
@@ -324,6 +325,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
