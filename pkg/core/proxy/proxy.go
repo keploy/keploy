@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -96,6 +97,11 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 	sort.Slice(p.integrationsPriority, func(i, j int) bool {
 		return p.integrationsPriority[i].Priority > p.integrationsPriority[j].Priority
 	})
+	
+	for _, parserPair := range p.integrationsPriority {
+		p.logger.Info("Registered parser", zap.String("ParserType", string(parserPair.ParserType)), zap.Int("Priority", parserPair.Priority))
+	}
+
 	return nil
 }
 
@@ -309,7 +315,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
+	p.logger.Info("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
@@ -335,13 +341,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	switch destInfo.Version {
 	case 4:
-		p.logger.Debug("the destination is ipv4")
+		p.logger.Info("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
+		p.logger.Info("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
 	case 6:
-		p.logger.Debug("the destination is ipv6")
+		p.logger.Info("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
-		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+		p.logger.Info("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
 	// This is used to handle the parser errors
@@ -447,7 +453,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
+			p.logger.Info("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
 		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
@@ -491,6 +497,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	// Log initial buffer for debugging
+	hexDump := ""
+	if len(initialBuf) > 0 {
+		maxLen := len(initialBuf)
+		if maxLen > 32 {
+			maxLen = 32
+		}
+		hexDump = hex.EncodeToString(initialBuf[:maxLen])
+	}
+	logger.Info("📦 Read initial buffer for parser matching",
+		zap.Int("buffer_length", len(initialBuf)),
+		zap.String("buffer_hex", hexDump))
+
 	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
 		// HTTP headers are never chunked according to the HTTP protocol,
 		// but at the TCP layer, we cannot be sure if we have received the entire
@@ -501,7 +520,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// These cases may send partial headers in multiple chunks, so we need to read until
 		// we get the complete headers.
 
-		logger.Debug("Partial HTTP headers detected, reading more data to get complete headers")
+		logger.Info("Partial HTTP headers detected, reading more data to get complete headers")
 
 		// Read more data from the TCP connection to get the complete HTTP headers.
 		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
@@ -541,7 +560,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
-		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
+		logger.Info("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
@@ -583,23 +602,31 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var parserType integrations.IntegrationType
 
 	//Checking for all the parsers according to their priority.
+	logger.Info("🔍 Starting parser matching", zap.Int("num_parsers", len(p.integrationsPriority)))
 	for _, parserPair := range p.integrationsPriority { // Iterate over ordered priority list
 		parser, exists := p.Integrations[parserPair.ParserType]
 		if !exists {
+			logger.Info("⚠️  Parser not found, skipping", zap.String("ParserType", string(parserPair.ParserType)))
 			continue // Skip if parser not found
 		}
 
-		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
+		logger.Info("🔎 Checking parser",
+			zap.String("ParserType", string(parserPair.ParserType)),
+			zap.Int("Priority", parserPair.Priority))
+
 		if parser.MatchType(parserCtx, initialBuf) {
 			matchedParser = parser
 			parserType = parserPair.ParserType
 			generic = false
+			logger.Info("✅ Parser MATCHED!", zap.String("ParserType", string(parserPair.ParserType)))
 			break
+		} else {
+			logger.Info("❌ Parser did NOT match", zap.String("ParserType", string(parserPair.ParserType)))
 		}
 	}
 
 	if !generic {
-		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
@@ -623,7 +650,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if generic {
-		logger.Debug("The external dependency is not supported. Hence using generic parser")
+		logger.Info("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
