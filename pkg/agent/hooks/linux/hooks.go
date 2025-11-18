@@ -392,9 +392,11 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 			clientInfo.PassThroughPorts[i] = -1
 			continue
 		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
+		// Copy the port, casting from uint32 to int32
+		clientInfo.PassThroughPorts[i] = int32(rules[i].Port)
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
+
 	return h.SendClientInfo(clientInfo)
 }
 
