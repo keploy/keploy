@@ -158,9 +158,9 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, agent.HookCfg{
-		Pid:      0,
-		IsDocker: opts.IsDocker,
-		Mode:     opts.Mode,
+		Pid:              0,
+		IsDocker:         opts.IsDocker,
+		Mode:             opts.Mode,
 		Rules:            opts.Rules,
 		PassThroughPorts: opts.PassThroughPorts,
 	}, a.config.Agent)

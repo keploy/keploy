@@ -295,7 +295,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
 	agentInfo.Proxy = proxyInfo
-	spew.Dump(agentInfo)
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))

@@ -177,12 +177,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
 			if len(opts.PassThroughPorts) > 0 {
-			portStrings := make([]string, len(opts.PassThroughPorts))
+				portStrings := make([]string, len(opts.PassThroughPorts))
 				for i, port := range opts.PassThroughPorts {
 					portStrings[i] = strconv.Itoa(int(port))
 				}
-			// Note the "=" sign, which is good practice for docker run
-			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+				// Note the "=" sign, which is good practice for docker run
+				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 			}
 			return alias, nil
 		}
@@ -259,7 +259,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				for i, port := range opts.PassThroughPorts {
 					portStrings[i] = strconv.Itoa(int(port))
 				}
-			// Note the "=" sign, which is good practice for docker run
+				// Note the "=" sign, which is good practice for docker run
 				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 			}
 			return alias, nil
