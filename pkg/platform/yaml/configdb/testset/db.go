@@ -86,6 +86,27 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 
 func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 	filePath := filepath.Join(db.path, testSetID)
+
+	// Clear secrets before writing to config.yaml to avoid leaking them in config.yaml
+	if testSetPtr, ok := any(config).(*models.TestSet); ok {
+		// Create a shallow copy of the TestSet to avoid modifying the original
+		testSetCopy := *testSetPtr
+		// Clear the secrets in the copy
+		testSetCopy.Secret = nil
+		// Marshal the copy instead of the original
+		data, err := yamlLib.Marshal(&testSetCopy)
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
+			return err
+		}
+		err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to write test-set configuration in yaml file", zap.String("testSet", testSetID))
+			return err
+		}
+		return nil
+	}
+
 	data, err := yamlLib.Marshal(config)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
