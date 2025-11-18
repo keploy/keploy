@@ -47,9 +47,9 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		for i, mock := range unfilteredMocks {
 			mockNames[i] = mock.Name
 		}
-		h.Logger.Info("mocks under consideration for match function", zap.Strings("mock names", mockNames))
+		h.Logger.Debug("mocks under consideration for match function", zap.Strings("mock names", mockNames))
 
-		h.Logger.Info(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
+		h.Logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
 
 		// Matching process
 		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks, headerNoise)
@@ -80,12 +80,12 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 
 			if len(bodyMatched) == 0 {
-				h.Logger.Info("No mock found with body schema match")
+				h.Logger.Debug("No mock found with body schema match")
 				return false, nil, nil
 			}
 
 			if len(bodyMatched) == 1 {
-				h.Logger.Info("body match found", zap.String("mock name", bodyMatched[0].Name))
+				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				if !h.updateMock(ctx, bodyMatched[0], mockDb) {
 					continue
 				}
@@ -96,11 +96,11 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			shortListed = bodyMatched
 		}
 
-		h.Logger.Info("Performing fuzzy match for req buffer")
+		h.Logger.Debug("Performing fuzzy match for req buffer")
 		// Perform fuzzy match on the request
 		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
 		if isMatched {
-			h.Logger.Info("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
+			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
 			if !h.updateMock(ctx, bestMatch, mockDb) {
 				continue
 			}

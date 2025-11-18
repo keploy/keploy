@@ -132,7 +132,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
-			h.Logger.Info("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
+			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
 				if !utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
