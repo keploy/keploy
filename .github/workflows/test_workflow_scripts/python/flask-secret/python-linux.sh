@@ -206,7 +206,6 @@ fi
 echo "Config path test passed successfully!"
 
 # move the config-test-dir to the root of the project
-echo "Moving config-test-dir to the root of the project"
 mv $CONFIG_TEST_DIR/* .
 rm -rf $CONFIG_TEST_DIR
 
@@ -232,7 +231,7 @@ if grep "ERROR" "test_logs_pass.txt"; then exit 1; fi
 
 all_passed=true
 for i in {0..1}; do
-    report_file="./keploy/reports/test-run-2/test-set-$i-report.yaml"
+    report_file="./keploy/reports/test-run-3/test-set-$i-report.yaml"
     if [ ! -f "$report_file" ] || [ "$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')" != "PASSED" ]; then
         all_passed=false
         echo "Test-set-$i did not pass after normalize."
