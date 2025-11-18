@@ -42,15 +42,23 @@ jobs:
   upload-latest:
     runs-on: ubuntu-latest
     steps:
-      - name: Upload latest release
+      - uses: actions/checkout@v4
+        with:
+          ref: debug-postgres-pipeline
+      - name: Add Private Parsers
+        if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
+
+      - name: Build Keploy
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
-          URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_linux_amd64.tar.gz"
-          curl -L "$URL" -o keploy.tar.gz
-          tar -xzf keploy.tar.gz
-          chmod +x keploy
+          mkdir -p out/latest
+          go build -tags=viper_bind_struct -o out/latest/keploy
+      
       - uses: actions/upload-artifact@v4
-        with: { name: latest, path: keploy }
+        with: { name: latest, path: out/latest/keploy }
 
   build-docker-image:
     runs-on: ubuntu-latest
