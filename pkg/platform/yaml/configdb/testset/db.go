@@ -133,7 +133,7 @@ func (db *Db[T]) GetTemplateCandidatesPath(ctx context.Context, testSetID string
 	// testSetID is the directory (e.g., "test-set-1")
 	// "template-candidates.yaml" is the file.
 	
-	absPath, err := filepath.Abs(filepath.Join(db.path, testSetID, "template-candidates.yaml"))
+	absPath, err := filepath.Abs(filepath.Join(db.path, testSetID, "config.yaml"))
 	if err != nil {
 		return "", err
 	}

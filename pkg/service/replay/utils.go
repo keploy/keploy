@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/olekukonko/tablewriter"
 	"go.uber.org/zap"
 
@@ -380,7 +381,7 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 }
 
 // generateProducerCombinations recursively builds all possible valid combinations.
-func (r *Replayer) generateProducerCombinations(consumers []TemplateCandidate) []combination {
+func (r *Replayer) generateProducerCombinations(consumers []models.TemplateCandidate) []combination {
 	var allCombinations []combination
 	var backtrack func(consumerIndex int, currentCombination combination)
 
@@ -409,6 +410,9 @@ func (r *Replayer) generateProducerCombinations(consumers []TemplateCandidate) [
 	}
 
 	backtrack(0, make(combination))
+	sort.SliceStable(allCombinations, func(i, j int) bool {
+		return len(allCombinations[i]) > len(allCombinations[j])
+	})
 	return allCombinations
 }
 
@@ -428,8 +432,9 @@ func (r *Replayer) findPassingCombination(ctx context.Context, testSetID string,
 	defer func() {
 		utils.TemplatizedValues = originalGlobalTemplates
 	}()
-
+	fmt.Println(len(allCombinations))
 	for _, combo := range allCombinations {
+		fmt.Println("getting here 100")
 		// 3. Create the temporary template data for *this* run.
 		//    Start with the confirmed templates from *previous* tests.
 		tempTemplateData := make(map[string]interface{})
@@ -444,7 +449,7 @@ func (r *Replayer) findPassingCombination(ctx context.Context, testSetID string,
 
 		// 5. **Set the global map.** This is what SimulateHTTP will read.
 		utils.TemplatizedValues = tempTemplateData
-
+		fmt.Println("used template values :", utils.TemplatizedValues)
 		// 6. Call SimulateRequest. It will now use our 'tempTemplateData'
 		//    when it renders internally. We pass the *original* tc.
 		resp, loopErr := HookImpl.SimulateRequest(ctx, tc, testSetID)
@@ -493,55 +498,110 @@ func (r *Replayer) findPassingCombination(ctx context.Context, testSetID string,
 	return nil, false, nil, nil, nil
 }
 
-// applyPermanentTemplates modifies the *original* TC and updates the final template map
+// // applyPermanentTemplates modifies the *original* TC and updates the final template map
+// func (r *Replayer) applyPermanentTemplates(tc *models.TestCase, reqBody interface{}, combo combination, finalTemplates map[string]interface{}) {
+
+// 	for consumerPath, producer := range combo {
+// 		// Find a unique key
+// 		finalKey := producer.TemplateName
+// 		i := 1
+// 		for {
+// 			existingVal, exists := finalTemplates[finalKey]
+// 			if !exists {
+// 				break // Found a free key
+// 			}
+// 			if existingVal == producer.ProducerValue {
+// 				break // Same key, same value, reuse it
+// 			}
+// 			finalKey = fmt.Sprintf("%s%d", producer.TemplateName, i)
+// 			i++
+// 		}
+
+// 		// 1. Update the main template map (conf.Template)
+// 		finalTemplates[finalKey] = producer.ProducerValue
+
+// 		// 2. Update the global map for the *next* test case in this run
+// 		utils.TemplatizedValues[finalKey] = producer.ProducerValue
+
+// 		// 3. Apply the template string to the *in-memory* test case object
+// 		templateStr := fmt.Sprintf("{{%s .%s}}", producer.OriginalType, finalKey)
+
+// 		if tc.Kind == models.HTTP {
+// 			// We need to find the *original* location info.
+// 			// This is a bit tricky. We should get this from the tools.go analysis.
+// 			// For now, I'll use the path string, but this should be more robust.
+// 			// (The `tools.go` should really save the `ValueLocation` struct)
+
+// 			if strings.HasPrefix(consumerPath, "body.") {
+// 				setValueByPath(&reqBody, strings.TrimPrefix(consumerPath, "body."), templateStr)
+// 			} else if strings.HasPrefix(consumerPath, "path.") {
+// 				reconstructURL(&tc.HTTPReq.URL, consumerPath, templateStr)
+// 			} else if strings.HasPrefix(consumerPath, "Cookie.") {
+// 				name := strings.TrimPrefix(consumerPath, "Cookie.")
+// 				tc.HTTPReq.Header["Cookie"] = replaceCookieValue(tc.HTTPReq.Header["Cookie"], name, templateStr)
+// 			} else {
+// 				// Assume it's a normal header
+// 				tc.HTTPReq.Header[consumerPath] = templateStr
+// 			}
+// 		} // TODO: Add gRPC logic here
+// 	}
+
+// 	// Re-marshal the body back into the test case
+// 	if reqBody != nil && tc.Kind == models.HTTP {
+// 		newBody, _ := json.Marshal(reqBody)
+// 		tc.HTTPReq.Body = string(newBody)
+// 	}
+// }
+
+// applyPermanentTemplates updates the Test Case and the Config Maps
 func (r *Replayer) applyPermanentTemplates(tc *models.TestCase, reqBody interface{}, combo combination, finalTemplates map[string]interface{}) {
+	fmt.Println("getting here 1")
+	if finalTemplates == nil {
+		finalTemplates = make(map[string]interface{})
+	}
 
 	for consumerPath, producer := range combo {
-		// Find a unique key
+		fmt.Println("getting here 2")
+		// Ensure unique key in the global map
 		finalKey := producer.TemplateName
 		i := 1
 		for {
+			fmt.Println("getting here 3")
 			existingVal, exists := finalTemplates[finalKey]
 			if !exists {
-				break // Found a free key
+				break
 			}
 			if existingVal == producer.ProducerValue {
-				break // Same key, same value, reuse it
+				break
 			}
 			finalKey = fmt.Sprintf("%s%d", producer.TemplateName, i)
 			i++
 		}
 
-		// 1. Update the main template map (conf.Template)
+		// 1. Update the Config Template Map (to be saved to config.yaml)
 		finalTemplates[finalKey] = producer.ProducerValue
 
-		// 2. Update the global map for the *next* test case in this run
+		// 2. Update the Global Map (for subsequent tests in this run)
 		utils.TemplatizedValues[finalKey] = producer.ProducerValue
-
-		// 3. Apply the template string to the *in-memory* test case object
+		spew.Dump(utils.TemplatizedValues)
+		// 3. Update the Test Case object (insert {{...}})
 		templateStr := fmt.Sprintf("{{%s .%s}}", producer.OriginalType, finalKey)
 
 		if tc.Kind == models.HTTP {
-			// We need to find the *original* location info.
-			// This is a bit tricky. We should get this from the tools.go analysis.
-			// For now, I'll use the path string, but this should be more robust.
-			// (The `tools.go` should really save the `ValueLocation` struct)
-
-			if strings.HasPrefix(consumerPath, "body.") {
-				setValueByPath(&reqBody, strings.TrimPrefix(consumerPath, "body."), templateStr)
-			} else if strings.HasPrefix(consumerPath, "path.") {
-				reconstructURL(&tc.HTTPReq.URL, consumerPath, templateStr)
-			} else if strings.HasPrefix(consumerPath, "Cookie.") {
+			if strings.HasPrefix(consumerPath, "Cookie.") {
 				name := strings.TrimPrefix(consumerPath, "Cookie.")
 				tc.HTTPReq.Header["Cookie"] = replaceCookieValue(tc.HTTPReq.Header["Cookie"], name, templateStr)
-			} else {
-				// Assume it's a normal header
+			} else if strings.HasPrefix(consumerPath, "path.") {
+				reconstructURL(&tc.HTTPReq.URL, consumerPath, templateStr)
+			} else if _, ok := tc.HTTPReq.Header[consumerPath]; ok {
 				tc.HTTPReq.Header[consumerPath] = templateStr
+			} else {
+				// Body replacement
+				setValueByPath(&reqBody, consumerPath, templateStr)
 			}
-		} // TODO: Add gRPC logic here
+		}
 	}
-
-	// Re-marshal the body back into the test case
+	// Re-marshal body if modified
 	if reqBody != nil && tc.Kind == models.HTTP {
 		newBody, _ := json.Marshal(reqBody)
 		tc.HTTPReq.Body = string(newBody)

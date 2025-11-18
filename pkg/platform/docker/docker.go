@@ -529,7 +529,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.EnableTesting {
 		command = append(command, "--enable-testing")
 	}
-
+	
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
 		Kind: yaml.MappingNode,

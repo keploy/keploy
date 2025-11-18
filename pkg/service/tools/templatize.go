@@ -1180,7 +1180,7 @@ type ProducerKey string
 
 // ProducerInfo holds the value and location of a variable source.
 type ProducerInfo struct {
-    Key          ProducerKey
+    Key          models.ProducerKey
     Value        string
     Location     *ValueLocation // Re-using V2 struct
     TemplateName string
@@ -1197,8 +1197,8 @@ type ConsumerInfo struct {
 // It finds all producers and consumers, matches them, and saves the "options"
 // to a template-candidates.yaml file for the `test` command to use.
 func (t *Tools) AnalyzeTemplateCandidates(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
-    producerIndex := make(map[ProducerKey]*ProducerInfo)
-    allCandidates := make(map[string][]TemplateCandidate)
+    producerIndex := make(map[models.ProducerKey]*ProducerInfo)
+    allCandidates := make(map[string][]models.TemplateCandidate)
 
     // Pre-process all test cases to parse bodies
     reqBodies := make([]interface{}, len(tcs))
@@ -1220,18 +1220,18 @@ func (t *Tools) AnalyzeTemplateCandidates(ctx context.Context, tcs []*models.Tes
         currentConsumers := t.findConsumersInRequest(i, tc, reqBodies[i])
 
         // --- Step 2: Match Consumers to available Producers ---
-        var tcCandidates []TemplateCandidate
+        var tcCandidates []models.TemplateCandidate
         for _, consumer := range currentConsumers {
             // Requirement #2: Do not templatize "0".
             if consumer.Value == "0" {
                 continue
             }
 
-            var options []*ProducerOption
+            var options []*models.ProducerOption
             for _, producer := range producerIndex {
                 // Check for value equality
                 if consumer.Value == producer.Value {
-                    options = append(options, &ProducerOption{
+                    options = append(options, &models.ProducerOption{
                         ProducerKey:   producer.Key,
                         ProducerValue: producer.Value,
                         TemplateName:  producer.TemplateName,
@@ -1241,7 +1241,7 @@ func (t *Tools) AnalyzeTemplateCandidates(ctx context.Context, tcs []*models.Tes
             }
 
             if len(options) > 0 {
-                tcCandidates = append(tcCandidates, TemplateCandidate{
+                tcCandidates = append(tcCandidates, models.TemplateCandidate{
                     ConsumerPath:  consumer.Location.Path,
                     ConsumerValue: consumer.Value,
                     Options:       options,
@@ -1264,37 +1264,58 @@ func (t *Tools) AnalyzeTemplateCandidates(ctx context.Context, tcs []*models.Tes
         return nil
     }
 
-    candidateConfig := CandidateConfig{
-        Candidates: allCandidates,
-    }
+    // candidateConfig := CandidateConfig{
+    //     Candidates: allCandidates,
+    // }
+	testSetConf, err := t.testSetConf.Read(ctx, testSetID)
+	if err != nil {
+		// If read fails (e.g. file missing), create a new one
+		testSetConf = &models.TestSet{} 
+	}
 
-    yamlData, err := yaml.Marshal(candidateConfig)
-    if err != nil {
-        utils.LogError(t.logger, err, "Failed to marshal template candidates")
-        return err
-    }
+	// Update Candidates
+	testSetConf.Candidates = allCandidates
+	
+	// Optional: Clear the old 'template' map if you want a fresh start
+	// testSetConf.Template = make(map[string]interface{})
 
-    // Save to keploy-path/test-set-ID/template-candidates.yaml
-    candidateFilePath, err := t.testSetConf.GetTemplateCandidatesPath(ctx, testSetID)
-    if err != nil {
-        utils.LogError(t.logger, err, "Failed to get path for template candidates file")
-        return err
-    }
+	// Write back to config.yaml
+	err = t.testSetConf.Write(ctx, testSetID, testSetConf)
+	if err != nil {
+		utils.LogError(t.logger, err, "Failed to write candidates to test set config")
+		return err
+	}
 
-    err = os.WriteFile(candidateFilePath, yamlData, 0644)
-    if err != nil {
-        utils.LogError(t.logger, err, "Failed to write template candidates file")
-        return err
-    }
+	t.logger.Info("Successfully updated config.yaml with template candidates", zap.String("testSet", testSetID), zap.Int("testCasesWithCandidates", len(allCandidates)))
+	return nil
+
+    // yamlData, err := yaml.Marshal(candidateConfig)
+    // if err != nil {
+    //     utils.LogError(t.logger, err, "Failed to marshal template candidates")
+    //     return err
+    // }
+
+    // // Save to keploy-path/test-set-ID/template-candidates.yaml
+    // candidateFilePath, err := t.testSetConf.GetTemplateCandidatesPath(ctx, testSetID)
+    // if err != nil {
+    //     utils.LogError(t.logger, err, "Failed to get path for template candidates file")
+    //     return err
+    // }
+
+    // err = os.WriteFile(candidateFilePath, yamlData, 0644)
+    // if err != nil {
+    //     utils.LogError(t.logger, err, "Failed to write template candidates file")
+    //     return err
+    // }
     
-    // Add to .gitignore
-    err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/template-candidates.yaml")
-    if err != nil {
-        t.logger.Warn("Failed to add template-candidates.yaml to .gitignore", zap.Error(err))
-    }
+    // // Add to .gitignore
+    // err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/template-candidates.yaml")
+    // if err != nil {
+    //     t.logger.Warn("Failed to add template-candidates.yaml to .gitignore", zap.Error(err))
+    // }
 
-    t.logger.Info(fmt.Sprintf("Generated template candidates file at: %s", candidateFilePath))
-    return nil
+    // t.logger.Info(fmt.Sprintf("Generated template candidates file at: %s", candidateFilePath))
+    // return nil
 }
 
 // --- V3 Analysis Helper Functions ---
@@ -1358,7 +1379,7 @@ func (t *Tools) findConsumersInRequest(tcIndex int, tc *models.TestCase, reqBody
 }
 
 // addProducersFromResponse scans a response and adds its fields to the producer index
-func (t *Tools) addProducersFromResponse(tcIndex int, tc *models.TestCase, respBody interface{}, producerIndex map[ProducerKey]*ProducerInfo) {
+func (t *Tools) addProducersFromResponse(tcIndex int, tc *models.TestCase, respBody interface{}, producerIndex map[models.ProducerKey]*ProducerInfo) {
     // 1. Response Headers
     for k, val := range tc.HTTPResp.Header {
          if strings.EqualFold(k, "Set-Cookie") {
@@ -1368,7 +1389,7 @@ func (t *Tools) addProducersFromResponse(tcIndex int, tc *models.TestCase, respB
                  if name == "" { continue }
                  
                  path := fmt.Sprintf("Set-Cookie.%s", name)
-                 key := ProducerKey(fmt.Sprintf("tc-%d.resp-header.%s", tcIndex, path))
+                 key := models.ProducerKey(fmt.Sprintf("tc-%d.resp-header.%s", tcIndex, path))
                  loc := &ValueLocation{
                      TestCaseIndex: tcIndex, Part: ResponseHeader,
                      Path: path, Pointer: &tc.HTTPResp.Header, OriginalType: "string",
@@ -1381,7 +1402,7 @@ func (t *Tools) addProducersFromResponse(tcIndex int, tc *models.TestCase, respB
              continue
          }
          
-         key := ProducerKey(fmt.Sprintf("tc-%d.resp-header.%s", tcIndex, k))
+         key := models.ProducerKey(fmt.Sprintf("tc-%d.resp-header.%s", tcIndex, k))
          loc := &ValueLocation{
             //  TestCaseIndex: i, Part: ResponseHeader,
 			 TestCaseIndex: tcIndex, Part: ResponseHeader,
@@ -1400,7 +1421,7 @@ func (t *Tools) addProducersFromResponse(tcIndex int, tc *models.TestCase, respB
 }
 
 // findValuesInInterfaceV3 is a recursive scanner for request (consumer) or response (producer) bodies.
-func findValuesInInterfaceV3(data interface{}, path []string, consumers *[]*ConsumerInfo, producers map[ProducerKey]*ProducerInfo, tcIndex int, part PartType, containerPtr interface{}) {
+func findValuesInInterfaceV3(data interface{}, path []string, consumers *[]*ConsumerInfo, producers map[models.ProducerKey]*ProducerInfo, tcIndex int, part PartType, containerPtr interface{}) {
     if data == nil {
         return
     }
@@ -1443,9 +1464,9 @@ func findValuesInInterfaceV3(data interface{}, path []string, consumers *[]*Cons
     }
     
     if producers != nil {
-        var key ProducerKey
+        var key models.ProducerKey
         if part == ResponseBody {
-            key = ProducerKey(fmt.Sprintf("tc-%d.resp-body.%s", tcIndex, currentPath))
+            key = models.ProducerKey(fmt.Sprintf("tc-%d.resp-body.%s", tcIndex, currentPath))
         } else {
             return
         }

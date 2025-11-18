@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"facette.io/natsort"
-	"github.com/invopop/yaml"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -88,7 +87,7 @@ type (
 	}
 
 	// combination maps a consumer's location path to a specific producer option
-	combination map[string]*ProducerOption
+	combination map[string]*models.ProducerOption
 )
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -666,29 +665,39 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if conf == nil {
 		conf = &models.TestSet{}
 	}
-	var templateCandidates map[string][]TemplateCandidate
-	if false { // <-- ASSUMING NEW CONFIG FLAG
+	var templateCandidates map[string][]models.TemplateCandidate
+	if true { // <-- ASSUMING NEW CONFIG FLAG
+		var conf *models.TestSet
+		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
+
+		// ...
+
+		// 2. We access candidates directly from the struct memory
+		// We do NOT need to load a separate file path here anymore.
+		templateCandidates = conf.Candidates
 		r.logger.Info("ApplyTemplates mode is enabled", zap.String("testSet", testSetID))
 
-		candidateFilePath, err := r.testSetConf.GetTemplateCandidatesPath(ctx, testSetID)
-		if err == nil {
-			yamlData, err := os.ReadFile(candidateFilePath)
-			if err == nil {
-				var candidateConfig CandidateConfig
-				if err := yaml.Unmarshal(yamlData, &candidateConfig); err == nil {
-					templateCandidates = candidateConfig.Candidates
-					r.logger.Info("Successfully loaded template candidates", zap.Int("count", len(templateCandidates)))
-				} else {
-					r.logger.Error("Failed to parse template-candidates.yaml", zap.Error(err))
-				}
-			} else if !os.IsNotExist(err) {
-				r.logger.Warn("Failed to read template-candidates.yaml", zap.Error(err))
-			}
-		} else {
-			r.logger.Warn("Failed to get template-candidates.yaml path", zap.Error(err))
-		}
+		// candidateFilePath, err := r.testSetConf.GetTemplateCandidatesPath(ctx, testSetID)
+		// if err == nil {
+		// 	yamlData, err := os.ReadFile(candidateFilePath)
+		// 	if err == nil {
+		// 		var candidateConfig CandidateConfig
+		// 		if err := yaml.Unmarshal(yamlData, &candidateConfig); err == nil {
+		// 			templateCandidates = candidateConfig.Candidates
+		// 			r.logger.Info("Successfully loaded template candidates", zap.Int("count", len(templateCandidates)))
+		// 		} else {
+		// 			r.logger.Error("Failed to parse template-candidates.yaml", zap.Error(err))
+		// 		}
+		// 	} else if !os.IsNotExist(err) {
+		// 		r.logger.Warn("Failed to read template-candidates.yaml", zap.Error(err))
+		// 	}
+		// } else {
+		// 	r.logger.Warn("Failed to get template-candidates.yaml path", zap.Error(err))
+		// }
 	}
-
+	if conf.Template == nil {
+		conf.Template = make(map[string]interface{})
+	}
 	utils.TemplatizedValues = conf.Template
 	if utils.TemplatizedValues == nil {
 		utils.TemplatizedValues = make(map[string]interface{})
@@ -1075,7 +1084,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		if false && hasCandidates {
+		if true && hasCandidates {
 			// --- EXPERIMENTAL PATH: Find passing combination ---
 			r.logger.Debug("Finding passing template combination", zap.String("tc", testCase.Name))
 
@@ -1108,11 +1117,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// 1. The in-memory `testCase` object
 				// 2. The main `conf.Template` map
 				// 3. The global `utils.TemplatizedValues` map (for the next test case)
+				fmt.Println("passing combination :", passingCombination)
 				r.applyPermanentTemplates(testCase, reqBody, passingCombination, conf.Template)
 
 				// Save the modified test case file immediately
 				if err := r.testDB.UpdateTestCase(ctx, testCase, testSetID, true); err != nil {
 					r.logger.Error("Failed to save templatized test case!", zap.Error(err), zap.String("tc", testCase.Name))
+				}
+				fmt.Println("writing first :")
+				// spew.Dump(conf)
+				if err := r.testSetConf.Write(ctx, testSetID, conf); err != nil {
+					r.logger.Error("Failed to update config.yaml with new template values", zap.Error(err))
 				}
 			} else {
 				r.logger.Warn("No passing template combination found", zap.String("tc", testCase.Name))
@@ -1480,11 +1495,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
 		utils.RemoveDoubleQuotes(utils.TemplatizedValues) // Write the templatized values to the yaml.
+		fmt.Println("writing to config file :", conf.Template)
 		if len(utils.TemplatizedValues) > 0 {
 			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
 				PreScript:  conf.PreScript,
 				PostScript: conf.PostScript,
-				Template:   utils.TemplatizedValues,
+				Template:   conf.Template,
 			})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
