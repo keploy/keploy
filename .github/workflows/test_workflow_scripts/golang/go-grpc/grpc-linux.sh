@@ -131,7 +131,7 @@ send_requests() {
 wait_for_port() {
     local port=$1
     echo "Waiting for port $port to be open..."
-    for i in {1..15}; do
+    for i in {1..120}; do
         # Use lsof to check for a listening TCP socket on the specified port
         if sudo lsof -iTCP:"$port" -sTCP:LISTEN -t >/dev/null; then
             echo "Port $port is open."
