@@ -11,37 +11,37 @@
 
 set -Eeuo pipefail
 
+section() { echo "::group::$*"; }
+endsec()  { echo "::endgroup::"; }
+
 MODE=${1:-incoming}
+BIG_PAYLOAD=${2:-false}
 
-# --- Sanity Checks ---
-[ -x "${RECORD_BIN:-}" ] || { echo "RECORD_BIN not set or not executable"; exit 1; }
-[ -x "${REPLAY_BIN:-}" ] || { echo "REPLAY_BIN not set or not executable"; exit 1; }
-command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
-
-echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
-
-# --- Build Application ---
-echo "Building gRPC server and client binaries..."
-go build -o grpc-server .
-go build -o grpc-client ./client
-chmod +x ./grpc-server ./grpc-client
+BIG_PAYLOAD_FLAG=""
+if [ "$BIG_PAYLOAD" = "true" ]; then
+  echo "🚀 Big payload mode enabled."
+  BIG_PAYLOAD_FLAG="--bigPayload"
+fi
 
 # --- Helper Functions ---
 
 # Kills all running application and keploy processes
 cleanup() {
-    echo "Cleaning up running processes..."
-    pkill -f keploy || true
-    pkill -f grpc-server || true
-    pkill -f grpc-client || true
+    section "🧹 Cleaning up running processes..."
+    sudo pkill -f keploy || true
+    sudo pkill -f grpc-server || true
+    sudo pkill -f grpc-client || true
     sleep 2
-    pkill -9 -f keploy || true
-    pkill -9 -f grpc-server || true
-    pkill -9 -f grpc-client || true
+    sudo pkill -9 -f keploy || true
+    sudo pkill -9 -f grpc-server || true
+    sudo pkill -9 -f grpc-client || true
     echo "Cleanup complete."
+    endsec
 }
+
 trap cleanup EXIT
+
+cleanup
 
 # Checks a log file for critical errors or data races
 check_for_errors() {
@@ -152,60 +152,86 @@ kill_keploy_process() {
 
 # --- Main Logic ---
 
+section "🛠️ Setting up environment and building binaries..."
+
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
+# --- Sanity Checks ---
+[ -x "${RECORD_BIN:-}" ] || { echo "RECORD_BIN not set or not executable"; exit 1; }
+[ -x "${REPLAY_BIN:-}" ] || { echo "REPLAY_BIN not set or not executable"; exit 1; }
+command -v go >/dev/null 2>&1 || { echo "go not found"; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
+
+echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
+  echo "📌 Setting up Keploy API Key..."
+  export KEPLOY_API_KEY="$KEPLOY_CI_API_KEY"
+fi
+
+# --- Build Application ---
+echo "Building gRPC server and client binaries..."
+go build -o grpc-server .
+go build -o grpc-client ./client
+chmod +x ./grpc-server ./grpc-client
+
 # Reset state before each run
 rm -rf ./keploy*
 sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
 
+endsec
+
+
 if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
-    # Record: Keploy wraps the server to capture incoming gRPC calls. The client is just a driver.
+    
+    section "🔴 Recording incoming gRPC calls..."
     ./grpc-client &> client_incoming.log &
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" $BIG_PAYLOAD_FLAG --generateGithubActions=false 2>&1 | tee record_incoming.log &
     wait_for_port 50051
-
     sleep 5
-    
     send_requests
-    sleep 15 # Allow time for traces to be recorded
-    
+    sleep 25 # Allow time for traces to be recorded
     kill_keploy_process
-
     check_for_errors record_incoming.log
+    endsec
 
-    # Test: Keploy replays the captured gRPC calls against the server.
+    section "▶️ Replaying incoming gRPC calls..."
+    cleanup
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
-
     check_for_errors test_incoming.log
     if ! check_test_report; then
         echo "Test report check failed for incoming mode."
         cat test_incoming.log
         exit 1
     fi
+    endsec
+    
     echo "✅ Incoming mode passed."
 
 elif [ "$MODE" = "outgoing" ]; then
     echo "🧪 Testing outgoing gRPC requests (testing grpc-client)"
-    # Record: Keploy wraps the client to capture its outgoing gRPC calls. The server is a dependency.
+
+    section "🔴 Recording outgoing gRPC calls..."
     ./grpc-server &> server_outgoing.log &
     wait_for_port 50051
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
-
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" $BIG_PAYLOAD_FLAG --generateGithubActions=false 2>&1 | tee record_outgoing.log &
     send_requests
     sleep 15 # Allow time for traces to be recorded
-
     kill_keploy_process
-    
     check_for_errors record_outgoing.log
+    endsec
 
-    # Test: Keploy mocks the server's responses for the client. The real server is NOT run.
+    section "▶️ Replaying outgoing gRPC calls (with mocks)..."
+    cleanup
     sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
-
     check_for_errors test_outgoing.log
     if ! check_test_report; then
         echo "Test report check failed for outgoing mode."
         cat test_outgoing.log
         exit 1
     fi
+    endsec
+
     echo "✅ Outgoing mode passed."
 
 else
