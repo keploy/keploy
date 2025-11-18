@@ -547,7 +547,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--pass-through-ports", strings.Join(portStrings, ","))
 	}
 
-	idc.logger.Info("Generating agent service with command", zap.Strings("command", command))
+	idc.logger.Debug("Generating agent service with command", zap.Strings("command", command))
 
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{

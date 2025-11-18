@@ -1212,6 +1212,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.DnsPort = dnsPort
+
+		buildDelay, err := cmd.Flags().GetUint64("build-delay")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get build-delay flag")
+			return nil // Or return an error
+		}
+		c.cfg.Agent.BuildDelay = buildDelay
+
+		passThroughPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
+			return nil // Or return an error
+		}
+		c.cfg.Agent.PassThroughPorts = passThroughPorts
 	}
 
 	return nil

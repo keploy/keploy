@@ -25,17 +25,6 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-
-			ports, err := cmd.Flags().GetUintSlice("pass-through-ports")
-			if err != nil {
-				logger.Error("failed to parse pass-through-ports", zap.Error(err))
-			}
-
-			// Manually put the value into the main config
-			// This is the critical step that was missing.
-			if ports != nil && len(ports) > 0 {
-				conf.Agent.PassThroughPorts = ports
-			}
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")

@@ -65,7 +65,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	}
 
 	// Preserves the alias generation
-	keployalias, err := getAlias(ctx, logger, opts)
+	keployalias, err := getAlias(ctx, logger, opts, conf.Debug)
 	if err != nil {
 		return "", err
 	}
@@ -73,7 +73,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
-func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) (string, error) {
+func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
@@ -136,6 +136,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 		}
+		if debug {
+			alias += " --debug"
+		}
 
 		return alias, nil
 	case "windows":
@@ -184,6 +187,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				// Note the "=" sign, which is good practice for docker run
 				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 			}
+			if debug {
+				alias += " --debug"
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -215,6 +221,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
 		}
 		return alias, nil
 	case "darwin":
@@ -262,6 +271,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				// Note the "=" sign, which is good practice for docker run
 				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 			}
+			if debug {
+				alias += " --debug"
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -294,6 +306,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
 		}
 		return alias, nil
 	}

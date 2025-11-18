@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -50,6 +51,17 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker
 
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
+
+	if a.config.Agent.BuildDelay > 0 {
+		a.logger.Info("Waiting for build delay", zap.Uint64("seconds", a.config.Agent.BuildDelay))
+		select {
+		case <-time.After(time.Duration(a.config.Agent.BuildDelay) * time.Second):
+			// Delay completed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	a.logger.Info("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)

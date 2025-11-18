@@ -21,7 +21,6 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/davecgh/go-spew/spew"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
@@ -270,7 +269,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
-	err = h.RegisterClient(ctx, setupOpts, opts.PassThroughPorts)
+	allRules := make([]models.BypassRule, 0, len(opts.Rules)+len(opts.PassThroughPorts))
+
+	allRules = append(allRules, opts.Rules...)
+
+	for _, port := range opts.PassThroughPorts {
+		allRules = append(allRules, models.BypassRule{
+			Port: uint(port),
+		})
+	}
+
+	err = h.RegisterClient(ctx, setupOpts, allRules)
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
 	}
@@ -372,7 +381,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	h.logger.Info("eBPF resources released successfully...")
 }
 
-func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, passThroughPorts []uint32) error {
+func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
 	h.logger.Info("Registering the client Info with keploy")
 	// Register the client and start processing
 
@@ -387,17 +396,14 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, passThrou
 		clientInfo.Mode = uint32(0)
 	}
 
+	ports := agent.GetPortToSendToKernel(ctx, rules)
 	for i := 0; i < 10; i++ {
-		if i >= len(passThroughPorts) {
-			clientInfo.PassThroughPorts[i] = -1 // Fill the rest with -1
+		if len(ports) <= i {
+			clientInfo.PassThroughPorts[i] = -1
 			continue
 		}
-		// Copy the port, casting from uint32 to int32
-		clientInfo.PassThroughPorts[i] = int32(passThroughPorts[i])
+		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
-	clientInfo.ClientNSPID = opts.ClientNSPID
-
-	spew.Dump(clientInfo)
 	return h.SendClientInfo(clientInfo)
 }
 
