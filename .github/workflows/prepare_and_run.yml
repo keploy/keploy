@@ -58,6 +58,12 @@ jobs:
           mkdir -p out/latest
           go build -tags=viper_bind_struct -o out/latest/keploy
       
+      - name: Verify Binary Dependencies
+        run: |
+          echo "===== Keploy Binary Build Info ====="
+          go version -m out/latest/keploy
+          echo "===================================="
+      
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: out/latest/keploy }
 
