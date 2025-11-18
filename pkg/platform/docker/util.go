@@ -138,6 +138,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+		if opts.ConfigPath != "" && opts.ConfigPath != "." {
+			alias += " --config-path " + opts.ConfigPath
 		}
 
 		return alias, nil
@@ -173,6 +175,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
@@ -189,6 +192,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if debug {
 				alias += " --debug"
+        
+			if opts.ConfigPath != "" && opts.ConfigPath != "." {
+				alias += " --config-path " + opts.ConfigPath
 			}
 			return alias, nil
 		}
@@ -208,6 +214,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
@@ -224,6 +231,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+
+		if opts.ConfigPath != "" && opts.ConfigPath != "." {
+			alias += " --config-path " + opts.ConfigPath
 		}
 		return alias, nil
 	case "darwin":
@@ -257,6 +267,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
@@ -273,6 +284,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if debug {
 				alias += " --debug"
+
+			if opts.ConfigPath != "" && opts.ConfigPath != "." {
+				alias += " --config-path " + opts.ConfigPath
 			}
 			return alias, nil
 		}
@@ -293,6 +307,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
@@ -309,6 +324,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if debug {
 			alias += " --debug"
+		if opts.ConfigPath != "" && opts.ConfigPath != "." {
+			alias += " --config-path " + opts.ConfigPath
 		}
 		return alias, nil
 	}

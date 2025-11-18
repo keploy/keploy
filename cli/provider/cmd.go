@@ -495,12 +495,23 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		return errors.New(errMsg)
 	}
 
-	// 4) Use provided configPath as-is (your default is already ".")
-	configPath, err := cmd.Flags().GetString("configPath")
+	// 4) Use provided configPath and convert to absolute path
+	configPath, err := cmd.Flags().GetString("config-path")
 	if err != nil {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
 	}
+
+	// Convert to absolute path to ensure viper can find the config file correctly
+	absConfigPath, err := utils.GetAbsPath(configPath)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to convert config path to absolute path: %v", err)
+		utils.LogError(c.logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+	configPath = absConfigPath
+
+	c.logger.Debug("config path is ", zap.String("configPath", configPath))
 
 	// 5) Read base keploy.yml exactly like before
 	viper.SetConfigName("keploy")
@@ -1240,7 +1251,16 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 		utils.LogError(c.logger, err, "failed to marshal config data")
 		return errors.New("failed to marshal config data")
 	}
-	err = toolSvc.CreateConfig(ctx, c.cfg.ConfigPath+"/keploy.yml", string(configDataBytes))
+
+	// Ensure the config directory exists before creating the file
+	if err := os.MkdirAll(c.cfg.ConfigPath, os.ModePerm); err != nil {
+		errMsg := fmt.Sprintf("failed to create config directory: %v", err)
+		utils.LogError(c.logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+
+	configFilePath := filepath.Join(c.cfg.ConfigPath, "keploy.yml")
+	err = toolSvc.CreateConfig(ctx, configFilePath, string(configDataBytes))
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to create config file")
 		return errors.New("failed to create config file")

@@ -502,6 +502,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	a.logger.Info("Starting native agent with args", zap.Strings("args", args))
 
+	if opts.ConfigPath != "" && opts.ConfigPath != "." {
+		args = append(args, "--config-path", opts.ConfigPath)
+	}
+
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
 	cmd := agentUtils.NewAgentCommand(keployBin, args)
 
