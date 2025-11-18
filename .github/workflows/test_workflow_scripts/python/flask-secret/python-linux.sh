@@ -159,6 +159,52 @@ else
     exit 1
 fi
 
+# --- CONFIG PATH TEST ---
+echo "Testing config path functionality..."
+
+# Create a test config directory
+CONFIG_TEST_DIR="./config-test-dir"
+mkdir -p "$CONFIG_TEST_DIR"
+
+# Move keploy.yml to the test directory
+if [ -f "keploy.yml" ]; then
+    mv keploy.yml "$CONFIG_TEST_DIR/"
+    echo "Moved keploy.yml to $CONFIG_TEST_DIR"
+else
+    echo "keploy.yml not found in current directory, cannot test config path functionality"
+    exit 1
+fi
+
+# Run test with config path pointing to the new location
+echo "Running test with --config-path $CONFIG_TEST_DIR"
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 --config-path "$CONFIG_TEST_DIR" 2>&1 | tee config_path_test_logs.txt
+
+# Check if keploy.yml was created in the original location (should NOT happen)
+if [ -f "keploy.yml" ]; then
+    echo "ERROR: keploy.yml was incorrectly created in the original location!"
+    ls -la keploy.yml
+    exit 1
+else
+    echo "✓ keploy.yml was NOT created in the original location"
+fi
+
+# Check if keploy.yml still exists in the moved location
+if [ -f "$CONFIG_TEST_DIR/keploy.yml" ]; then
+    echo "✓ keploy.yml still exists in the moved location: $CONFIG_TEST_DIR/keploy.yml"
+else
+    echo "ERROR: keploy.yml is missing from the moved location: $CONFIG_TEST_DIR/keploy.yml"
+    exit 1
+fi
+
+# Check if the test with config path was successful
+if grep "ERROR" "config_path_test_logs.txt"; then
+    echo "ERROR: Test with config path failed"
+    cat "config_path_test_logs.txt"
+    exit 1
+fi
+
+echo "Config path test passed successfully!"
+
 # --- NORMALIZE WORKFLOW ---
 echo "Swapping main.py with temp_main.py for normalize test"
 # Save original main.py instead of deleting it

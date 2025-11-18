@@ -487,6 +487,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	if opts.ConfigPath != "" && opts.ConfigPath != "." {
+		args = append(args, "--config-path", opts.ConfigPath)
+	}
 
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
 	cmd := agentUtils.NewAgentCommand(keployBin, args)
