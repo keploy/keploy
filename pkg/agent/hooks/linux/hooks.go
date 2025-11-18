@@ -269,17 +269,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
-	allRules := make([]models.BypassRule, 0, len(opts.Rules)+len(opts.PassThroughPorts))
-
-	allRules = append(allRules, opts.Rules...)
-
-	for _, port := range opts.PassThroughPorts {
-		allRules = append(allRules, models.BypassRule{
-			Port: uint(port),
-		})
-	}
-
-	err = h.RegisterClient(ctx, setupOpts, allRules)
+	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
 	}
@@ -402,8 +392,11 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 			clientInfo.PassThroughPorts[i] = -1
 			continue
 		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
+		// Copy the port, casting from uint32 to int32
+		clientInfo.PassThroughPorts[i] = int32(rules[i].Port)
 	}
+	clientInfo.ClientNSPID = opts.ClientNSPID
+
 	return h.SendClientInfo(clientInfo)
 }
 
