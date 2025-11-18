@@ -589,7 +589,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			continue // Skip if parser not found
 		}
 
-		p.logger.Info("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
+		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
 		if parser.MatchType(parserCtx, initialBuf) {
 			matchedParser = parser
 			parserType = parserPair.ParserType
@@ -599,7 +599,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if !generic {
-		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
@@ -623,7 +623,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if generic {
-		logger.Info("The external dependency is not supported. Hence using generic parser")
+		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {

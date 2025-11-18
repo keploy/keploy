@@ -31,7 +31,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		for {
 			//Check if the expected header is present
 			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
-				h.Logger.Info("The expect header is present in the request buffer and writing the 100 continue response to the client")
+				h.Logger.Debug("The expect header is present in the request buffer and writing the 100 continue response to the client")
 				//Send the 100 continue response
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
@@ -42,7 +42,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- err
 					return
 				}
-				h.Logger.Info("The 100 continue response has been sent to the user application")
+				h.Logger.Debug("The 100 continue response has been sent to the user application")
 				//Read the request buffer again
 				newRequest, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
 				if err != nil {
@@ -54,7 +54,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				reqBuf = append(reqBuf, newRequest...)
 			}
 
-			h.Logger.Info("handling the chunked requests to read the complete request")
+			h.Logger.Debug("handling the chunked requests to read the complete request")
 			err := h.HandleChunkedRequests(ctx, &reqBuf, clientConn, nil)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to handle chunked requests")
@@ -62,7 +62,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			h.Logger.Info(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
+			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
 
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
@@ -72,7 +72,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			h.Logger.Info("Decoded HTTP request headers", zap.Any("headers", request.Header))
+			h.Logger.Debug("Decoded HTTP request headers", zap.Any("headers", request.Header))
 			// Set the host header explicitely because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
@@ -109,7 +109,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			h.Logger.Info("decodeHTTP debug logs for input",
+			h.Logger.Debug("decodeHTTP debug logs for input",
 				zap.Any("method", input.method),
 				zap.Any("url", input.url),
 				zap.Any("header", input.header),
@@ -173,7 +173,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- err
 					return
 				}
-				h.Logger.Info("the length of the response body: " + strconv.Itoa(len(compressedBody)))
+				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBody)))
 				respBody = string(compressedBody)
 			} else {
 				respBody = body
@@ -191,7 +191,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 			responseString = statusLine + headers + "\r\n" + "" + respBody
 
-			h.Logger.Info(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
+			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
 
 			_, err = clientConn.Write([]byte(responseString))
 			if err != nil {
@@ -205,8 +205,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 			if err != nil {
-				h.Logger.Info("failed to read the request buffer from the client", zap.Error(err))
-				h.Logger.Info("This was the last response from the server:\n" + string(responseString))
+				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
+				h.Logger.Debug("This was the last response from the server:\n" + string(responseString))
 				errCh <- nil
 				return
 			}
