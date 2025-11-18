@@ -17,6 +17,13 @@ import (
 	"go.uber.org/zap"
 )
 
+
+func runningInDocker() bool {
+	_, err := os.Stat("/.dockerenv")
+	return err == nil
+}
+
+
 func NewApp(logger *zap.Logger, cmd string, client docker.Client, opts models.SetupOptions) *App {
 	app := &App{
 		logger:          logger,
@@ -138,7 +145,9 @@ func (a *App) SetupCompose() error {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
 
-	a.logger.Info(fmt.Sprintf("Found docker compose file paths: %v", paths))
+	if !runningInDocker() {
+		a.logger.Info(fmt.Sprintf("Found docker compose file paths: %v", paths))
+	}
 
 	newPath := "docker-compose-tmp.yaml"
 
@@ -167,12 +176,17 @@ func (a *App) SetupCompose() error {
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
-	a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
+	if !runningInDocker() {
+		a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
+	}
+
 
 	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
 	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath)
 
-	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
+	if !runningInDocker() {
+		a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
+	}
 
 	return nil
 }
