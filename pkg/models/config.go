@@ -9,7 +9,25 @@ type TestSet struct {
 	Secret       map[string]interface{} `json:"secret" bson:"secret" yaml:"secret,omitempty"`
 	MockRegistry *MockRegistry          `yaml:"mockRegistry" bson:"mock_registry" json:"mockRegistry,omitempty"`
 	Metadata     map[string]interface{} `json:"metadata" bson:"metadata" yaml:"metadata"`
+	Candidates map[string][]TemplateCandidate `json:"candidates,omitempty" yaml:"Candidates,omitempty"`
 }
+// TemplateCandidate represents a single field in a request (a consumer)
+type TemplateCandidate struct {
+	ConsumerPath  string            `yaml:"ConsumerPath"`
+	ConsumerValue string            `yaml:"ConsumerValue"`
+	Options       []*ProducerOption `yaml:"Options"`
+}
+
+// ProducerOption represents one possible source (a producer)
+type ProducerOption struct {
+	ProducerKey   ProducerKey `yaml:"ProducerKey"`
+	ProducerValue string `yaml:"ProducerValue"`
+	TemplateName  string `yaml:"TemplateName"`
+	OriginalType  string `yaml:"OriginalType"`
+}
+
+// ProducerKey helper type
+type ProducerKey string
 
 // Secret interface for types that support secret configuration.
 type Secret interface {
