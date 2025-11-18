@@ -58,6 +58,23 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	return noise
 }
 
+// PrepareHeaderNoiseConfig prepares the header noise configuration for mock matching.
+// It merges global and test-set specific noise, then extracts only the header noise.
+func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
+	noiseConfig := globalNoise
+	if tsNoise, ok := testSetNoise[testSetID]; ok {
+		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
+	}
+
+	// Extract only header noise for mock matching
+	headerNoiseConfig := map[string]map[string][]string{}
+	if headerNoise, ok := noiseConfig["header"]; ok {
+		headerNoiseConfig["header"] = headerNoise
+	}
+
+	return headerNoiseConfig
+}
+
 // ReplaceBaseURL replaces the baseUrl of the old URL with the new URL's.
 func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 	parsedOldURL, err := url.Parse(oldURL)
