@@ -205,6 +205,11 @@ fi
 
 echo "Config path test passed successfully!"
 
+# move the config-test-dir to the root of the project
+echo "Moving config-test-dir to the root of the project"
+mv $CONFIG_TEST_DIR/* .
+rm -rf $CONFIG_TEST_DIR
+
 # --- NORMALIZE WORKFLOW ---
 echo "Swapping main.py with temp_main.py for normalize test"
 # Save original main.py instead of deleting it
