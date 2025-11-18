@@ -1526,29 +1526,8 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 		return nil
 	}
 
-	println("tcs filtering from: " + afterTime.String() + " to: " + beforeTime.String())
-
 	filtered = pkg.FilterTcsMocks(ctx, r.logger, filtered, afterTime, beforeTime)
 	unfiltered = pkg.FilterConfigMocks(ctx, r.logger, unfiltered, afterTime, beforeTime)
-
-	println("Filtered mocks count after time-based filtering:", len(filtered))
-	println("Unfiltered mocks count after time-based filtering:", len(unfiltered))
-
-	println("filtered mocks after time-based filterinng: ", func() string {
-		var names []string
-		for _, m := range filtered {
-			names = append(names, m.Name)
-		}
-		return strings.Join(names, ", ")
-	}())
-
-	println("unfiltered mocks after time-based filtering: ", func() string {
-		var names []string
-		for _, m := range unfiltered {
-			names = append(names, m.Name)
-		}
-		return strings.Join(names, ", ")
-	}())
 
 	filterOutDeleted := func(in []*models.Mock) []*models.Mock {
 		out := make([]*models.Mock, 0, len(in))
@@ -1573,25 +1552,6 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 
 	filtered = filterOutDeleted(filtered)
 	unfiltered = filterOutDeleted(unfiltered)
-
-	println("Filtered mocks count after deleting and time-based filtering:", len(filtered))
-	println("Unfiltered mocks count after deleting and time-based filtering:", len(unfiltered))
-
-	println("filtered mocks after deleting and time-based filterinng: ", func() string {
-		var names []string
-		for _, m := range filtered {
-			names = append(names, m.Name)
-		}
-		return strings.Join(names, ", ")
-	}())
-
-	println("unfiltered mocks after deleting and time-based filtering: ", func() string {
-		var names []string
-		for _, m := range unfiltered {
-			names = append(names, m.Name)
-		}
-		return strings.Join(names, ", ")
-	}())
 
 	err := r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
 	if err != nil {
