@@ -49,6 +49,7 @@ jobs:
         if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: ./.github/actions/setup-private-parsers
         with:
+          integration-ref: fb7544a41bc1bae878f38d152f1f9295bd0b1e2f
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
 
