@@ -27,10 +27,19 @@ runs:
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
       run: |
+        set -euo pipefail
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
+        echo "Fetching latest commit hash from v2 branch..."
+        LATEST_COMMIT=$(git ls-remote https://github.com/keploy/integrations.git refs/heads/v2 | awk '{print $1}')
+        if [ -z "$LATEST_COMMIT" ]; then
+          echo "Error: Failed to fetch latest commit hash from v2 branch"
+          exit 1
+        fi
+        echo "Latest commit hash: $LATEST_COMMIT"
+        
         echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@df6aa0c741aee8cb0574157c1166f4f55fa174c6
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@$LATEST_COMMIT
         
         echo "Creating extraparsers.go..."
         mkdir -p pkg/core/proxy
