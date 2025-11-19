@@ -38,8 +38,6 @@ func DecodeStmtExecute(
 
 	logger.Debug("Decoding COM_STMT_EXECUTE packet", zap.Int("packet_length", len(data)), zap.Uint32("client_capabilities", clientCapabilities))
 
-	PrintByteArray("COM_STMT_EXECUTE Hexadecimal", data)
-
 	// Read Status
 	if pos+1 > len(data) {
 		logger.Error("unexpected end of data while reading status", zap.Int("position", pos), zap.Int("data_length", len(data)))
@@ -300,17 +298,4 @@ func DecodeStmtExecute(
 		}
 	}
 	return packet, nil
-}
-
-func PrintByteArray(name string, b []byte) {
-	fmt.Printf("%s:\n", name)
-	var i = 1
-	for _, byte := range b {
-		fmt.Printf(" %02x", byte)
-		i++
-		if i%16 == 0 {
-			fmt.Println()
-		}
-	}
-	fmt.Println()
 }
