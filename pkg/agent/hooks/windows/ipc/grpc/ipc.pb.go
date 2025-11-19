@@ -27,6 +27,7 @@ type InterceptConf struct {
 	Default       bool                   `protobuf:"varint,1,opt,name=default,proto3" json:"default,omitempty"`
 	Actions       []string               `protobuf:"bytes,2,rep,name=actions,proto3" json:"actions,omitempty"`
 	AgentPid      uint32                 `protobuf:"varint,3,opt,name=agent_pid,json=agentPid,proto3" json:"agent_pid,omitempty"`
+	Mode          string                 `protobuf:"bytes,4,opt,name=mode,proto3" json:"mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -80,6 +81,13 @@ func (x *InterceptConf) GetAgentPid() uint32 {
 		return x.AgentPid
 	}
 	return 0
+}
+
+func (x *InterceptConf) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
 }
 
 type Message struct {
@@ -694,11 +702,12 @@ var File_ipc_proto protoreflect.FileDescriptor
 
 const file_ipc_proto_rawDesc = "" +
 	"\n" +
-	"\tipc.proto\x12\x03ipc\"`\n" +
+	"\tipc.proto\x12\x03ipc\"t\n" +
 	"\rInterceptConf\x12\x18\n" +
 	"\adefault\x18\x01 \x01(\bR\adefault\x12\x18\n" +
 	"\aactions\x18\x02 \x03(\tR\aactions\x12\x1b\n" +
-	"\tagent_pid\x18\x03 \x01(\rR\bagentPid\"\x81\x02\n" +
+	"\tagent_pid\x18\x03 \x01(\rR\bagentPid\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\tR\x04mode\"\x81\x02\n" +
 	"\aMessage\x12\"\n" +
 	"\x04flow\x18\x01 \x01(\v2\f.ipc.NewFlowH\x00R\x04flow\x12@\n" +
 	"\x0fsocketOpenEvent\x18\x02 \x01(\v2\x14.ipc.SocketOpenEventH\x00R\x0fsocketOpenEvent\x12C\n" +

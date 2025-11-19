@@ -133,6 +133,16 @@ func (h *Hooks) load(ctx context.Context, setupOpts config.Agent) error {
 		clientInfo := structs.ClientInfo{
 			ClientNSPID: setupOpts.ClientNSPID,
 		}
+
+		switch setupOpts.Mode {
+		case models.MODE_RECORD:
+			clientInfo.Mode = uint32(1)
+		case models.MODE_TEST:
+			clientInfo.Mode = uint32(2)
+		default:
+			clientInfo.Mode = uint32(0)
+		}
+
 		err := h.SendClientInfo(clientInfo)
 		if err != nil {
 			h.logger.Error("failed to send client info", zap.Error(err))
