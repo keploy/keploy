@@ -78,15 +78,25 @@ func CompareMultiValueHeaders(mockHeaderValue string, inputHeaderValue []string)
 	}
 
 	mockValues := strings.Split(mockHeaderValue, ",")
-	normalizedMockValues := make([]string, len(mockValues))
-	for i, v := range mockValues {
-		normalizedMockValues[i] = strings.TrimSpace(v)
+	normalizedMockValues := make([]string, 0, len(mockValues))
+	for _, v := range mockValues {
+		trimmed := strings.TrimSpace(v)
+		if trimmed != "" {
+			normalizedMockValues = append(normalizedMockValues, trimmed)
+		}
 	}
 
-	// Normalize input header values
-	normalizedInputValues := make([]string, len(inputHeaderValue))
-	for i, v := range inputHeaderValue {
-		normalizedInputValues[i] = strings.TrimSpace(v)
+	// Normalize input header values: each input may itself contain comma-separated values
+	normalizedInputValues := make([]string, 0, len(inputHeaderValue))
+	for _, v := range inputHeaderValue {
+		// Split each input value by comma in case it's comma-separated
+		parts := strings.Split(v, ",")
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				normalizedInputValues = append(normalizedInputValues, trimmed)
+			}
+		}
 	}
 
 	// Sort both slices for comparison
