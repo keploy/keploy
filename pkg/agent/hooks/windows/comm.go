@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strconv"
 
 	"go.keploy.io/server/v3/config"
@@ -86,8 +87,9 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 func (h *Hooks) SendClientInfo(appInfo structs.ClientInfo) error {
 
 	conf := &grpc.InterceptConf{
-		Default: true,
-		Actions: []string{strconv.Itoa(int(appInfo.ClientNSPID))},
+		Default:  true,
+		Actions:  []string{strconv.Itoa(int(appInfo.ClientNSPID))},
+		AgentPid: uint32(os.Getpid()),
 	}
 
 	data, err := proto.Marshal(conf)

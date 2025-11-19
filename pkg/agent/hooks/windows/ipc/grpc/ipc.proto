@@ -7,6 +7,7 @@ option go_package = "./";
 message InterceptConf {
   bool default = 1;
   repeated string actions = 2;
+  uint32 agent_pid = 3;
 }
 
 message Message {

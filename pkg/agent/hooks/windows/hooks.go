@@ -156,5 +156,12 @@ func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan
 }
 
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
-	return nil, nil
+	ch := make(chan models.IngressEvent, 1024)
+
+	ch <- models.IngressEvent{
+		OrigAppPort: 3000,
+		NewAppPort:  8080,
+	}
+
+	return ch, nil
 }
