@@ -15,9 +15,15 @@ import (
 const RESET = 0x00
 
 type DecodeContext struct {
-	Mode               models.Mode
-	LastOp             *LastOperation
-	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
+	Mode            models.Mode
+	LastOp          *LastOperation
+	RecordPrepStmts map[uint32]*mysql.StmtPrepareOkPacket
+
+	//Runtime map populated when COM_STMT_PREP is observed during runtime/test runs in test mode.
+	// connID -> (normalizedQuery -> StmtPrepareOkPacket)
+	// This map is used in TEST mode to resolve the recorded PREP packet for a runtime query.
+	MockPrepStmts map[string]map[string]*mysql.StmtPrepareOkPacket
+
 	ServerGreetings    *ServerGreetings
 	ClientCapabilities uint32
 	PluginName         string

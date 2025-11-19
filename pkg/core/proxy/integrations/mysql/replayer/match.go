@@ -338,16 +338,31 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// Persist prepared-statement metadata
 	if req.Header.Type == sCOM_STMT_PREP {
 		if prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket); ok && prepareOkResp != nil {
-			decodeCtx.PreparedStatements[prepareOkResp.StatementID] = prepareOkResp
-			// also maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
-			if decodeCtx.StmtIDToQuery == nil {
-				decodeCtx.StmtIDToQuery = make(map[uint32]string)
-			}
+
 			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
+				// maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
+
 				decodeCtx.StmtIDToQuery[prepareOkResp.StatementID] = sp.Query
 				logger.Debug("Recorded runtime PREP mapping",
 					zap.Uint32("stmt_id", prepareOkResp.StatementID),
 					zap.String("query", strings.TrimSpace(sp.Query)))
+
+				//also index the prepare packet keyed by connection id and normalized query
+				// get connID from ctx
+				if rawConn := ctx.Value(models.ClientConnectionIDKey); rawConn != nil {
+					if connID, ok := rawConn.(string); ok && connID != "" {
+						// ensure inner map exists
+						if _, ok := decodeCtx.MockPrepStmts[connID]; !ok {
+							decodeCtx.MockPrepStmts[connID] = make(map[string]*mysql.StmtPrepareOkPacket)
+						}
+						nq := strings.ToLower(strings.TrimSpace(sp.Query)) // normalized query key
+						decodeCtx.MockPrepStmts[connID][nq] = prepareOkResp
+						logger.Debug("Inserted runtime PREP OK Response into MockPrepStmtMap",
+							zap.String("connID", connID),
+							zap.String("normalized_query", nq),
+							zap.Uint32("stmt_id", prepareOkResp.StatementID))
+					}
+				}
 			}
 		}
 	}
