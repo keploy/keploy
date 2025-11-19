@@ -194,11 +194,6 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	return nil
 }
 
-func (a *Agent) SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	a.logger.Debug("Inside SetMocks of agent binary !!")
-	return a.Proxy.SetMocks(ctx, filtered, unFiltered)
-}
-
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	return a.Proxy.GetConsumedMocks(ctx)
 }
@@ -228,7 +223,6 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID")
 	}
-
 	storage := storageInterface.(*ClientMockStorage)
 	storage.mu.RLock()
 	originalFiltered := make([]*models.Mock, len(storage.filtered))

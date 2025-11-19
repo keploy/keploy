@@ -10,26 +10,15 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
     steps:
-      - name: Aggressive Cleanup (Workspace + Keploy procs)
-        if: always()
+      - name: Create workflow start lock
         shell: powershell
-        continue-on-error: true
         run: |
-          # Kill any lingering Keploy processes
-          $procs = 'keploy.exe','keploy-record.exe','keploy-replay.exe','keploy-record','keploy-replay'
-          foreach ($p in $procs) { cmd /c "taskkill /F /IM $p /T" 2>$null | Out-Null }
-
-          # Clean workspace artifacts that could affect the build
-          $paths = @('.\bin','.\\keploy.exe','.\\keploy','.\\keploy.yml','.\\record-bin','.\\replay-bin')
-          foreach ($p in $paths) {
-            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-          # Optional: clean Go caches to avoid stale behavior
-          go version 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) {
-            go clean -cache -modcache -testcache -fuzzcache 2>$null
-          }
+          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
+          New-Item -Path $lockDir -ItemType Directory -Force | Out-Null
+          $timestamp = (Get-Date -UFormat %s)
+          $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
+          Set-Content -Path $lockPath -Value "started-$timestamp"
+          Write-Host "Created workflow start lock: $lockPath"
 
       - name: Clean up git config (ensure HTTPS for checkout)
         if: always()
@@ -60,7 +49,7 @@ jobs:
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
           $env:CGO_ENABLED = "0"
-          go build -tags=viper_bind_struct -o keploy.exe ./main.go
+          go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy.exe ./main.go
 
       - name: Upload build artifact (Windows CLI)
         uses: actions/upload-artifact@v4
@@ -78,34 +67,96 @@ jobs:
   docker-image-build:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: true
 
       - name: Set PR image tag
-        run: echo "PR_IMAGE_TAG=ghcr.io/${GITHUB_REPOSITORY}:pr-${GITHUB_SHA::7}" >> $GITHUB_ENV
+        run: echo "PR_IMAGE_TAG=ttl.sh/keploy/keploy:${GITHUB_SHA::7}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build PR Docker image (linux/amd64) -> tar
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: false
-          tags: ${{ env.PR_IMAGE_TAG }}
-          outputs: type=docker,dest=keploy-image-pr.tar
+      - name: Build and push Docker image for PR
+        run: |
+          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
 
-      - name: Upload PR Docker image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-build
-          path: keploy-image-pr.tar
+      - name: Make unique tag for this run
+        id: tag
+        run: |
+          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_SHA}-1h"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
+          docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
+
+      - name: Push unique tag
+        run: |
+          docker push "${{ steps.tag.outputs.image_tag }}"
+    
+  pull-docker-image:
+    needs: [docker-image-build]
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: [self-hosted, Windows, X64]
+
+    steps:
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Ensure Docker is running
+      shell: powershell
+      run: |
+        $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
+        if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+
+    - name: Pull Docker image
+      shell: powershell
+      run: |
+        docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
   run_golang_docker_windows:
-    needs: [build-and-upload, docker-image-build]
+    needs: [build-and-upload, docker-image-build, pull-docker-image]
     uses: ./.github/workflows/golang_docker_windows.yml
+    with:
+      image_tag: ${{ needs.docker-image-build.outputs.image_tag }}
+
+  cleanup:
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    runs-on: [self-hosted, Windows, X64]
+    needs: [run_golang_docker_windows]
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Remove workflow start lock
+        shell: powershell
+        run: |
+          $lockDir = Join-Path $env:USERPROFILE '.github-workflow-locks'
+          $lockPath = Join-Path $lockDir "prepare-windows-workflow-$($env:GITHUB_RUN_ID).lock"
+          Remove-Item -Path $lockPath -Force -ErrorAction SilentlyContinue
+    
+      - name: Check and cleanup long-running containers (Windows helper)
+        id: count_stash
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/cleanup-windows.ps1'
+          if (Test-Path $script) {
+            & $script
+          } else {
+            Write-Error "Cleanup script not found at $script"
+            exit 1
+          }
+      
 

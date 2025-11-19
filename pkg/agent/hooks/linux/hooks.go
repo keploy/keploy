@@ -267,7 +267,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if opts.IsDocker {
 		agentInfo.IsDocker = 1
 	}
-	agentInfo.DNSPort = int32(h.dnsPort)
+	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {

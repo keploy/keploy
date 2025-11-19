@@ -523,7 +523,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough})
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -721,6 +721,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-agentReadyCh:
 		}
 
+		// Prepare header noise configuration for mock matching
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -728,6 +731,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -799,6 +803,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
+		// Prepare header noise configuration for mock matching
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -806,6 +813,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -1094,7 +1102,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					goto compareResp
 				}
 
-				pc := ProtoConfig{
+				pc := models.ProtoConfig{
 					ProtoFile:    r.config.Test.ProtoFile,
 					ProtoDir:     r.config.Test.ProtoDir,
 					ProtoInclude: r.config.Test.ProtoInclude,
@@ -1102,15 +1110,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 
 				// get the proto message descriptor
-				md, files, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+				md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
 					goto compareResp
 				}
 
 				// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-				actJSON, actOK := ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-				testJSON, testOK := ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+				actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
+				testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
 
 				if actOK && testOK {
 					respCopy.Body.DecodedData = string(actJSON)
@@ -1726,7 +1734,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 				goto compareResp
 			}
 
-			pc := ProtoConfig{
+			pc := models.ProtoConfig{
 				ProtoFile:    r.config.Test.ProtoFile,
 				ProtoDir:     r.config.Test.ProtoDir,
 				ProtoInclude: r.config.Test.ProtoInclude,
@@ -1734,15 +1742,15 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			}
 
 			// get the proto message descriptor
-			md, files, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+			md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
 				goto compareResp
 			}
 
 			// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-			actJSON, actOK := ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-			testJSON, testOK := ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+			actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
+			testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
 
 			if actOK && testOK {
 				respCopy.Body.DecodedData = string(actJSON)
@@ -1846,12 +1854,34 @@ func (r *Replayer) authenticateUser(ctx context.Context) error {
 	r.mock.setToken(token)
 	return nil
 }
-
 func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	// Authenticate the user for mock registry
 	err := r.authenticateUser(ctx)
 	if err != nil {
 		return err
+	}
+
+	if len(r.config.MockDownload.RegistryIDs) > 0 {
+		for _, registryID := range r.config.MockDownload.RegistryIDs {
+			// Use the registry ID to download mocks directly
+			r.logger.Info("Downloading mocks using registry ID",
+				zap.String("registryID", registryID),
+				zap.String("app", r.config.AppName))
+
+			err = r.mock.downloadByRegistryID(ctx, registryID, r.config.AppName)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return err
+				}
+				utils.LogError(r.logger, err, "failed to download mocks using registry ID", zap.String("registryID", registryID))
+				continue
+			}
+
+			r.logger.Info("Successfully downloaded mocks using registry ID",
+				zap.String("registryID", registryID),
+				zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
+		}
+		return nil
 	}
 
 	testSets, err := r.GetSelectedTestSets(ctx)

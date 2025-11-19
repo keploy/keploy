@@ -82,7 +82,13 @@ jobs:
         shell: bash
         run: |
           cd samples-python/flask-mongo
-          bash ./../../.github/workflows/test_workflow_scripts/python-docker-macos.sh
+          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python-docker-macos.sh
+
+      - name: Kill the running script processes
+        if: always()
+        continue-on-error: true
+        run: |
+          pkill -f "bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python-docker-macos.sh" || true
 
       - name: Clean up git config
         if: always()
