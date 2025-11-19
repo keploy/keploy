@@ -351,7 +351,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
-			} else if r.config.Test.SkipAppRestart { // if app crashes while --skip-app-restart is set, we don't RESTART the app for next test-set
+			} else if r.config.Test.SkipAppRestart {
 				switch testSetStatus {
 				case models.TestSetStatusFaultUserApp,
 					models.TestSetStatusAppHalted:
@@ -871,6 +871,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
+	headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
@@ -878,6 +880,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		Mocking:        r.config.Test.Mocking,
 		Backdate:       testCases[0].HTTPReq.Timestamp,
+		NoiseConfig:    headerNoiseConfig,
 	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")

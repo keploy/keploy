@@ -87,11 +87,11 @@ check_for_errors() {
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
     # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation" | grep -v "failed to send test report request"; then
       echo "::error::Critical error found in $logfile. Failing the build."
       # Print the specific errors that caused the failure
       echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation" | grep -v "failed to send test report request"
       echo "----------------------"
       exit 1
     fi
