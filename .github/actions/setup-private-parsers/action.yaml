@@ -39,10 +39,12 @@ runs:
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
+        echo "INTEGRATION_REF: $INTEGRATION_REF"
+        
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${{ inputs.integration-ref }}
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@$INTEGRATION_REF
         
         echo "Creating extraparsers.go..."
         mkdir -p pkg/agent/proxy
