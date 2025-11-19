@@ -9,6 +9,14 @@ inputs:
     description: 'Whether to enable Go module caching (default: true).'
     required: false
     default: true
+  integration-ref:
+    description: 'The git ref (branch, tag, or commit) of the integrations repo.'
+    required: true
+    default: 'main'
+  package-path:
+    description: 'The package path where extraparsers.go will be created (e.g., pkg/agent or pkg/core).'
+    required: false
+    default: 'pkg/agent'
 
 runs:
   using: composite
@@ -19,6 +27,12 @@ runs:
         go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
+    - name: Add GitHub to known hosts
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
@@ -26,15 +40,21 @@ runs:
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
+      env:
+        INTEGRATION_REF: ${{ inputs.integration-ref }}
+        PACKAGE_PATH: ${{ inputs.package-path }}
       run: |
+        echo "INTEGRATION_REF: $INTEGRATION_REF"
+        echo "PACKAGE_PATH: $PACKAGE_PATH"
+        
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@df6aa0c741aee8cb0574157c1166f4f55fa174c6
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@$INTEGRATION_REF
         
-        echo "Creating extraparsers.go..."
-        mkdir -p pkg/core/proxy
-        cat <<'EOF' > pkg/core/proxy/extraparsers.go
+        echo "Creating extraparsers.go in $PACKAGE_PATH/proxy..."
+        mkdir -p $PACKAGE_PATH/proxy
+        cat <<'EOF' > $PACKAGE_PATH/proxy/extraparsers.go
         //go:build linux
 
         package proxy
