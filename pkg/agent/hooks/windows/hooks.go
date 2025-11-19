@@ -104,7 +104,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
-	err := StartRedirector(clientPID, agentPID, h.proxyPort, uint32(3000), "C:\\Users\\keploy\\ayush_work\\keploy\\pkg\\agent\\hooks\\windows\\assets\\WinDivert.dll", mode)
+	err := StartRedirector(clientPID, agentPID, h.proxyPort, h.dnsPort, uint32(3000), "C:\\Users\\keploy\\ayush_work\\keploy\\pkg\\agent\\hooks\\windows\\assets\\WinDivert.dll", mode)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err

@@ -31,7 +31,7 @@ require (
 
 require (
 	github.com/containerd/log v0.1.0 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/getkin/kin-openapi v0.126.0
 	github.com/go-errors/errors v1.4.2 // indirect
@@ -114,7 +114,7 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/zricethezav/gitleaks/v8 v8.28.0
-	golang.org/x/sync v0.15.0
+	golang.org/x/sync v0.16.0
 	google.golang.org/grpc v1.71.0
 	gopkg.in/yaml.v2 v2.4.0
 	helm.sh/helm/v3 v3.18.3

@@ -18,8 +18,8 @@ typedef struct {
     uint32_t kernel_pid;
 } WinDest;
 
-unsigned int start_redirector(unsigned int client_pid, unsigned int agent_pid, unsigned int proxy_port, unsigned int incoming_proxy, unsigned int mode);
-unsigned int start_redirector_with_dll_path(unsigned int client_pid, unsigned int agent_pid, unsigned int proxy_port, unsigned int incoming_proxy, unsigned int mode, const char* dll_path);
+unsigned int start_redirector(unsigned int client_pid, unsigned int agent_pid, unsigned int proxy_port, unsigned int incoming_proxy, unsigned int dns_proxy_port, unsigned int mode);
+unsigned int start_redirector_with_dll_path(unsigned int client_pid, unsigned int agent_pid, unsigned int proxy_port, unsigned int incoming_proxy, unsigned int dns_proxy_port, unsigned int mode, const char* dll_path);
 unsigned int stop_redirector(void);
 WinDest get_destination(unsigned int src_port);
 unsigned int delete_destination(unsigned int src_port);
@@ -36,8 +36,8 @@ import (
 
 // StartRedirector initializes and starts the Windows redirector with configuration
 // Returns error if already running or startup fails
-func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy uint32, dllPath string, mode uint32) error {
-	fmt.Println("Start redirector from the go side", clientPID, agentPID, proxyPort, incomingProxy)
+func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy, dnsPort uint32, dllPath string, mode uint32) error {
+	fmt.Println("Start redirector from the go side", clientPID, agentPID, proxyPort, incomingProxy, dnsPort, mode, dllPath)
 
 	var cDllPath *C.char
 	if dllPath == "" {
@@ -48,7 +48,7 @@ func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy uint32, dllPa
 		cDllPath = cs
 	}
 
-	rc := C.start_redirector_with_dll_path(C.uint(clientPID), C.uint(agentPID), C.uint(proxyPort), C.uint(incomingProxy), C.uint(mode), cDllPath)
+	rc := C.start_redirector_with_dll_path(C.uint(clientPID), C.uint(agentPID), C.uint(proxyPort), C.uint(incomingProxy), C.uint(dnsPort), C.uint(mode), cDllPath)
 	if rc == 0 {
 		return fmt.Errorf("start_redirector failed (already running or error)")
 	}
