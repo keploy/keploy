@@ -5,27 +5,33 @@ package windows
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/utils"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
-	windows_comm "go.keploy.io/server/v3/pkg/agent/hooks/windows/ipc/windows"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+//go:embed assets/WinDivert.dll
+var windivertDLL []byte
+
+//go:embed assets/WinDivert64.sys
+var windivert64DLL []byte
+
+//go:embed assets
+var _ embed.FS
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
@@ -88,67 +94,78 @@ func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Ag
 	return nil
 }
 
-func (h *Hooks) load(ctx context.Context, setupOpts config.Agent) error {
-
-	unixSocket := windows_comm.UnixSocket{
-		Path:   `C:\my.sock`,
-		Logger: h.logger,
+func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
+	// Ensure the WinDivert artifacts are present under $HOME/.keploy.
+	if err := h.ensureWinDivertAssets(); err != nil {
+		// Log and return the error so load fails fast if writing assets fails.
+		h.logger.Error("failed to ensure windivert assets", zap.Error(err))
+		return err
 	}
 
-	connChan := make(chan net.Conn, 1)
-	errChan := make(chan error, 1)
+	clientPID := uint32(setupOpts.ClientNSPID)
+	agentPID := uint32(os.Getpid())
 
-	go func() {
-		conn, err := unixSocket.Start(ctx)
-		if err != nil {
-			h.logger.Error("Unable to start commuciation with redirector", zap.Error(err))
-			errChan <- err
-			return
+	var mode uint32
+
+	switch setupOpts.Mode {
+	case models.MODE_TEST:
+		mode = 2
+	case models.MODE_RECORD:
+		mode = 1
+	default:
+		mode = 0
+	}
+
+	err := StartRedirector(clientPID, agentPID, h.proxyPort, uint32(3000), "C:\\Users\\keploy\\ayush_work\\keploy\\pkg\\agent\\hooks\\windows\\assets\\WinDivert.dll", mode)
+	if err != nil {
+		h.logger.Error("failed to start redirector", zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+// ensureWinDivertAssets checks $HOME/.keploy and writes the embedded
+// WinDivert DLL/SYS files if they are missing.
+func (h *Hooks) ensureWinDivertAssets() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		h.logger.Warn("unable to determine user home directory, skipping writing windivert files", zap.Error(err))
+		return nil
+	}
+
+	keployDir := filepath.Join(home, ".keploy")
+	if err := os.MkdirAll(keployDir, 0o755); err != nil {
+		h.logger.Error("failed to create .keploy dir", zap.Error(err))
+		return fmt.Errorf("failed to create keploy dir: %w", err)
+	}
+
+	dllPath := filepath.Join(keployDir, "WinDivert.dll")
+	if _, err := os.Stat(dllPath); errors.Is(err, os.ErrNotExist) {
+		h.logger.Info("writing WinDivert.dll", zap.String("path", dllPath))
+		if err := os.WriteFile(dllPath, windivertDLL, 0o644); err != nil {
+			h.logger.Error("failed to write WinDivert.dll", zap.Error(err))
+			return fmt.Errorf("failed to write WinDivert.dll: %w", err)
 		}
-		connChan <- conn
-	}()
-
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return errors.New("unable to get the current filename")
-	}
-	dirname := filepath.Dir(filename)
-
-	// Join the current directory with the relative path to the executable
-	exePath := filepath.Join(dirname, "windows-redirector.exe")
-	exePath = filepath.Clean(exePath)
-
-	cmd := exec.CommandContext(ctx, exePath, `C:\my.sock`)
-
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start the executable: %w", err)
 	}
 
-	select {
-	case conn := <-connChan:
-		h.conn = conn
-		clientInfo := structs.ClientInfo{
-			ClientNSPID: setupOpts.ClientNSPID,
+	sysPath := filepath.Join(keployDir, "WinDivert64.sys")
+	if _, err := os.Stat(sysPath); errors.Is(err, os.ErrNotExist) {
+		h.logger.Info("writing WinDivert64.sys", zap.String("path", sysPath))
+		if err := os.WriteFile(sysPath, windivert64DLL, 0o644); err != nil {
+			h.logger.Error("failed to write WinDivert64.sys", zap.Error(err))
+			return fmt.Errorf("failed to write WinDivert64.sys: %w", err)
 		}
-		err := h.SendClientInfo(clientInfo)
-		if err != nil {
-			h.logger.Error("failed to send client info", zap.Error(err))
-			return fmt.Errorf("failed to load hooks")
-		}
-	case <-errChan:
-		return fmt.Errorf("failed to load hooks")
 	}
 
-	go func() {
-		h.GetEvents(ctx)
-	}()
 	return nil
 }
 
 func (h *Hooks) unLoad(_ context.Context) {
+	err := StopRedirector()
+	if err != nil {
+		h.logger.Error("failed to stop redirector", zap.Error(err))
+	}
 }
 
 func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
@@ -156,5 +173,12 @@ func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan
 }
 
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
-	return nil, nil
+	ch := make(chan models.IngressEvent, 1024)
+
+	ch <- models.IngressEvent{
+		OrigAppPort: 3000,
+		NewAppPort:  0000,
+	}
+
+	return ch, nil
 }

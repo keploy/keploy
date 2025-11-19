@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"runtime"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -75,12 +74,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 	var tc <-chan *models.TestCase
 
-	// Using the old way of capturing the test cases on windows, have to explore if intercepting port binding can be done for windows as well
-	if runtime.GOOS == "windows" {
-		tc, err = a.svc.GetIncoming(ctx, uint64(0), incomingReq.IncomingOptions)
-	} else {
-		tc, err = a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
-	}
+	tc, err = a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
 
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"

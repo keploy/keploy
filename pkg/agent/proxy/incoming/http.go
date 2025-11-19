@@ -17,11 +17,14 @@ import (
 	"go.uber.org/zap"
 )
 
-func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions) {
-	upConn, err := net.DialTimeout("tcp4", newAppAddr, 3*time.Second)
+func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase) {
+	// Get the actual destination address (handles Windows vs others platform logic)
+	finalAppAddr := pm.getActualDestination(clientConn, newAppAddr, logger)
+	
+	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	clientReader := bufio.NewReader(clientConn)
 	if err != nil {
-		logger.Warn("Failed to dial upstream new app port", zap.String("New_App_Port", newAppAddr), zap.Error(err))
+		logger.Warn("Failed to dial upstream app port", zap.String("Final_App_Port", finalAppAddr), zap.Error(err))
 		return
 	}
 	defer upConn.Close()
@@ -83,7 +86,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		go func() {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.Capture(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, opts)
+			hooksUtils.Capture(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts)
 		}()
 	}
 }
