@@ -57,6 +57,7 @@ wait_for_http_port() {
 detect_api_prefix() {
   # returns either /petclinic/api or /api (echo to stdout), otherwise empty
   local base="http://localhost:9966"
+  echo "using both base urls"
   local candidates=( "/petclinic/api" "/api" )
   for p in "${candidates[@]}"; do
     local code

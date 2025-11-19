@@ -17,6 +17,9 @@ jobs:
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
+          - name: skip-app-restart
+            path: echo-mysql
+            script_dir: skip_app_restart
         config:
           - job: record_latest_replay_build
             record_src: latest
