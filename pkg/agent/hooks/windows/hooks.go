@@ -8,7 +8,6 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,7 +18,6 @@ import (
 	"go.keploy.io/server/v3/utils"
 
 	"go.keploy.io/server/v3/pkg/agent"
-	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -35,16 +33,13 @@ var _ embed.FS
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
-		logger:         logger,
-		sess:           agent.NewSessions(),
-		m:              sync.Mutex{},
-		proxyIP4:       "127.0.0.1",
-		proxyIP6:       [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort:      cfg.ProxyPort,
-		dnsPort:        cfg.DNSPort,
-		openEventChan:  make(chan conn.SocketOpenEvent, 1024),
-		closeEventChan: make(chan conn.SocketCloseEvent, 1024),
-		dataEventChan:  make(chan conn.SocketDataEvent, 1024),
+		logger:    logger,
+		sess:      agent.NewSessions(),
+		m:         sync.Mutex{},
+		proxyIP4:  "127.0.0.1",
+		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
+		proxyPort: cfg.ProxyPort,
+		dnsPort:   cfg.DNSPort,
 	}
 }
 
@@ -56,13 +51,6 @@ type Hooks struct {
 	proxyPort uint32
 	dnsPort   uint32
 	m         sync.Mutex
-	// windows destination info map
-	dstMap sync.Map
-	// windows incoming traffic streams
-	openEventChan  chan conn.SocketOpenEvent
-	closeEventChan chan conn.SocketCloseEvent
-	dataEventChan  chan conn.SocketDataEvent
-	conn           net.Conn
 }
 
 func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Agent) error {
@@ -169,7 +157,7 @@ func (h *Hooks) unLoad(_ context.Context) {
 }
 
 func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	return conn.ListenSocket(ctx, h.logger, h.openEventChan, h.dataEventChan, h.closeEventChan, opts)
+	return nil, nil
 }
 
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
