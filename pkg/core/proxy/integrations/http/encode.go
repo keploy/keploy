@@ -3,11 +3,14 @@
 package http
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -25,8 +28,24 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
 
+	// Check if this request should be passed through BEFORE processing
+	// This prevents issues with streaming/long-lived connections
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
+	if err != nil {
+		utils.LogError(h.Logger, err, "failed to parse the http request message for passthrough check")
+		// Continue with normal flow even if parsing fails
+	} else {
+		req.Header.Set("Host", req.Host)
+		h.Logger.Debug("Checking bypass rules", zap.String("host", req.Host), zap.Uint("destPort", destPort), zap.String("url", req.URL.String()))
+		if utils.IsPassThrough(h.Logger, req, destPort, opts) {
+			h.Logger.Info("The request is a passThrough request - bypassing completely", zap.Any("metadata", utils.GetReqMeta(req)))
+			return h.relayPassThroughTraffic(ctx, reqBuf, clientConn, destConn)
+		}
+		h.Logger.Debug("Request does not match bypass rules, proceeding with normal recording")
+	}
+
 	//Writing the request to the server.
-	_, err := destConn.Write(reqBuf)
+	_, err = destConn.Write(reqBuf)
 	if err != nil {
 		h.Logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
@@ -258,5 +277,71 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			return nil
 		}
 		return err
+	}
+}
+
+// relayPassThroughTraffic relays traffic bidirectionally between client and destination
+// without any processing, recording, or buffering. This is used for bypass rules.
+func (h *HTTP) relayPassThroughTraffic(ctx context.Context, initialReq []byte, clientConn, destConn net.Conn) error {
+	// Write the initial request to destination
+	_, err := destConn.Write(initialReq)
+	if err != nil {
+		utils.LogError(h.Logger, err, "failed to write initial request to destination during passthrough")
+		return err
+	}
+
+	clientBuffChan := make(chan []byte, 1)
+	destBuffChan := make(chan []byte, 1)
+	errChan := make(chan error, 2)
+
+	// Read from client in background
+	err = pUtil.ReadFromPeer(ctx, h.Logger, clientConn, clientBuffChan, errChan, pUtil.Client)
+	if err != nil {
+		return fmt.Errorf("error setting up client reader for passthrough: %v", err)
+	}
+
+	// Read from destination in background
+	err = pUtil.ReadFromPeer(ctx, h.Logger, destConn, destBuffChan, errChan, pUtil.Destination)
+	if err != nil {
+		return fmt.Errorf("error setting up destination reader for passthrough: %v", err)
+	}
+
+	// Relay traffic bidirectionally
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case buffer := <-clientBuffChan:
+			// Write request from client to destination
+			_, err := destConn.Write(buffer)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to write request to destination during passthrough")
+				return fmt.Errorf("error writing to destination during passthrough")
+			}
+		case buffer := <-destBuffChan:
+			// Write response from destination to client
+			_, err := clientConn.Write(buffer)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to write response to client during passthrough")
+				return fmt.Errorf("error writing to client during passthrough")
+			}
+		case err := <-errChan:
+			if err == io.EOF {
+				h.Logger.Debug("passthrough connection closed normally")
+				// When destination closes, close the client connection read side
+				// to ensure client gets clean EOF instead of "unexpected EOF"
+				// Use CloseRead if available (TCP), otherwise just close
+				if tcpConn, ok := clientConn.(*net.TCPConn); ok {
+					if err := tcpConn.CloseRead(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+						h.Logger.Debug("error closing client connection read side after passthrough EOF", zap.Error(err))
+					}
+				}
+				return nil
+			}
+			if err != nil {
+				utils.LogError(h.Logger, err, "error during passthrough relay")
+			}
+			return err
+		}
 	}
 }

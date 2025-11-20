@@ -135,9 +135,33 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				if !utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
-					utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", utils.GetReqMeta(request)))
+				// Check if this request matches bypass rules
+				h.Logger.Debug("No mock found, checking bypass rules", zap.String("host", request.Host), zap.Uint("destPort", dstCfg.Port), zap.String("url", request.URL.String()))
+				isPassThrough := utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts)
+
+				// If it matches bypass rules, pass it through to the actual server
+				if isPassThrough {
+					h.Logger.Info("Request matches bypass rules - passing through to destination", zap.Any("metadata", utils.GetReqMeta(request)), zap.String("destination", dstCfg.Addr))
+					_, err = pUtil.PassThrough(ctx, h.Logger, clientConn, dstCfg, [][]byte{reqBuf})
+					if err != nil {
+						// If server is not available, this is expected for bypass rules
+						// Log as warning instead of error since bypass rules require real server
+						h.Logger.Warn("Failed to passThrough bypass rule request - server may not be running",
+							zap.Any("metadata", utils.GetReqMeta(request)),
+							zap.String("destination", dstCfg.Addr),
+							zap.Error(err))
+						errCh <- err
+						return
+					}
+					errCh <- nil
+					return
 				}
+				h.Logger.Debug("Request does not match bypass rules")
+
+				// Not a bypass rule - log error
+				utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", utils.GetReqMeta(request)))
+
+				// Fall back to actual server if configured
 				if opts.FallBackOnMiss {
 					_, err = pUtil.PassThrough(ctx, h.Logger, clientConn, dstCfg, [][]byte{reqBuf})
 					if err != nil {
