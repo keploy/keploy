@@ -67,6 +67,7 @@ func DecodeStmtExecute(
 	}
 
 	if mode == models.MODE_RECORD {
+		logger.Debug("Decoding in RECORD mode", zap.Uint32("statement_id", packet.StatementID), zap.String("conn_id", connID))
 		// RECORD mode - use stmtID -> StmtPrepareOkPacket map
 		if recordPrepStmtMap != nil {
 			if sp, ok := recordPrepStmtMap[packet.StatementID]; ok && sp != nil {
@@ -74,13 +75,14 @@ func DecodeStmtExecute(
 			}
 		}
 	} else {
+		logger.Debug("Decoding in TEST mode", zap.Uint32("runtime statement_id", packet.StatementID), zap.String("conn_id", connID))
 		// TEST mode - do not rely on the raw stmtID equality.
 		// Use runtimeStmtIDToQuery to obtain the runtime query for this stmt id,
 		// normalize it and lookup MockPrepStmtMap[connID][normalizedQuery].
 		var runtimeQuery string
 		if runtimeStmtIDToQuery != nil {
 			if q, ok := runtimeStmtIDToQuery[packet.StatementID]; ok {
-				runtimeQuery = strings.TrimSpace(q) //New
+				runtimeQuery = strings.TrimSpace(q)
 			}
 		}
 		if runtimeQuery != "" && connID != "" && MockPrepStmtMap != nil {

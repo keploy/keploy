@@ -77,6 +77,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 			RecordPrepStmts:    make(map[uint32]*mysql.StmtPrepareOkPacket),
 			MockPrepStmts:      make(map[string]map[string]*mysql.StmtPrepareOkPacket),
 			StmtIDToQuery:      make(map[uint32]string),
+			NextStmtID:         1,                         // Start statement ID counter from 1
 			PluginName:         string(mysql.CachingSha2), // usually a default plugin in newer versions of MySQL
 			PreferRecordedCaps: true,
 		}

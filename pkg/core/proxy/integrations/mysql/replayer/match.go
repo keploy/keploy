@@ -340,11 +340,27 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		if prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket); ok && prepareOkResp != nil {
 
 			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
-				// maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
+				// Store original statement ID for logging
+				originalStmtID := prepareOkResp.StatementID
 
-				decodeCtx.StmtIDToQuery[prepareOkResp.StatementID] = sp.Query
-				logger.Debug("Recorded runtime PREP mapping",
-					zap.Uint32("stmt_id", prepareOkResp.StatementID),
+				// Generate a new unique statement ID for this connection.
+				// During record mode, different connections can produce identical statement IDs
+				// for the same or different queries. However, during test mode, if both queries
+				// execute on the same connection and we reuse those IDs, they would collide.
+				// A single connection cannot have two different queries with the same statement ID.
+				// To avoid this, we assign a new incremental and unique statement ID for each query.
+
+				newStmtID := decodeCtx.NextStmtID
+				decodeCtx.NextStmtID++
+
+				// Update the response with the new statement ID
+				prepareOkResp.StatementID = newStmtID
+
+				// maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
+				decodeCtx.StmtIDToQuery[newStmtID] = sp.Query
+				logger.Debug("Recorded runtime PREP mapping with new statement ID",
+					zap.Uint32("original_stmt_id from mock ", originalStmtID),
+					zap.Uint32("new_stmt_id", newStmtID),
 					zap.String("query", strings.TrimSpace(sp.Query)))
 
 				//also index the prepare packet keyed by connection id and normalized query
@@ -356,11 +372,14 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 							decodeCtx.MockPrepStmts[connID] = make(map[string]*mysql.StmtPrepareOkPacket)
 						}
 						nq := strings.ToLower(strings.TrimSpace(sp.Query)) // normalized query key
+
+						// Store the already-modified prepare response (which has the new statement ID)
 						decodeCtx.MockPrepStmts[connID][nq] = prepareOkResp
+
 						logger.Debug("Inserted runtime PREP OK Response into MockPrepStmtMap",
 							zap.String("connID", connID),
 							zap.String("normalized_query", nq),
-							zap.Uint32("stmt_id", prepareOkResp.StatementID))
+							zap.Uint32("new_stmt_id", newStmtID))
 					}
 				}
 			}
