@@ -95,15 +95,17 @@ func DecodeStmtExecute(
 		}
 	}
 
-	if stmtPrepOk == nil {
-		var runtimeQueryForErr string
-		if runtimeStmtIDToQuery != nil {
-			runtimeQueryForErr = runtimeStmtIDToQuery[packet.StatementID]
-		}
-		return nil, fmt.Errorf("prepared statement metadata not found for statement id %d (mode=%v, connID=%q). runtimeQuery=%q", packet.StatementID, mode, connID, runtimeQueryForErr) //New
+	var runtimeQuery string
+	if runtimeStmtIDToQuery != nil {
+		runtimeQuery = runtimeStmtIDToQuery[packet.StatementID]
 	}
 
-	logger.Debug("The stmtPrepOk packet", zap.Any("stmtPrepOk", stmtPrepOk))
+	if stmtPrepOk == nil {
+
+		return nil, fmt.Errorf("prepared statement metadata not found for statement id %d (mode=%v, connID=%q). runtimeQuery=%q", packet.StatementID, mode, connID, runtimeQuery) //New
+	}
+
+	logger.Debug("The stmtPrepOk packet", zap.Any("stmtPrepOk", stmtPrepOk), zap.String("runtimeQuery", runtimeQuery))
 
 	// Read Flags
 	if pos+1 > len(data) {
