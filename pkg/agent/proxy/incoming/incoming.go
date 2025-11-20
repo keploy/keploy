@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
 
 	"go.keploy.io/server/v3/pkg/agent"
@@ -19,23 +20,23 @@ import (
 )
 
 type proxyStop func() error
-
 type IngressProxyManager struct {
-	mu     sync.Mutex
-	active map[uint16]proxyStop
-	logger *zap.Logger
-	// deps         models.ProxyDependencies // Use the new dependency struct
+	mu           sync.Mutex
+	active       map[uint16]proxyStop
+	logger       *zap.Logger
 	hooks        agent.Hooks
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
+	synchronous  bool
 }
 
-func New(logger *zap.Logger, h agent.Hooks) *IngressProxyManager {
+func New(logger *zap.Logger, h agent.Hooks, opts *config.Config) *IngressProxyManager {
 	pm := &IngressProxyManager{
-		logger: logger,
-		hooks:  h,
-		tcChan: make(chan *models.TestCase, 100),
-		active: make(map[uint16]proxyStop),
+		logger:      logger,
+		hooks:       h,
+		tcChan:      make(chan *models.TestCase, 100),
+		active:      make(map[uint16]proxyStop),
+		synchronous: opts.Agent.Synchronous,
 	}
 	return pm
 }
@@ -79,7 +80,6 @@ func (pm *IngressProxyManager) StopAll() {
 }
 
 func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
-
 	eventChan, err := pm.hooks.WatchBindEvents(ctx)
 	if err != nil {
 		pm.logger.Error("Failed to start watching for ingress events", zap.Error(err))
@@ -121,6 +121,7 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		var processMu sync.Mutex
 		for {
 			select {
 			case <-ctx.Done():
@@ -140,7 +141,15 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-			go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
+			if pm.synchronous {
+				go func(cc net.Conn) {
+					processMu.Lock()
+					defer processMu.Unlock()
+					handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts)
+				}(clientConn)
+			} else {
+				go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
+			}
 		}
 	}()
 	return func() error {

@@ -247,6 +247,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("synchronous", c.cfg.Record.Synchronous, "Snychrous recording of testcases")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -304,6 +305,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
+		cmd.Flags().Bool("synchronous", c.cfg.Record.Synchronous, "Snychrous recording of testcases")
 
 	default:
 		return errors.New("unknown command name")
@@ -953,6 +955,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
+			synchronous, err := cmd.Flags().GetBool("synchronous")
+			if err != nil {
+				errMsg := "failed to get the synchronous flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.Synchronous = synchronous
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
@@ -1220,6 +1230,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.DnsPort = dnsPort
+
+		synchronous, err := cmd.Flags().GetBool("synchronous")
+		if err != nil {
+			errMsg := "failed to get the synchronous flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.Synchronous = synchronous
 	}
 
 	return nil

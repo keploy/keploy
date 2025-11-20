@@ -71,6 +71,7 @@ type SetupOptions struct {
 	Container       string
 	KeployContainer string
 	DockerDelay     uint64
+	Synchronous     bool
 	// Cmd               string
 	AgentURI          string
 	IsDocker          bool

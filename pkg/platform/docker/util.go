@@ -124,6 +124,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
+		if opts.Synchronous {
+			alias += " --synchronous"
+		}
 
 		return alias, nil
 	case "windows":
@@ -161,6 +164,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
+			if opts.Synchronous {
+				alias += " --synchronous"
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -181,6 +187,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
+		}
+		if opts.Synchronous {
+			alias += " --synchronous"
 		}
 		return alias, nil
 	case "darwin":
@@ -217,6 +226,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
+			if opts.Synchronous {
+				alias += " --synchronous"
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -239,19 +251,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
+		if opts.Synchronous {
+			alias += " --synchronous"
+		}
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
-}
-
-func convertPathToUnixStyle(path string) string {
-	// Replace backslashes with forward slashes
-	unixPath := strings.ReplaceAll(path, "\\", "/")
-	// Remove 'C:'
-	if len(unixPath) > 1 && unixPath[1] == ':' {
-		unixPath = unixPath[2:]
-	}
-	return unixPath
 }
 
 func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string, error) {
