@@ -105,7 +105,7 @@ func DecodeStmtExecute(
 		return nil, fmt.Errorf("prepared statement metadata not found for statement id %d (mode=%v, connID=%q). runtimeQuery=%q", packet.StatementID, mode, connID, runtimeQuery) //New
 	}
 
-	logger.Debug("The stmtPrepOk packet", zap.Any("stmtPrepOk", stmtPrepOk), zap.String("runtimeQuery", runtimeQuery))
+	logger.Debug("The stmtPrepOk packet", zap.String("runtimeQuery", runtimeQuery), zap.Any("stmtPrepOk", stmtPrepOk))
 
 	// Read Flags
 	if pos+1 > len(data) {
