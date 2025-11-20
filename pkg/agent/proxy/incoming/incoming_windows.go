@@ -18,16 +18,16 @@ func (pm *IngressProxyManager) getActualDestination(clientConn net.Conn, fallbac
 	clientAddr := clientConn.RemoteAddr().String()
 	_, srcPortStr, err := net.SplitHostPort(clientAddr)
 	if err != nil {
-		logger.Debug("Failed to parse client address, using fallback", 
-			zap.String("clientAddr", clientAddr), 
+		logger.Debug("Failed to parse client address, using fallback",
+			zap.String("clientAddr", clientAddr),
 			zap.String("fallback", fallbackAddr))
 		return fallbackAddr
 	}
 
 	srcPort64, err := strconv.ParseUint(srcPortStr, 10, 16)
 	if err != nil {
-		logger.Debug("Failed to parse source port, using fallback", 
-			zap.String("srcPort", srcPortStr), 
+		logger.Debug("Failed to parse source port, using fallback",
+			zap.String("srcPort", srcPortStr),
 			zap.String("fallback", fallbackAddr))
 		return fallbackAddr
 	}
@@ -44,26 +44,26 @@ func (pm *IngressProxyManager) getActualDestination(clientConn net.Conn, fallbac
 		} else {
 			destIP = util.ToIPv6AddressStr(networkAddr.IPv6Addr)
 		}
-		
+
 		finalDestAddr := fmt.Sprintf("%s:%d", destIP, networkAddr.Port)
-		
-		logger.Debug("Found Windows destination for gRPC", 
-			zap.String("original", fallbackAddr), 
+
+		logger.Debug("Found Windows destination for gRPC",
+			zap.String("original", fallbackAddr),
 			zap.String("actual", finalDestAddr),
 			zap.Uint16("srcPort", srcPort))
-		
+
 		// Delete the entry from hooks to clean up
 		if deleteErr := pm.hooks.Delete(ctx, srcPort); deleteErr != nil {
-			logger.Warn("Failed to delete destination entry for gRPC", 
-				zap.Uint16("srcPort", srcPort), 
+			logger.Warn("Failed to delete destination entry for gRPC",
+				zap.Uint16("srcPort", srcPort),
 				zap.Error(deleteErr))
 		}
-		
+
 		return finalDestAddr
 	}
 
-	logger.Debug("No Windows destination found for gRPC, using fallback", 
-		zap.Uint16("srcPort", srcPort), 
+	logger.Debug("No Windows destination found for gRPC, using fallback",
+		zap.Uint16("srcPort", srcPort),
 		zap.String("fallback", fallbackAddr),
 		zap.Error(err))
 	return fallbackAddr

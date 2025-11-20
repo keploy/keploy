@@ -20,7 +20,7 @@ import (
 func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase) {
 	// Get the actual destination address (handles Windows vs others platform logic)
 	finalAppAddr := pm.getActualDestination(clientConn, newAppAddr, logger)
-	
+
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	clientReader := bufio.NewReader(clientConn)
 	if err != nil {
