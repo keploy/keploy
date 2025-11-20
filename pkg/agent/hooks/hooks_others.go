@@ -1,4 +1,4 @@
-//go:build !windows && !linux
+//go:build (!windows && !linux) || (windows && arm64)
 
 package hooks
 

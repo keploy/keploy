@@ -867,8 +867,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
-		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" && runtime.GOOS != "windows" { // need to check this one
-			return errors.New("non docker command not supported for os : " + runtime.GOOS)
+		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" && (runtime.GOOS != "windows" && runtime.GOARCH != "amd64") { // need to check this one
+			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
 
 		// empty the command if base path is provided, because no need of command even if provided
