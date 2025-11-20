@@ -20,7 +20,106 @@ import (
 	"go.uber.org/zap"
 )
 
-func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
+type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions)
+
+var CaptureHook CaptureFunc = OssCapture
+
+func OssCapture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
+	var reqBody []byte
+	fmt.Println("calling default function")
+	if req.Body != nil { // Read
+		var err error
+		reqBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			logger.Warn("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
+		}
+
+		if req.Header.Get("Content-Encoding") != "" {
+			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
+			if err != nil {
+				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return
+			}
+		}
+	}
+
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close the http response body")
+		}
+	}()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the http response body")
+		return
+	}
+
+	if IsFiltered(logger, req, opts) {
+		logger.Debug("The request is a filtered request")
+		return
+	}
+	var formData []models.FormData
+	if contentType := req.Header.Get("Content-Type"); strings.HasPrefix(contentType, "multipart/form-data") {
+		parts := strings.Split(contentType, ";")
+		if len(parts) > 1 {
+			req.Header.Set("Content-Type", strings.TrimSpace(parts[0]))
+		}
+		formData = ExtractFormData(logger, reqBody, contentType)
+		reqBody = []byte{}
+	} else if contentType := req.Header.Get("Content-Type"); contentType == "application/x-www-form-urlencoded" {
+		decodedBody, err := url.QueryUnescape(string(reqBody))
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode the url-encoded request body")
+			return
+		}
+		reqBody = []byte(decodedBody)
+	}
+
+	if resp.Header.Get("Content-Encoding") != "" {
+		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decompress the response body")
+			return
+		}
+	}
+
+	testCase := &models.TestCase{
+		Version: models.GetVersion(),
+		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
+		Kind:    models.HTTP,
+		Created: time.Now().Unix(),
+		HTTPReq: models.HTTPReq{
+			Method:     models.Method(req.Method),
+			ProtoMajor: req.ProtoMajor,
+			ProtoMinor: req.ProtoMinor,
+			URL:        fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
+			Form:       formData,
+			Header:     pkg.ToYamlHTTPHeader(req.Header),
+			Body:       string(reqBody),
+			URLParams:  pkg.URLParams(req),
+			Timestamp:  reqTimeTest,
+		},
+		HTTPResp: models.HTTPResp{
+			StatusCode:    resp.StatusCode,
+			Header:        pkg.ToYamlHTTPHeader(resp.Header),
+			Body:          string(respBody),
+			Timestamp:     resTimeTest,
+			StatusMessage: http.StatusText(resp.StatusCode),
+		},
+		Noise: map[string][]string{},
+		// Mocks: mocks,
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case t <- testCase:
+		// Successfully sent test case
+	}
+}
+func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	dstPort := 0
 	var err error
 	if p := req.URL.Port(); p != "" {
@@ -122,103 +221,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	return passThrough
 }
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
-
-	var reqBody []byte
-	if req.Body != nil { // Read
-		var err error
-		reqBody, err = io.ReadAll(req.Body)
-		if err != nil {
-			logger.Warn("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
-		}
-
-		if req.Header.Get("Content-Encoding") != "" {
-			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
-			if err != nil {
-				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
-				return
-			}
-		}
-	}
-
-	defer func() {
-		err := resp.Body.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the http response body")
-		}
-	}()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the http response body")
-		return
-	}
-
-	if isFiltered(logger, req, opts) {
-		logger.Debug("The request is a filtered request")
-		return
-	}
-	var formData []models.FormData
-	if contentType := req.Header.Get("Content-Type"); strings.HasPrefix(contentType, "multipart/form-data") {
-		parts := strings.Split(contentType, ";")
-		if len(parts) > 1 {
-			req.Header.Set("Content-Type", strings.TrimSpace(parts[0]))
-		}
-		formData = extractFormData(logger, reqBody, contentType)
-		reqBody = []byte{}
-	} else if contentType := req.Header.Get("Content-Type"); contentType == "application/x-www-form-urlencoded" {
-		decodedBody, err := url.QueryUnescape(string(reqBody))
-		if err != nil {
-			utils.LogError(logger, err, "failed to decode the url-encoded request body")
-			return
-		}
-		reqBody = []byte(decodedBody)
-	}
-
-	if resp.Header.Get("Content-Encoding") != "" {
-		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody)
-		if err != nil {
-			utils.LogError(logger, err, "failed to decompress the response body")
-			return
-		}
-	}
-
-	testCase := &models.TestCase{
-		Version: models.GetVersion(),
-		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
-		Kind:    models.HTTP,
-		Created: time.Now().Unix(),
-		HTTPReq: models.HTTPReq{
-			Method:     models.Method(req.Method),
-			ProtoMajor: req.ProtoMajor,
-			ProtoMinor: req.ProtoMinor,
-			URL:        fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
-			Form:       formData,
-			Header:     pkg.ToYamlHTTPHeader(req.Header),
-			Body:       string(reqBody),
-			URLParams:  pkg.URLParams(req),
-			Timestamp:  reqTimeTest,
-		},
-		HTTPResp: models.HTTPResp{
-			StatusCode:    resp.StatusCode,
-			Header:        pkg.ToYamlHTTPHeader(resp.Header),
-			Body:          string(respBody),
-			Timestamp:     resTimeTest,
-			StatusMessage: http.StatusText(resp.StatusCode),
-		},
-		Noise: map[string][]string{},
-		// Mocks: mocks,
-	}
-
-	select {
-	case <-ctx.Done():
-		return
-	case t <- testCase:
-		// Successfully sent test case
-	}
-}
-
-func extractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
+func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
 	boundary := ""
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		parts := strings.Split(contentType, "boundary=")

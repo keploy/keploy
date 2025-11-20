@@ -84,6 +84,7 @@ type Record struct {
 	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	Synchronous       bool            `json:"synchronous" yaml:"synchronous" mapstructure:"synchronous"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 
