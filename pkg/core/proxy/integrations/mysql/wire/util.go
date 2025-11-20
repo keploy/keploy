@@ -15,9 +15,15 @@ import (
 const RESET = 0x00
 
 type DecodeContext struct {
-	Mode               models.Mode
-	LastOp             *LastOperation
-	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
+	Mode            models.Mode
+	LastOp          *LastOperation
+	RecordPrepStmts map[uint32]*mysql.StmtPrepareOkPacket
+
+	//Runtime map populated when COM_STMT_PREP is observed during runtime/test runs in test mode.
+	// connID -> (normalizedQuery -> StmtPrepareOkPacket)
+	// This map is used in TEST mode to resolve the recorded PREP packet for a runtime query.
+	MockPrepStmts map[string]map[string]*mysql.StmtPrepareOkPacket
+
 	ServerGreetings    *ServerGreetings
 	ClientCapabilities uint32
 	PluginName         string
@@ -30,6 +36,9 @@ type DecodeContext struct {
 
 	//runtime stmt-id → query mapping set when COM_STMT_PREP matches
 	StmtIDToQuery map[uint32]string
+
+	// Statement ID counter for generating unique statement IDs during replay
+	NextStmtID uint32
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000

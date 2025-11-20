@@ -219,7 +219,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			// Do not change the last operation if the packet is a prepared statement, it will be changed when the prepared statement is fully received
 			setPacketInfo(ctx, parsedPacket, pkt, "COM_STMT_PREPARE_OK", clientConn, lastOp, decodeCtx)
 			// Store the prepared statement to use it later
-			decodeCtx.PreparedStatements[pkt.StatementID] = pkt
+			decodeCtx.RecordPrepStmts[pkt.StatementID] = pkt
 			logger.Debug("Prepared statement stored", zap.Any("statementId", pkt.StatementID), zap.Any("prepared statement", pkt))
 			logger.Debug("COM_STMT_PREPARE_OK decoded", zap.Any("parsed packet", parsedPacket))
 
@@ -385,11 +385,15 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	case payloadType == mysql.COM_STMT_EXECUTE:
 		logger.Debug("COM_STMT_EXECUTE packet", zap.Any("Type", payloadType))
-		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities)
+		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload,
+			decodeCtx.Mode,
+			decodeCtx.RecordPrepStmts, // Record mode map: stmtID -> packet
+			decodeCtx.MockPrepStmts,   // Test Mode map: connID -> (normalizedQuery -> packet)
+			decodeCtx.StmtIDToQuery,   // runtime stmtID -> query map
+			decodeCtx.ClientCapabilities)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_EXECUTE packet: %w", err)
 		}
-
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE), clientConn, mysql.COM_STMT_EXECUTE, decodeCtx)
 		logger.Debug("COM_STMT_EXECUTE decoded", zap.Any("parsed packet", parsedPacket))
 

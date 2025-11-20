@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -18,6 +19,48 @@ import (
 	"go.uber.org/zap"
 )
 
+func cleanupPreparedStatementOnClose(decodeCtx *wire.DecodeContext, runtimeConnID string, closeStmtID uint32, logger *zap.Logger) {
+	// defensive nil checks
+	if decodeCtx == nil {
+		return
+	}
+
+	// remove from record-mode map if present
+	delete(decodeCtx.RecordPrepStmts, closeStmtID)
+
+	if decodeCtx.StmtIDToQuery == nil {
+		logger.Debug("StmtIDToQuery map is nil; skipping COM_STMT_CLOSE cleanup", zap.Uint32("stmt_id", closeStmtID))
+		return
+	}
+
+	// If we have a runtime query for this stmt id, use it to remove the conn-scoped entry.
+	if runtimeQuery, found := decodeCtx.StmtIDToQuery[closeStmtID]; found && runtimeQuery != "" {
+		nq := strings.ToLower(strings.TrimSpace(runtimeQuery))
+
+		if runtimeConnID != "" && decodeCtx.MockPrepStmts != nil {
+			if inner, has := decodeCtx.MockPrepStmts[runtimeConnID]; has && inner != nil {
+				if _, present := inner[nq]; present {
+					delete(inner, nq)
+					logger.Debug("Deleted runtime PREP OK Response entry for query on COM_STMT_CLOSE",
+						zap.String("connID", runtimeConnID),
+						zap.String("normalized_query", nq),
+						zap.Uint32("stmt_id", closeStmtID))
+				}
+
+				if len(inner) == 0 {
+					delete(decodeCtx.MockPrepStmts, runtimeConnID)
+					logger.Debug("Runtime PREP OK Response bucket empty; removed bucket", zap.String("connID", runtimeConnID))
+				}
+			}
+		}
+	}
+
+	// remove runtime stmtID->query mapping
+	delete(decodeCtx.StmtIDToQuery, closeStmtID)
+
+	logger.Debug("Cleaned up prepared statement", zap.Uint32("StatementID", closeStmtID))
+}
+
 func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 
 	// Log initial mock state at the start of command phase
@@ -26,6 +69,24 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 		zap.Int("total_mysql_mocks", total),
 		zap.Int("config_mocks", cfg),
 		zap.Int("data_mocks_available", data))
+
+	// capture connID for this connection (used for runtime per-connection PREP map lookups)
+	var runtimeConnID string
+	if raw := ctx.Value(models.ClientConnectionIDKey); raw != nil {
+		if s, ok := raw.(string); ok {
+			runtimeConnID = s
+		}
+	}
+
+	// ensure the runtime per-connection PREP bucket is removed when this function returns.
+	if runtimeConnID != "" && decodeCtx != nil {
+		defer func() {
+			if decodeCtx.MockPrepStmts != nil {
+				delete(decodeCtx.MockPrepStmts, runtimeConnID)
+				logger.Debug("Cleaned up runtime PREP bucket on connection exit", zap.String("connID", runtimeConnID))
+			}
+		}()
+	}
 
 	commandCount := 0
 	for {
@@ -85,6 +146,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			commandPkt, err := wire.DecodePayload(ctx, logger, command, clientConn, decodeCtx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the MySQL packet from the client")
+				return err
 			}
 
 			req := mysql.Request{
@@ -121,11 +183,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			// Handle prepared statement cleanup for COM_STMT_CLOSE
 			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
 				if closePacket, ok := commandPkt.Message.(*mysql.StmtClosePacket); ok {
-					delete(decodeCtx.PreparedStatements, closePacket.StatementID)
-					if decodeCtx.StmtIDToQuery != nil {
-						delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
-					}
-					logger.Debug("Cleaned up prepared statement", zap.Uint32("StatementID", closePacket.StatementID))
+					cleanupPreparedStatementOnClose(decodeCtx, runtimeConnID, closePacket.StatementID, logger)
 				}
 			}
 

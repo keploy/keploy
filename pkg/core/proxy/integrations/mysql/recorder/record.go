@@ -49,7 +49,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			// Map for storing server greetings (inc capabilities, auth plugin, etc) per initial handshake (per connection)
 			ServerGreetings: wire.NewGreetings(),
 			// Map for storing prepared statements per connection
-			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+			RecordPrepStmts: make(map[uint32]*mysql.StmtPrepareOkPacket),
 		}
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
