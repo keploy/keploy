@@ -27,20 +27,38 @@ type TestReportVerdict struct {
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
-	noise := globalNoise
-
-	if _, ok := noise["body"]; !ok {
+	// Create a deep copy of globalNoise to avoid mutating the original config
+	noise := make(config.GlobalNoise)
+	
+	// Deep copy the body map
+	if bodyMap, ok := globalNoise["body"]; ok {
+		noise["body"] = make(map[string][]string)
+		for field, regexArr := range bodyMap {
+			// Copy the slice to avoid sharing references
+			noise["body"][field] = append([]string{}, regexArr...)
+		}
+	} else {
 		noise["body"] = make(map[string][]string)
 	}
+	
+	// Deep copy the header map
+	if headerMap, ok := globalNoise["header"]; ok {
+		noise["header"] = make(map[string][]string)
+		for field, regexArr := range headerMap {
+			// Copy the slice to avoid sharing references
+			noise["header"][field] = append([]string{}, regexArr...)
+		}
+	} else {
+		noise["header"] = make(map[string][]string)
+	}
+
+	// Merge test-set specific noise (overwrites global noise for matching fields)
 	if tsNoiseBody, ok := tsNoise["body"]; ok {
 		for field, regexArr := range tsNoiseBody {
 			noise["body"][field] = regexArr
 		}
 	}
 
-	if _, ok := noise["header"]; !ok {
-		noise["header"] = make(map[string][]string)
-	}
 	if tsNoiseHeader, ok := tsNoise["header"]; ok {
 		for field, regexArr := range tsNoiseHeader {
 			noise["header"][field] = regexArr
