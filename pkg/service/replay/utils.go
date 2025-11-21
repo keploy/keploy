@@ -29,7 +29,7 @@ type TestReportVerdict struct {
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
 	// Create a deep copy of globalNoise to avoid mutating the original config
 	noise := make(config.GlobalNoise)
-	
+
 	// Deep copy the body map
 	if bodyMap, ok := globalNoise["body"]; ok {
 		noise["body"] = make(map[string][]string)
@@ -40,7 +40,7 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	} else {
 		noise["body"] = make(map[string][]string)
 	}
-	
+
 	// Deep copy the header map
 	if headerMap, ok := globalNoise["header"]; ok {
 		noise["header"] = make(map[string][]string)
