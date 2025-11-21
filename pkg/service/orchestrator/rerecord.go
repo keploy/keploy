@@ -435,14 +435,16 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		// Store the original test case response for comparison using the rendered copy
 		originalTestCase := *renderedTC
 		// Detect noise fields introduced by templating and mark them on the testcase
-		if len(utils.TemplatizedValues) > 0 {
-			detected := pkg.DetectNoiseFieldsInResp(&models.HTTPResp{
-				StatusCode: renderedTC.HTTPResp.StatusCode,
-				Body:       renderedTC.HTTPResp.Body,
-				Header:     renderedTC.HTTPResp.Header,
-			})
+
+		// Detect noisy fields (templatized + heuristic random ID / timestamp) and mark them on the testcase
+		detected := pkg.DetectNoiseFieldsInResp(&models.HTTPResp{
+			StatusCode: renderedTC.HTTPResp.StatusCode,
+			Body:       renderedTC.HTTPResp.Body,
+			Header:     renderedTC.HTTPResp.Header,
+		})
+
+		if len(detected) > 0 {
 			o.logger.Debug("Detected noise fields", zap.Any("fields", detected))
-			// merge detected into originalTestCase.Noise
 			if originalTestCase.Noise == nil {
 				originalTestCase.Noise = map[string][]string{}
 			}
