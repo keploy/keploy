@@ -194,6 +194,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		matchedResp     *mysql.Response
 		matchedMock     *models.Mock
 		queryMatched    bool
+		stmtMatched     bool
 	)
 
 	// Single pass: filter & match on the fly.
@@ -252,7 +253,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actMsg.StatementID])
 				}
 
-				if c := matchStmtExecutePacketQueryAware(mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery); c > maxMatchedCount {
+				if ok, c := matchStmtExecutePacketQueryAware(mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery); ok {
+					// Query-aware definitive match (exact or structural): pick and stop searching
+					matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
+				} else if c > maxMatchedCount {
+					// fallback score-based candidate (used when no stmt info was available)
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
 
@@ -278,7 +283,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 			}
 		}
-		if queryMatched {
+		if queryMatched || stmtMatched {
 			break
 		}
 	}
@@ -515,15 +520,15 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 // query-aware EXEC scoring.
 //   - Keep the existing header/flags/params scoring.
 //   - Do NOT reward raw StatementID equality.
-//   - Reward query equality (or structural equality) resolved via:
-//     recorded (expected) -> recordedPrepByConn[connID] -> query
-//     runtime  (actual)   -> decodeCtx.StmtIDToQuery(stmtID) set during COM_STMT_PREP
-func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expectedQuery, actualQuery string) int {
+//   - If both expectedQuery and actualQuery are present, require them to match (exact or structural).
+//     If they don't match, return (false, 0) immediately.
+//   - If either query is missing, fall back to best-effort scoring (returns (false, score)).
+func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expectedQuery, actualQuery string) (bool, int) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
-		return 0
+		return false, 0
 	}
 	// Match the header
 	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
@@ -536,6 +541,7 @@ func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expec
 	if expectedMessage.Status == actualMessage.Status {
 		matchCount++
 	}
+
 	// DO NOT score StatementID equality (unstable across runs)
 	// if expectedMessage.StatementID == actualMessage.StatementID { matchCount++ }
 
@@ -571,20 +577,30 @@ func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expec
 		}
 	}
 
-	// Query bonus
+	// Query logic:
 	eq := strings.TrimSpace(expectedQuery)
 	aq := strings.TrimSpace(actualQuery)
+
+	// If both queries are present, require them to match (exact or structural) for a definitive match.
 	if eq != "" && aq != "" {
+		// If both queries are available, require an exact or structural match to treat this as a definitive match.
 		if strings.EqualFold(eq, aq) {
 			matchCount += 10
-		} else if sigE, errE := getQueryStructureCached(eq); errE == nil {
+			return true, matchCount
+		}
+		if sigE, errE := getQueryStructureCached(eq); errE == nil {
 			if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
 				matchCount += 6
+				return true, matchCount
 			}
 		}
+		// Both queries present but neither exact nor structural match -> NOT a query match.
+		// Return false with zero so caller won't pick this mock as a definitive query match.
+		return false, 0
 	}
 
-	return matchCount
+	// If either query is missing, fall back to scoring (no definitive match)
+	return false, matchCount
 }
 
 func paramValueEqual(a, b interface{}) bool {
