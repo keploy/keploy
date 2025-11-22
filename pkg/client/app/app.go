@@ -157,6 +157,15 @@ func (a *App) SetupCompose() error {
 	a.opts.AppNetworks = serviceInfo.Networks
 	compose := serviceInfo.Compose
 
+	if HookImpl != nil {
+		_, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+		if err != nil {
+			utils.LogError(a.logger, err, "hook failed during docker compose setup")
+			return err
+		}
+		a.logger.Debug("Successfully ran BeforeDockerComposeSetup hook")
+	}
+
 	err = a.docker.ModifyComposeForAgent(compose, a.opts, a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
