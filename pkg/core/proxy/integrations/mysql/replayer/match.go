@@ -195,13 +195,23 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	recordedPrepByConn := buildRecordedPrepIndex(unfiltered)
 
 	// Print the recordedPrepByConn map only once across all calls
-	printPrepIndexOnce.Do(func() {
+	// printPrepIndexOnce.Do(func() {
+	// 	for connID, prepEntries := range recordedPrepByConn {
+	// 		for _, entry := range prepEntries {
+	// 			logger.Debug("recorded prepEntry", zap.String("connID", connID), zap.Uint32("statementID", entry.statementID), zap.String("query", entry.query), zap.String("mockName", entry.mockName))
+	// 		}
+	// 	}
+	// })
+
+	if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
+		var allEntries []string
 		for connID, prepEntries := range recordedPrepByConn {
 			for _, entry := range prepEntries {
-				logger.Debug("recorded prepEntry", zap.String("connID", connID), zap.Uint32("statementID", entry.statementID), zap.String("query", entry.query), zap.String("mockName", entry.mockName))
+				allEntries = append(allEntries, fmt.Sprintf("connID=%s stmtID=%d query=%q mock=%s", connID, entry.statementID, entry.query, entry.mockName))
 			}
 		}
-	})
+		logger.Debug("recorded prepEntries", zap.String("entries", strings.Join(allEntries, " | ")))
+	}
 
 	var (
 		maxMatchedCount int
