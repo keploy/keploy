@@ -86,13 +86,11 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 			}
 		}
 	} else if transferEncodingHeader != "" {
-		// check if the initial request is the complete request.
-		if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
-			return nil
-		}
-		if transferEncodingHeader == "chunked" {
-			err := h.chunkedRequest(ctx, finalReq, clientConn, destConn, transferEncodingHeader)
-			if err != nil {
+		if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+			if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
+				return nil
+			}
+			if err := h.chunkedRequest(ctx, finalReq, clientConn, destConn, transferEncodingHeader); err != nil {
 				return err
 			}
 		}
