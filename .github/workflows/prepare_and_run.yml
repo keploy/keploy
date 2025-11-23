@@ -1,4 +1,4 @@
-name: Prepare Binary and Run Workflows
+name: sem2 exam
 on:
   pull_request:
     branches: [main]
@@ -127,3 +127,5 @@ jobs:
   run_grpc_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/grpc_linux.yml
+
+
