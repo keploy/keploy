@@ -89,6 +89,8 @@ keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 inDocker: false
 cmdType: "native"
+agent:
+  databasePorts: [3306, 4000]
 `
 
 var config = &Config{}
