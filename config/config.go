@@ -57,6 +57,7 @@ type Config struct {
 
 type Agent struct {
 	models.SetupOptions
+	DatabasePorts []uint32 `json:"databasePorts" yaml:"databasePorts" mapstructure:"databasePorts"`
 }
 
 type UtGen struct {
