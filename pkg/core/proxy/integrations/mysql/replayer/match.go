@@ -23,10 +23,6 @@ import (
 
 var querySigCache sync.Map // map[string]string
 
-var (
-	printPrepIndexOnce sync.Once
-)
-
 // recorded PREP registry per recorded connection
 type prepEntry struct { // minimal, enough for lookup
 	statementID uint32
@@ -210,15 +206,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 	// Build recordedPrepByConn once (map[connID][]prepEntry) from recorded mocks
 	recordedPrepByConn := buildRecordedPrepIndex(unfiltered)
-
-	// Print the recordedPrepByConn map only once across all calls
-	// printPrepIndexOnce.Do(func() {
-	// 	for connID, prepEntries := range recordedPrepByConn {
-	// 		for _, entry := range prepEntries {
-	// 			logger.Debug("recorded prepEntry", zap.String("connID", connID), zap.Uint32("statementID", entry.statementID), zap.String("query", entry.query), zap.String("mockName", entry.mockName))
-	// 		}
-	// 	}
-	// })
 
 	if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
 		var allEntries []string
