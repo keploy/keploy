@@ -881,6 +881,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Mocking:        r.config.Test.Mocking,
 		Backdate:       testCases[0].HTTPReq.Timestamp,
 		NoiseConfig:    headerNoiseConfig,
+		SkipAppRestart: r.config.Test.SkipAppRestart,
 	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")

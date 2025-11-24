@@ -706,7 +706,13 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.MockManagers.LoadOrStore(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+
+	if opts.SkipAppRestart {
+		// no need to set a new mock manager if app restart is skipped
+		p.MockManagers.LoadOrStore(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	} else {
+		p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	}
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
