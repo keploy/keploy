@@ -85,6 +85,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			commandPkt, err := wire.DecodePayload(ctx, logger, command, clientConn, decodeCtx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the MySQL packet from the client")
+				return err
 			}
 
 			req := mysql.Request{
