@@ -397,8 +397,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	//checking for the destination port of "mysql" or "tidb" (MySQL-compatible databases)
+	// MySQL uses port 3306, TiDB uses port 4000
+	if destInfo.Port == 3306 || destInfo.Port == 4000 {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
