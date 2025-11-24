@@ -46,15 +46,26 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 	}
 
 	lines := strings.Split(string(*finalReq), "\n")
-	var contentLengthHeader string
-	var transferEncodingHeader string
+	var contentLengthHeader, transferEncodingHeader string
 	for _, line := range lines {
-		if strings.HasPrefix(line, "Content-Length:") {
-			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-			break
-		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
-			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
-			break
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		val := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "content-length":
+			contentLengthHeader = val
+		case "transfer-encoding":
+			transferEncodingHeader = val
 		}
 	}
 
@@ -75,13 +86,11 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 			}
 		}
 	} else if transferEncodingHeader != "" {
-		// check if the initial request is the complete request.
-		if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
-			return nil
-		}
-		if transferEncodingHeader == "chunked" {
-			err := h.chunkedRequest(ctx, finalReq, clientConn, destConn, transferEncodingHeader)
-			if err != nil {
+		if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+			if strings.HasSuffix(string(*finalReq), "0\r\n\r\n") {
+				return nil
+			}
+			if err := h.chunkedRequest(ctx, finalReq, clientConn, destConn, transferEncodingHeader); err != nil {
 				return err
 			}
 		}
@@ -221,12 +230,25 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 	var contentLengthHeader, transferEncodingHeader string
 	lines := strings.Split(string(resp), "\n")
 	for _, line := range lines {
-		if strings.HasPrefix(line, "Content-Length:") {
-			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-			break
-		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
-			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
-			break
+		line = strings.TrimRight(line, "\r") // remove trailing \r if present
+		if line == "" {
+			continue
+		}
+
+		// Split key: value
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		val := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "content-length":
+			contentLengthHeader = val
+		case "transfer-encoding":
+			transferEncodingHeader = val
 		}
 	}
 	//Handle chunked responses
@@ -245,13 +267,11 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 			}
 		}
 	} else if transferEncodingHeader != "" {
-		//check if the initial response is the complete response.
-		if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
-			return nil
-		}
-		if transferEncodingHeader == "chunked" {
-			err := h.chunkedResponse(ctx, finalResp, clientConn, destConn)
-			if err != nil {
+		if strings.Contains(strings.ToLower(transferEncodingHeader), "chunked") {
+			if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
+				return nil
+			}
+			if err := h.chunkedResponse(ctx, finalResp, clientConn, destConn); err != nil {
 				return err
 			}
 		}
