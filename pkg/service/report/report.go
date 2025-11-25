@@ -3,6 +3,7 @@ package report
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -731,7 +732,26 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 		if bodyResult.Type == models.JSON || bodyResult.Type == models.GrpcData {
 			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
-				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
+
+				// Sanitize using noise
+				bodyNoise := make(map[string][]string)
+				for k, v := range test.Noise {
+					if strings.HasPrefix(k, "body.") {
+						bodyNoise[strings.TrimPrefix(k, "body.")] = v
+					}
+				}
+
+				var expObj, actObj interface{}
+				_ = json.Unmarshal([]byte(bodyResult.Expected), &expObj)
+				_ = json.Unmarshal([]byte(bodyResult.Actual), &actObj)
+
+				cleanExp := matcherUtils.SanitizeJSON(expObj, bodyNoise, false)
+				cleanAct := matcherUtils.SanitizeJSON(actObj, bodyNoise, true)
+
+				bExp, _ := json.Marshal(cleanExp)
+				bAct, _ := json.Marshal(cleanAct)
+
+				diff, err := GenerateTableDiff(string(bExp), string(bAct))
 				if err == nil {
 					sb.WriteString(applyCliColorsToDiff(diff))
 					sb.WriteString("\n")

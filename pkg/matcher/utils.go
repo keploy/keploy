@@ -984,6 +984,63 @@ func sprintDiff(expect, actual, field string) string {
 	return expectActualTable(diff.Expected, diff.Actual, field, true)
 }
 
+func SanitizeJSON(data interface{}, noise map[string][]string, isActual bool) interface{} {
+	ni := buildNoiseIndex(noise)
+	return sanitizeRecursive("", data, ni, isActual)
+}
+
+func sanitizeRecursive(key string, data interface{}, ni noiseIndex, isActual bool) interface{} {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		newMap := make(map[string]interface{})
+		for k, val := range v {
+			childKey := k
+			if key != "" {
+				childKey = key + "." + k
+			}
+
+			// Check noise for childKey
+			childKeyLower := strings.ToLower(childKey)
+			regs, noisy := ni.match(childKeyLower)
+			if noisy {
+				if len(regs) == 0 {
+					continue // Remove field
+				}
+				// Regex match
+				if isActual {
+					if valStr, ok := val.(string); ok && anyRegexpMatchStr(valStr, regs) {
+						newMap[k] = "<NOISE>"
+						continue
+					}
+				} else {
+					// For expected, always replace if there's a regex rule
+					// This ensures that if actual matches regex (becomes <NOISE>), they match.
+					// If actual doesn't match regex (remains original), they mismatch (<NOISE> != original).
+					newMap[k] = "<NOISE>"
+					continue
+				}
+			}
+
+			// Recurse
+			sanitizedVal := sanitizeRecursive(childKey, val, ni, isActual)
+			newMap[k] = sanitizedVal
+		}
+		return newMap
+
+	case []interface{}:
+		newSlice := make([]interface{}, len(v))
+		for i, val := range v {
+			// Pass 'key' unchanged to elements, matching matchJSONWithNoiseHandlingIndexed logic
+			sanitizedVal := sanitizeRecursive(key, val, ni, isActual)
+			newSlice[i] = sanitizedVal
+		}
+		return newSlice
+
+	default:
+		return data
+	}
+}
+
 /* This will return the json diffs in a beautifull way. It will in fact
  * create a colorized table-based expect-response string and return it.
  * on the left-side there'll be the expect and on the right the actual
@@ -992,7 +1049,31 @@ func sprintDiff(expect, actual, field string) string {
  * its better to use a generic diff output as the SprintDiff.
  */
 func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string, error) {
-	diff, err := jsonDiff.CompareJSON(json1, json2, noise, false)
+	// Unmarshal to sanitize
+	var obj1, obj2 interface{}
+	if err := json.Unmarshal(json1, &obj1); err != nil {
+		return "", err
+	}
+	if err := json.Unmarshal(json2, &obj2); err != nil {
+		return "", err
+	}
+
+	// Sanitize both expected and actual
+	clean1 := SanitizeJSON(obj1, noise, false)
+	clean2 := SanitizeJSON(obj2, noise, true)
+
+	// Marshal back to bytes
+	b1, err := json.Marshal(clean1)
+	if err != nil {
+		return "", err
+	}
+	b2, err := json.Marshal(clean2)
+	if err != nil {
+		return "", err
+	}
+
+	// Pass nil for noise since we already handled it
+	diff, err := jsonDiff.CompareJSON(b1, b2, nil, false)
 	if err != nil {
 		return "", err
 	}

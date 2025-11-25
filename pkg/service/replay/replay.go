@@ -1288,7 +1288,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Res:          *httpResp,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-					Noise:        testCase.Noise,
+					Noise:        r.getEffectiveNoise(testSetID, testCase.Noise),
 					Result:       *testResult,
 					TimeTaken:    time.Since(started).String(),
 				}
@@ -2264,4 +2264,34 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 
 		}
 	}
+}
+
+func (r *Replayer) getEffectiveNoise(testSetID string, tcNoise map[string][]string) map[string][]string {
+	globalNoise := r.config.Test.GlobalNoise.Global
+	tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]
+	noiseConfig := globalNoise
+	if ok {
+		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
+	}
+
+	// Flatten noiseConfig into tcNoise format
+	effective := make(map[string][]string)
+
+	// Add global/testset noise first
+	if bodyNoise, ok := noiseConfig["body"]; ok {
+		for k, v := range bodyNoise {
+			effective["body."+k] = v
+		}
+	}
+	if headerNoise, ok := noiseConfig["header"]; ok {
+		for k, v := range headerNoise {
+			effective["header."+k] = v
+		}
+	}
+
+	// Overwrite with testcase noise
+	for k, v := range tcNoise {
+		effective[k] = v
+	}
+	return effective
 }
