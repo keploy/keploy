@@ -1621,3 +1621,22 @@ func normalizeNestedJSONValue(v interface{}, rootKeys map[string]bool) {
 		}
 	}
 }
+
+// removeGlobalNoise recursively removes keys from a JSON object (map or slice)
+// if the key exists in the keysToIgnore map.
+func RemoveGlobalNoise(data interface{}, keysToIgnore map[string]bool) {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		for k, val := range v {
+			if keysToIgnore[k] {
+				delete(v, k)
+				continue
+			}
+			RemoveGlobalNoise(val, keysToIgnore)
+		}
+	case []interface{}:
+		for _, val := range v {
+			RemoveGlobalNoise(val, keysToIgnore)
+		}
+	}
+}

@@ -218,6 +218,44 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	decodedDataNormal := true
 	expectedDecodedData := expectedResp.Body.DecodedData
 	actualDecodedData := actualResp.Body.DecodedData
+
+	// If the decoded data is valid JSON, we remove global keys (keys without dots like "timestamp")
+	// recursively from the structure before comparison.
+	if len(bodyNoise) > 0 && json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
+		globalKeys := make(map[string]bool)
+		for k := range bodyNoise {
+			if !strings.Contains(k, ".") {
+				globalKeys[k] = true
+			}
+		}
+
+		if len(globalKeys) > 0 {
+			var expObj, actObj interface{}
+			// Clean Expected Body
+			if err := json.Unmarshal([]byte(expectedDecodedData), &expObj); err == nil {
+				matcher.RemoveGlobalNoise(expObj, globalKeys)
+				if b, err := json.Marshal(expObj); err == nil {
+					expectedDecodedData = string(b)
+				} else {
+					logger.Debug("failed to marshal expected body after noise removal", zap.Error(err))
+				}
+			} else {
+				logger.Debug("failed to unmarshal expected body for noise removal", zap.Error(err))
+			}
+			// Clean Actual Body
+			if err := json.Unmarshal([]byte(actualDecodedData), &actObj); err == nil {
+				matcher.RemoveGlobalNoise(actObj, globalKeys)
+				if b, err := json.Marshal(actObj); err == nil {
+					actualDecodedData = string(b)
+				} else {
+					logger.Debug("failed to marshal actual body after noise removal", zap.Error(err))
+				}
+			} else {
+				logger.Debug("failed to unmarshal actual body for noise removal", zap.Error(err))
+			}
+		}
+	}
+
 	var jsonComparisonResult matcher.JSONComparisonResult
 
 	// Check if both decoded data are valid JSON
@@ -278,8 +316,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
 		Type:     models.GrpcData,
-		Expected: expectedDecodedData,
-		Actual:   actualDecodedData,
+		Expected: expectedDecodedData, // This now contains the CLEANSED data
+		Actual:   actualDecodedData,   // This now contains the CLEANSED data
 	})
 
 	// If decoded data matches but message length differs, ignore the length difference
