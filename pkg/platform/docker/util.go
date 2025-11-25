@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/config"
@@ -64,7 +65,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	}
 
 	// Preserves the alias generation
-	keployalias, err := getAlias(ctx, logger, opts)
+	keployalias, err := getAlias(ctx, logger, opts, conf.Debug)
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +73,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
-func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) (string, error) {
+func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
@@ -121,6 +122,23 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
@@ -158,6 +176,24 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
+			if opts.BuildDelay > 0 {
+				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if len(opts.PassThroughPorts) > 0 {
+				portStrings := make([]string, len(opts.PassThroughPorts))
+				for i, port := range opts.PassThroughPorts {
+					portStrings[i] = strconv.Itoa(int(port))
+				}
+				// Note the "=" sign, which is good practice for docker run
+				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+			}
+			if debug {
+				alias += " --debug"
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
@@ -179,6 +215,24 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
@@ -214,6 +268,24 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
+			if opts.BuildDelay > 0 {
+				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if len(opts.PassThroughPorts) > 0 {
+				portStrings := make([]string, len(opts.PassThroughPorts))
+				for i, port := range opts.PassThroughPorts {
+					portStrings[i] = strconv.Itoa(int(port))
+				}
+				// Note the "=" sign, which is good practice for docker run
+				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+			}
+			if debug {
+				alias += " --debug"
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
@@ -236,6 +308,24 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
