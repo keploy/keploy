@@ -95,14 +95,22 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				matcherUtils.RemoveGlobalNoise(expObj, globalKeys)
 				if b, err := jsonMarshal234(expObj); err == nil {
 					cleanExp = string(b)
+				} else {
+					logger.Debug("failed to marshal expected body after noise removal", zap.Error(err))
 				}
+			} else {
+				logger.Debug("failed to unmarshal expected body for noise removal", zap.Error(err))
 			}
 			// Clean Actual Body
 			if err := jsonUnmarshal234([]byte(cleanAct), &actObj); err == nil {
 				matcherUtils.RemoveGlobalNoise(actObj, globalKeys)
 				if b, err := jsonMarshal234(actObj); err == nil {
 					cleanAct = string(b)
+				} else {
+					logger.Debug("failed to marshal actual body after noise removal", zap.Error(err))
 				}
+			} else {
+				logger.Debug("failed to unmarshal actual body for noise removal", zap.Error(err))
 			}
 		}
 	}
@@ -656,4 +664,3 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 	}
 	return m, nil
 }
-
