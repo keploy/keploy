@@ -78,6 +78,40 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
+
+	if bodyType == models.JSON && len(bodyNoise) > 0 {
+		globalKeys := make(map[string]bool)
+		for k := range bodyNoise {
+			// If key does not contain ".", treat it as a global field name to ignore everywhere
+			if !strings.Contains(k, ".") {
+				globalKeys[k] = true
+			}
+		}
+
+		if len(globalKeys) > 0 {
+			var expObj, actObj interface{}
+			// Clean Expected Body
+			if err := jsonUnmarshal234([]byte(cleanExp), &expObj); err == nil {
+				removeGlobalNoise(expObj, globalKeys)
+				if b, err := jsonMarshal234(expObj); err == nil {
+					cleanExp = string(b)
+				}
+			}
+			// Clean Actual Body
+			if err := jsonUnmarshal234([]byte(cleanAct), &actObj); err == nil {
+				removeGlobalNoise(actObj, globalKeys)
+				if b, err := jsonMarshal234(actObj); err == nil {
+					cleanAct = string(b)
+				}
+			}
+		}
+	}
+
+	if bodyType == models.JSON {
+		res.BodyResult[0].Expected = cleanExp
+		res.BodyResult[0].Actual = cleanAct
+	}
+
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
 	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
 		//validate the stored json
@@ -621,4 +655,23 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 		return m, err
 	}
 	return m, nil
+}
+
+// removeGlobalNoise recursively removes keys from a JSON object (map or slice)
+// if the key exists in the keysToIgnore map.
+func removeGlobalNoise(data interface{}, keysToIgnore map[string]bool) {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		for k, val := range v {
+			if keysToIgnore[k] {
+				delete(v, k)
+				continue
+			}
+			removeGlobalNoise(val, keysToIgnore)
+		}
+	case []interface{}:
+		for _, val := range v {
+			removeGlobalNoise(val, keysToIgnore)
+		}
+	}
 }
