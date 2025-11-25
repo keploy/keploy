@@ -1142,10 +1142,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
+		// log the consumed mocks during the test run of the test case for test set
+		r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
+
 		if !testPass {
-			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
-			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 		}
