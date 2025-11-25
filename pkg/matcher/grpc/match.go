@@ -282,6 +282,22 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		Actual:   actualDecodedData,
 	})
 
+	// If decoded data matches but message length differs, ignore the length difference
+	if decodedDataNormal && !messageLengthNormal {
+		logger.Warn("Ignoring message length mismatch since decoded data is identical",
+			zap.Uint32("expected", expectedResp.Body.MessageLength),
+			zap.Uint32("actual", actualResp.Body.MessageLength))
+		// Update the message length result to Normal=true
+		for i := range result.BodyResult {
+			if result.BodyResult[i].Type == models.GrpcLength {
+				result.BodyResult[i].Normal = true
+				break
+			}
+		}
+		// Remove the message_length difference from differences map
+		delete(differences, "body.message_length")
+	}
+
 	// Apply noise configuration to ignore specified differences
 	for path := range differences {
 		pathParts := strings.Split(path, ".")
