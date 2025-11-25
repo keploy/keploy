@@ -2,6 +2,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,18 +44,66 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 }
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
+
+	if err := h.callAgentHook("/hooks/before-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI); err != nil {
+		h.logger.Error("failed to call before simulate hook", zap.Error(err))
+	}
+
 	switch tc.Kind {
 	case models.HTTP:
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
-		return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
 
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
+		if err := h.callAgentHook("/hooks/after-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI); err != nil {
+			h.logger.Error("failed to call after simulate hook", zap.Error(err))
+		}
+		return resp, err
 	case models.GRPC_EXPORT:
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
-		return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
+		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
+		if err := h.callAgentHook("/hooks/after-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI); err != nil {
+			h.logger.Error("failed to call after simulate hook", zap.Error(err))
+		}
+		return resp, err
 
 	default:
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
+
+}
+
+// Helper function to hit the Agent API
+func (h *Hooks) callAgentHook(endpoint string, timestamp *time.Time, agentURI string) error {
+
+	type AgentPayload struct {
+		Timestamp *time.Time `json:"timestamp"`
+	}
+
+	if timestamp == nil || timestamp.IsZero() {
+		h.logger.Warn("Skipping agent hook: timestamp is zero or nil")
+		return nil
+	}
+
+	payload := AgentPayload{
+		Timestamp: timestamp,
+	}
+
+	body, _ := json.Marshal(payload)
+
+	url := fmt.Sprintf("%s%s", agentURI, endpoint)
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("agent hook failed with status: %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {

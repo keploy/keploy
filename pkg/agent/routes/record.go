@@ -39,7 +39,39 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
+		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
+		r.Post("/hooks/after-simulate", a.HandleAfterSimulate)
 	})
+}
+
+type TimeFreezeReq struct {
+	Time time.Time `json:"timestamp"`
+}
+
+func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
+	var req TimeFreezeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	currentHooks := agent.GetHooks()
+	if err := currentHooks.BeforeSimulate(r.Context(), req.Time); err != nil {
+		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
+	currentHooks := agent.GetHooks()
+	if err := currentHooks.AfterSimulate(r.Context()); err != nil {
+		a.logger.Error("failed to execute after simulate hook", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
