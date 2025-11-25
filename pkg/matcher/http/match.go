@@ -92,14 +92,14 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			var expObj, actObj interface{}
 			// Clean Expected Body
 			if err := jsonUnmarshal234([]byte(cleanExp), &expObj); err == nil {
-				removeGlobalNoise(expObj, globalKeys)
+				matcherUtils.RemoveGlobalNoise(expObj, globalKeys)
 				if b, err := jsonMarshal234(expObj); err == nil {
 					cleanExp = string(b)
 				}
 			}
 			// Clean Actual Body
 			if err := jsonUnmarshal234([]byte(cleanAct), &actObj); err == nil {
-				removeGlobalNoise(actObj, globalKeys)
+				matcherUtils.RemoveGlobalNoise(actObj, globalKeys)
 				if b, err := jsonMarshal234(actObj); err == nil {
 					cleanAct = string(b)
 				}
@@ -657,21 +657,3 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 	return m, nil
 }
 
-// removeGlobalNoise recursively removes keys from a JSON object (map or slice)
-// if the key exists in the keysToIgnore map.
-func removeGlobalNoise(data interface{}, keysToIgnore map[string]bool) {
-	switch v := data.(type) {
-	case map[string]interface{}:
-		for k, val := range v {
-			if keysToIgnore[k] {
-				delete(v, k)
-				continue
-			}
-			removeGlobalNoise(val, keysToIgnore)
-		}
-	case []interface{}:
-		for _, val := range v {
-			removeGlobalNoise(val, keysToIgnore)
-		}
-	}
-}
