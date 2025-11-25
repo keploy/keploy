@@ -107,10 +107,34 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	res.BodyResult[0].Normal = pass
 
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
-		pass = false
-	}
+		res.HeadersResult = *hRes
 
-	res.HeadersResult = *hRes
+		// If body matches but content-length differs, ignore the content-length difference
+		if res.BodyResult[0].Normal {
+			for i := range res.HeadersResult {
+				if strings.ToLower(res.HeadersResult[i].Expected.Key) == "content-length" && !res.HeadersResult[i].Normal {
+					logger.Warn("Ignoring Content-Length mismatch since body content is identical",
+						zap.String("expected", strings.Join(res.HeadersResult[i].Expected.Value, ",")),
+						zap.String("actual", strings.Join(res.HeadersResult[i].Actual.Value, ",")))
+					res.HeadersResult[i].Normal = true
+				}
+			}
+		}
+
+		// Check if there are still any header mismatches after ignoring content-length
+		hasHeaderMismatch := false
+		for _, hr := range res.HeadersResult {
+			if !hr.Normal {
+				hasHeaderMismatch = true
+				break
+			}
+		}
+		if hasHeaderMismatch {
+			pass = false
+		}
+	} else {
+		res.HeadersResult = *hRes
+	}
 	if tc.HTTPResp.StatusCode == actualResponse.StatusCode {
 		res.StatusCode.Normal = true
 	} else {
