@@ -84,6 +84,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
+		var noiseCh = make(chan []map[string][]string, 1)
 
 		mappingTestSet := testSet // Test set to store the mapping , have to get a new test set id if we are creating a new test set
 
@@ -120,7 +121,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				allRecorded, err := o.replayTests(recordCtx, testSet, mappingTestSet, isMappingEnabled)
+				allRecorded, noiseList, err := o.replayTests(recordCtx, testSet, mappingTestSet, isMappingEnabled)
 
 				if allRecorded && err == nil {
 					ReRecordedTests = append(ReRecordedTests, mappingTestSet)
@@ -129,6 +130,10 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 				if !allRecorded {
 					o.logger.Warn("Failed to re-record some testcases", zap.String("testset", testSet))
 					stopReason = "failed to re-record some testcases"
+				}
+
+				if len(noiseList) > 0 {
+					noiseCh <- noiseList
 				}
 
 				replayErrCh <- err
@@ -161,6 +166,41 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to stop re-recording")
+		}
+
+		// Update the new testcases with the detected noise
+		select {
+		case noiseList := <-noiseCh:
+			if len(noiseList) > 0 {
+				// Get the new testcases
+				newTCs, err := o.replay.GetTestCases(ctx, mappingTestSet)
+				if err != nil {
+					utils.LogError(o.logger, err, "failed to get new testcases for noise update", zap.String("testset", mappingTestSet))
+				} else {
+					// Apply noise
+					for i, tc := range newTCs {
+						if i < len(noiseList) {
+							noise := noiseList[i]
+							if len(noise) > 0 {
+								if tc.Noise == nil {
+									tc.Noise = make(map[string][]string)
+								}
+								for k, v := range noise {
+									tc.Noise[k] = v
+								}
+								// Update the testcase
+								err := o.replay.UpdateTestCase(ctx, tc, mappingTestSet)
+								if err != nil {
+									utils.LogError(o.logger, err, "failed to update testcase with noise", zap.String("testcase", tc.Name))
+								}
+							}
+						}
+					}
+					o.logger.Info("Updated testcases with detected noise", zap.String("testset", mappingTestSet))
+				}
+			}
+		default:
+			// No noise detected or channel empty
 		}
 
 		// Check if the global context is done after each iteration
@@ -221,21 +261,22 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	return nil
 }
 
-func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingTestSet string, isMappingEnabled bool) (bool, error) {
+func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingTestSet string, isMappingEnabled bool) (bool, []map[string][]string, error) {
 
 	var mappings = make(map[string][]string)
+	var noiseList []map[string][]string
 
 	//replay the recorded testcases
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
 		errMsg := "failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))
-		return false, fmt.Errorf("%s", errMsg)
+		return false, nil, fmt.Errorf("%s", errMsg)
 	}
 
 	if len(tcs) == 0 {
 		o.logger.Warn("No testcases found for the given testset", zap.String("testset", testSet))
-		return false, nil
+		return false, nil, nil
 	}
 
 	host, port, err := pkg.ExtractHostAndPort(tcs[0].Curl)
@@ -243,7 +284,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		errMsg := "failed to extract host and port"
 		utils.LogError(o.logger, err, "")
 		o.logger.Debug("", zap.String("curl", tcs[0].Curl))
-		return false, fmt.Errorf("%s", errMsg)
+		return false, nil, fmt.Errorf("%s", errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
 	delay := o.config.Test.Delay
@@ -257,7 +298,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 
 	if err := pkg.WaitForPort(ctx, host, port, timeout); err != nil {
 		utils.LogError(o.logger, err, "Waiting for port failed", zap.String("host", host), zap.String("port", port))
-		return false, err
+		return false, nil, err
 	}
 
 	// Read the template and secret values once per test set
@@ -356,7 +397,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 	var simErr bool
 	for _, tc := range tcs {
 		if ctx.Err() != nil {
-			return false, ctx.Err()
+			return false, nil, ctx.Err()
 		}
 
 		// Register test case with correlation manager
@@ -453,6 +494,9 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 					originalTestCase.Noise[k] = []string{}
 				}
 			}
+			noiseList = append(noiseList, detected)
+		} else {
+			noiseList = append(noiseList, map[string][]string{})
 		}
 
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
@@ -561,10 +605,10 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 	}
 
 	if simErr {
-		return allTcRecorded, fmt.Errorf("got error while simulating HTTP request. Please make sure the related services are up and running")
+		return allTcRecorded, nil, fmt.Errorf("got error while simulating HTTP request. Please make sure the related services are up and running")
 	}
 
-	return allTcRecorded, nil
+	return allTcRecorded, noiseList, nil
 }
 
 // checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording
