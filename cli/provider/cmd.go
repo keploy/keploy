@@ -965,6 +965,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 
 				if c.cfg.Test.ProtoInclude != nil {
+					var includes []string
 					for _, dir := range c.cfg.Test.ProtoInclude {
 						absDir, err := utils.GetAbsPath(dir)
 						if err != nil {
@@ -972,8 +973,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 							utils.LogError(c.logger, err, errMsg)
 							return errors.New(errMsg)
 						}
-						c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
+						includes = append(includes, absDir)
 					}
+					c.cfg.Test.ProtoInclude = includes
 				}
 
 				// Mount proto paths that are outside current working directory
@@ -1222,6 +1224,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			if c.cfg.Test.ProtoInclude != nil {
+				var includes []string
 				for _, dir := range c.cfg.Test.ProtoInclude {
 					absDir, err := utils.GetAbsPath(dir)
 					if err != nil {
@@ -1229,8 +1232,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 						utils.LogError(c.logger, err, errMsg)
 						return errors.New(errMsg)
 					}
-					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
+					includes = append(includes, absDir)
 				}
+				c.cfg.Test.ProtoInclude = includes
 			}
 		}
 
