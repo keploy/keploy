@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
+	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -409,7 +410,7 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	// Create a context for the agent that can be cancelled independently
 	agentCtx, cancel := context.WithCancel(ctx)
 	a.agentCancel = cancel
-
+	opts.ExtraArgs = agent.GetStartupHook().GetArgs(ctx)
 	if isDockerCmd {
 		// Start the agent in Docker container using errgroup
 		grp.Go(func() error {
@@ -478,6 +479,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		"--mode", string(opts.Mode),
 	}
 
+	extraArgs := opts.ExtraArgs
+	if len(extraArgs) > 0 {
+		args = append(args, extraArgs...)
+	}
 	if a.conf.Debug {
 		args = append(args, "--debug")
 	}

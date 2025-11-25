@@ -36,3 +36,21 @@ func GetHooks() AgentHooks {
 	defer hookMu.RUnlock()
 	return activeHooks
 }
+
+type StartupHook interface {
+    GetArgs(ctx context.Context) []string
+}
+
+// Default NoOp implementation
+type NoOpStartupHook struct{}
+func (h *NoOpStartupHook) GetArgs(ctx context.Context) []string { return nil }
+
+var startupHook StartupHook = &NoOpStartupHook{}
+
+func RegisterStartupHook(h StartupHook) {
+    startupHook = h
+}
+
+func GetStartupHook() StartupHook {
+    return startupHook
+}

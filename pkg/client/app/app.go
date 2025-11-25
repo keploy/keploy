@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/agent"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -42,7 +43,7 @@ type App struct {
 	Mode            models.Mode
 }
 
-func (a *App) Setup(_ context.Context) error {
+func (a *App) Setup(ctx context.Context) error {
 
 	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
@@ -55,7 +56,8 @@ func (a *App) Setup(_ context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
-		err := a.SetupCompose()
+		extraArgs := agent.GetStartupHook().GetArgs(ctx)
+		err := a.SetupCompose(extraArgs)
 		if err != nil {
 			return err
 		}
@@ -122,7 +124,7 @@ func (a *App) attachInitPid(_ context.Context) error {
 	return nil
 }
 
-func (a *App) SetupCompose() error {
+func (a *App) SetupCompose(extraArgs []string) error {
 	if a.container == "" {
 		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
 		return errors.New("container name not found")
@@ -155,6 +157,7 @@ func (a *App) SetupCompose() error {
 
 	a.opts.AppPorts = serviceInfo.Ports
 	a.opts.AppNetworks = serviceInfo.Networks
+	a.opts.ExtraArgs = extraArgs
 	compose := serviceInfo.Compose
 
 	if HookImpl != nil {

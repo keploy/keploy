@@ -84,6 +84,7 @@ type SetupOptions struct {
 	AppPorts          []string
 	AppNetworks       []string
 	ConfigPath        string
+	ExtraArgs         []string
 }
 
 type RunOptions struct {
