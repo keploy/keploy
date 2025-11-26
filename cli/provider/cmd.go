@@ -1109,15 +1109,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
 			}
-
-			protoCfg, err := parseProtoFlags(c.logger, cmd)
-			if err != nil {
-				return err
-			}
-
-			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
-			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
-			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
 		}
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
