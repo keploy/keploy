@@ -104,13 +104,29 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 	return nil, false
 }
 
+// JSONDiffWithNoiseControl compares JSON with support for both Path-based noise (e.g. "body.user.id")
+// and Global noise (e.g. "timestamp") to be ignored everywhere.
 func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
-	idx := buildNoiseIndex(noise)
-	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, ignoreOrdering)
+	// Split noise into Path-based (contains dots) and Global (no dots)
+	pathNoise := make(map[string][]string)
+	globalKeys := make(map[string]bool)
+
+	for k, v := range noise {
+		// If a key has no dots, treat it as a Global Key to be ignored everywhere.
+		if !strings.Contains(k, ".") {
+			globalKeys[strings.ToLower(k)] = true
+		} else {
+			// Otherwise, it's a path-specific noise (e.g. "body.data.timestamp")
+			pathNoise[k] = v
+		}
+	}
+
+	idx := buildNoiseIndex(pathNoise)
+	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering)
 }
 
-// New optimized implementation.
-func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, ignoreOrdering bool) (JSONComparisonResult, error) {
+// matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth.
+func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string]bool, ignoreOrdering bool) (JSONComparisonResult, error) {
 	var out JSONComparisonResult
 	// Type check fast-path (JSON unmarshal produces these concrete types).
 	switch e := expected.(type) {
@@ -171,8 +187,6 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			return out, nil
 		}
 
-		// Quick length check — allows early exit if extra/missing keys (ignoring noisy children).
-		// We still need to walk to account for noisy exclusions; so we won't return solely on len.
 		isExact := true
 
 		// Lowercased prefix once.
@@ -184,18 +198,22 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 		// 1) All expected keys must be present & match.
 		for k, v := range e {
+			if globalKeys[strings.ToLower(k)] {
+				continue
+			}
+
 			val, ok := a[k]
 			if !ok {
 				return out, nil
 			}
 			childKeyLower := prefixLower + strings.ToLower(k)
 
-			// If child subtree is entirely noisy, skip deep compare.
+			// If child subtree is entirely noisy via path, skip deep compare.
 			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
 				continue
 			}
 
-			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, ignoreOrdering)
+			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering)
 			if err != nil || !res.matches {
 				return out, nil
 			}
@@ -208,6 +226,10 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 		// 2) No unexpected non-noisy keys in actual.
 		for k := range a {
+			if globalKeys[strings.ToLower(k)] {
+				continue
+			}
+
 			if _, ok := e[k]; ok {
 				continue
 			}
@@ -240,7 +262,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ignoreOrdering {
 			isExact := true
 			for i := 0; i < len(e); i++ {
-				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, ignoreOrdering)
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering)
 				if err != nil || !res.matches {
 					return out, nil
 				}
@@ -269,7 +291,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 						continue
 					}
 					childKey := key
-					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, ignoreOrdering)
+					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering)
 					if err == nil && res.matches {
 						if !res.isExact {
 							isExact = false
