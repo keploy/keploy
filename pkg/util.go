@@ -24,6 +24,10 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/araddon/dateparse"
+	"github.com/google/uuid"
+	"github.com/oklog/ulid/v2"
+	"github.com/segmentio/ksuid"
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/utils"
@@ -477,128 +481,126 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	return &rendered, nil
 }
 
+
 // DetectNoiseFieldsInResp inspects a rendered HTTP response and returns a map
 // of noise fields that should be marked on the testcase so matchers ignore
-// them during comparison. It uses:
-//  1. Current templated values from utils.TemplatizedValues, and
-//  2. Heuristics for random IDs and timestamps (even when no templates exist).
+// them during comparison. It uses current templated values from utils and library-based detection.
 func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 	noise := make(map[string][]string)
 	if resp == nil {
 		return noise
 	}
 
-	
-	// Template-based noise detection 
-	
-	if len(utils.TemplatizedValues) > 0 {
-		// headers: if a header value contains a templated value, mark header.<name>
-		for hk, hv := range resp.Header {
-			for _, v := range utils.TemplatizedValues {
-				if v == nil {
-					continue
-				}
-				lit := fmt.Sprintf("%v", v)
-				if lit == "" {
-					continue
-				}
-				if strings.Contains(hv, lit) {
-					key := fmt.Sprintf("header.%s", strings.ToLower(hk))
-					noise[key] = []string{}
-					break
-				}
-			}
-		}
-
-		// body: if JSON, traverse and mark specific json paths where templated values appear
-		var parsed interface{}
-		if json.Valid([]byte(resp.Body)) {
-			if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
-				for _, v := range utils.TemplatizedValues {
-					if v == nil {
-						continue
-					}
-					lit := fmt.Sprintf("%v", v)
-					if lit == "" {
-						continue
-					}
-					paths := findJSONPathsWithValue(parsed, lit, "")
-					for _, p := range paths {
-						key := fmt.Sprintf("body.%s", p)
-						noise[key] = []string{}
-					}
-					// also mark literal occurrences in raw body (fallback)
-					if strings.Contains(resp.Body, lit) && len(paths) == 0 {
-						noise["body"] = []string{}
-					}
-				}
-			}
-		} else {
-			// non-json body: if any templated literal present, mark the full body as noisy
-			for _, v := range utils.TemplatizedValues {
-				if v == nil {
-					continue
-				}
-				lit := fmt.Sprintf("%v", v)
-				if lit == "" {
-					continue
-				}
-				if strings.Contains(resp.Body, lit) {
-					noise["body"] = []string{}
-					break
-				}
-			}
-		}
-	}
-
-	
-	//  Heuristic noise detection for random IDs / timestamps
-	//    (works even when there are no templated values)
-	
-	//  Headers: date-ish or id-ish headers whose values look random/time-based
+	// headers: if a header value contains a templated value or matches noise pattern
 	for hk, hv := range resp.Header {
-		lowerName := strings.ToLower(hk)
-		parts := strings.Split(hv, ",")
-		for _, raw := range parts {
-			val := strings.TrimSpace(raw)
-			if val == "" {
+		for _, v := range utils.TemplatizedValues {
+			if v == nil {
 				continue
 			}
-			if isTimeLikeName(lowerName) && LooksLikeTimestamp(val) {
-				key := fmt.Sprintf("header.%s", lowerName)
-				noise[key] = []string{}
-				break
+			lit := fmt.Sprintf("%v", v)
+			if lit == "" {
+				continue
 			}
-			if isIDLikeName(lowerName) && LooksLikeRandomID(val) {
-				key := fmt.Sprintf("header.%s", lowerName)
+			if strings.Contains(hv, lit) {
+				key := fmt.Sprintf("header.%s", strings.ToLower(hk))
 				noise[key] = []string{}
 				break
 			}
 		}
+		// Pattern check (automatic denoise)
+		if isNoiseValue(hv) {
+			key := fmt.Sprintf("header.%s", strings.ToLower(hk))
+			noise[key] = []string{}
+		}
 	}
 
-	//  Body: JSON – mark specific paths that look like IDs or timestamps
+	// body: if JSON, traverse and mark specific json paths where templated values appear or match patterns
+	var parsed interface{}
 	if json.Valid([]byte(resp.Body)) {
-		var parsed interface{}
 		if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
-			paths := findNoisyJSONFields(parsed, "", "")
-			for _, p := range paths {
-				key := "body"
-				if p != "" {
-					key = fmt.Sprintf("body.%s", p)
+			// Template check
+			for _, v := range utils.TemplatizedValues {
+				if v == nil {
+					continue
 				}
+				lit := fmt.Sprintf("%v", v)
+				if lit == "" {
+					continue
+				}
+				paths := findJSONPathsWithValue(parsed, lit, "")
+				for _, p := range paths {
+					key := fmt.Sprintf("body.%s", p)
+					noise[key] = []string{}
+				}
+				// also mark literal occurrences in raw body (fallback)
+				if strings.Contains(resp.Body, lit) && len(paths) == 0 {
+					noise["body"] = []string{}
+				}
+			}
+
+			// Pattern check (automatic denoise)
+			patternPaths := findJSONPathsWithPatterns(parsed, "")
+			for _, p := range patternPaths {
+				key := fmt.Sprintf("body.%s", p)
 				noise[key] = []string{}
 			}
 		}
 	} else {
-		// non-json body: if whole body looks like a timestamp or random ID, mark it noisy
-		bodyTrim := strings.TrimSpace(resp.Body)
-		if bodyTrim != "" && (LooksLikeTimestamp(bodyTrim) || LooksLikeRandomID(bodyTrim)) {
+		// non-json body: if any templated literal present, mark the full body as noisy
+		for _, v := range utils.TemplatizedValues {
+			if v == nil {
+				continue
+			}
+			lit := fmt.Sprintf("%v", v)
+			if lit == "" {
+				continue
+			}
+			if strings.Contains(resp.Body, lit) {
+				noise["body"] = []string{}
+				break
+			}
+		}
+		// Pattern check for raw body
+		if isNoiseValue(resp.Body) {
 			noise["body"] = []string{}
 		}
 	}
 
 	return noise
+}
+
+// isNoiseValue checks if the string matches common noise patterns (Timestamp or Random ID)
+func isNoiseValue(s string) bool {
+	return LooksLikeTimestamp(s) || LooksLikeRandomID(s)
+}
+
+// findJSONPathsWithPatterns recursively searches parsed JSON for values matching noise patterns
+func findJSONPathsWithPatterns(node interface{}, prefix string) []string {
+	var paths []string
+	switch t := node.(type) {
+	case map[string]interface{}:
+		for k, v := range t {
+			p := k
+			if prefix != "" {
+				p = prefix + "." + k
+			}
+			paths = append(paths, findJSONPathsWithPatterns(v, p)...)
+		}
+	case []interface{}:
+		for i, v := range t {
+			idx := fmt.Sprintf("%d", i)
+			p := idx
+			if prefix != "" {
+				p = prefix + "." + idx
+			}
+			paths = append(paths, findJSONPathsWithPatterns(v, p)...)
+		}
+	case string:
+		if isNoiseValue(t) {
+			paths = append(paths, prefix)
+		}
+	}
+	return paths
 }
 
 // findJSONPathsWithValue recursively searches parsed JSON for values equal to target
@@ -636,189 +638,65 @@ func findJSONPathsWithValue(node interface{}, target, prefix string) []string {
 }
 
 // LooksLikeTimestamp returns true if the string looks like a timestamp
-// (date-like string or unix epoch seconds/millis near "now").
+// Uses dateparse library for comprehensive timestamp detection covering 50+ formats
 func LooksLikeTimestamp(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
 	}
 
-	// Use existing date/time layouts first
-	if IsTime(s) {
+	// Use dateparse library for automatic format detection
+	_, err := dateparse.ParseAny(s)
+	if err == nil {
 		return true
 	}
 
-	// Pure digits? Try unix seconds / millis
-	allDigits := true
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			allDigits = false
-			break
-		}
-	}
-	if !allDigits {
-		return false
-	}
-
-	// We only consider 10-digit (seconds) and 13-digit (millis) as timestamps
-	if len(s) != 10 && len(s) != 13 {
-		return false
-	}
-
-	unixVal, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return false
-	}
-
-	now := time.Now().Unix()
-	var ts int64
-	if len(s) == 13 {
-		ts = unixVal / 1000 // millis -> seconds
-	} else {
-		ts = unixVal
-	}
-
-	const tenYears = int64(10 * 365 * 24 * 60 * 60)
-	if ts < now-tenYears || ts > now+tenYears {
-		return false
-	}
-	return true
+	return false
 }
 
 var (
-	uuidRe     = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	objectIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{24}$`)
-	base62IDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{16,36}$`)
+	objectIDRe  = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
+	base62IDRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,36}$`)
+	nanoIDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{21,22}$`)
+	snowflakeRe = regexp.MustCompile(`^\d{18,19}$`)
 )
 
-// LooksLikeRandomID tries to detect UUIDs, Mongo ObjectIDs, and generic
-// high-entropy base62-ish IDs (NanoID-style).
+// LooksLikeRandomID uses specialized libraries to detect various random ID formats:
+// UUID, KSUID, ULID, NanoID, Snowflake IDs, MongoDB ObjectIDs, and generic high-entropy IDs
 func LooksLikeRandomID(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
 	}
 
-	// Strict formats first
-	if uuidRe.MatchString(s) || objectIDRe.MatchString(s) {
+	// Library-based detection (most accurate)
+	if _, err := uuid.Parse(s); err == nil {
 		return true
 	}
 
-	// Generic base62-style random IDs
+	if len(s) == 27 {
+		if _, err := ksuid.Parse(s); err == nil {
+			return true
+		}
+	}
+
+	if len(s) == 26 {
+		if _, err := ulid.Parse(s); err == nil {
+			return true
+		}
+	}
+
+	// Regex-based detection for formats without libraries
+	if objectIDRe.MatchString(s) || snowflakeRe.MatchString(s) || nanoIDRe.MatchString(s) {
+		return true
+	}
+
+	// Fallback: generic high-entropy IDs
 	if !base62IDRe.MatchString(s) {
 		return false
 	}
 
-	// Require a mix of letters and digits to avoid matching simple numbers
-	hasLetter, hasDigit := false, false
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			hasLetter = true
-		} else if r >= '0' && r <= '9' {
-			hasDigit = true
-		}
-	}
-	return hasLetter && hasDigit
-}
-
-// isTimeLikeName checks if a field/header name is likely time-related.
-func isTimeLikeName(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	if n == "" {
-		return false
-	}
-
-	if n == "date" || n == "time" || n == "timestamp" {
-		return true
-	}
-	if strings.Contains(n, "timestamp") || strings.Contains(n, "time") || strings.Contains(n, "date") {
-		return true
-	}
-	if strings.HasSuffix(n, "_at") || strings.HasSuffix(n, "-at") {
-		return true
-	}
-	if strings.Contains(n, "created") || strings.Contains(n, "updated") {
-		return true
-	}
 	return false
-}
-
-// isIDLikeName checks if a field/header name is likely ID-related.
-func isIDLikeName(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	if n == "" {
-		return false
-	}
-
-	if n == "id" || strings.HasSuffix(n, "_id") || strings.HasSuffix(n, "id") {
-		return true
-	}
-	if strings.Contains(n, "uuid") ||
-		strings.Contains(n, "token") ||
-		strings.Contains(n, "trace") ||
-		strings.Contains(n, "span") ||
-		strings.Contains(n, "correlation") ||
-		strings.Contains(n, "request-id") {
-		return true
-	}
-	return false
-}
-
-// findNoisyJSONFields walks parsed JSON and returns paths whose leaf values
-// look like random IDs or timestamps. keyHint is the current map key.
-func findNoisyJSONFields(node interface{}, path string, keyHint string) []string {
-	var paths []string
-
-	switch v := node.(type) {
-	case map[string]interface{}:
-		for k, child := range v {
-			p := k
-			if path != "" {
-				p = path + "." + k
-			}
-			paths = append(paths, findNoisyJSONFields(child, p, k)...)
-		}
-	case []interface{}:
-		for i, child := range v {
-			p := fmt.Sprintf("%s[%d]", path, i)
-			paths = append(paths, findNoisyJSONFields(child, p, keyHint)...)
-		}
-	case string:
-		if isIDLikeName(keyHint) && LooksLikeRandomID(v) {
-			if path != "" {
-				paths = append(paths, path)
-			}
-		}
-		if isTimeLikeName(keyHint) && LooksLikeTimestamp(v) {
-			if path != "" {
-				paths = append(paths, path)
-			}
-		}
-	case float64:
-		// numeric timestamps in json (epoch seconds/millis)
-		if isTimeLikeName(keyHint) && looksLikeEpochFloat(v) {
-			if path != "" {
-				paths = append(paths, path)
-			}
-		}
-	}
-	return paths
-}
-
-func looksLikeEpochFloat(val float64) bool {
-	if val <= 0 {
-		return false
-	}
-
-	now := float64(time.Now().Unix())
-	seconds := val
-	// if it's huge, assume millis
-	if val > 1e11 {
-		seconds = val / 1e3
-	}
-
-	tenYears := float64(10 * 365 * 24 * 60 * 60)
-	return seconds > now-tenYears && seconds < now+tenYears
 }
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
