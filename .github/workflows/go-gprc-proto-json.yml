@@ -1,6 +1,7 @@
 name: Golang Grpc Proto JSON
 
 # This workflow is used to test keploy grpc proto to json conversion logic used while comparing expected and actual payloads during replay.
+# It also tests the noise feature for grpc tests. (using the keploy.yml config in the samples-go/grpc-apps/multi-proto )
 
 on:
   workflow_call:
