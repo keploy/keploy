@@ -79,47 +79,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 
-	if bodyType == models.JSON && len(bodyNoise) > 0 {
-		globalKeys := make(map[string]bool)
-		for k := range bodyNoise {
-			// If key does not contain ".", treat it as a global field name to ignore everywhere
-			if !strings.Contains(k, ".") {
-				globalKeys[k] = true
-			}
-		}
-
-		if len(globalKeys) > 0 {
-			var expObj, actObj interface{}
-			// Clean Expected Body
-			if err := jsonUnmarshal234([]byte(cleanExp), &expObj); err == nil {
-				matcherUtils.RemoveGlobalNoise(expObj, globalKeys)
-				if b, err := jsonMarshal234(expObj); err == nil {
-					cleanExp = string(b)
-				} else {
-					logger.Debug("failed to marshal expected body after noise removal", zap.Error(err))
-				}
-			} else {
-				logger.Debug("failed to unmarshal expected body for noise removal", zap.Error(err))
-			}
-			// Clean Actual Body
-			if err := jsonUnmarshal234([]byte(cleanAct), &actObj); err == nil {
-				matcherUtils.RemoveGlobalNoise(actObj, globalKeys)
-				if b, err := jsonMarshal234(actObj); err == nil {
-					cleanAct = string(b)
-				} else {
-					logger.Debug("failed to marshal actual body after noise removal", zap.Error(err))
-				}
-			} else {
-				logger.Debug("failed to unmarshal actual body for noise removal", zap.Error(err))
-			}
-		}
-	}
-
-	if bodyType == models.JSON {
-		res.BodyResult[0].Expected = cleanExp
-		res.BodyResult[0].Actual = cleanAct
-	}
-
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
 	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
 		//validate the stored json
