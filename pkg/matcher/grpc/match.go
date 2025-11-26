@@ -218,6 +218,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	decodedDataNormal := true
 	expectedDecodedData := expectedResp.Body.DecodedData
 	actualDecodedData := actualResp.Body.DecodedData
+
 	var jsonComparisonResult matcher.JSONComparisonResult
 
 	// Check if both decoded data are valid JSON
