@@ -944,19 +944,43 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			// Parse and mount proto paths for test/rerecord commands
 			if cmd.Name() == "test" || cmd.Name() == "rerecord" {
-				// Parse proto flags from command
-				protoCfg, err := parseProtoFlags(c.logger, cmd)
-				if err != nil {
-					return err
+				if c.cfg.Test.ProtoFile != "" {
+					protoFile, err := utils.GetAbsPath(c.cfg.Test.ProtoFile)
+					if err != nil {
+						errMsg := "failed to get the absolute path of proto-file"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					c.cfg.Test.ProtoFile = protoFile
 				}
 
-				c.cfg.Test.ProtoFile = protoCfg.ProtoFile
-				c.cfg.Test.ProtoDir = protoCfg.ProtoDir
-				c.cfg.Test.ProtoInclude = protoCfg.ProtoInclude
+				if c.cfg.Test.ProtoDir != "" {
+					protoDir, err := utils.GetAbsPath(c.cfg.Test.ProtoDir)
+					if err != nil {
+						errMsg := "failed to get the absolute path of proto-dir"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					c.cfg.Test.ProtoDir = protoDir
+				}
+
+				if c.cfg.Test.ProtoInclude != nil {
+					var includes []string
+					for _, dir := range c.cfg.Test.ProtoInclude {
+						absDir, err := utils.GetAbsPath(dir)
+						if err != nil {
+							errMsg := "failed to get the absolute path of proto-include"
+							utils.LogError(c.logger, err, errMsg)
+							return errors.New(errMsg)
+						}
+						includes = append(includes, absDir)
+					}
+					c.cfg.Test.ProtoInclude = includes
+				}
 
 				// Mount proto paths that are outside current working directory
 				// Mount proto file (if specified)
-				err = mountPathIfExternal(c.logger, c.cfg.Test.ProtoFile, true, "proto")
+				err := mountPathIfExternal(c.logger, c.cfg.Test.ProtoFile, true, "proto")
 				if err != nil {
 					return err
 				}
@@ -1179,14 +1203,39 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			protoCfg, err := parseProtoFlags(c.logger, cmd)
-			if err != nil {
-				return err
+			if c.cfg.Test.ProtoFile != "" {
+				protoFile, err := utils.GetAbsPath(c.cfg.Test.ProtoFile)
+				if err != nil {
+					errMsg := "failed to get the absolute path of proto-file"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Test.ProtoFile = protoFile
 			}
 
-			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
-			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
-			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
+			if c.cfg.Test.ProtoDir != "" {
+				protoDir, err := utils.GetAbsPath(c.cfg.Test.ProtoDir)
+				if err != nil {
+					errMsg := "failed to get the absolute path of proto-dir"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Test.ProtoDir = protoDir
+			}
+
+			if c.cfg.Test.ProtoInclude != nil {
+				var includes []string
+				for _, dir := range c.cfg.Test.ProtoInclude {
+					absDir, err := utils.GetAbsPath(dir)
+					if err != nil {
+						errMsg := "failed to get the absolute path of proto-include"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					includes = append(includes, absDir)
+				}
+				c.cfg.Test.ProtoInclude = includes
+			}
 		}
 
 		bigPayload, err := cmd.Flags().GetBool("bigPayload")

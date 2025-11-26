@@ -127,3 +127,6 @@ jobs:
   run_grpc_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/grpc_linux.yml
+  run_grpc_proto_json:
+    needs: [build-and-upload]
+    uses: ./.github/workflows/go-gprc-proto-json.yml

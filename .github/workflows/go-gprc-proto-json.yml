@@ -1,0 +1,51 @@
+name: Golang Grpc Proto JSON
+
+# This workflow is used to test keploy grpc proto to json conversion logic used while comparing expected and actual payloads during replay.
+# It also tests the noise feature for grpc tests. (using the keploy.yml config in the samples-go/grpc-apps/multi-proto )
+
+on:
+  workflow_call:
+
+jobs:
+  test-proto-json:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Keploy repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      
+      - name: Install PyYAML
+        run: pip install pyyaml
+      
+      - name: Download Keploy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: keploy-bin
+      
+      - name: Make Keploy executable
+        run: |
+          chmod +x keploy-bin/keploy
+          echo "REPLAY_BIN=$(pwd)/keploy-bin/keploy" >> $GITHUB_ENV
+      
+      - name: Checkout samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+      
+      - name: Make test script executable
+        run: chmod +x .github/workflows/test_workflow_scripts/grpc-apps/go-grpc-proto-json.sh
+      
+      - name: Run gRPC Proto JSON test
+        run: ./.github/workflows/test_workflow_scripts/grpc-apps/go-grpc-proto-json.sh
