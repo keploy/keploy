@@ -6,9 +6,8 @@ name: Docker
 # documentation.
 
 on:
-  pull_request:
-    branches:
-      - v2
+  push:
+    tags: [ 'v*.*.*' ]
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -45,6 +44,7 @@ jobs:
       # Install the cosign tool except on PR
       # https://github.com/sigstore/cosign-installer
       - name: Install cosign
+        if: github.event_name != 'pull_request'
         uses: sigstore/cosign-installer@v3.4.0
 
 
@@ -55,6 +55,7 @@ jobs:
       # Login against a Docker registry except on PR
       # https://github.com/docker/login-action
       - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
         with:
           registry: ${{ env.REGISTRY }}
@@ -72,7 +73,7 @@ jobs:
       - name: Set version
         shell: bash
         run: |
-          echo "VERSION=v2.11.30-debug-http" >> $GITHUB_ENV
+          echo "VERSION=$(echo ${GITHUB_REF#refs/tags/v})" >> $GITHUB_ENV
 
       - name: Prepare Dockerfile for Release Build
         run: |
@@ -96,7 +97,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             SENTRY_DSN_DOCKER=${{secrets.SENTRY_DSN_DOCKER}}
-            VERSION=v2.11.30-debug-http
+            VERSION=${{ env.VERSION }}
             SERVER_URL=https://api.keploy.io
             GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
 

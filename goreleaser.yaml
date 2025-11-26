@@ -9,7 +9,7 @@ builds:
     main: ./main.go
     ldflags:
       - -s -w -X main.dsn={{.Env.SENTRY_DSN_BINARY}}
-      - -s -w -X main.version=v2.11.30-debug-http
+      - -s -w -X main.version={{.Version}}
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
       - -s -w -X main.gitHubClientID={{.Env.GITTHUB_APP_CLIENT_ID}}
     env:

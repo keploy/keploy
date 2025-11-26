@@ -1,8 +1,8 @@
 name: Release
 on:
-  pull_request:
-    branches:
-      - v2
+  push:
+    tags:
+    - 'v*.*.*'
 
 permissions:
   contents: write
