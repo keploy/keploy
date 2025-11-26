@@ -43,14 +43,14 @@ echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 # Navigate to the server directory
 cd samples-go/grpc-apps/multi-proto/server
 
-echo "go mod tidy"
-go mod tidy
+echo "Building the app binary"
+go build -o server . 
 
 endsec
 
 section "▶️ Running Keploy test mode..."
 
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "go run main.go" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_logs.txt || true
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./server" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_logs.txt || true
 
 endsec
 
