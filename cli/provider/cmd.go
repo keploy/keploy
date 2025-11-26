@@ -302,8 +302,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
-		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
+
+		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
+		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 
 	default:
 		return errors.New("unknown command name")
@@ -1220,6 +1223,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.DnsPort = dnsPort
+
+		buildDelay, err := cmd.Flags().GetUint64("build-delay")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get build-delay flag")
+			return nil // Or return an error
+		}
+		c.cfg.Agent.BuildDelay = buildDelay
+
+		passThroughPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
+			return nil // Or return an error
+		}
+		c.cfg.Agent.PassThroughPorts = passThroughPorts
 	}
 
 	return nil

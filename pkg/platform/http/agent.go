@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -492,6 +493,20 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	if opts.BuildDelay > 0 {
+		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+	}
+	if len(opts.PassThroughPorts) > 0 {
+		// Convert []uint32 to []string
+		portStrings := make([]string, len(opts.PassThroughPorts))
+		for i, port := range opts.PassThroughPorts {
+			portStrings[i] = strconv.Itoa(int(port))
+		}
+		// Join them with a comma and add as a single argument
+		args = append(args, "--pass-through-ports", strings.Join(portStrings, ","))
+	}
+	a.logger.Info("Starting native agent with args", zap.Strings("args", args))
+
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
