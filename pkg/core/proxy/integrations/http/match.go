@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/agnivade/levenshtein"
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -181,10 +180,6 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 
 func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 
-	h.Logger.Debug("mock-UrlParamMap")
-	spew.Dump(map1)
-	h.Logger.Debug("req-UrlParamMap")
-	spew.Dump(map2)
 	// Helper function to check if a header should be ignored
 	shouldIgnoreHeader := func(key string) bool {
 		lkey := strings.ToLower(key)
