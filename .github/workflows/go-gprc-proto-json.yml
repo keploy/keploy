@@ -4,7 +4,6 @@ name: Golang Grpc Proto JSON
 
 on:
   workflow_call:
-  workflow_dispatch:
 
 jobs:
   test-proto-json:
