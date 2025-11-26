@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/agnivade/levenshtein"
+	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -179,6 +180,11 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 }
 
 func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
+
+	h.Logger.Debug("mock-UrlParamMap")
+	spew.Dump(map1)
+	h.Logger.Debug("req-UrlParamMap")
+	spew.Dump(map2)
 	// Helper function to check if a header should be ignored
 	shouldIgnoreHeader := func(key string) bool {
 		lkey := strings.ToLower(key)
@@ -203,6 +209,7 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 
 	// Check if counts match
 	if map1Count != map2Count {
+		h.Logger.Debug("Maps do not have the same number of non-ignored keys", zap.Int("mock-UrlParamMap", map1Count), zap.Int("req-UrlParamMap", map2Count))
 		return false
 	}
 
@@ -212,6 +219,7 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 			continue
 		}
 		if _, exists := map2[key]; !exists {
+			h.Logger.Debug("Key from mock-UrlParamMap not found in req-UrlParamMap", zap.String("missing key", key))
 			return false
 		}
 	}
@@ -222,6 +230,7 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 			continue
 		}
 		if _, exists := map1[key]; !exists {
+			h.Logger.Debug("Key from req-UrlParamMap not found in mock-UrlParamMap", zap.String("missing key", key))
 			return false
 		}
 	}
