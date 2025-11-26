@@ -45,7 +45,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
-	if err := h.callAgentHook("/hooks/before-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI); err != nil {
+	if err := h.callAgentHook("/hooks/before-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI, tc.Name, testSetID); err != nil {
 		h.logger.Error("failed to call before simulate hook", zap.Error(err))
 	}
 
@@ -54,14 +54,14 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
 
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
-		if err := h.callAgentHook("/hooks/after-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI); err != nil {
+		if err := h.callAgentHook("/hooks/after-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call after simulate hook", zap.Error(err))
 		}
 		return resp, err
 	case models.GRPC_EXPORT:
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
 		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
-		if err := h.callAgentHook("/hooks/after-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI); err != nil {
+		if err := h.callAgentHook("/hooks/after-simulate", &tc.HTTPReq.Timestamp, h.cfg.Agent.AgentURI, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call after simulate hook", zap.Error(err))
 		}
 		return resp, err
@@ -73,10 +73,12 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 }
 
 // Helper function to hit the Agent API
-func (h *Hooks) callAgentHook(endpoint string, timestamp *time.Time, agentURI string) error {
+func (h *Hooks) callAgentHook(endpoint string, timestamp *time.Time, agentURI string, tcName string, testSetID string) error {
 
 	type AgentPayload struct {
-		Timestamp *time.Time `json:"timestamp"`
+		Timestamp    *time.Time `json:"timestamp"`
+		TestSetID    string     `json:"testSetID"`
+		TestCaseName string     `json:"testCaseName"`
 	}
 
 	if timestamp == nil || timestamp.IsZero() {
@@ -85,7 +87,9 @@ func (h *Hooks) callAgentHook(endpoint string, timestamp *time.Time, agentURI st
 	}
 
 	payload := AgentPayload{
-		Timestamp: timestamp,
+		Timestamp:    timestamp,
+		TestSetID:    testSetID,
+		TestCaseName: tcName,
 	}
 
 	body, _ := json.Marshal(payload)
@@ -108,6 +112,42 @@ func (h *Hooks) callAgentHook(endpoint string, timestamp *time.Time, agentURI st
 
 func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
+	payload := map[string]string{
+        "testRunID": testRunID,
+    }
+
+	return h.callAgent("/hooks/before-test-run", payload)
+}
+
+func (h *Hooks) callAgent(endpoint string, payload interface{}) error {
+	if h.cfg.Agent.AgentURI == "" {
+		return nil
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s%s", h.cfg.Agent.AgentURI, endpoint)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		h.logger.Warn("failed to call agent hook", zap.String("endpoint", endpoint), zap.Error(err))
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		h.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
+		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -249,7 +289,16 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
-	return nil
+	h.logger.Debug("Signaling Agent: AfterTestRun", zap.String("testRunID", testRunID))
+
+    payload := map[string]interface{}{
+        "testRunID":  testRunID,
+        "testSetIDs": testSetIDs,
+        "coverage":   coverage,
+    }
+
+    // Call the endpoint
+	return h.callAgent("/hooks/after-test-run", payload)
 }
 
 func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
