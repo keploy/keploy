@@ -110,11 +110,11 @@ func (h *Hooks) callAgentHook(endpoint string, timestamp *time.Time, agentURI st
 	return nil
 }
 
-func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
+func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string, firstRun bool, isDockerCompose bool) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
 	payload := map[string]string{
-        "testRunID": testRunID,
-    }
+		"testRunID": testRunID,
+	}
 
 	return h.callAgent("/hooks/before-test-run", payload)
 }
@@ -135,19 +135,22 @@ func (h *Hooks) callAgent(endpoint string, payload interface{}) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 50 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		h.logger.Warn("failed to call agent hook", zap.String("endpoint", endpoint), zap.Error(err))
 		return nil
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		h.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
 		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
 	}
+	return nil
+}
+
+func (h *Hooks) BeforeTestResult(ctx context.Context, agentURI string, isDocker bool, isDockerCompose bool) error {
 	return nil
 }
 
@@ -291,13 +294,13 @@ func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []s
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
 	h.logger.Debug("Signaling Agent: AfterTestRun", zap.String("testRunID", testRunID))
 
-    payload := map[string]interface{}{
-        "testRunID":  testRunID,
-        "testSetIDs": testSetIDs,
-        "coverage":   coverage,
-    }
+	payload := map[string]interface{}{
+		"testRunID":  testRunID,
+		"testSetIDs": testSetIDs,
+		"coverage":   coverage,
+	}
 
-    // Call the endpoint
+	// Call the endpoint
 	return h.callAgent("/hooks/after-test-run", payload)
 }
 

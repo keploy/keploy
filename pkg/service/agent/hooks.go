@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,7 +24,10 @@ func (n *NoOpHooks) BeforeSimulate(ctx context.Context, t time.Time, testSetID s
 func (n *NoOpHooks) AfterSimulate(ctx context.Context, testSetID string, tcName string) error {
 	return nil
 }
-func (n *NoOpHooks) BeforeTestRun(ctx context.Context, id string) error { return nil }
+func (n *NoOpHooks) BeforeTestRun(ctx context.Context, id string) error {
+	fmt.Println("doing nothing")
+	return nil
+}
 func (n *NoOpHooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	return nil
 }

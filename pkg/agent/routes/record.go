@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,7 +24,7 @@ type Agent struct {
 	svc    agent.Service
 }
 
-func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
+func (d DefaultRoutes)New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	a := &Agent{
 		logger: logger,
 		svc:    agent,
@@ -46,6 +47,29 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	})
 }
 
+type DefaultRoutes struct{}
+
+type RouteHook interface {
+	New(r chi.Router, agent agent.Service, logger *zap.Logger)
+}
+
+var (
+	activeHooks RouteHook = &DefaultRoutes{}
+	hookMu      sync.RWMutex
+)
+
+func RegisterHooks(h RouteHook) {
+	hookMu.Lock()
+	defer hookMu.Unlock()
+	activeHooks = h
+}
+
+func GetHooks() RouteHook {
+	hookMu.RLock()
+	defer hookMu.RUnlock()
+	return activeHooks
+}
+
 type TimeFreezeReq struct {
 	Time         time.Time `json:"timestamp"`
 	TestSetID    string    `json:"testSetID"`
@@ -65,6 +89,7 @@ type AfterTestRunReq struct {
 }
 
 func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("router working")
 	var req BeforeTestRunReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -80,6 +105,7 @@ func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("router working")
 	var req AfterTestRunReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

@@ -95,8 +95,9 @@ type Telemetry interface {
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error)
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
-	BeforeTestRun(ctx context.Context, testRunID string) error
+	BeforeTestRun(ctx context.Context, testRunID string, firstRun bool, isDockerCompose bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
+	BeforeTestResult(ctx context.Context, agentURI string, isDocker bool, isDockerCompose bool) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
 }
