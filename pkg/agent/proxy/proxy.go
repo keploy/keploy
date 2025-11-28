@@ -165,7 +165,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 					return err
 				}
 			}
-			return nil
+			return ctx.Err()
 		case err := <-errCh:
 			return err
 		}
@@ -193,7 +193,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 					return err
 				}
 			}
-			return nil
+			return ctx.Err()
 		case err := <-errCh:
 			return err
 		}
@@ -277,7 +277,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		}()
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		case err := <-errCh:
 			return err
 		// handle the client connection
@@ -717,10 +717,10 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	p.MockManagers.Store(uint64(0), NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	if !opts.Mocking {
-		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
+		p.logger.Info("\U0001f500 Mocking is disabled, the response will be fetched from the actual service")
 	}
 
-	if string(p.nsswitchData) == "" {
+	if p.DNSPort != 0 && string(p.nsswitchData) == "" {
 		// setup the nsswitch config to redirect the DNS queries to the proxy
 		err := p.setupNsswitchConfig()
 		if err != nil {

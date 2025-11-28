@@ -9,6 +9,12 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+const (
+	DefaultServePort      = 6789
+	DefaultServeProxyPort = 16789
+	ShutdownTimeout       = 5 * time.Second
+)
+
 type MockDownload struct {
 	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
 }

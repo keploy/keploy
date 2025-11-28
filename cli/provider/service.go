@@ -47,6 +47,8 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	case "agent":
 		return GetAgent(ctx, cmd, n.cfg, n.logger, n.auth)
+	case "serve":
+		return GetServe(ctx, cmd, n.cfg, n.logger)
 	default:
 		return nil, errors.New("invalid command")
 	}

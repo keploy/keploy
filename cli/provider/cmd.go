@@ -308,6 +308,15 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 
+	case "serve":
+		cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where recorded mocks are stored")
+		cmd.Flags().Uint32("port", config.DefaultServePort, "Port on which the mock server will run")
+		cmd.Flags().Uint32("proxy-port", config.DefaultServeProxyPort, "Port on which the proxy will run")
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Test sets to load mocks from e.g. --test-sets \"test-set-1,test-set-2\"")
+		cmd.Flags().Bool("fallback-on-miss", c.cfg.Test.FallBackOnMiss, "Fallback to real dependencies when mock is not found")
+		cmd.Flags().Uint64("delay", c.cfg.Test.Delay, "Delay for SQL operations (in seconds)")
+		cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB traffic")
+
 	default:
 		return errors.New("unknown command name")
 	}
@@ -1228,6 +1237,97 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil // Or return an error
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+	case "serve":
+		absPath, err := utils.GetAbsPath(c.cfg.Path)
+		if err != nil {
+			errMsg := "failed to get the absolute path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = absPath
+
+		port, err := cmd.Flags().GetUint32("port")
+		if err != nil {
+			errMsg := "failed to read the port flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.ServerPort = port
+
+		// Port range validation
+		if port == 0 || port > 65535 {
+			return fmt.Errorf("invalid port number: %d. Port number should be between 1 and 65535", port)
+		}
+
+		proxyPort, err := cmd.Flags().GetUint32("proxy-port")
+		if err != nil {
+			errMsg := "failed to read the proxy-port flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.ProxyPort = proxyPort
+
+		// Proxy port range validation
+		if proxyPort == 0 || proxyPort > 65535 {
+			return fmt.Errorf("invalid proxy port number: %d. Port number should be between 1 and 65535", proxyPort)
+		}
+
+		// Ensure port and proxy port are different
+		if port == proxyPort {
+			return fmt.Errorf("server port and proxy port cannot be the same: %d", port)
+		}
+
+		// Path existence validation
+		if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
+			return fmt.Errorf("path does not exist: %s", c.cfg.Path)
+		}
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to read the test-sets flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		if len(testSets) > 0 {
+			config.SetSelectedTests(c.cfg, testSets)
+		}
+
+		// Test set names validation
+		for tsName := range c.cfg.Test.SelectedTests {
+			if strings.Contains(tsName, "..") {
+				return fmt.Errorf("invalid test set name: %s. It should not contain '..'", tsName)
+			}
+		}
+
+		fallbackOnMiss, err := cmd.Flags().GetBool("fallback-on-miss")
+		if err != nil {
+			errMsg := "failed to read the fallback-on-miss flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Test.FallBackOnMiss = fallbackOnMiss
+
+		delay, err := cmd.Flags().GetUint64("delay")
+		if err != nil {
+			errMsg := "failed to read the delay flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Test.Delay = delay
+
+		mongoPassword, err := cmd.Flags().GetString("mongo-password")
+		if err != nil {
+			errMsg := "failed to read the mongo-password flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Test.MongoPassword = mongoPassword
+
+		c.logger.Info("Mock server will be started",
+			zap.Uint32("port", port),
+			zap.Uint32("proxy-port", proxyPort),
+			zap.String("path", c.cfg.Path),
+			zap.Strings("test-sets", testSets))
 	}
 
 	return nil
