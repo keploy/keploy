@@ -150,7 +150,7 @@ wait_for_port() {
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    REC_PID=$(pgrep keploy | sort -n | head -1)
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
