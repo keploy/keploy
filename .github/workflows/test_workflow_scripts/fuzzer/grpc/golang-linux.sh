@@ -244,7 +244,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
  sleep 10
 
-
+ echo "using the new commnad to stop keploy"
  REC_PID=$(pgrep keploy | sort -n | head -1)
  echo "$REC_PID Keploy PID"
  echo "Killing keploy"
