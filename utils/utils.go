@@ -195,10 +195,10 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 			if bypass.Port == 0 || bypass.Port == destPort {
 				logger.Debug("request matched bypass rule", zap.Any("rule", bypass))
 				return true
-			} else {
-				logger.Debug("port mismatch for bypass rule", zap.Uint("destPort", destPort), zap.Uint("rulePort", bypass.Port))
-				passThrough = false
 			}
+			logger.Debug("port mismatch for bypass rule", zap.Uint("destPort", destPort), zap.Uint("rulePort", bypass.Port))
+			passThrough = false
+
 		}
 	}
 	logger.Debug("request is not passthrough")
