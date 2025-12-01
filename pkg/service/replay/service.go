@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"time"
-
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -46,12 +45,9 @@ type Service interface {
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
-
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context, testSets []string) error
-
 	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
-
 	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
 	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result)
 	// CompareGRPCResp compares gRPC responses and returns match result with detailed diffs

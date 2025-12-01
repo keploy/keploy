@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// Add after line 10 (imports section)
+type DebugConfig struct {
+    Enabled bool            `json:"enabled" yaml:"enabled" mapstructure:"enabled"`
+    Modules map[string]bool `json:"modules" yaml:"modules" mapstructure:"modules"`
+}
+
 type MockDownload struct {
 	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
 }
@@ -23,6 +29,7 @@ type Config struct {
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
+    DebugConfig			  DebugConfig `json:"debugConfig" yaml:"debugConfig" mapstructure:"debugConfig"` 
 	DisableTele           bool         `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
 	InDocker              bool         `json:"inDocker" yaml:"-" mapstructure:"inDocker"`

@@ -569,15 +569,20 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
-	if c.cfg.Debug {
+	globalDebug := c.cfg.Debug || c.cfg.DebugConfig.Enabled
+
+	if globalDebug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
-		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to change log level"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		*c.logger = *logger
 	}
+
+	// Initialize module logger factory
+	log.InitGlobalFactory(c.logger, globalDebug, c.cfg.DebugConfig.Modules)
 
 	if c.cfg.Record.BasePath != "" {
 		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)
