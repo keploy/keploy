@@ -206,6 +206,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if opts.Synchronous {
 				alias += " --synchronous"
+			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
 			}
@@ -250,10 +251,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --synchronous"
+		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
 		}
 		return alias, nil
+
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
@@ -308,6 +311,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if opts.Synchronous {
 				alias += " --synchronous"
+			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
 			}
@@ -353,6 +357,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --synchronous"
+		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
 		}
