@@ -247,8 +247,8 @@ func (a *AgentClient) BeforeSimulate(timestamp *time.Time, testSetID string, tcN
 	}
 
 	requestBody := models.BeforeSimulateRequest{
-		TimeStamp: *timestamp,
-		TestSetID: testSetID,
+		TimeStamp:    *timestamp,
+		TestSetID:    testSetID,
 		TestCaseName: tcName,
 	}
 	if a.conf.Agent.AgentURI == "" {
