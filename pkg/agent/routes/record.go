@@ -24,7 +24,7 @@ type Agent struct {
 	svc    agent.Service
 }
 
-func (d DefaultRoutes)New(r chi.Router, agent agent.Service, logger *zap.Logger) {
+func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	a := &Agent{
 		logger: logger,
 		svc:    agent,

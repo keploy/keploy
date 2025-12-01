@@ -166,16 +166,16 @@ func (a *App) SetupCompose(extraArgs []string) error {
 		return err
 	}
 	if HookImpl != nil {
-        // We pass 'a.container' (the user app), but inside the hook we will also target the agent
-        changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
-        if err != nil {
-            utils.LogError(a.logger, err, "hook failed during docker compose setup")
-            return err
-        }
-        if changed {
-             a.logger.Debug("Successfully ran BeforeDockerComposeSetup hook and modified volumes")
-        }
-    }
+		// We pass 'a.container' (the user app), but inside the hook we will also target the agent
+		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+		if err != nil {
+			utils.LogError(a.logger, err, "hook failed during docker compose setup")
+			return err
+		}
+		if changed {
+			a.logger.Debug("Successfully ran BeforeDockerComposeSetup hook and modified volumes")
+		}
+	}
 	err = a.docker.WriteComposeFile(compose, newPath)
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
