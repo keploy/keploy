@@ -328,6 +328,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	fmt.Println("🟢 Handling outgoing connection to destination port:", destInfo.Port)
+
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
 	if err != nil {

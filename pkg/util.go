@@ -835,6 +835,9 @@ func AgentHealthTicker(ctx context.Context, agentURI string, agentReadyCh chan<-
 
 // isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
 func isAgentHealthy(ctx context.Context, client *http.Client, agentURI string) bool {
+
+	fmt.Println("Checking agent health at:", fmt.Sprintf("%s/health", agentURI))
+
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/health", agentURI), nil)
 	if err != nil {
 		return false
@@ -845,6 +848,13 @@ func isAgentHealthy(ctx context.Context, client *http.Client, agentURI string) b
 		return false
 	}
 	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+	fmt.Println("Agent health check status code:", resp.StatusCode)
+	fmt.Println("Agent health check response body:", string(body))
 
 	return resp.StatusCode == http.StatusOK
 }
