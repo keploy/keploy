@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -54,23 +53,14 @@ type RouteHook interface {
 }
 
 var (
-	activeHooks RouteHook = &DefaultRoutes{}
-	hookMu      sync.RWMutex
+	ActiveHooks RouteHook = &DefaultRoutes{}
 )
 
 func RegisterHooks(h RouteHook) {
-	hookMu.Lock()
-	defer hookMu.Unlock()
-	activeHooks = h
+	ActiveHooks = h
 }
 
-func GetHooks() RouteHook {
-	hookMu.RLock()
-	defer hookMu.RUnlock()
-	return activeHooks
-}
-
-type TimeFreezeReq struct {
+type SimulationHookRequest struct {
 	Time         time.Time `json:"timestamp"`
 	TestSetID    string    `json:"testSetID"`
 	TestCaseName string    `json:"testCaseName"`
@@ -89,15 +79,13 @@ type AfterTestRunReq struct {
 }
 
 func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("router working")
 	var req BeforeTestRunReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Call Hook
-	if err := agent.GetHooks().BeforeTestRun(r.Context(), req.TestRunID); err != nil {
+	if err := agent.ActiveHooks.BeforeTestRun(r.Context(), req.TestRunID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -105,7 +93,6 @@ func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("router working")
 	var req AfterTestRunReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -113,7 +100,7 @@ func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Pass all fields to the hook interface
-	if err := agent.GetHooks().AfterTestRun(r.Context(), req.TestRunID, req.TestSetIDs, req.Coverage); err != nil {
+	if err := agent.ActiveHooks.AfterTestRun(r.Context(), req.TestRunID, req.TestSetIDs, req.Coverage); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -121,14 +108,13 @@ func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
-	var req TimeFreezeReq
+	var req SimulationHookRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	currentHooks := agent.GetHooks()
-	if err := currentHooks.BeforeSimulate(r.Context(), req.Time, req.TestSetID, req.TestCaseName); err != nil {
+	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.Time, req.TestSetID, req.TestCaseName); err != nil {
 		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -137,13 +123,13 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
-	var req TimeFreezeReq
+	var req SimulationHookRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	currentHooks := agent.GetHooks()
-	if err := currentHooks.AfterSimulate(r.Context(), req.TestSetID, req.TestCaseName); err != nil {
+
+	if err := agent.ActiveHooks.AfterSimulate(r.Context(), req.TestSetID, req.TestCaseName); err != nil {
 		a.logger.Error("failed to execute after simulate hook", zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

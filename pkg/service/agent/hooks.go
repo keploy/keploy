@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -33,20 +32,11 @@ func (n *NoOpHooks) AfterTestRun(ctx context.Context, testRunID string, testSetI
 }
 
 var (
-	activeHooks AgentHooks = &NoOpHooks{}
-	hookMu      sync.RWMutex
+	ActiveHooks AgentHooks = &NoOpHooks{}
 )
 
 func RegisterHooks(h AgentHooks) {
-	hookMu.Lock()
-	defer hookMu.Unlock()
-	activeHooks = h
-}
-
-func GetHooks() AgentHooks {
-	hookMu.RLock()
-	defer hookMu.RUnlock()
-	return activeHooks
+	ActiveHooks = h
 }
 
 type StartupHook interface {
@@ -58,12 +48,8 @@ type NoOpStartupHook struct{}
 
 func (h *NoOpStartupHook) GetArgs(ctx context.Context) []string { return nil }
 
-var startupHook StartupHook = &NoOpStartupHook{}
+var StartupHooks StartupHook = &NoOpStartupHook{}
 
 func RegisterStartupHook(h StartupHook) {
-	startupHook = h
-}
-
-func GetStartupHook() StartupHook {
-	return startupHook
+	StartupHooks = h
 }

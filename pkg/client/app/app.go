@@ -56,7 +56,7 @@ func (a *App) Setup(ctx context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
-		extraArgs := agent.GetStartupHook().GetArgs(ctx)
+		extraArgs := agent.StartupHooks.GetArgs(ctx)
 		err := a.SetupCompose(extraArgs)
 		if err != nil {
 			return err
@@ -166,7 +166,6 @@ func (a *App) SetupCompose(extraArgs []string) error {
 		return err
 	}
 	if HookImpl != nil {
-		// We pass 'a.container' (the user app), but inside the hook we will also target the agent
 		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during docker compose setup")

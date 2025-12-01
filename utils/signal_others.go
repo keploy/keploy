@@ -4,7 +4,6 @@ package utils
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -48,7 +47,6 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cli", cmd.String()))
-	fmt.Println("application started at :", time.Now().Unix())
 	err := cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}

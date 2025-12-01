@@ -798,7 +798,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 		if !BeforeOnce {
-			fmt.Println("CALLING THE BEFORE HOOK")
 			err = HookImpl.BeforeTestRun(ctx, testRunID, BeforeOnce, false)
 			if err != nil {
 				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
