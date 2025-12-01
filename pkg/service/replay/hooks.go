@@ -2,7 +2,6 @@
 package replay
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -45,46 +44,34 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
-	triggerHook := func(endpoint string, timestamp *time.Time) error {
-		if timestamp == nil || timestamp.IsZero() {
-			h.logger.Warn("Skipping agent hook: timestamp is zero or nil")
-			return nil
-		}
-
-		payload := map[string]interface{}{
-			"timestamp":    timestamp,
-			"testSetID":    testSetID,
-			"testCaseName": tc.Name,
-		}
-
-		return h.callAgent(endpoint, payload)
-	}
-
 	switch tc.Kind {
 	case models.HTTP:
-		if err := triggerHook("/hooks/before-simulate", &tc.HTTPReq.Timestamp); err != nil {
+
+		if err := h.instrumentation.BeforeSimulate(&tc.HTTPReq.Timestamp); err != nil {
 			h.logger.Error("failed to call before simulate hook", zap.Error(err))
 		}
 
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
 
-		if err := triggerHook("/hooks/after-simulate", &tc.HTTPReq.Timestamp); err != nil {
+		if err := h.instrumentation.AfterSimulate(tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call after simulate hook", zap.Error(err))
 		}
+
 		return resp, err
 	case models.GRPC_EXPORT:
 
-		if err := triggerHook("/hooks/before-simulate", &tc.GrpcReq.Timestamp); err != nil {
+		if err := h.instrumentation.BeforeSimulate(&tc.GrpcReq.Timestamp); err != nil {
 			h.logger.Error("failed to call before simulate hook", zap.Error(err))
 		}
 
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
 		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
 
-		if err := triggerHook("/hooks/after-simulate", &tc.GrpcReq.Timestamp); err != nil {
+		if err := h.instrumentation.AfterSimulate(tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call after simulate hook", zap.Error(err))
 		}
+
 		return resp, err
 
 	default:
@@ -95,41 +82,11 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string, firstRun bool) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
-	payload := map[string]string{
-		"testRunID": testRunID,
+
+	if err := h.instrumentation.BeforeTestRun(testRunID, firstRun); err != nil {
+		h.logger.Error("failed to call before test run hook", zap.Error(err))
 	}
 
-	return h.callAgent("/hooks/before-test-run", payload)
-}
-
-func (h *Hooks) callAgent(endpoint string, payload interface{}) error {
-	if h.cfg.Agent.AgentURI == "" {
-		return nil
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s%s", h.cfg.Agent.AgentURI, endpoint)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 50 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		h.logger.Warn("failed to call agent hook", zap.String("endpoint", endpoint), zap.Error(err))
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		h.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
-	}
 	return nil
 }
 
@@ -276,16 +233,11 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
-	h.logger.Debug("Signaling Agent: AfterTestRun", zap.String("testRunID", testRunID))
-
-	payload := map[string]interface{}{
-		"testRunID":  testRunID,
-		"testSetIDs": testSetIDs,
-		"coverage":   coverage,
+	
+	if err := h.instrumentation.AfterTestRun(testRunID, testSetIDs, coverage); err != nil {
+		h.logger.Error("failed to call before test run hook", zap.Error(err))
 	}
-
-	// Call the endpoint
-	return h.callAgent("/hooks/after-test-run", payload)
+	return nil
 }
 
 func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {

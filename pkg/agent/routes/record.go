@@ -60,26 +60,8 @@ func RegisterHooks(h RouteHook) {
 	ActiveHooks = h
 }
 
-type SimulationHookRequest struct {
-	Time         time.Time `json:"timestamp"`
-	TestSetID    string    `json:"testSetID"`
-	TestCaseName string    `json:"testCaseName"`
-}
-
-// Keep this for BeforeTestRun
-type BeforeTestRunReq struct {
-	TestRunID string `json:"testRunID"`
-}
-
-// NEW: Matches the signature of the Hook
-type AfterTestRunReq struct {
-	TestRunID  string              `json:"testRunID"`
-	TestSetIDs []string            `json:"testSetIDs"`
-	Coverage   models.TestCoverage `json:"coverage"`
-}
-
 func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
-	var req BeforeTestRunReq
+	var req models.BeforeTestRunReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -93,13 +75,12 @@ func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
-	var req AfterTestRunReq
+	var req models.AfterTestRunReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Pass all fields to the hook interface
 	if err := agent.ActiveHooks.AfterTestRun(r.Context(), req.TestRunID, req.TestSetIDs, req.Coverage); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -108,13 +89,13 @@ func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
-	var req SimulationHookRequest
+	var req models.BeforeSimulateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.Time, req.TestSetID, req.TestCaseName); err != nil {
+	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp); err != nil {
 		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -123,7 +104,7 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
-	var req SimulationHookRequest
+	var req models.AfterSimulateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
