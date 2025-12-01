@@ -720,9 +720,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
 		}
-		err = HookImpl.BeforeTestRun(ctx, testRunID, firstRun)
+
+		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
+		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
+		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, firstRun)
 		if err != nil {
-			stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
+			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
 		}
 		firstRun = false

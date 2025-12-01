@@ -42,6 +42,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
 		r.Post("/hooks/after-simulate", a.HandleAfterSimulate)
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
+		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
 	})
 }
@@ -68,6 +69,20 @@ func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := agent.ActiveHooks.BeforeTestRun(r.Context(), req.TestRunID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Request) {
+	var req models.BeforeTestSetCompose
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestRunID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
