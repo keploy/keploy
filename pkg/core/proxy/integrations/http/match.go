@@ -274,7 +274,10 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 		// Query parameter match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
-			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
+			h.Logger.Debug("The query params of mock and request aren't the same",
+				zap.String("mock name", mock.Name),
+				zap.Any("expected query params", mock.Spec.HTTPReq.URLParams),
+				zap.Any("input query params", input.url.Query()))
 			continue
 		}
 
