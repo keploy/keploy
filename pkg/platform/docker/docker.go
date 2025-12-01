@@ -536,6 +536,25 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--config-path", opts.ConfigPath)
 	}
 
+	if opts.GlobalPassthrough {
+		command = append(command, "--global-passthrough")
+	}
+
+	if opts.BuildDelay > 0 {
+		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+	}
+
+	if len(opts.PassThroughPorts) > 0 {
+		portStrings := make([]string, len(opts.PassThroughPorts))
+		for i, port := range opts.PassThroughPorts {
+			portStrings[i] = strconv.Itoa(int(port))
+		}
+		// Join them with a comma and add as a single argument
+		command = append(command, "--pass-through-ports", strings.Join(portStrings, ","))
+	}
+
+	idc.logger.Debug("Generating agent service with command", zap.Strings("command", command))
+
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
 		Kind: yaml.MappingNode,
