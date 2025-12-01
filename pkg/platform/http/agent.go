@@ -317,7 +317,7 @@ func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetI
 	return nil
 }
 
-func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string, firstRun bool) error {
+func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string) error {
 
 	requestBody := models.BeforeTestRunReq{
 		TestRunID: testRunID,
