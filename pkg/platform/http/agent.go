@@ -411,7 +411,7 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	// Create a context for the agent that can be cancelled independently
 	agentCtx, cancel := context.WithCancel(ctx)
 	a.agentCancel = cancel
-	opts.ExtraArgs = agent.StartupHooks.GetArgs(ctx)
+	opts.ExtraArgs = agent.StartupAgentHook.GetArgs(ctx)
 	if isDockerCmd {
 		// Start the agent in Docker container using errgroup
 		grp.Go(func() error {

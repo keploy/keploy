@@ -56,7 +56,7 @@ func (a *App) Setup(ctx context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
-		extraArgs := agent.StartupHooks.GetArgs(ctx)
+		extraArgs := agent.StartupAgentHook.GetArgs(ctx)
 		err := a.SetupCompose(extraArgs)
 		if err != nil {
 			return err

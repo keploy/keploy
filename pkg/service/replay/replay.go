@@ -36,7 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var BeforeOnce bool
+var FirstRun bool
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
@@ -244,7 +244,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	BeforeOnce = false
+	FirstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -720,12 +720,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
 		}
-		err = HookImpl.BeforeTestRun(ctx, testRunID, BeforeOnce, true)
+		err = HookImpl.BeforeTestRun(ctx, testRunID, FirstRun)
 		if err != nil {
 			stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
 		}
-		BeforeOnce = true
+		FirstRun = false
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
@@ -797,13 +797,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		if !BeforeOnce {
-			err = HookImpl.BeforeTestRun(ctx, testRunID, BeforeOnce, false)
+		if FirstRun {
+			err = HookImpl.BeforeTestRun(ctx, testRunID, FirstRun)
 			if err != nil {
 				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 			}
-			BeforeOnce = true
+			FirstRun = false
 		}
 		isMappingEnabled := !r.config.DisableMapping
 
@@ -1244,9 +1244,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	isDocker := cmdType == utils.DockerRun || cmdType == utils.DockerStart
-	isDockerCompose := cmdType == utils.DockerCompose
-	err = HookImpl.BeforeTestResult(ctx, r.config.Agent.AgentURI, isDocker, isDockerCompose)
+	err = HookImpl.BeforeTestResult(ctx)
 	if err != nil {
 		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
 		utils.LogError(r.logger, err, stopReason)
