@@ -36,6 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var FirstRun bool
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
@@ -243,13 +244,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-
-	err = HookImpl.BeforeTestRun(ctx, testRunID)
-	if err != nil {
-		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-	}
-
+	FirstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -308,7 +303,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestFailed = initFailed
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
-
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
@@ -726,7 +720,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
 		}
-
+		err = HookImpl.BeforeTestRun(ctx, testRunID, FirstRun)
+		if err != nil {
+			stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+		}
+		FirstRun = false
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
@@ -798,7 +797,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-
+		if FirstRun {
+			err = HookImpl.BeforeTestRun(ctx, testRunID, FirstRun)
+			if err != nil {
+				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
+				utils.LogError(r.logger, err, stopReason)
+			}
+			FirstRun = false
+		}
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
@@ -1238,6 +1244,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	err = HookImpl.BeforeTestResult(ctx)
+	if err != nil {
+		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))

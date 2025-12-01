@@ -12,7 +12,6 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
-
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -107,6 +106,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 	}
 
+	extraArgs := opts.ExtraArgs
+
 	switch osName {
 	case "linux":
 
@@ -146,6 +147,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += " --synchronous"
 		}
 
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
+		}
 		return alias, nil
 	case "windows":
 
@@ -202,6 +206,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if opts.Synchronous {
 				alias += " --synchronous"
+			if len(extraArgs) > 0 {
+				alias += " " + strings.Join(extraArgs, " ")
 			}
 			return alias, nil
 		}
@@ -244,6 +250,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --synchronous"
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
 		}
 		return alias, nil
 	case "darwin":
@@ -300,6 +308,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if opts.Synchronous {
 				alias += " --synchronous"
+			if len(extraArgs) > 0 {
+				alias += " " + strings.Join(extraArgs, " ")
 			}
 			return alias, nil
 		}
@@ -343,6 +353,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --synchronous"
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
 		}
 		return alias, nil
 	}

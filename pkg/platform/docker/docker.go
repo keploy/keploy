@@ -535,6 +535,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
 		command = append(command, "--config-path", opts.ConfigPath)
 	}
+	if len(opts.ExtraArgs) > 0 {
+		command = append(command, opts.ExtraArgs...)
+	}
 
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
