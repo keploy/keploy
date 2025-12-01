@@ -54,6 +54,10 @@ type BeforeTestRunReq struct {
 	TestRunID string `json:"testRunID"`
 }
 
+type BeforeTestSetCompose struct {
+	TestRunID string `json:"testRunID"`
+}
+
 type AfterTestRunReq struct {
 	TestRunID  string       `json:"testRunID"`
 	TestSetIDs []string     `json:"testSetIDs"`

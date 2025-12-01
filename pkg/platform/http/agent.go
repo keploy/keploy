@@ -240,7 +240,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 
 }
 
-func (a *AgentClient) BeforeSimulate(timestamp *time.Time, testSetID string, tcName string) error {
+func (a *AgentClient) BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, tcName string) error {
 	if timestamp == nil || timestamp.IsZero() {
 		a.logger.Warn("Skipping agent hook: timestamp is zero or nil")
 		return nil
@@ -281,7 +281,7 @@ func (a *AgentClient) BeforeSimulate(timestamp *time.Time, testSetID string, tcN
 	return nil
 }
 
-func (a *AgentClient) AfterSimulate(tcName string, testSetID string) error {
+func (a *AgentClient) AfterSimulate(ctx context.Context, tcName string, testSetID string) error {
 
 	requestBody := models.AfterSimulateRequest{
 		TestSetID:    testSetID,
@@ -317,7 +317,7 @@ func (a *AgentClient) AfterSimulate(tcName string, testSetID string) error {
 	return nil
 }
 
-func (a *AgentClient) BeforeTestRun(testRunID string, firstRun bool) error {
+func (a *AgentClient) BeforeTestRun(ctx context.Context, testRunID string, firstRun bool) error {
 
 	requestBody := models.BeforeTestRunReq{
 		TestRunID: testRunID,
@@ -353,7 +353,43 @@ func (a *AgentClient) BeforeTestRun(testRunID string, firstRun bool) error {
 
 }
 
-func (a *AgentClient) AfterTestRun(testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
+func (a *AgentClient) BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error {
+
+	requestBody := models.BeforeTestSetCompose{
+		TestRunID: testRunID,
+	}
+	if a.conf.Agent.AgentURI == "" {
+		return nil
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s%s", a.conf.Agent.AgentURI, "/hooks/before-test-set-compose")
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 50 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		a.logger.Warn("failed to call agent hook", zap.String("endpoint", "/hooks/before-test-set-compose"), zap.Error(err))
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		a.logger.Error("agent hook returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
+		return fmt.Errorf("agent hook failed: %d", resp.StatusCode)
+	}
+	return nil
+
+}
+
+func (a *AgentClient) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 
 	requestBody := models.AfterTestRunReq{
 		TestRunID:  testRunID,

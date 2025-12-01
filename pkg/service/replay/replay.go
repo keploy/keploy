@@ -36,7 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var FirstRun bool
+var firstRun bool
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
@@ -244,7 +244,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	FirstRun = true
+	firstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -720,12 +720,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
 		}
-		err = HookImpl.BeforeTestRun(ctx, testRunID, FirstRun)
+
+		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
+		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
+		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, firstRun)
 		if err != nil {
-			stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
+			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
 		}
-		FirstRun = false
+		firstRun = false
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
@@ -797,13 +800,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		if FirstRun {
-			err = HookImpl.BeforeTestRun(ctx, testRunID, FirstRun)
+		if firstRun {
+			err = HookImpl.BeforeTestRun(ctx, testRunID, firstRun)
 			if err != nil {
 				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 			}
-			FirstRun = false
+			firstRun = false
 		}
 		isMappingEnabled := !r.config.DisableMapping
 
