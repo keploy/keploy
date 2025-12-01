@@ -95,7 +95,7 @@ func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp); err != nil {
+	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
 		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

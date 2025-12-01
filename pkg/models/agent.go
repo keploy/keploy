@@ -40,7 +40,9 @@ type UpdateMockParamsReq struct {
 }
 
 type BeforeSimulateRequest struct {
-	TimeStamp time.Time `json:"timestamp"`
+	TimeStamp    time.Time `json:"timestamp"`
+	TestSetID    string    `json:"testSetID"`
+	TestCaseName string    `json:"testCaseName"`
 }
 
 type AfterSimulateRequest struct {

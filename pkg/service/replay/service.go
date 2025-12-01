@@ -19,7 +19,7 @@ type Instrumentation interface {
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
 	GetErrorChannel() <-chan error
-	BeforeSimulate(timestamp *time.Time) error
+	BeforeSimulate(timestamp *time.Time, testSetID string, testCaseName string) error
 	AfterSimulate(tcName string, testSetID string) error
 	BeforeTestRun(testRunID string, firstRun bool) error
 	AfterTestRun(testRunID string, testSetIDs []string, coverage models.TestCoverage) error

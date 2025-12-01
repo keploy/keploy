@@ -47,7 +47,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 	switch tc.Kind {
 	case models.HTTP:
 
-		if err := h.instrumentation.BeforeSimulate(&tc.HTTPReq.Timestamp); err != nil {
+		if err := h.instrumentation.BeforeSimulate(&tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
 			h.logger.Error("failed to call before simulate hook", zap.Error(err))
 		}
 
@@ -61,7 +61,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return resp, err
 	case models.GRPC_EXPORT:
 
-		if err := h.instrumentation.BeforeSimulate(&tc.GrpcReq.Timestamp); err != nil {
+		if err := h.instrumentation.BeforeSimulate(&tc.GrpcReq.Timestamp, testSetID, tc.Name); err != nil {
 			h.logger.Error("failed to call before simulate hook", zap.Error(err))
 		}
 

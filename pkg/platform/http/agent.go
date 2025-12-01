@@ -240,7 +240,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 
 }
 
-func (a *AgentClient) BeforeSimulate(timestamp *time.Time) error {
+func (a *AgentClient) BeforeSimulate(timestamp *time.Time, testSetID string, tcName string) error {
 	if timestamp == nil || timestamp.IsZero() {
 		a.logger.Warn("Skipping agent hook: timestamp is zero or nil")
 		return nil
@@ -248,6 +248,8 @@ func (a *AgentClient) BeforeSimulate(timestamp *time.Time) error {
 
 	requestBody := models.BeforeSimulateRequest{
 		TimeStamp: *timestamp,
+		TestSetID: testSetID,
+		TestCaseName: tcName,
 	}
 	if a.conf.Agent.AgentURI == "" {
 		return nil
