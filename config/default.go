@@ -59,6 +59,7 @@ test:
 record:
   recordTimer: 0s
   filters: []
+  sync: false
 configPath: ""
 bypassRules: []
 contract:

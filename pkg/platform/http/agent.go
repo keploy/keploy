@@ -597,6 +597,9 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	// Create a context for the agent that can be cancelled independently
 	agentCtx, cancel := context.WithCancel(ctx)
 	a.agentCancel = cancel
+	if a.conf.Record.Synchronous {
+		opts.Synchronous = true
+	}
 	opts.ExtraArgs = agent.StartupAgentHook.GetArgs(ctx)
 	if isDockerCmd {
 		// Start the agent in Docker container using errgroup
@@ -672,6 +675,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if a.conf.Debug {
 		args = append(args, "--debug")
+	}
+	if a.conf.Record.Synchronous {
+		args = append(args, "--sync")
 	}
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")
