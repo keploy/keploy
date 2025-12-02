@@ -677,7 +677,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--debug")
 	}
 	if a.conf.Record.Synchronous {
-		args = append(args, "--synchronous")
+		args = append(args, "--sync")
 	}
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")

@@ -527,7 +527,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--debug")
 	}
 	if idc.conf.Record.Synchronous {
-		command = append(command, "--synchronous")
+		command = append(command, "--sync")
 	}
 	if opts.EnableTesting {
 		command = append(command, "--enable-testing")

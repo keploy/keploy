@@ -144,7 +144,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += " --config-path " + opts.ConfigPath
 		}
 		if opts.Synchronous {
-			alias += " --synchronous"
+			alias += " --sync"
 		}
 
 		if len(extraArgs) > 0 {
@@ -205,7 +205,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				alias += " --config-path " + opts.ConfigPath
 			}
 			if opts.Synchronous {
-				alias += " --synchronous"
+				alias += " --sync"
 			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
@@ -250,7 +250,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += " --config-path " + opts.ConfigPath
 		}
 		if opts.Synchronous {
-			alias += " --synchronous"
+			alias += " --sync"
 		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
@@ -310,7 +310,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				alias += " --config-path " + opts.ConfigPath
 			}
 			if opts.Synchronous {
-				alias += " --synchronous"
+				alias += " --sync"
 			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
@@ -356,7 +356,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += " --config-path " + opts.ConfigPath
 		}
 		if opts.Synchronous {
-			alias += " --synchronous"
+			alias += " --sync"
 		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
