@@ -295,7 +295,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		return nil
 	}
 
-	if len(node.Content) > 0 {
+	if len(node.Content) > 0 { // we don't need agent config in the config file. All the config of the agent will be managed internally
 		rootContent := node.Content[0].Content
 		for i := 0; i < len(rootContent)-1; i += 2 {
 			keyNode := rootContent[i]
