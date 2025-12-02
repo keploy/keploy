@@ -801,7 +801,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 		if firstRun {
-			err = HookImpl.BeforeTestRun(ctx, testRunID, firstRun)
+			err = HookImpl.BeforeTestRun(ctx, testRunID)
 			if err != nil {
 				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
 				utils.LogError(r.logger, err, stopReason)
