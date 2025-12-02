@@ -80,7 +80,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 }
 
-func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string, firstRun bool) error {
+func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
 
 	if err := h.instrumentation.BeforeTestRun(ctx, testRunID); err != nil {

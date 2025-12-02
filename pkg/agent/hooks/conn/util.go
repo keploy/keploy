@@ -22,11 +22,10 @@ import (
 
 type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions)
 
-var CaptureHook CaptureFunc = OssCapture
+var CaptureHook CaptureFunc = Capture
 
-func OssCapture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
 	var reqBody []byte
-	fmt.Println("calling default function")
 	if req.Body != nil { // Read
 		var err error
 		reqBody, err = io.ReadAll(req.Body)
