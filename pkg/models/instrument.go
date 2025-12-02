@@ -86,6 +86,7 @@ type SetupOptions struct {
 	BuildDelay        uint64
 	PassThroughPorts  []uint
 	ConfigPath        string
+	ExtraArgs         []string
 }
 
 type RunOptions struct {

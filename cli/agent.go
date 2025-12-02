@@ -41,7 +41,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
-			routes.New(router, a, logger)
+			routes.ActiveHooks.New(router, a, logger)
 			go func() {
 				select {
 				case <-ctx.Done():
