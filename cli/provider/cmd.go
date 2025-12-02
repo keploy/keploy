@@ -247,6 +247,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("synchronous", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -303,6 +304,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
+		cmd.Flags().Bool("synchronous", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
 
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
@@ -956,6 +958,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
@@ -1215,6 +1218,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.DnsPort = dnsPort
 
+		synchronous, err := cmd.Flags().GetBool("synchronous")
+		if err != nil {
+			errMsg := "failed to get the synchronous flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.Synchronous = synchronous
 		buildDelay, err := cmd.Flags().GetUint64("build-delay")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get build-delay flag")

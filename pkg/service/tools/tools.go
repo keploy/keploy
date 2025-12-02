@@ -294,6 +294,17 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		utils.LogError(t.logger, err, "failed to unmarshal the config")
 		return nil
 	}
+
+	if len(node.Content) > 0 {
+		rootContent := node.Content[0].Content
+		for i := 0; i < len(rootContent)-1; i += 2 {
+			keyNode := rootContent[i]
+			if keyNode.Value == "agent" {
+				node.Content[0].Content = append(rootContent[:i], rootContent[i+2:]...)
+				break
+			}
+		}
+	}
 	results, err := yamlLib.Marshal(node.Content[0])
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to marshal the config")
