@@ -30,13 +30,13 @@ type IngressProxyManager struct {
 	synchronous  bool
 }
 
-func New(logger *zap.Logger, h agent.Hooks, opts *config.Config) *IngressProxyManager {
+func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
 	pm := &IngressProxyManager{
 		logger:      logger,
 		hooks:       h,
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
-		synchronous: opts.Agent.Synchronous,
+		synchronous: cfg.Agent.Synchronous,
 	}
 	return pm
 }
