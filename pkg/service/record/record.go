@@ -142,7 +142,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	// Create config.yaml if metadata is provided
-	if r.config.Record.Metadata != "" {
+	if r.config.Record.Metadata != "" && r.testSetConf != nil {
 		r.createConfigWithMetadata(ctx, newTestSetID)
 	}
 
