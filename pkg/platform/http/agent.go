@@ -48,9 +48,8 @@ type AgentClient struct {
 // var initStopScript []byte
 
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
-
 	return &AgentClient{
-		logger:       logger,
+		logger:       logger.Named(models.ProxyService),
 		dockerClient: client,
 		client:       http.Client{},
 		conf:         c,

@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -39,7 +40,7 @@ type Agent struct {
 
 func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker.Client, ip agent.IncomingProxy, config *config.Config) *Agent {
 	return &Agent{
-		logger:        logger,
+		logger:        logger.Named(models.AgentService),
 		Hooks:         hook,
 		Proxy:         proxy,
 		IncomingProxy: ip,

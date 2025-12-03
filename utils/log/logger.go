@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
+	"io"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -84,6 +86,9 @@ func New() (*zap.Logger, *os.File, error) {
 	LogCfg.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
 	LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 
+	// Disable printing the logger name to keep logs clean
+	LogCfg.EncoderConfig.EncodeName = nil
+
 	LogCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	LogCfg.DisableStacktrace = true
 	LogCfg.EncoderConfig.EncodeCaller = nil
@@ -142,10 +147,84 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	// For non-color mode, use the standard console encoder
 	LogCfg.Encoding = "console"
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	LogCfg.EncoderConfig.EncodeName = nil
 
 	logger, err := LogCfg.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
 	}
+	return logger, nil
+}
+
+// moduleCore wraps a zapcore.Core to filter log entries based on their logger name.
+type moduleCore struct {
+	zapcore.Core
+	modules map[string]bool
+}
+
+func (mc *moduleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	// If the log level is greater than Debug (e.g., Info, Warn, Error), let it pass.
+	if ent.Level > zapcore.DebugLevel {
+		return mc.Core.Check(ent, ce)
+	}
+
+	// For Debug level logs, check if the logger name matches any of the allowed modules.
+	// We check for exact match or if the logger name starts with "module.".
+	enabled := false
+	if val, ok := mc.modules[ent.LoggerName]; ok {
+		if val {
+			enabled = true
+		}
+	} else {
+		for mod, isActive := range mc.modules {
+			if isActive && strings.HasPrefix(ent.LoggerName, mod+".") {
+				enabled = true
+				break
+			}
+		}
+	}
+
+	if enabled {
+		return mc.Core.Check(ent, ce)
+	}
+
+	return ce
+}
+
+func (mc *moduleCore) With(fields []zapcore.Field) zapcore.Core {
+	return &moduleCore{
+		Core:    mc.Core.With(fields),
+		modules: mc.modules,
+	}
+}
+
+var consoleWriter = zapcore.AddSync(os.Stdout)
+
+func SetConsoleWriter(w io.Writer) {
+	consoleWriter = zapcore.AddSync(w)
+}
+
+func SetDebugModules(modules map[string]bool) (*zap.Logger, error) {
+	// Enable Debug level globally in the configuration so the underlying core accepts it.
+	LogCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	LogCfg.DisableStacktrace = false
+	LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
+	// Ensure name is hidden
+	LogCfg.EncoderConfig.EncodeName = nil
+
+	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
+	// Using os.Stdout as per ChangeLogLevel implementation
+	core := zapcore.NewCore(
+		encoder,
+		consoleWriter,
+		LogCfg.Level,
+	)
+
+	wrappedCore := &moduleCore{
+		Core:    core,
+		modules: modules,
+	}
+
+	logger := zap.New(wrappedCore)
 	return logger, nil
 }
