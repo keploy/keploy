@@ -1,9 +1,11 @@
+
 package app
 
 import (
 	"context"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -19,8 +21,10 @@ type Hooks struct {
 	logger *zap.Logger
 }
 
-func NewHooks(logger *zap.Logger) Hooks {
-	return Hooks{logger: logger}
+func NewHooks(logger *zap.Logger) *Hooks {
+	return &Hooks{
+		logger: logger.Named(models.HooksService),
+	}
 }
 
 func (Hooks) BeforeDockerComposeSetup(ctx context.Context, _ *docker.Compose, _ string) (bool, error) {

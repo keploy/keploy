@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -17,7 +18,7 @@ type MappingDb struct {
 
 func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
 	return &MappingDb{
-		logger:      logger,
+		logger:      logger.Named(models.MapDBService),
 		path:        path,
 		MapFileName: mapFileName,
 	}

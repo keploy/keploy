@@ -34,7 +34,7 @@ type contract struct {
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, config *config.Config) Service {
 	return &contract{
-		logger:    logger,
+		logger:    logger.Named(models.ContractService),
 		testDB:    testDB,
 		mockDB:    mockDB,
 		openAPIDB: openAPIDB,

@@ -68,7 +68,7 @@ type Proxy struct {
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
-		logger:            logger,
+		logger:            logger.Named(models.ProxyService),
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
 		IP4:               "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
@@ -88,7 +88,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
-		logger := p.logger.With(zap.Any("Type", parserType))
+		logger := p.logger.Named(strings.ToLower(string(parserType))).With(zap.Any("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})

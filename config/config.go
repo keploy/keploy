@@ -24,6 +24,7 @@ type Config struct {
 	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DebugModules          map[string]bool     `json:"debugModules" yaml:"debugModules" mapstructure:"debugModules"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
 	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`

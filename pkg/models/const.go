@@ -149,3 +149,30 @@ type contextKey string
 const ErrGroupKey contextKey = "errGroup"
 const ClientConnectionIDKey contextKey = "clientConnectionId"
 const DestConnectionIDKey contextKey = "destConnectionId"
+
+const (
+	ContractService = "contract"
+	RecordService   = "record"
+	ReplayService   = "test"
+	ToolsService    = "tools"
+	ReportService   = "report"
+	RerecordService = "rerecord"
+	HooksService    = "hooks"
+	DockerService   = "docker"
+	ProxyService    = "proxy"
+
+	// DB Services
+	TestDBService    = "test-db"
+	MockDBService    = "mock-db"
+	MapDBService     = "map-db"
+	OpenAPIDBService = "openapi-db"
+	ReportDBService  = "report-db"
+	TestSetDBService = "testset-db"
+
+	StorageService = "storage"
+	AgentService   = "agent"
+	GenService       = "gen"
+	CoverageService  = "coverage"
+	TelemetryService = "telemetry"
+	AuthService      = "auth"
+)

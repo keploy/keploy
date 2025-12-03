@@ -27,7 +27,7 @@ type OpenAPIYaml struct {
 func New(logger *zap.Logger, openAPIPath string) *OpenAPIYaml {
 	return &OpenAPIYaml{
 		OpenAPIPath: openAPIPath,
-		logger:      logger,
+		logger:      logger.Named(models.OpenAPIDBService),
 	}
 }
 func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string, testPath string) ([]*models.OpenAPI, error) {

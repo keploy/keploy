@@ -28,7 +28,7 @@ func New(logger *zap.Logger, reportPath string) *TestReport {
 	return &TestReport{
 		tests:  make(map[string]map[string][]models.TestResult),
 		m:      sync.Mutex{},
-		Logger: logger,
+		Logger: logger.Named(models.ReportDBService),
 		Path:   reportPath,
 	}
 }
