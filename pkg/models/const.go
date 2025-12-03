@@ -169,8 +169,8 @@ const (
 	ReportDBService  = "report-db"
 	TestSetDBService = "testset-db"
 
-	StorageService = "storage"
-	AgentService   = "agent"
+	StorageService   = "storage"
+	AgentService     = "agent"
 	GenService       = "gen"
 	CoverageService  = "coverage"
 	TelemetryService = "telemetry"

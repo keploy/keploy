@@ -9,8 +9,6 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-
-
 func TestDebugModules(t *testing.T) {
 	LogCfg = zap.NewDevelopmentConfig()
 	LogCfg.EncoderConfig.EncodeTime = customTimeEncoder
@@ -195,7 +193,7 @@ func TestDebugModules(t *testing.T) {
 			expectedOutput:   []string{"Sending metrics", "User authenticated"},
 			unexpectedOutput: []string{"Generating tests"},
 		},
-				{
+		{
 			name: "Enable unknown module",
 			modules: map[string]bool{
 				"alien-module": true,
@@ -212,7 +210,7 @@ func TestDebugModules(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf.Reset()
-			
+
 			logger, err := SetDebugModules(tt.modules)
 			assert.NoError(t, err)
 
