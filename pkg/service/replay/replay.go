@@ -36,7 +36,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+
 var CompleteTestResult = make(map[string]TestReportVerdict)
+var firstRun bool
+
 var totalTests int
 var totalTestPassed int
 var totalTestFailed int
@@ -247,13 +250,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-
-	err = HookImpl.BeforeTestRun(ctx, testRunID)
-	if err != nil {
-		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-	}
-
+	firstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -312,7 +309,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestFailed = initFailed
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
-
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
@@ -733,6 +729,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-agentReadyCh:
 		}
 
+		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
+		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
+		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, firstRun)
+		if err != nil {
+			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+		}
+		firstRun = false
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
@@ -804,7 +808,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-
+		if firstRun {
+			err = HookImpl.BeforeTestRun(ctx, testRunID)
+			if err != nil {
+				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
+				utils.LogError(r.logger, err, stopReason)
+			}
+			firstRun = false
+		}
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
@@ -1244,6 +1255,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	err = HookImpl.BeforeTestResult(ctx)
+	if err != nil {
+		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))

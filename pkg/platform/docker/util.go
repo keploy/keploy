@@ -12,7 +12,6 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
-
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -107,6 +106,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 	}
 
+	extraArgs := opts.ExtraArgs
+
 	switch osName {
 	case "linux":
 
@@ -142,7 +143,13 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
+		if opts.Synchronous {
+			alias += " --sync"
+		}
 
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
+		}
 		return alias, nil
 	case "windows":
 
@@ -197,6 +204,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
+			if opts.Synchronous {
+				alias += " --sync"
+			}
+			if len(extraArgs) > 0 {
+				alias += " " + strings.Join(extraArgs, " ")
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -236,7 +249,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
+		if opts.Synchronous {
+			alias += " --sync"
+		}
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
+		}
 		return alias, nil
+
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
@@ -289,6 +309,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
 			}
+			if opts.Synchronous {
+				alias += " --sync"
+			}
+			if len(extraArgs) > 0 {
+				alias += " " + strings.Join(extraArgs, " ")
+			}
 			return alias, nil
 		}
 		// if default docker context is used
@@ -329,19 +355,15 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
+		if opts.Synchronous {
+			alias += " --sync"
+		}
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
+		}
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
-}
-
-func convertPathToUnixStyle(path string) string {
-	// Replace backslashes with forward slashes
-	unixPath := strings.ReplaceAll(path, "\\", "/")
-	// Remove 'C:'
-	if len(unixPath) > 1 && unixPath[1] == ':' {
-		unixPath = unixPath[2:]
-	}
-	return unixPath
 }
 
 func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string, error) {
