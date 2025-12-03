@@ -82,6 +82,30 @@ func TestArrayMatchingWithIgnoreOrder_PrimitiveValues(t *testing.T) {
 			shouldMatch: false,
 			description: "Full bug report scenario: object with List field containing different values",
 		},
+		{
+			name:        "arrays with null values should match",
+			expected:    `[null, null, null]`,
+			actual:      `[null, null, null]`,
+			ignoreOrder: true,
+			shouldMatch: true,
+			description: "Arrays with null values should match",
+		},
+		{
+			name:        "arrays with null in different order should match",
+			expected:    `[null, 1, 2]`,
+			actual:      `[1, null, 2]`,
+			ignoreOrder: true,
+			shouldMatch: true,
+			description: "Arrays with null values in different order should match when ignoreOrdering=true",
+		},
+		{
+			name:        "arrays with null vs numbers should not match",
+			expected:    `[null, null]`,
+			actual:      `[1, 2]`,
+			ignoreOrder: true,
+			shouldMatch: false,
+			description: "Arrays with null values should not match arrays with numbers",
+		},
 	}
 
 	for _, tt := range tests {
@@ -145,6 +169,122 @@ func TestArrayMatchingWithIgnoreOrder_StringValues(t *testing.T) {
 			name:        "same strings different order should match",
 			expected:    `["a", "b", "c"]`,
 			actual:      `["c", "b", "a"]`,
+			ignoreOrder: true,
+			shouldMatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var expectedJSON interface{}
+			var actualJSON interface{}
+			
+			err := json.Unmarshal([]byte(tt.expected), &expectedJSON)
+			assert.NoError(t, err)
+			
+			err = json.Unmarshal([]byte(tt.actual), &actualJSON)
+			assert.NoError(t, err)
+
+			result, err := matchJSONWithNoiseHandlingIndexed(
+				"",
+				expectedJSON,
+				actualJSON,
+				noiseIndex{},
+				map[string]bool{},
+				tt.ignoreOrder,
+			)
+
+		assert.NoError(t, err)
+		assert.Equal(t, tt.shouldMatch, result.matches)
+	})
+	}
+}
+
+// TestArrayMatchingWithIgnoreOrder_BooleanValues tests boolean array matching
+func TestArrayMatchingWithIgnoreOrder_BooleanValues(t *testing.T) {
+	tests := []struct {
+		name        string
+		expected    string
+		actual      string
+		ignoreOrder bool
+		shouldMatch bool
+	}{
+		{
+			name:        "boolean arrays in different order should match",
+			expected:    `[true, true, false]`,
+			actual:      `[true, false, true]`,
+			ignoreOrder: true,
+			shouldMatch: true,
+		},
+		{
+			name:        "different boolean arrays should not match",
+			expected:    `[true, true, true]`,
+			actual:      `[true, false, false]`,
+			ignoreOrder: true,
+			shouldMatch: false,
+		},
+		{
+			name:        "identical boolean arrays should match",
+			expected:    `[true, false, true]`,
+			actual:      `[true, false, true]`,
+			ignoreOrder: false,
+			shouldMatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var expectedJSON interface{}
+			var actualJSON interface{}
+			
+			err := json.Unmarshal([]byte(tt.expected), &expectedJSON)
+			assert.NoError(t, err)
+			
+			err = json.Unmarshal([]byte(tt.actual), &actualJSON)
+			assert.NoError(t, err)
+
+			result, err := matchJSONWithNoiseHandlingIndexed(
+				"",
+				expectedJSON,
+				actualJSON,
+				noiseIndex{},
+				map[string]bool{},
+				tt.ignoreOrder,
+			)
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.shouldMatch, result.matches)
+		})
+	}
+}
+
+// TestArrayMatchingWithIgnoreOrder_MixedPrimitiveTypes tests arrays with mixed primitive types
+func TestArrayMatchingWithIgnoreOrder_MixedPrimitiveTypes(t *testing.T) {
+	tests := []struct {
+		name        string
+		expected    string
+		actual      string
+		ignoreOrder bool
+		shouldMatch bool
+	}{
+		{
+			name:        "mixed primitives in different order should match",
+			expected:    `[1, "a", true]`,
+			actual:      `["a", true, 1]`,
+			ignoreOrder: true,
+			shouldMatch: true,
+		},
+		{
+			name:        "mixed primitives with type mismatch should not match",
+			expected:    `[1, "a", true]`,
+			actual:      `[1, "b", true]`,
+			ignoreOrder: true,
+			shouldMatch: false,
+		},
+		{
+			name:        "mixed primitives including null should match",
+			expected:    `[1, null, "test"]`,
+			actual:      `["test", 1, null]`,
 			ignoreOrder: true,
 			shouldMatch: true,
 		},
