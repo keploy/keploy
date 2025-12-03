@@ -36,7 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var completeTestReport = make(map[string]TestReportVerdict)
+var CompleteTestResult = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
 var totalTestFailed int
@@ -631,7 +631,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			timeTaken: timeTaken.String(),
 		}
 
-		completeTestReport[testSetID] = verdict
+		CompleteTestResult[testSetID] = verdict
 		totalTests += testReport.Total
 		totalTestIgnored += testReport.Ignored
 		totalTestTimeTaken += timeTaken
@@ -1367,7 +1367,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		timeTaken: timeTaken.String(),
 	}
 
-	completeTestReport[testSetID] = verdict
+	CompleteTestResult[testSetID] = verdict
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
@@ -1488,8 +1488,8 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	if totalTests > 0 {
-		testSuiteNames := make([]string, 0, len(completeTestReport))
-		for testSuiteName := range completeTestReport {
+		testSuiteNames := make([]string, 0, len(CompleteTestResult))
+		for testSuiteName := range CompleteTestResult {
 			testSuiteNames = append(testSuiteNames, testSuiteName)
 		}
 		sort.SliceStable(testSuiteNames, func(i, j int) bool {
@@ -1537,7 +1537,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		}
 
 		for _, testSuiteName := range testSuiteNames {
-			report := completeTestReport[testSuiteName]
+			report := CompleteTestResult[testSuiteName]
 			if report.status {
 				pp.SetColorScheme(models.GetPassingColorScheme())
 			} else {
