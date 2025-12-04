@@ -137,7 +137,20 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
 		return false
 	}
 	h.Logger.Debug("parsed URL", zap.Any("parsed URL", parsedURL.Path), zap.Any("req path", reqPath))
-	return parsedURL.Path == reqPath
+	
+	// Normalize both URLs to ensure consistent matching
+	// (handle trailing slashes, fragments, and other inconsistencies)
+	mockURLNormalized := pkg.NormalizeURL(mockURL)
+	reqURLNormalized := pkg.NormalizeURL("http://dummy" + reqPath) // construct a temporary URL to normalize the path
+	
+	// Extract and compare just the paths and query strings
+	parsedMock, _ := url.Parse(mockURLNormalized)
+	parsedReq, _ := url.Parse(reqURLNormalized)
+	
+	mockPath := strings.TrimRight(parsedMock.Path, "/")
+	reqPathNorm := strings.TrimRight(parsedReq.Path, "/")
+	
+	return mockPath == reqPathNorm
 }
 
 // relaxed header key matcher (presence-only)
@@ -176,56 +189,46 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	return true
 }
 
-func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
-	// Helper function to check if a header should be ignored
-	shouldIgnoreHeader := func(key string) bool {
-		lkey := strings.ToLower(key)
-		return strings.HasPrefix(lkey, "keploy")
+// MapsHaveSameKeys now checks relaxed query matching.
+// For each key in mockQP, the request must contain that key.
+// Additionally, if the mock specifies a non-empty value for the key,
+// at least one of the request values must equal the mock value.
+// Extra keys in reqQP are allowed.
+func (h *HTTP) MapsHaveSameKeys(mockQP map[string]string, reqQP map[string][]string) bool {
+
+	// If mock has no required params, it's always a match
+	if len(mockQP) == 0 {
+		return true
 	}
 
-	// Count non-ignored keys in map1
-	map1Count := 0
-	for key := range map1 {
-		if !shouldIgnoreHeader(key) {
-			map1Count++
-		}
-	}
-
-	// Count non-ignored keys in map2
-	map2Count := 0
-	for key := range map2 {
-		if !shouldIgnoreHeader(key) {
-			map2Count++
-		}
-	}
-
-	// Check if counts match
-	if map1Count != map2Count {
-		return false
-	}
-
-	// Check if all non-ignored keys in map1 exist in map2
-	for key := range map1 {
-		if shouldIgnoreHeader(key) {
-			continue
-		}
-		if _, exists := map2[key]; !exists {
+	for key, mockVal := range mockQP {
+		// required key must be present in request
+		reqVals, exists := reqQP[key]
+		if !exists {
 			return false
 		}
-	}
 
-	// Check if all non-ignored keys in map2 exist in map1
-	for key := range map2 {
-		if shouldIgnoreHeader(key) {
+		// if mock doesn't specify a value, presence is enough
+		if mockVal == "" {
 			continue
 		}
-		if _, exists := map1[key]; !exists {
+
+		// otherwise at least one value must match
+		matched := false
+		for _, v := range reqVals {
+			if v == mockVal {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return false
 		}
 	}
 
 	return true
 }
+
 
 // SchemaMatch match the schema of the request with the mocks
 func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock, headerNoise map[string][]string) ([]*models.Mock, error) {

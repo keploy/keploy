@@ -54,6 +54,33 @@ func URLParams(r *http.Request) map[string]string {
 	return result
 }
 
+// NormalizeURL normalizes a URL by:
+// - Parsing the URL to validate it
+// - Removing the fragment (everything after #)
+// - Removing trailing slashes from the path
+// - Sorting query parameters for consistent comparison
+// - Returning a canonical string representation
+func NormalizeURL(rawURL string) string {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	// Remove fragment
+	parsedURL.Fragment = ""
+
+	// Remove trailing slash from path
+	parsedURL.Path = strings.TrimRight(parsedURL.Path, "/")
+
+	// Sort query parameters for consistent ordering
+	if len(parsedURL.RawQuery) > 0 {
+		q := parsedURL.Query()
+		parsedURL.RawQuery = q.Encode()
+	}
+
+	return parsedURL.String()
+}
+
 // ToYamlHTTPHeader converts the http header into yaml format
 func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 	header := map[string]string{}
