@@ -58,6 +58,9 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 }
 
 func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+
+	fmt.Println("🔵 Connecting to incoming test cases stream...")
+
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
 	}
@@ -128,10 +131,14 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		}
 	}()
 
+	fmt.Println("🟢 Successfully connected to incoming test cases stream.")
 	return tcChan, nil
 }
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+
+	fmt.Println("🔵 Connecting to outgoing mocks stream...")
+
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
 	}
@@ -195,6 +202,8 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		}
 		return nil
 	})
+
+	fmt.Println("🟢 Successfully connected to outgoing mocks stream.")
 
 	return mockChan, nil
 }
