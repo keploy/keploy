@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/models"
+	mockcov "go.keploy.io/server/v3/pkg/coverage"
 	"go.uber.org/zap"
 )
 
@@ -306,6 +307,8 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
++		// Also mark in the coverage tracker (use mock name as the identifier)
++		mockcov.MarkMockUsed(new.Name)
 	}
 
 	// Bump revisions accurately:

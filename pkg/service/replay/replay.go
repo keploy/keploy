@@ -25,6 +25,7 @@ import (
 	grpcMatcher "go.keploy.io/server/v3/pkg/matcher/grpc"
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
+	mockcov "go.keploy.io/server/v3/pkg/coverage"
 	"go.keploy.io/server/v3/pkg/platform/coverage"
 	"go.keploy.io/server/v3/pkg/platform/coverage/golang"
 	"go.keploy.io/server/v3/pkg/platform/coverage/java"
@@ -756,6 +757,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 
+		// Register all unfiltered mocks with coverage tracker so we have a baseline
+		for _, m := range unfilteredMocks {
+			method := string(m.Kind)
+			path := ""
+			if m.Spec != nil && m.Spec.HTTPReq != nil {
+				method = string(m.Spec.HTTPReq.Method)
+				path = m.Spec.HTTPReq.URL
+			}
+			// Use mock.Name as the identifier (existing codebase uses names as keys)
+			mockcov.RegisterMock(m.Name, m.Name, method, path, testSetID)
+		}
+
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
@@ -793,6 +806,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
 		if err != nil {
 			return models.TestSetStatusFailed, err
+		}
+
+		// Register all unfiltered mocks with coverage tracker so we have a baseline
+		for _, m := range unfilteredMocks {
+			method := string(m.Kind)
+			path := ""
+			if m.Spec != nil && m.Spec.HTTPReq != nil {
+				method = string(m.Spec.HTTPReq.Method)
+				path = m.Spec.HTTPReq.URL
+			}
+			// Use mock.Name as the identifier (existing codebase uses names as keys)
+			mockcov.RegisterMock(m.Name, m.Name, method, path, testSetID)
 		}
 
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
