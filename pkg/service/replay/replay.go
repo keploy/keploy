@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"facette.io/natsort"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -39,7 +40,7 @@ import (
 
 var (
 	completeTestReport   = make(map[string]TestReportVerdict)
-	firstRun bool
+	firstRun             bool
 	completeTestReportMu sync.RWMutex
 	totalTests           int
 	totalTestPassed      int
@@ -402,10 +403,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
-			// if r.config.Test.MaxFailAttempts == 0 {
-			// 	utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
-			// 	break
-			// }
+			if r.config.Test.MaxFailAttempts == 0 {
+				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
+				break
+			}
 			if len(failedTcIDs) == 0 {
 				// if no testcase failed in this attempt move to next attempt
 				continue
@@ -1099,6 +1100,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		switch testCase.Kind {
 		case models.HTTP:
+			spew.Dump(resp)
 			httpResp, ok := resp.(*models.HTTPResp)
 			if !ok {
 				r.logger.Error("invalid response type for HTTP test case")
@@ -1269,7 +1271,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	err = HookImpl.BeforeTestResult(ctx)
+	timeTaken := time.Since(startTime)
+
+	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
+	if err != nil {
+		if runTestSetCtx.Err() != context.Canceled {
+			utils.LogError(r.logger, err, "failed to get test case results")
+			testSetStatus = models.TestSetStatusInternalErr
+		}
+	}
+
+	err = HookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
 	if err != nil {
 		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
 		utils.LogError(r.logger, err, stopReason)
@@ -1280,16 +1292,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.executeScript(runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
-		}
-	}
-
-	timeTaken := time.Since(startTime)
-
-	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
-	if err != nil {
-		if runTestSetCtx.Err() != context.Canceled {
-			utils.LogError(r.logger, err, "failed to get test case results")
-			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
 
