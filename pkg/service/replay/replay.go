@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"facette.io/natsort"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -1100,7 +1099,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		switch testCase.Kind {
 		case models.HTTP:
-			spew.Dump(resp)
 			httpResp, ok := resp.(*models.HTTPResp)
 			if !ok {
 				r.logger.Error("invalid response type for HTTP test case")
