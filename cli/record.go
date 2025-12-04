@@ -17,8 +17,11 @@ func init() {
 
 func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "record",
-		Short:   "record the keploy testcases from the API calls",
+		Use:   "record",
+		 Short: "Record API calls to create test cases",
+		Long: `The 'record' command runs your application and captures all outgoing calls (HTTP, DB, etc.)
+        to generate test-cases and data mocks. These test-cases can later be replayed to ensure your 
+        application behaves the same across code changes.`,
 		Example: `keploy record -c "/path/to/user/app"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
