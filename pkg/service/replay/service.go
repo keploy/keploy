@@ -19,7 +19,11 @@ type Instrumentation interface {
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
 	GetErrorChannel() <-chan error
-
+	BeforeSimulate(ctx context.Context, timestamp *time.Time, testSetID string, testCaseName string) error
+	AfterSimulate(ctx context.Context, tcName string, testSetID string) error
+	BeforeTestRun(ctx context.Context, testRunID string) error
+	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
+	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
 	// New methods for improved mock management
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
@@ -97,7 +101,9 @@ type TestHooks interface {
 	SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error)
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	BeforeTestRun(ctx context.Context, testRunID string) error
+	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
+	BeforeTestResult(ctx context.Context) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
 }
