@@ -72,7 +72,7 @@ func TestPreparedStmtHistory_RecordClose(t *testing.T) {
 	if h.Entries[0].ClosedAt == -1 {
 		t.Error("expected entry to be marked as closed")
 	}
-	if h.Entries[0].ClosedAt != int64(h.CurrentCycle) {
+	if h.Entries[0].ClosedAt != int32(h.CurrentCycle) {
 		t.Errorf("expected ClosedAt=%d, got %d", h.CurrentCycle, h.Entries[0].ClosedAt)
 	}
 }
@@ -221,6 +221,46 @@ func TestPreparedStmtHistory_MultiplePrepareWithoutClose(t *testing.T) {
 	}
 }
 
+func TestPreparedStmtHistory_PruneClosedEntries(t *testing.T) {
+	h := wire.NewPreparedStmtHistory()
+
+	// Create entries exceeding MaxPreparedStmtHistorySize to trigger pruning
+	// We'll create 1100 entries (above the 1000 threshold)
+	for i := uint32(1); i <= 1100; i++ {
+		h.RecordPrepare(i, "SELECT * FROM users WHERE id = ?")
+		// Close all but the last 10 entries
+		if i <= 1090 {
+			h.RecordClose(i)
+		}
+	}
+
+	// After pruning:
+	// - All 10 active entries should be preserved
+	// - Only about half of the closed entries should remain
+	// - Total should be less than original 1100
+
+	if len(h.Entries) >= 1100 {
+		t.Errorf("expected pruning to reduce entries, got %d", len(h.Entries))
+	}
+
+	// Verify active entries are preserved
+	activeCount := 0
+	for _, e := range h.Entries {
+		if e.ClosedAt == -1 {
+			activeCount++
+		}
+	}
+	if activeCount != 10 {
+		t.Errorf("expected 10 active entries preserved, got %d", activeCount)
+	}
+
+	// Verify we can still look up active queries
+	active := h.GetActiveEntryByQuery("SELECT * FROM users WHERE id = ?")
+	if active == nil {
+		t.Error("expected to find active entry after pruning")
+	}
+}
+
 // ============================================================================
 // prepEntry and buildRecordedPrepIndex Tests
 // ============================================================================
@@ -322,81 +362,6 @@ func TestLookupRecordedQuery_NotFound(t *testing.T) {
 	query = lookupRecordedQuery(index, "conn-999", 1)
 	if query != "" {
 		t.Errorf("expected empty string for non-existent connID, got '%s'", query)
-	}
-}
-
-// ============================================================================
-// lookupRecordedQueryByContent Tests
-// ============================================================================
-
-func TestLookupRecordedQueryByContent_BasicFunctionality(t *testing.T) {
-	mocks := []*models.Mock{
-		createPrepMock("mock-1", "conn-1", 1, "SELECT * FROM users"),
-		createPrepMock("mock-2", "conn-1", 2, "SELECT * FROM users"),
-		createPrepMock("mock-3", "conn-1", 3, "SELECT * FROM users"),
-	}
-
-	index := buildRecordedPrepIndex(mocks)
-
-	// Find first prepare
-	entry := lookupRecordedQueryByContent(index, "conn-1", "SELECT * FROM users", 1)
-	if entry == nil {
-		t.Fatal("expected to find entry")
-	}
-	if entry.statementID != 1 {
-		t.Errorf("expected stmtID=1, got %d", entry.statementID)
-	}
-
-	// Find second prepare
-	entry = lookupRecordedQueryByContent(index, "conn-1", "SELECT * FROM users", 2)
-	if entry == nil {
-		t.Fatal("expected to find entry")
-	}
-	if entry.statementID != 2 {
-		t.Errorf("expected stmtID=2, got %d", entry.statementID)
-	}
-
-	// Find third prepare
-	entry = lookupRecordedQueryByContent(index, "conn-1", "SELECT * FROM users", 3)
-	if entry == nil {
-		t.Fatal("expected to find entry")
-	}
-	if entry.statementID != 3 {
-		t.Errorf("expected stmtID=3, got %d", entry.statementID)
-	}
-}
-
-func TestLookupRecordedQueryByContent_CaseInsensitive(t *testing.T) {
-	mocks := []*models.Mock{
-		createPrepMock("mock-1", "conn-1", 1, "SELECT * FROM Users"),
-	}
-
-	index := buildRecordedPrepIndex(mocks)
-
-	// Should match case-insensitively
-	entry := lookupRecordedQueryByContent(index, "conn-1", "select * from users", 1)
-	if entry == nil {
-		t.Error("expected case-insensitive match")
-	}
-}
-
-func TestLookupRecordedQueryByContent_NotFound(t *testing.T) {
-	mocks := []*models.Mock{
-		createPrepMock("mock-1", "conn-1", 1, "SELECT * FROM users"),
-	}
-
-	index := buildRecordedPrepIndex(mocks)
-
-	// Query doesn't exist
-	entry := lookupRecordedQueryByContent(index, "conn-1", "SELECT * FROM orders", 1)
-	if entry != nil {
-		t.Error("expected nil for non-existent query")
-	}
-
-	// Prepare order too high
-	entry = lookupRecordedQueryByContent(index, "conn-1", "SELECT * FROM users", 2)
-	if entry != nil {
-		t.Error("expected nil for non-existent prepare order")
 	}
 }
 
@@ -512,12 +477,12 @@ func TestIntegration_PrepareClosePrepareCycle(t *testing.T) {
 	}
 
 	// We can correlate: 3rd prepare in recorded (stmtID=3) matches 3rd prepare at runtime (stmtID=102)
-	recordedEntry := lookupRecordedQueryByContent(index, "conn-1", "SELECT * FROM users WHERE id = ?", 3)
-	if recordedEntry == nil {
-		t.Fatal("expected to find 3rd recorded entry")
+	// The 3rd entry (index 2) in the recorded index should have prepareOrder=3 and stmtID=3
+	if entries[2].prepareOrder != 3 {
+		t.Errorf("expected 3rd entry prepareOrder=3, got %d", entries[2].prepareOrder)
 	}
-	if recordedEntry.statementID != 3 {
-		t.Errorf("expected recorded stmtID=3, got %d", recordedEntry.statementID)
+	if entries[2].statementID != 3 {
+		t.Errorf("expected recorded stmtID=3, got %d", entries[2].statementID)
 	}
 }
 

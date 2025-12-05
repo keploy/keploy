@@ -22,6 +22,14 @@ import (
 var querySigCache sync.Map // map[string]string
 
 // recorded PREP registry per recorded connection
+// The prepareOrder and wasClosed fields enable ID reuse handling:
+// - prepareOrder: tracks the Nth time a query was prepared (for correlating with runtime)
+// - wasClosed: indicates if this statement was closed before a subsequent prepare
+// These fields are currently used for:
+// 1. markClosedEntries() to track statement lifecycle in recorded mocks
+// 2. Future enhancement: correlate recorded and runtime prepare cycles when IDs differ
+// The current matching works via query comparison (see matchStmtExecutePacketQueryAware),
+// which handles most ID reuse cases by comparing query content rather than statement IDs.
 type prepEntry struct {
 	statementID  uint32
 	query        string
@@ -1074,23 +1082,6 @@ func markClosedEntries(unfiltered []*models.Mock, idx map[string][]prepEntry) {
 			}
 		}
 	}
-}
-
-// lookupRecordedQueryByContent finds a recorded query entry by query text and prepare order
-// This handles ID reuse scenarios where the same query was prepared multiple times
-func lookupRecordedQueryByContent(index map[string][]prepEntry, connID string, query string, prepareOrder int) *prepEntry {
-	normalizedQuery := strings.TrimSpace(strings.ToLower(query))
-	count := 0
-
-	for i, e := range index[connID] {
-		if strings.EqualFold(strings.TrimSpace(e.query), normalizedQuery) {
-			count++
-			if count == prepareOrder {
-				return &index[connID][i]
-			}
-		}
-	}
-	return nil
 }
 
 // Caveat: There can be a condition where for the same connId, for the same query there can be different statementIds,

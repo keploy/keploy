@@ -16,14 +16,18 @@ const RESET = 0x00
 // PreparedStmtEntry tracks the lifecycle of a single prepared statement
 type PreparedStmtEntry struct {
 	StmtID     uint32 // Statement ID assigned during replay
-	Query      string // The prepared SQL query (normalized)
+	Query      string // The prepared SQL query (stored as-is, normalized during lookups)
 	PreparedAt uint32 // Cycle number when prepared
-	ClosedAt   int64  // Cycle number when closed (-1 if still active)
+	ClosedAt   int32  // Cycle number when closed (-1 if still active)
 }
 
-// PreparedStmtHistory maintains full history of prepared statements
-// to handle ID reuse scenarios (prepare→close→prepare cycles)
+// MaxPreparedStmtHistorySize is the threshold at which old closed entries are pruned
+// to prevent unbounded memory growth during long-lived connections
+const MaxPreparedStmtHistorySize = 1000
 
+// PreparedStmtHistory maintains full history of prepared statements
+// to handle ID reuse scenarios (prepare→close→prepare cycles).
+// When the history exceeds MaxPreparedStmtHistorySize, old closed entries are pruned.
 type PreparedStmtHistory struct {
 	Entries      []PreparedStmtEntry // Append-only history of all preparations
 	QueryIndex   map[string][]int    // normalized query -> indices in Entries
@@ -54,14 +58,59 @@ func (h *PreparedStmtHistory) RecordPrepare(stmtID uint32, query string) {
 	// Update query index (case-insensitive, trimmed)
 	normalizedQuery := strings.TrimSpace(strings.ToLower(query))
 	h.QueryIndex[normalizedQuery] = append(h.QueryIndex[normalizedQuery], idx)
+
+	// Prune old closed entries if history grows too large
+	if len(h.Entries) > MaxPreparedStmtHistorySize {
+		h.pruneClosedEntries()
+	}
 }
 
-// RecordClose marks a prepared statement as closed
+// pruneClosedEntries removes old closed entries to prevent unbounded memory growth.
+// It keeps all active entries and the most recent half of closed entries.
+func (h *PreparedStmtHistory) pruneClosedEntries() {
+	// Separate active and closed entries
+	var activeEntries []PreparedStmtEntry
+	var closedEntries []PreparedStmtEntry
+
+	for _, e := range h.Entries {
+		if e.ClosedAt == -1 {
+			activeEntries = append(activeEntries, e)
+		} else {
+			closedEntries = append(closedEntries, e)
+		}
+	}
+
+	// Keep only the most recent half of closed entries
+	keepCount := len(closedEntries) / 2
+	if keepCount < len(closedEntries) {
+		closedEntries = closedEntries[len(closedEntries)-keepCount:]
+	}
+
+	// Rebuild entries and index
+	h.Entries = make([]PreparedStmtEntry, 0, len(activeEntries)+len(closedEntries))
+	h.QueryIndex = make(map[string][]int)
+
+	// Add closed entries first (older), then active entries (newer)
+	for _, e := range closedEntries {
+		idx := len(h.Entries)
+		h.Entries = append(h.Entries, e)
+		normalizedQuery := strings.TrimSpace(strings.ToLower(e.Query))
+		h.QueryIndex[normalizedQuery] = append(h.QueryIndex[normalizedQuery], idx)
+	}
+	for _, e := range activeEntries {
+		idx := len(h.Entries)
+		h.Entries = append(h.Entries, e)
+		normalizedQuery := strings.TrimSpace(strings.ToLower(e.Query))
+		h.QueryIndex[normalizedQuery] = append(h.QueryIndex[normalizedQuery], idx)
+	}
+}
+
+// RecordClose marks a prepared statement as closed at the current cycle
 func (h *PreparedStmtHistory) RecordClose(stmtID uint32) {
-	// Find the most recent active entry with this stmtID and mark it closed
+	// Find the most recent active entry with this stmtID and mark it closed at current cycle
 	for i := len(h.Entries) - 1; i >= 0; i-- {
 		if h.Entries[i].StmtID == stmtID && h.Entries[i].ClosedAt == -1 {
-			h.Entries[i].ClosedAt = int64(h.CurrentCycle)
+			h.Entries[i].ClosedAt = int32(h.CurrentCycle)
 			break
 		}
 	}
