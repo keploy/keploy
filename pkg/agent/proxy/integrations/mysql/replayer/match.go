@@ -22,10 +22,12 @@ import (
 var querySigCache sync.Map // map[string]string
 
 // recorded PREP registry per recorded connection
-type prepEntry struct { // minimal, enough for lookup
-	statementID uint32
-	query       string
-	mockName    string // for debugging purpose
+type prepEntry struct {
+	statementID  uint32
+	query        string
+	mockName     string // for debugging purpose
+	prepareOrder int    // Order of preparation for this query (1st, 2nd, 3rd time prepared)
+	wasClosed    bool   // Whether this statement was closed before another prepare
 }
 
 // case-insensitive prefix check without allocation
@@ -420,6 +422,17 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				decodeCtx.PreparedStatements[prepareOkRespCopy.StatementID] = &prepareOkRespCopy
 				// maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
 				decodeCtx.StmtIDToQuery[prepareOkRespCopy.StatementID] = sp.Query
+
+				// Record in history for ID reuse tracking
+				if decodeCtx.StmtHistory != nil {
+					decodeCtx.StmtHistory.RecordPrepare(prepareOkRespCopy.StatementID, sp.Query)
+					logger.Debug("Recorded PREP in history",
+						zap.Uint32("stmt_id", prepareOkRespCopy.StatementID),
+						zap.String("query", strings.TrimSpace(sp.Query)),
+						zap.Uint32("cycle", decodeCtx.StmtHistory.GetCurrentCycle()),
+						zap.Int("prepare_count", decodeCtx.StmtHistory.GetPrepareCountForQuery(sp.Query)))
+				}
+
 				logger.Debug("Recorded runtime PREP mapping with new statement ID",
 					zap.Uint32("original_stmt_id from mock ", originalStmtID),
 					zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
@@ -972,6 +985,9 @@ func pluginEqualCompat(exp, act string) bool {
 // Assumes each mock has exactly one MySQLRequest and one MySQLResponse.
 func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 	out := make(map[string][]prepEntry)
+	// Track prepare order per connection per query
+	queryCountPerConn := make(map[string]map[string]int) // connID → normalized_query → count
+
 	for _, m := range unfiltered {
 		if m == nil || m.Kind != models.MySQL {
 			continue
@@ -980,6 +996,11 @@ func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 			continue
 		}
 		connID := m.Spec.Metadata["connID"]
+
+		// Initialize query counter for this connection
+		if _, ok := queryCountPerConn[connID]; !ok {
+			queryCountPerConn[connID] = make(map[string]int)
+		}
 
 		// Check if we have at least one response
 		if len(m.Spec.MySQLResponses) == 0 {
@@ -1008,13 +1029,68 @@ func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 			continue
 		}
 
+		// Track prepare order for this query
+		normalizedQuery := strings.ToLower(prepQuery)
+		queryCountPerConn[connID][normalizedQuery]++
+
 		out[connID] = append(out[connID], prepEntry{
-			statementID: stmtID,
-			query:       prepQuery,
-			mockName:    m.Name,
+			statementID:  stmtID,
+			query:        prepQuery,
+			mockName:     m.Name,
+			prepareOrder: queryCountPerConn[connID][normalizedQuery],
+			wasClosed:    false, // Will be updated by markClosedEntries
 		})
 	}
+
+	// Second pass: mark entries that were closed
+	markClosedEntries(unfiltered, out)
+
 	return out
+}
+
+// markClosedEntries scans CLOSE commands and marks corresponding prepEntries
+func markClosedEntries(unfiltered []*models.Mock, idx map[string][]prepEntry) {
+	for _, m := range unfiltered {
+		if m == nil || m.Kind != models.MySQL {
+			continue
+		}
+		if m.Spec.Metadata["type"] == "config" {
+			continue
+		}
+		connID := m.Spec.Metadata["connID"]
+
+		for _, req := range m.Spec.MySQLRequests {
+			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
+				if cp, ok := req.Message.(*mysql.StmtClosePacket); ok && cp != nil {
+					// Find and mark the corresponding prepEntry as closed
+					entries := idx[connID]
+					for i := range entries {
+						if entries[i].statementID == cp.StatementID && !entries[i].wasClosed {
+							entries[i].wasClosed = true
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// lookupRecordedQueryByContent finds a recorded query entry by query text and prepare order
+// This handles ID reuse scenarios where the same query was prepared multiple times
+func lookupRecordedQueryByContent(index map[string][]prepEntry, connID string, query string, prepareOrder int) *prepEntry {
+	normalizedQuery := strings.TrimSpace(strings.ToLower(query))
+	count := 0
+
+	for i, e := range index[connID] {
+		if strings.EqualFold(strings.TrimSpace(e.query), normalizedQuery) {
+			count++
+			if count == prepareOrder {
+				return &index[connID][i]
+			}
+		}
+	}
+	return nil
 }
 
 // Caveat: There can be a condition where for the same connId, for the same query there can be different statementIds,
@@ -1036,6 +1112,18 @@ func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 // -> preparedStatement with query-1 comes and returns statement-id=2
 // -> preparedStatement with query-1 comes and returns statement-id=3
 // -> Client will usually use stmt-id-3 but not necessary.
+
+// NOTE: Statement ID reuse is handled via PreparedStmtHistory tracking.
+// The system maintains full lifecycle history including:
+// - Multiple prepare cycles for the same query (prepareOrder field)
+// - Closure tracking to disambiguate ID reuse (wasClosed field)
+// - Runtime history in DecodeContext.StmtHistory
+//
+// Supported scenarios:
+// 1. Prepare→Close→Prepare→Close→Prepare→Execute (same query, different IDs)
+// 2. Multiple prepares without closing (same query gets multiple IDs)
+//
+// See PreparedStmtHistory in wire/util.go for implementation details.
 
 // lookup helper on recordedPrepByConn
 func lookupRecordedQuery(index map[string][]prepEntry, connID string, stmtID uint32) string {
