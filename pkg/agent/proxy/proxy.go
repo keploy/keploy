@@ -371,7 +371,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
 					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 				}
-				return
 			}
 		}
 
@@ -383,7 +382,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					// Log other errors
 					utils.LogError(p.logger, err, "failed to close the destination connection")
 				}
-				return
 			}
 		}
 
@@ -670,7 +668,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	for _, clientConn := range p.clientConnections {
 		err := clientConn.Close()
 		if err != nil {
-			return
+			utils.LogError(p.logger, err, "failed to close client connection")
 		}
 	}
 	p.connMutex.Unlock()
@@ -686,7 +684,6 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	err := p.stopDNSServers(ctx)
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to stop the dns servers")
-		return
 	}
 
 	// Close the error channel
