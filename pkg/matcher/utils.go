@@ -70,11 +70,60 @@ func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 }
 
 type noiseEntry struct {
-	keyLower string
-	regexps  []*regexp.Regexp // empty => ignore subtree
+	keyLower      string
+	keyLowerIndexless string // key without numeric indices for fallback matching
+	regexps       []*regexp.Regexp // empty => ignore subtree
 }
 type noiseIndex struct {
 	entries []noiseEntry
+}
+
+func normalizeArrayIndices(path string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(path) {
+		if path[i] == '[' {
+			closeIdx := strings.IndexByte(path[i:], ']')
+			if closeIdx == -1 {
+				result.WriteString(path[i:])
+				break
+			}
+			closeIdx += i
+			indexStr := path[i+1 : closeIdx]
+			if _, err := strconv.Atoi(indexStr); err == nil {
+				result.WriteByte('.')
+				result.WriteString(indexStr)
+				i = closeIdx + 1
+			} else {
+				result.WriteString(path[i : closeIdx+1])
+				i = closeIdx + 1
+			}
+		} else {
+			result.WriteByte(path[i])
+			i++
+		}
+	}
+	return result.String()
+}
+
+func removeNumericIndices(path string) string {
+	if path == "" {
+		return ""
+	}
+	parts := strings.Split(path, ".")
+	var result []string
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if _, err := strconv.Atoi(part); err != nil {
+			result = append(result, part)
+		}
+	}
+	if len(result) == 0 {
+		return ""
+	}
+	return strings.Join(result, ".")
 }
 
 func buildNoiseIndex(mp map[string][]string) noiseIndex {
@@ -83,7 +132,13 @@ func buildNoiseIndex(mp map[string][]string) noiseIndex {
 	}
 	out := noiseIndex{entries: make([]noiseEntry, 0, len(mp))}
 	for k, arr := range mp {
-		e := noiseEntry{keyLower: strings.ToLower(k)}
+		normalizedKey := normalizeArrayIndices(k)
+		keyLower := strings.ToLower(normalizedKey)
+		keyLowerIndexless := strings.ToLower(removeNumericIndices(normalizedKey))
+		e := noiseEntry{
+			keyLower:          keyLower,
+			keyLowerIndexless: keyLowerIndexless,
+		}
 		if len(arr) > 0 {
 			e.regexps = make([]*regexp.Regexp, 0, len(arr))
 			for _, p := range arr {
@@ -97,7 +152,17 @@ func buildNoiseIndex(mp map[string][]string) noiseIndex {
 
 func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
 	for _, e := range ni.entries {
-		if strings.Contains(keyLower, e.keyLower) {
+		if keyLower == e.keyLower {
+			return e.regexps, true
+		}
+		if e.keyLower != "" && strings.HasPrefix(keyLower, e.keyLower+".") {
+			return e.regexps, true
+		}
+		keyIndexless := removeNumericIndices(keyLower)
+		if keyIndexless == e.keyLowerIndexless {
+			return e.regexps, true
+		}
+		if e.keyLowerIndexless != "" && strings.HasPrefix(keyIndexless, e.keyLowerIndexless+".") {
 			return e.regexps, true
 		}
 	}
@@ -260,11 +325,16 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			return out, nil
 		}
 
-		// Fast path: if ordering matters, avoid O(n²).
 		if !ignoreOrdering {
 			isExact := true
 			for i := 0; i < len(e); i++ {
-				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering)
+				childKey := key
+				if key != "" {
+					childKey = key + "." + strconv.Itoa(i)
+				} else {
+					childKey = strconv.Itoa(i)
+				}
+				res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[i], ni, globalKeys, ignoreOrdering)
 				if err != nil || !res.matches {
 					return out, nil
 				}
@@ -282,17 +352,20 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 		for i := 0; i < len(e); i++ {
 			matched := false
-			// Try primitive fast match first to reduce recursion.
 			if j, ok := findAndClaimPrimitiveEqual(e[i], a, used); ok {
 				used[j] = true
 				matched = true
 			} else {
-				// Fallback to structural match.
 				for j := 0; j < len(a); j++ {
 					if used[j] {
 						continue
 					}
 					childKey := key
+					if key != "" {
+						childKey = key + "." + strconv.Itoa(j)
+					} else {
+						childKey = strconv.Itoa(j)
+					}
 					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering)
 					if err == nil && res.matches {
 						if !res.isExact {
