@@ -47,7 +47,6 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cli", cmd.String()))
-
 	err := cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}

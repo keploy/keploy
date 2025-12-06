@@ -50,14 +50,25 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker
 
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
+
 	a.logger.Info("Starting the agent in ", zap.String("mode", string(a.config.Agent.Mode)))
 	errGrp, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
+
+	passPortsUint := a.config.Agent.PassThroughPorts
+
+	rules := make([]models.BypassRule, len(a.config.Agent.PassThroughPorts))
+	for i, port := range passPortsUint {
+		rules[i] = models.BypassRule{
+			Port: port,
+		}
+	}
 
 	err := a.Hook(ctx, models.HookOptions{
 		Mode:          a.config.Agent.Mode,
 		IsDocker:      a.config.Agent.IsDocker,
 		EnableTesting: a.config.Agent.EnableTesting,
+		Rules:         rules,
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -154,6 +165,7 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		Pid:      0,
 		IsDocker: opts.IsDocker,
 		Mode:     opts.Mode,
+		Rules:    opts.Rules,
 	}, a.config.Agent)
 
 	if err != nil {
@@ -190,11 +202,6 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	return nil
 }
 
-func (a *Agent) SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	a.logger.Debug("Inside SetMocks of agent binary !!")
-	return a.Proxy.SetMocks(ctx, filtered, unFiltered)
-}
-
 func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	return a.Proxy.GetConsumedMocks(ctx)
 }
@@ -224,7 +231,6 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID")
 	}
-
 	storage := storageInterface.(*ClientMockStorage)
 	storage.mu.RLock()
 	originalFiltered := make([]*models.Mock, len(storage.filtered))

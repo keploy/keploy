@@ -51,7 +51,8 @@ type OutgoingOptions struct {
 	FallBackOnMiss bool          // this enables to pass the request to the actual server if no mock is found during test mode.
 	Mocking        bool          // used to enable/disable mocking
 	DstCfg         *ConditionalDstCfg
-	Backdate       time.Time // used to set backdate in cacert request
+	Backdate       time.Time                      // used to set backdate in cacert request
+	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 }
 
 type ConditionalDstCfg struct {
@@ -70,6 +71,7 @@ type SetupOptions struct {
 	Container       string
 	KeployContainer string
 	DockerDelay     uint64
+	Synchronous     bool
 	// Cmd               string
 	AgentURI          string
 	IsDocker          bool
@@ -82,6 +84,10 @@ type SetupOptions struct {
 	AgentPort         uint32
 	AppPorts          []string
 	AppNetworks       []string
+	BuildDelay        uint64
+	PassThroughPorts  []uint
+	ConfigPath        string
+	ExtraArgs         []string
 }
 
 type RunOptions struct {

@@ -36,6 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var firstRun bool
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
@@ -243,13 +244,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-
-	err = HookImpl.BeforeTestRun(ctx, testRunID)
-	if err != nil {
-		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-	}
-
+	firstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -308,7 +303,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestFailed = initFailed
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
-
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
@@ -523,7 +517,13 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough})
+	passPortsUint := config.GetByPassPorts(r.config)
+	passPortsUint32 := make([]uint32, len(passPortsUint)) // slice type of uint32
+	for i, port := range passPortsUint {
+		passPortsUint32[i] = uint32(port)
+	}
+
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -721,6 +721,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-agentReadyCh:
 		}
 
+		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
+		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
+		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, firstRun)
+		if err != nil {
+			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+		}
+		firstRun = false
+		// Prepare header noise configuration for mock matching
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -728,6 +739,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -788,7 +800,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-
+		if firstRun {
+			err = HookImpl.BeforeTestRun(ctx, testRunID)
+			if err != nil {
+				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
+				utils.LogError(r.logger, err, stopReason)
+			}
+			firstRun = false
+		}
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
@@ -799,6 +818,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
+		// Prepare header noise configuration for mock matching
+		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -806,6 +828,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -1128,10 +1151,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
+		// log the consumed mocks during the test run of the test case for test set
+		r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
+
 		if !testPass {
-			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
-			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 		}
@@ -1223,6 +1247,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	err = HookImpl.BeforeTestResult(ctx)
+	if err != nil {
+		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
@@ -1846,12 +1875,34 @@ func (r *Replayer) authenticateUser(ctx context.Context) error {
 	r.mock.setToken(token)
 	return nil
 }
-
 func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	// Authenticate the user for mock registry
 	err := r.authenticateUser(ctx)
 	if err != nil {
 		return err
+	}
+
+	if len(r.config.MockDownload.RegistryIDs) > 0 {
+		for _, registryID := range r.config.MockDownload.RegistryIDs {
+			// Use the registry ID to download mocks directly
+			r.logger.Info("Downloading mocks using registry ID",
+				zap.String("registryID", registryID),
+				zap.String("app", r.config.AppName))
+
+			err = r.mock.downloadByRegistryID(ctx, registryID, r.config.AppName)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return err
+				}
+				utils.LogError(r.logger, err, "failed to download mocks using registry ID", zap.String("registryID", registryID))
+				continue
+			}
+
+			r.logger.Info("Successfully downloaded mocks using registry ID",
+				zap.String("registryID", registryID),
+				zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
+		}
+		return nil
 	}
 
 	testSets, err := r.GetSelectedTestSets(ctx)

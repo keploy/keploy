@@ -267,7 +267,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if opts.IsDocker {
 		agentInfo.IsDocker = 1
 	}
-	agentInfo.DNSPort = int32(h.dnsPort)
+	agentInfo.DNSPort = int32(setupOpts.DnsPort)
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {
@@ -392,9 +392,11 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 			clientInfo.PassThroughPorts[i] = -1
 			continue
 		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
+		// Copy the port, casting from uint32 to int32
+		clientInfo.PassThroughPorts[i] = int32(rules[i].Port)
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
+
 	return h.SendClientInfo(clientInfo)
 }
 

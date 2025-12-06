@@ -134,8 +134,8 @@ wait_for_port() {
     local port=$1
     echo "Waiting for port $port to be open..."
     for i in {1..15}; do
-        # Use lsof to check for a listening TCP socket on the specified port
-        if sudo nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1 || nc -z -w 1 -6 ::1 "$port" >/dev/null 2>&1; then
+        # Use lsof to check if ANY process is listening on the port
+        if sudo lsof -i :$port -sTCP:LISTEN >/dev/null 2>&1; then
             echo "Port $port is open."
             return 0
         fi
@@ -143,12 +143,14 @@ wait_for_port() {
         sleep 2
     done
     echo "Timed out waiting for port $port."
+    # List open ports for debugging before failing
+    sudo lsof -i -P -n | grep LISTEN
     exit 1
 }
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    REC_PID=$(pgrep keploy | sort -n | head -1)
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
@@ -174,6 +176,8 @@ if [ "$MODE" = "incoming" ]; then
     
     kill_keploy_process
 
+    sleep 5
+
     check_for_errors record_incoming.log
 
     # Test: Keploy replays the captured gRPC calls against the server.
@@ -198,6 +202,8 @@ elif [ "$MODE" = "outgoing" ]; then
     sleep 15 # Allow time for traces to be recorded
 
     kill_keploy_process
+    
+    sleep 5
     
     check_for_errors record_outgoing.log
 
