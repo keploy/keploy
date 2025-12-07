@@ -139,6 +139,37 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			newTestFile = isCreated
 		}
 
+		if g.testPath == "" {
+			return fmt.Errorf("test path is empty")
+		}
+
+		// check if the test file already exists
+		exist := utils.CheckFileExists(g.testPath)
+		if !exist{
+			// make a empty test file
+			if err := os.MkdirAll(filepath.Dir(g.testPath), 0777); err != nil {
+				return fmt.Errorf("failed to create parent dirs for %s: %w", g.testPath, err)
+			}
+			// create file only if it does not exist (avoid truncation)
+			f, err := os.OpenFile(g.testPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0777)
+			if err != nil {
+				if os.IsExist(err) {
+					// someone else created it concurrently — continue
+				} else {
+					return fmt.Errorf("failed to create test file %s: %w", g.testPath, err)
+				}
+			} else {
+				// optionally write a header/comment
+				if _, werr := f.WriteString(fmt.Sprintf("// Unit test for %s\n", filepath.Base(g.srcPath))); werr != nil {
+					_ = f.Close()
+					return fmt.Errorf("failed to write initial content to %s: %w", g.testPath, werr)
+				}
+				if cerr := f.Close(); cerr != nil {
+					return fmt.Errorf("failed to close file %s: %w", g.testPath, cerr)
+				}
+			}
+		}
+
 		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
 		isEmpty, err := utils.IsFileEmpty(g.testPath)
 		if err != nil {
