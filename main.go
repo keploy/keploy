@@ -48,7 +48,7 @@ func setVersion() {
 		version = "2-dev"
 	}
 	utils.Version = version
-	utils.VersionIdenitfier = "version"
+	utils.VersionIdentifier = "Keploy Version"
 }
 
 func start(ctx context.Context) {
