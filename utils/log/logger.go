@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"io"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
-	"io"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -156,45 +157,57 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	return logger, nil
 }
 
-// moduleCore wraps a zapcore.Core to filter log entries based on their logger name.
+// moduleCore wraps a zapcore.Core to filter log entries based on include/exclude patterns.
+// Include has priority over Exclude. Hierarchical matching: "proxy" matches "proxy.http".
 type moduleCore struct {
 	zapcore.Core
-	modules map[string]bool
+	include []string
+	exclude []string
 }
 
 func (mc *moduleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
-	// If the log level is greater than Debug (e.g., Info, Warn, Error), let it pass.
+	// Non-debug logs always pass through
 	if ent.Level > zapcore.DebugLevel {
 		return mc.Core.Check(ent, ce)
 	}
 
-	// For Debug level logs, check if the logger name matches any of the allowed modules.
-	// We check for exact match or if the logger name starts with "module.".
-	enabled := false
-	if val, ok := mc.modules[ent.LoggerName]; ok {
-		if val {
-			enabled = true
+	name := ent.LoggerName
+
+	// Priority 1: If include list is non-empty, only matching modules pass
+	if len(mc.include) > 0 {
+		if matchesHierarchy(name, mc.include) {
+			return mc.Core.Check(ent, ce)
 		}
-	} else {
-		for mod, isActive := range mc.modules {
-			if isActive && strings.HasPrefix(ent.LoggerName, mod+".") {
-				enabled = true
-				break
-			}
+		return ce // Not in include list = blocked
+	}
+
+	// Priority 2: If only exclude list exists, block matching modules
+	if len(mc.exclude) > 0 {
+		if matchesHierarchy(name, mc.exclude) {
+			return ce // In exclude list = blocked
 		}
 	}
 
-	if enabled {
-		return mc.Core.Check(ent, ce)
-	}
+	// No filtering or not excluded = pass through
+	return mc.Core.Check(ent, ce)
+}
 
-	return ce
+// matchesHierarchy checks if name matches any pattern hierarchically.
+// "proxy" matches "proxy", "proxy.http", "proxy.http.request", etc.
+func matchesHierarchy(name string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if name == pattern || strings.HasPrefix(name, pattern+".") {
+			return true
+		}
+	}
+	return false
 }
 
 func (mc *moduleCore) With(fields []zapcore.Field) zapcore.Core {
 	return &moduleCore{
 		Core:    mc.Core.With(fields),
-		modules: mc.modules,
+		include: mc.include,
+		exclude: mc.exclude,
 	}
 }
 
@@ -204,7 +217,7 @@ func SetConsoleWriter(w io.Writer) {
 	consoleWriter = zapcore.AddSync(w)
 }
 
-func SetDebugModules(modules map[string]bool) (*zap.Logger, error) {
+func SetDebugModules(include, exclude []string) (*zap.Logger, error) {
 	// Enable Debug level globally in the configuration so the underlying core accepts it.
 	LogCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 	LogCfg.DisableStacktrace = false
@@ -222,7 +235,8 @@ func SetDebugModules(modules map[string]bool) (*zap.Logger, error) {
 
 	wrappedCore := &moduleCore{
 		Core:    core,
-		modules: modules,
+		include: include,
+		exclude: exclude,
 	}
 
 	logger := zap.New(wrappedCore)

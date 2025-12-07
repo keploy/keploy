@@ -13,6 +13,13 @@ type MockDownload struct {
 	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
 }
 
+// DebugModules configures module-level debug logging with include/exclude filtering.
+// Include has priority over Exclude. Hierarchical matching: "proxy" matches "proxy.http".
+type DebugModules struct {
+	Include []string `json:"include" yaml:"include" mapstructure:"include"`
+	Exclude []string `json:"exclude" yaml:"exclude" mapstructure:"exclude"`
+}
+
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
@@ -24,7 +31,7 @@ type Config struct {
 	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DebugModules          map[string]bool     `json:"debugModules" yaml:"debugModules" mapstructure:"debugModules"`
+	DebugModules          DebugModules        `json:"debugModules" yaml:"debugModules" mapstructure:"debugModules"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
 	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`

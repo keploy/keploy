@@ -16,42 +16,8 @@ func TestUpdateConfigData_DebugModules(t *testing.T) {
 	defaultCfg := config.Config{}
 	updatedCfg := c.UpdateConfigData(defaultCfg)
 
-	expectedModules := []string{
-		"contract",
-		"record",
-		"test",
-		"tools",
-		"report",
-		"rerecord",
-		"hooks",
-		"docker",
-		"proxy",
-		"test-db",
-		"mock-db",
-		"map-db",
-		"openapi-db",
-		"report-db",
-		"testset-db",
-		"storage",
-		"agent",
-		"gen",
-		"coverage",
-		"telemetry",
-		"auth",
-		"proxy.http",
-		"proxy.grpc",
-		"proxy.generic",
-		"proxy.mysql",
-		"proxy.postgres_v1",
-		"proxy.postgres_v2",
-		"proxy.mongo",
-		"proxy.redis",
-		"proxy.tls",
-	}
-
-	for _, module := range expectedModules {
-		_, exists := updatedCfg.DebugModules[module]
-		assert.True(t, exists, "Module %s should exist in DebugModules", module)
-		assert.False(t, updatedCfg.DebugModules[module], "Module %s should be disabled by default", module)
-	}
+	// Verify DebugModules struct is initialized with empty slices
+	assert.NotNil(t, updatedCfg.DebugModules)
+	assert.Empty(t, updatedCfg.DebugModules.Include, "Include should be empty by default")
+	assert.Empty(t, updatedCfg.DebugModules.Exclude, "Exclude should be empty by default")
 }

@@ -281,7 +281,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
-		cmd.PersistentFlags().StringSlice("debug-modules", []string{}, "Run in debug mode for specific modules")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
@@ -423,7 +422,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"protoInclude":          "proto-include",
 		"allowHighRisk":         "allow-high-risk",
 		"disableMapping":        "disable-mapping",
-		"debugModules":          "debug-modules",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -574,33 +572,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
 
-	cliModules, err := cmd.Flags().GetStringSlice("debug-modules")
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get debug-modules flag")
-		return nil
-	}
-
-	// Check if we have active modules from Config OR CLI
-	hasActiveModules := false
-
-	// 1. Check Config file values
-	for _, active := range c.cfg.DebugModules {
-		if active {
-			hasActiveModules = true
-			break
-		}
-	}
-
-	// 2. Merge CLI flags into the map (CLI takes precedence)
-	if len(cliModules) > 0 {
-		if c.cfg.DebugModules == nil {
-			c.cfg.DebugModules = make(map[string]bool)
-		}
-		for _, m := range cliModules {
-			c.cfg.DebugModules[m] = true
-		}
-		hasActiveModules = true
-	}
+	// Check if we have active debug module filtering from config file
+	hasActiveModules := len(c.cfg.DebugModules.Include) > 0 || len(c.cfg.DebugModules.Exclude) > 0
 
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
@@ -611,7 +584,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 	} else if hasActiveModules {
-		logger, err := log.SetDebugModules(c.cfg.DebugModules)
+		logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude)
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to set debug modules"
@@ -1321,37 +1294,9 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
 	defaultCfg.Test.DisableLineCoverage = c.cfg.Test.DisableLineCoverage
-	defaultCfg.DebugModules = map[string]bool{
-		"contract":          false,
-		"record":            false,
-		"test":              false,
-		"tools":             false,
-		"report":            false,
-		"rerecord":          false,
-		"hooks":             false,
-		"docker":            false,
-		"proxy":             false,
-		"test-db":           false,
-		"mock-db":           false,
-		"map-db":            false,
-		"openapi-db":        false,
-		"report-db":         false,
-		"testset-db":        false,
-		"storage":           false,
-		"agent":             false,
-		"gen":               false,
-		"coverage":          false,
-		"telemetry":         false,
-		"auth":              false,
-		"proxy.http":        false,
-		"proxy.grpc":        false,
-		"proxy.generic":     false,
-		"proxy.mysql":       false,
-		"proxy.postgres_v1": false,
-		"proxy.postgres_v2": false,
-		"proxy.mongo":       false,
-		"proxy.redis":       false,
-		"proxy.tls":         false,
+	defaultCfg.DebugModules = config.DebugModules{
+		Include: []string{},
+		Exclude: []string{},
 	}
 	return defaultCfg
 }
