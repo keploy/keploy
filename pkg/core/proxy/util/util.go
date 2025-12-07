@@ -2,6 +2,7 @@
 package util
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -207,142 +208,141 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 // ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
 // It returns the content as a byte array.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	var buffer []byte
-	const maxEmptyReads = 5
-	emptyReads := 0
+	// Use a larger buffer size for better performance (16KB instead of 1KB)
+	const bufferSize = 16 * 1024
 
-	// Channel to communicate read results
-	readResult := make(chan struct {
-		n   int
-		err error
-		buf []byte
-	})
-
-	g, ctx := errgroup.WithContext(ctx)
-
-	defer func() {
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(logger, err, "failed to read the request message in proxy")
-		}
-		close(readResult)
-	}()
+	// Pre-allocate buffer with expected capacity to reduce allocations
+	buffer := make([]byte, 0, bufferSize)
+	buf := make([]byte, bufferSize)
 
 	for {
-		// Start a goroutine to perform the read operation
-		g.Go(func() error {
-			defer Recover(logger, nil, nil)
-			buf := make([]byte, 1024)
-			n, err := reader.Read(buf)
-			if ctx.Err() != nil {
-				return nil
-			}
-			readResult <- struct {
-				n   int
-				err error
-				buf []byte
-			}{n, err, buf}
-			return nil
-		})
-
-		// Use a select statement to wait for either the read result or context cancellation
+		// Check context cancellation before reading
 		select {
 		case <-ctx.Done():
 			return buffer, ctx.Err()
-		case result := <-readResult:
-			if result.n > 0 {
-				buffer = append(buffer, result.buf[:result.n]...)
-				emptyReads = 0 // Reset the counter because we got some data
+		default:
+		}
+
+		n, err := reader.Read(buf)
+		if n > 0 {
+			buffer = append(buffer, buf[:n]...)
 			}
 
-			if result.err != nil {
-				if result.err == io.EOF {
-					emptyReads++
-					if emptyReads >= maxEmptyReads {
-						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
-					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
-					continue
+		if err != nil {
+			if err == io.EOF {
+				// If we have data and got EOF, return the data without error
+				// If we have no data and got EOF, return EOF
+				if len(buffer) > 0 {
+					return buffer, nil
 				}
-				return buffer, result.err
+				return buffer, err
+				}
+			return buffer, err
 			}
-			if result.n < len(result.buf) {
+
+		// If we read less than buffer size, we likely have all available data
+		if n < bufferSize {
 				return buffer, nil
 			}
 		}
 	}
+
+// ReadMongoMessage reads a complete MongoDB wire protocol message efficiently.
+// MongoDB wire messages have a 4-byte little-endian length prefix followed by the message body.
+// This function uses io.ReadFull for optimal performance with exact byte reads.
+func ReadMongoMessage(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+	// Check context cancellation before reading
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
 }
 
-// ReadRequiredBytes ReadBytes function is utilized to read the required number of bytes from the reader.
+	// Wrap reader in bufio.Reader for efficient reading if not already buffered
+	var bufReader *bufio.Reader
+	if br, ok := reader.(*bufio.Reader); ok {
+		bufReader = br
+	} else {
+		bufReader = bufio.NewReaderSize(reader, 32*1024) // 32KB buffer for network reads
+	}
+
+	// Read the 4-byte message length header
+	lengthBuf := make([]byte, 4)
+	n, err := io.ReadFull(bufReader, lengthBuf)
+	if err != nil {
+		if err == io.EOF && n == 0 {
+			return nil, io.EOF
+		}
+		if err == io.ErrUnexpectedEOF {
+			return lengthBuf[:n], io.EOF
+		}
+		return nil, err
+	}
+
+	// Parse message length (little-endian int32)
+	messageLength := int32(lengthBuf[0]) | int32(lengthBuf[1])<<8 | int32(lengthBuf[2])<<16 | int32(lengthBuf[3])<<24
+
+	// Validate message length (MongoDB messages are typically < 48MB)
+	if messageLength < 4 || messageLength > 48*1024*1024 {
+		return lengthBuf, fmt.Errorf("invalid MongoDB message length: %d", messageLength)
+	}
+
+	// Check context cancellation before reading body
+	select {
+	case <-ctx.Done():
+		return lengthBuf, ctx.Err()
+	default:
+	}
+
+	// Allocate buffer for full message and copy length bytes
+	message := make([]byte, messageLength)
+	copy(message[:4], lengthBuf)
+
+	// Read the remaining message body using io.ReadFull for efficiency
+	_, err = io.ReadFull(bufReader, message[4:])
+	if err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return message, io.EOF
+		}
+		return message, err
+	}
+
+	return message, nil
+}
+
+// ReadRequiredBytes is utilized to read the required number of bytes from the reader.
 // It returns the content as a byte array.
 func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
-	var buffer []byte
-	const maxEmptyReads = 5
-	emptyReads := 0
+	if numBytes <= 0 {
+		return nil, nil
+	}
 
-	// Channel to communicate read results
-	readResult := make(chan struct {
-		n   int
-		err error
-		buf []byte
-	})
+	// Use io.ReadFull for efficient reading of exact bytes
+	// This is much faster than the previous goroutine-based approach
+	buffer := make([]byte, numBytes)
+	totalRead := 0
 
-	g, ctx := errgroup.WithContext(ctx)
-
-	defer func() {
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(logger, err, "failed to read the request message in proxy")
-		}
-		close(readResult)
-	}()
-
-	for numBytes > 0 {
-		// Start a goroutine to perform the read operation
-		g.Go(func() error {
-			defer Recover(logger, nil, nil)
-			buf := make([]byte, numBytes)
-			n, err := reader.Read(buf)
-			if ctx.Err() != nil {
-				return nil
-			}
-			readResult <- struct {
-				n   int
-				err error
-				buf []byte
-			}{n, err, buf}
-			return nil
-		})
-
-		// Use a select statement to wait for either the read result or context cancellation with timeout
+	for totalRead < numBytes {
+		// Check context cancellation before reading
 		select {
 		case <-ctx.Done():
-			return buffer, ctx.Err()
-		// case <-time.After(5 * time.Second):
-		// 	logger.Error("timeout occurred while reading the packet")
-		// 	return buffer, context.DeadlineExceeded
-		case result := <-readResult:
-			if result.n > 0 {
-				buffer = append(buffer, result.buf[:result.n]...)
-				numBytes -= result.n
-				emptyReads = 0 // Reset the counter because we got some data
-			}
+			return buffer[:totalRead], ctx.Err()
+		default:
+		}
 
-			if result.err != nil {
-				if result.err == io.EOF {
-					emptyReads++
-					if emptyReads >= maxEmptyReads {
-						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
-					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
-					continue
-				}
-				return buffer, result.err
-			}
+		n, err := reader.Read(buffer[totalRead:])
+		totalRead += n
 
-			if numBytes == 0 {
+		if err != nil {
+			if err == io.EOF {
+				if totalRead < numBytes {
+					// Got EOF before reading all required bytes
+					return buffer[:totalRead], err
+			}
+				// Got all bytes we needed
 				return buffer, nil
 			}
+			return buffer[:totalRead], err
 		}
 	}
 
