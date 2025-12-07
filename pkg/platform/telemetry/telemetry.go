@@ -1,6 +1,5 @@
 // Package telemetry provides functionality for telemetry data collection.
 package telemetry
-
 import (
 	"bytes"
 	"net/http"
@@ -20,18 +19,22 @@ type Telemetry struct {
 	logger         *zap.Logger
 	InstallationID string
 	KeployVersion  string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	client         *http.Client
 }
 
 type Options struct {
 	Enabled        bool
 	Version        string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	InstallationID string
 }
 
 func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
+	if opt.GlobalMap == nil {
+		opt.GlobalMap = &sync.Map{}
+	}
+
 	return &Telemetry{
 		Enabled:        opt.Enabled,
 		logger:         logger,
@@ -96,6 +99,8 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 
 func (tel *Telemetry) RecordedTestAndMocks() {
 	dataMap := &sync.Map{}
+	// Using a plain map intentionally because this data is accessed only by a single goroutine.
+	// Upstream components expect map[string]int, so sync.Map is unnecessary here.
 	mapcheck := make(map[string]int)
 	dataMap.Store("mocks", mapcheck)
 	go tel.SendTelemetry("RecordedTestAndMocks", dataMap)
