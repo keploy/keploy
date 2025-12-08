@@ -577,8 +577,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	hasExcludeModules := len(c.cfg.DebugModules.Exclude) > 0
 
 	if c.cfg.Debug {
-		// debug: true - Both include and exclude work together (Caddy-style)
-		if hasIncludeModules || hasExcludeModules {
+		// debug: true - Include is IGNORED, only exclude works
+		if hasExcludeModules {
 			logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude, true)
 			*c.logger = *logger
 			if err != nil {
@@ -587,7 +587,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 		} else {
-			// No include or exclude modules, just enable global debug
+			// No exclude modules, just enable global debug (all modules)
 			logger, err := log.ChangeLogLevel(zap.DebugLevel)
 			*c.logger = *logger
 			if err != nil {
@@ -597,7 +597,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 	} else if hasIncludeModules {
-		// debug: false - Use include list only (exclude is ignored)
+		// debug: false - Include works, exclude works only when include is present
 		logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude, false)
 		*c.logger = *logger
 		if err != nil {

@@ -24,14 +24,14 @@ func TestDebugModules(t *testing.T) {
 		name             string
 		include          []string
 		exclude          []string
-		debugMode        bool // true = use both include & exclude (Caddy-style), false = use include only
+		debugMode        bool // true = include ignored, exclude works; false = include works, exclude works only with include
 		logOperations    func(logger *zap.Logger)
 		expectedOutput   []string
 		unexpectedOutput []string
 	}{
-		// ====== debugMode=false (include only, exclude ignored) tests ======
+		// ====== debugMode=false: include works, exclude works ONLY when include is present ======
 		{
-			name:      "Include mode: single module 'proxy'",
+			name:      "debug=false: include only - single module 'proxy'",
 			include:   []string{"proxy"},
 			exclude:   []string{},
 			debugMode: false,
@@ -43,7 +43,7 @@ func TestDebugModules(t *testing.T) {
 			unexpectedOutput: []string{"This is a record debug log"},
 		},
 		{
-			name:      "Include mode: multiple modules 'proxy' and 'record'",
+			name:      "debug=false: include only - multiple modules",
 			include:   []string{"proxy", "record"},
 			exclude:   []string{},
 			debugMode: false,
@@ -56,7 +56,7 @@ func TestDebugModules(t *testing.T) {
 			unexpectedOutput: []string{"This is a test debug log"},
 		},
 		{
-			name:      "Include mode: nested module 'proxy.http' does not match parent",
+			name:      "debug=false: include only - nested module does not match parent",
 			include:   []string{"proxy.http"},
 			exclude:   []string{},
 			debugMode: false,
@@ -68,7 +68,7 @@ func TestDebugModules(t *testing.T) {
 			unexpectedOutput: []string{"This is a proxy debug log"},
 		},
 		{
-			name:      "Include mode: parent module 'proxy' enables child 'proxy.http'",
+			name:      "debug=false: include only - parent enables child",
 			include:   []string{"proxy"},
 			exclude:   []string{},
 			debugMode: false,
@@ -79,32 +79,7 @@ func TestDebugModules(t *testing.T) {
 			unexpectedOutput: []string{},
 		},
 		{
-			name:      "Include mode: 'proxy.mysql' only",
-			include:   []string{"proxy.mysql"},
-			exclude:   []string{},
-			debugMode: false,
-			logOperations: func(logger *zap.Logger) {
-				logger.Named("proxy.mysql").Debug("Parsing MySQL packet")
-				logger.Named("proxy.http").Debug("Parsing HTTP header")
-				logger.Named("proxy.mongo").Debug("Parsing Mongo opcode")
-			},
-			expectedOutput:   []string{"Parsing MySQL packet"},
-			unexpectedOutput: []string{"Parsing HTTP header", "Parsing Mongo opcode"},
-		},
-		{
-			name:      "Include mode: exclude list is ignored",
-			include:   []string{"proxy"},
-			exclude:   []string{"proxy"}, // This should be ignored when debugMode=false
-			debugMode: false,
-			logOperations: func(logger *zap.Logger) {
-				logger.Named("proxy").Debug("Proxy should appear (exclude ignored)")
-				logger.Named("record").Debug("Record should not appear")
-			},
-			expectedOutput:   []string{"Proxy should appear (exclude ignored)"},
-			unexpectedOutput: []string{"Record should not appear"},
-		},
-		{
-			name:      "Include mode: empty include blocks all",
+			name:      "debug=false: empty include - no debug logs",
 			include:   []string{},
 			exclude:   []string{},
 			debugMode: false,
@@ -115,88 +90,36 @@ func TestDebugModules(t *testing.T) {
 			expectedOutput:   []string{},
 			unexpectedOutput: []string{"Should not appear", "Should not appear either"},
 		},
-
-		// ====== debugMode=true (both include & exclude work, Caddy-style) tests ======
 		{
-			name:      "Debug mode: exclude only - single module 'proxy'",
+			name:      "debug=false: empty include with exclude - exclude ignored (no include = no logs)",
 			include:   []string{},
-			exclude:   []string{"proxy"},
-			debugMode: true,
+			exclude:   []string{"telemetry"},
+			debugMode: false,
 			logOperations: func(logger *zap.Logger) {
-				logger.Named("proxy").Debug("This should NOT appear")
-				logger.Named("record").Debug("This should appear")
+				logger.Named("proxy").Debug("Should not appear")
+				logger.Named("telemetry").Debug("Should not appear either")
 			},
-			expectedOutput:   []string{"This should appear"},
-			unexpectedOutput: []string{"This should NOT appear"},
+			expectedOutput:   []string{},
+			unexpectedOutput: []string{"Should not appear", "Should not appear either"},
 		},
 		{
-			name:      "Debug mode: exclude only - hierarchical matching",
-			include:   []string{},
-			exclude:   []string{"proxy"},
-			debugMode: true,
-			logOperations: func(logger *zap.Logger) {
-				logger.Named("proxy.http").Debug("Excluded child log")
-				logger.Named("hooks").Debug("Should appear")
-			},
-			expectedOutput:   []string{"Should appear"},
-			unexpectedOutput: []string{"Excluded child log"},
-		},
-		{
-			name:      "Debug mode: exclude only - multiple modules",
-			include:   []string{},
-			exclude:   []string{"telemetry", "auth"},
-			debugMode: true,
-			logOperations: func(logger *zap.Logger) {
-				logger.Named("telemetry").Debug("Should not appear")
-				logger.Named("auth").Debug("Also should not appear")
-				logger.Named("proxy").Debug("Should appear")
-			},
-			expectedOutput:   []string{"Should appear"},
-			unexpectedOutput: []string{"Should not appear", "Also should not appear"},
-		},
-		{
-			name:      "Debug mode: empty include and exclude allows all",
-			include:   []string{},
-			exclude:   []string{},
-			debugMode: true,
-			logOperations: func(logger *zap.Logger) {
-				logger.Named("proxy").Debug("Proxy log")
-				logger.Named("hooks").Debug("Hooks log")
-			},
-			expectedOutput:   []string{"Proxy log", "Hooks log"},
-			unexpectedOutput: []string{},
-		},
-		{
-			name:      "Debug mode: include only - filters to specific modules",
-			include:   []string{"proxy"},
-			exclude:   []string{},
-			debugMode: true,
-			logOperations: func(logger *zap.Logger) {
-				logger.Named("proxy").Debug("Proxy should appear")
-				logger.Named("hooks").Debug("Hooks should NOT appear")
-			},
-			expectedOutput:   []string{"Proxy should appear"},
-			unexpectedOutput: []string{"Hooks should NOT appear"},
-		},
-		{
-			name:      "Debug mode: BOTH include and exclude work together (Caddy-style)",
+			name:      "debug=false: include + exclude - exclude filters from included set",
 			include:   []string{"proxy"},
 			exclude:   []string{"proxy.mysql"},
-			debugMode: true,
+			debugMode: false,
 			logOperations: func(logger *zap.Logger) {
 				logger.Named("proxy.http").Debug("proxy.http should appear")
-				logger.Named("proxy.grpc").Debug("proxy.grpc should appear")
-				logger.Named("proxy.mysql").Debug("proxy.mysql should NOT appear (excluded)")
-				logger.Named("hooks").Debug("hooks should NOT appear (not in include)")
+				logger.Named("proxy.mysql").Debug("proxy.mysql should NOT appear")
+				logger.Named("hooks").Debug("hooks should NOT appear")
 			},
-			expectedOutput:   []string{"proxy.http should appear", "proxy.grpc should appear"},
+			expectedOutput:   []string{"proxy.http should appear"},
 			unexpectedOutput: []string{"proxy.mysql should NOT appear", "hooks should NOT appear"},
 		},
 		{
-			name:      "Debug mode: include + exclude - exclude filters from included set",
+			name:      "debug=false: include + exclude - multiple modules",
 			include:   []string{"proxy", "hooks"},
 			exclude:   []string{"proxy.mysql", "hooks.conn"},
-			debugMode: true,
+			debugMode: false,
 			logOperations: func(logger *zap.Logger) {
 				logger.Named("proxy.http").Debug("proxy.http appears")
 				logger.Named("proxy.mysql").Debug("proxy.mysql excluded")
@@ -206,6 +129,84 @@ func TestDebugModules(t *testing.T) {
 			},
 			expectedOutput:   []string{"proxy.http appears", "hooks appears"},
 			unexpectedOutput: []string{"proxy.mysql excluded", "hooks.conn excluded", "telemetry not included"},
+		},
+
+		// ====== debugMode=true: include IGNORED, only exclude works ======
+		{
+			name:      "debug=true: no exclude - all modules log",
+			include:   []string{},
+			exclude:   []string{},
+			debugMode: true,
+			logOperations: func(logger *zap.Logger) {
+				logger.Named("proxy").Debug("Proxy log")
+				logger.Named("hooks").Debug("Hooks log")
+				logger.Named("telemetry").Debug("Telemetry log")
+			},
+			expectedOutput:   []string{"Proxy log", "Hooks log", "Telemetry log"},
+			unexpectedOutput: []string{},
+		},
+		{
+			name:      "debug=true: exclude single module",
+			include:   []string{},
+			exclude:   []string{"telemetry"},
+			debugMode: true,
+			logOperations: func(logger *zap.Logger) {
+				logger.Named("proxy").Debug("Proxy should appear")
+				logger.Named("telemetry").Debug("Telemetry should NOT appear")
+			},
+			expectedOutput:   []string{"Proxy should appear"},
+			unexpectedOutput: []string{"Telemetry should NOT appear"},
+		},
+		{
+			name:      "debug=true: exclude multiple modules",
+			include:   []string{},
+			exclude:   []string{"telemetry", "auth"},
+			debugMode: true,
+			logOperations: func(logger *zap.Logger) {
+				logger.Named("proxy").Debug("Proxy appears")
+				logger.Named("telemetry").Debug("Telemetry excluded")
+				logger.Named("auth").Debug("Auth excluded")
+			},
+			expectedOutput:   []string{"Proxy appears"},
+			unexpectedOutput: []string{"Telemetry excluded", "Auth excluded"},
+		},
+		{
+			name:      "debug=true: exclude hierarchical matching",
+			include:   []string{},
+			exclude:   []string{"proxy"},
+			debugMode: true,
+			logOperations: func(logger *zap.Logger) {
+				logger.Named("proxy").Debug("proxy excluded")
+				logger.Named("proxy.http").Debug("proxy.http excluded")
+				logger.Named("hooks").Debug("hooks appears")
+			},
+			expectedOutput:   []string{"hooks appears"},
+			unexpectedOutput: []string{"proxy excluded", "proxy.http excluded"},
+		},
+		{
+			name:      "debug=true: include is IGNORED",
+			include:   []string{"proxy"}, // This should be IGNORED
+			exclude:   []string{},
+			debugMode: true,
+			logOperations: func(logger *zap.Logger) {
+				logger.Named("proxy").Debug("Proxy appears")
+				logger.Named("hooks").Debug("Hooks also appears (include ignored)")
+			},
+			expectedOutput:   []string{"Proxy appears", "Hooks also appears"},
+			unexpectedOutput: []string{},
+		},
+		{
+			name:      "debug=true: include ignored, exclude works",
+			include:   []string{"proxy"}, // IGNORED
+			exclude:   []string{"telemetry"},
+			debugMode: true,
+			logOperations: func(logger *zap.Logger) {
+				logger.Named("proxy").Debug("Proxy appears")
+				logger.Named("hooks").Debug("Hooks appears (include ignored)")
+				logger.Named("telemetry").Debug("Telemetry excluded")
+			},
+			expectedOutput:   []string{"Proxy appears", "Hooks appears"},
+			unexpectedOutput: []string{"Telemetry excluded"},
 		},
 	}
 
