@@ -577,8 +577,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	hasExcludeModules := len(c.cfg.DebugModules.Exclude) > 0
 
 	if c.cfg.Debug {
-		// debug: true - Include is IGNORED, only exclude works
-		if hasExcludeModules {
+		// debug=true: Enable debug logging with include/exclude filtering
+		if hasIncludeModules || hasExcludeModules {
+			// Use SetDebugModules for filtered debug logging
 			logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude, true)
 			*c.logger = *logger
 			if err != nil {
@@ -587,7 +588,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 		} else {
-			// No exclude modules, just enable global debug (all modules)
+			// No filtering, just enable global debug (all modules)
 			logger, err := log.ChangeLogLevel(zap.DebugLevel)
 			*c.logger = *logger
 			if err != nil {
@@ -596,16 +597,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 		}
-	} else if hasIncludeModules {
-		// debug: false - Include works, exclude works only when include is present
-		logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude, false)
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to set debug modules"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
 	}
+	// debug=false: Do nothing - no debug logs at all (include/exclude are ignored)
 
 	if c.cfg.Record.BasePath != "" {
 		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)

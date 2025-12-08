@@ -158,14 +158,19 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 }
 
 // moduleCore wraps a zapcore.Core to filter log entries based on include/exclude patterns.
-// When debugMode=true: include is IGNORED, only exclude works (all modules except excluded)
-// When debugMode=false: include works, exclude works ONLY when include is present (filters from included set)
+// When debugMode=false: No debug logs appear at all (include/exclude are ignored)
+// When debugMode=true: include/exclude filtering is applied
+//   - include=[] and exclude=[]: All debug logs appear
+//   - include=[A,B] and exclude=[]: Only A and B appear (whitelist)
+//   - include=[] and exclude=[A]: All except A appear (blacklist)
+//   - include=[A,B,C] and exclude=[B]: Only A and C appear (exclude filters from include)
+//
 // Hierarchical matching: "proxy" matches "proxy.http".
 type moduleCore struct {
 	zapcore.Core
 	include   []string
 	exclude   []string
-	debugMode bool // true = global debug (include ignored, exclude works), false = selective debug (include works, exclude filters from include)
+	debugMode bool // true = debug enabled (filtering active), false = no debug logs at all
 }
 
 func (mc *moduleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -174,31 +179,29 @@ func (mc *moduleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcor
 		return mc.Core.Check(ent, ce)
 	}
 
+	// debug=false: No debug logs at all (include/exclude are ignored)
+	if !mc.debugMode {
+		return ce // Block all debug logs
+	}
+
+	// debug=true: Apply include/exclude filtering
 	name := ent.LoggerName
 
-	if mc.debugMode {
-		// debug: true - Include is IGNORED, only exclude works
-		// All modules get debug logs EXCEPT those in exclude list
-		if len(mc.exclude) > 0 && matchesHierarchy(name, mc.exclude) {
-			return ce // In exclude list = blocked
+	// Step 1: Check include list (whitelist)
+	if len(mc.include) > 0 {
+		// Include list is specified - only allow modules in the list
+		if !matchesHierarchy(name, mc.include) {
+			return ce // Not in include list = blocked
 		}
-		// Not excluded = allow
-		return mc.Core.Check(ent, ce)
 	}
+	// If include is empty, all modules pass this step (proceed to exclude check)
 
-	// debug: false - Include works, exclude works ONLY when include is present
-	// Step 1: Check include list (must be in include to pass)
-	if len(mc.include) == 0 {
-		return ce // No include list = no debug logs
-	}
-	if !matchesHierarchy(name, mc.include) {
-		return ce // Not in include list = blocked
-	}
-	// Step 2: Check exclude list (only if include was present and matched)
+	// Step 2: Check exclude list (blacklist - filters from include set or all modules)
 	if len(mc.exclude) > 0 && matchesHierarchy(name, mc.exclude) {
 		return ce // In exclude list = blocked
 	}
-	// Passed both filters = allow
+
+	// Passed all filters = allow
 	return mc.Core.Check(ent, ce)
 }
 
