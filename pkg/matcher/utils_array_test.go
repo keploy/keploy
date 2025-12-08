@@ -194,9 +194,9 @@ func TestArrayMatchingWithIgnoreOrder_StringValues(t *testing.T) {
 				tt.ignoreOrder,
 			)
 
-		assert.NoError(t, err)
-		assert.Equal(t, tt.shouldMatch, result.matches)
-	})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.shouldMatch, result.matches)
+		})
 	}
 }
 
