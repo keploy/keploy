@@ -573,18 +573,32 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	PrintLogo(os.Stdout, disableAnsi)
 
 	// Check if we have active debug module filtering from config file
-	hasActiveModules := len(c.cfg.DebugModules.Include) > 0 || len(c.cfg.DebugModules.Exclude) > 0
+	hasIncludeModules := len(c.cfg.DebugModules.Include) > 0
+	hasExcludeModules := len(c.cfg.DebugModules.Exclude) > 0
 
 	if c.cfg.Debug {
-		logger, err := log.ChangeLogLevel(zap.DebugLevel)
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to change log level"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		// debug: true - Both include and exclude work together (Caddy-style)
+		if hasIncludeModules || hasExcludeModules {
+			logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude, true)
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to set debug modules"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+		} else {
+			// No include or exclude modules, just enable global debug
+			logger, err := log.ChangeLogLevel(zap.DebugLevel)
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to change log level"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
-	} else if hasActiveModules {
-		logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude)
+	} else if hasIncludeModules {
+		// debug: false - Use include list only (exclude is ignored)
+		logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude, false)
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to set debug modules"

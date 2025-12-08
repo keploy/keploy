@@ -158,11 +158,17 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 }
 
 // moduleCore wraps a zapcore.Core to filter log entries based on include/exclude patterns.
-// Include has priority over Exclude. Hierarchical matching: "proxy" matches "proxy.http".
+// When debugMode=false: only include list is used (selective debug for specific modules), exclude is ignored
+// When debugMode=true: both include and exclude work together (Caddy-style):
+//   - If include is non-empty, only matching modules pass
+//   - Then exclude filters out from those (or from all if include is empty)
+//
+// Hierarchical matching: "proxy" matches "proxy.http".
 type moduleCore struct {
 	zapcore.Core
-	include []string
-	exclude []string
+	include   []string
+	exclude   []string
+	debugMode bool // true = global debug on (use both include & exclude), false = selective debug (use include only)
 }
 
 func (mc *moduleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -173,23 +179,29 @@ func (mc *moduleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcor
 
 	name := ent.LoggerName
 
-	// Priority 1: If include list is non-empty, only matching modules pass
-	if len(mc.include) > 0 {
-		if matchesHierarchy(name, mc.include) {
-			return mc.Core.Check(ent, ce)
+	if mc.debugMode {
+		// debug: true - Both include and exclude work (Caddy-style)
+		// Step 1: Check include list (if non-empty, only matching modules pass)
+		if len(mc.include) > 0 {
+			if !matchesHierarchy(name, mc.include) {
+				return ce // Not in include list = blocked
+			}
 		}
-		return ce // Not in include list = blocked
-	}
-
-	// Priority 2: If only exclude list exists, block matching modules
-	if len(mc.exclude) > 0 {
-		if matchesHierarchy(name, mc.exclude) {
+		// Step 2: Check exclude list (filter out from included/all)
+		if len(mc.exclude) > 0 && matchesHierarchy(name, mc.exclude) {
 			return ce // In exclude list = blocked
 		}
+		// Passed both filters = allow
+		return mc.Core.Check(ent, ce)
 	}
 
-	// No filtering or not excluded = pass through
-	return mc.Core.Check(ent, ce)
+	// debug: false - Use include list only, exclude is ignored
+	// Only modules in include list get debug logging
+	if len(mc.include) > 0 && matchesHierarchy(name, mc.include) {
+		return mc.Core.Check(ent, ce)
+	}
+	// Not in include list = blocked
+	return ce
 }
 
 // matchesHierarchy checks if name matches any pattern hierarchically.
@@ -217,7 +229,7 @@ func SetConsoleWriter(w io.Writer) {
 	consoleWriter = zapcore.AddSync(w)
 }
 
-func SetDebugModules(include, exclude []string) (*zap.Logger, error) {
+func SetDebugModules(include, exclude []string, debugMode bool) (*zap.Logger, error) {
 	// Enable Debug level globally in the configuration so the underlying core accepts it.
 	LogCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 	LogCfg.DisableStacktrace = false
@@ -234,9 +246,10 @@ func SetDebugModules(include, exclude []string) (*zap.Logger, error) {
 	)
 
 	wrappedCore := &moduleCore{
-		Core:    core,
-		include: include,
-		exclude: exclude,
+		Core:      core,
+		include:   include,
+		exclude:   exclude,
+		debugMode: debugMode,
 	}
 
 	logger := zap.New(wrappedCore)
