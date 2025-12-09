@@ -10,6 +10,13 @@
 set -Eeuo pipefail
 
 MODE=${1:-incoming}
+BIG_PAYLOAD=${2:-false}
+
+BIG_PAYLOAD_FLAG=""
+if [ "$BIG_PAYLOAD" = "true" ]; then
+  echo "🚀 Big payload mode enabled."
+  BIG_PAYLOAD_FLAG="--bigPayload"
+fi
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
@@ -123,9 +130,9 @@ if [ "$MODE" = "incoming" ]; then
 
   # Start server with keploy in record mode
   if [[ "$RECORD_SRC" == "latest" ]]; then
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
   else
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
   fi
  
  sleep 10
