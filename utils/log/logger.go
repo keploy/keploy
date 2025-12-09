@@ -235,8 +235,8 @@ func SetDebugModules(include, exclude []string, debugMode bool) (*zap.Logger, er
 	LogCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 	LogCfg.DisableStacktrace = false
 	LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
-	// Ensure name is hidden
-	LogCfg.EncoderConfig.EncodeName = nil
+	// Show logger name to identify parsers (e.g., "proxy.mysql", "proxy.postgres")
+	LogCfg.EncoderConfig.EncodeName = zapcore.FullNameEncoder
 
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	// Using os.Stdout as per ChangeLogLevel implementation
