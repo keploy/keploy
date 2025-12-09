@@ -603,7 +603,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			continue // Skip if parser not found
 		}
 
-		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
+		// Use parser-specific logger to show module name (e.g., "proxy.mongo", "proxy.http")
+		parserLogger := p.logger.Named(strings.ToLower(string(parserPair.ParserType)))
+		parserLogger.Debug("Checking for the parser")
 		if parser.MatchType(parserCtx, initialBuf) {
 			matchedParser = parser
 			parserType = parserPair.ParserType
@@ -613,7 +615,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if !generic {
-		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		// Use parser-specific logger to show module name (e.g., "proxy.mongo", "proxy.http")
+		matchedLogger := p.logger.Named(strings.ToLower(string(parserType)))
+		matchedLogger.Info("The external dependency is supported. Hence using the parser")
 		switch rule.Mode {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
@@ -637,7 +641,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if generic {
-		logger.Debug("The external dependency is not supported. Hence using generic parser")
+		// Use generic parser logger to show as "proxy.generic"
+		genericLogger := p.logger.Named("generic")
+		genericLogger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
