@@ -1262,6 +1262,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	timeTaken := time.Since(startTime)
+	// Subtract application delay time from total time to show only test execution time
+	if r.instrument {
+		delayDuration := time.Duration(r.config.Test.Delay) * time.Second
+		if timeTaken > delayDuration {
+			timeTaken -= delayDuration
+		}
+	}
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
@@ -1517,12 +1524,12 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTaken)
 
 		if totalTestIgnored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal test execution time: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test execution time: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
