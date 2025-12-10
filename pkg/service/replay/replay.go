@@ -559,6 +559,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
 	startTime := time.Now()
+	delayApplied := false
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
@@ -781,6 +782,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Delay for user application to run
+		delayApplied = true
 		select {
 		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
 		case <-runTestSetCtx.Done():
@@ -885,6 +887,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			})
 
 			// Delay for user application to run
+			delayApplied = true
 			select {
 			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
 			case <-runTestSetCtx.Done():
@@ -1263,7 +1266,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	timeTaken := time.Since(startTime)
 	// Subtract application delay time from total time to show only test execution time
-	if r.instrument {
+	if delayApplied {
 		delayDuration := time.Duration(r.config.Test.Delay) * time.Second
 		if timeTaken >= delayDuration {
 			timeTaken -= delayDuration
