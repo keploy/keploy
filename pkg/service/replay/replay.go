@@ -1265,8 +1265,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Subtract application delay time from total time to show only test execution time
 	if r.instrument {
 		delayDuration := time.Duration(r.config.Test.Delay) * time.Second
-		if timeTaken > delayDuration {
+		if timeTaken >= delayDuration {
 			timeTaken -= delayDuration
+		} else {
+			// If test execution is faster than delay, set to zero to avoid negative values
+			timeTaken = 0
 		}
 	}
 
