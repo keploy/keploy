@@ -23,7 +23,7 @@ type PostgresSpec struct {
 // Backend is PG Request Packet Transcoder
 type Backend struct {
 	PacketTypes         []string                     `json:"header,omitempty" yaml:"header,omitempty,flow"`
-	Identfier           string                       `json:"identifier,omitempty" yaml:"identifier,omitempty"`
+	Identifier          string                       `json:"identifier,omitempty" yaml:"identifier,omitempty"`
 	Length              uint32                       `json:"length,omitempty" yaml:"length,omitempty"`
 	Payload             string                       `json:"payload,omitempty" yaml:"payload,omitempty"`
 	Bind                pgproto3.Bind                `yaml:"-"`
@@ -58,7 +58,7 @@ type Backend struct {
 
 type Frontend struct {
 	PacketTypes                     []string                                 `json:"header,omitempty" yaml:"header,omitempty,flow"`
-	Identfier                       string                                   `json:"identifier,omitempty" yaml:"identifier,omitempty"`
+	Identifier                      string                                   `json:"identifier,omitempty" yaml:"identifier,omitempty"`
 	Length                          uint32                                   `json:"length,omitempty" yaml:"length,omitempty"`
 	Payload                         string                                   `json:"payload,omitempty" yaml:"payload,omitempty"`
 	AuthenticationOk                pgproto3.AuthenticationOk                `json:"authentication_ok,omitempty" yaml:"authentication_ok,omitempty"`
