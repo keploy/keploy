@@ -38,3 +38,28 @@ type MockFilterParams struct {
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
 }
+
+type BeforeSimulateRequest struct {
+	TimeStamp    time.Time `json:"timestamp"`
+	TestSetID    string    `json:"testSetID"`
+	TestCaseName string    `json:"testCaseName"`
+}
+
+type AfterSimulateRequest struct {
+	TestSetID    string `json:"testSetID"`
+	TestCaseName string `json:"testCaseName"`
+}
+
+type BeforeTestRunReq struct {
+	TestRunID string `json:"testRunID"`
+}
+
+type BeforeTestSetCompose struct {
+	TestRunID string `json:"testRunID"`
+}
+
+type AfterTestRunReq struct {
+	TestRunID  string       `json:"testRunID"`
+	TestSetIDs []string     `json:"testSetIDs"`
+	Coverage   TestCoverage `json:"coverage"`
+}

@@ -527,9 +527,37 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}
+	if idc.conf.Record.Synchronous {
+		command = append(command, "--sync")
+	}
 	if opts.EnableTesting {
 		command = append(command, "--enable-testing")
 	}
+	if opts.ConfigPath != "" && opts.ConfigPath != "." {
+		command = append(command, "--config-path", opts.ConfigPath)
+	}
+	if len(opts.ExtraArgs) > 0 {
+		command = append(command, opts.ExtraArgs...)
+	}
+
+	if opts.GlobalPassthrough {
+		command = append(command, "--global-passthrough")
+	}
+
+	if opts.BuildDelay > 0 {
+		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+	}
+
+	if len(opts.PassThroughPorts) > 0 {
+		portStrings := make([]string, len(opts.PassThroughPorts))
+		for i, port := range opts.PassThroughPorts {
+			portStrings[i] = strconv.Itoa(int(port))
+		}
+		// Join them with a comma and add as a single argument
+		command = append(command, "--pass-through-ports", strings.Join(portStrings, ","))
+	}
+
+	idc.logger.Debug("Generating agent service with command", zap.Strings("command", command))
 
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
@@ -660,17 +688,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	)
 
 	return serviceNode, nil
-}
-
-// convertPathToUnixStyleForCompose converts Windows paths to Unix style for Docker Compose
-func convertPathToUnixStyleForCompose(path string) string {
-	// Replace backslashes with forward slashes
-	unixPath := strings.ReplaceAll(path, "\\", "/")
-	// Remove 'C:' and similar drive letters
-	if len(unixPath) > 1 && unixPath[1] == ':' {
-		unixPath = unixPath[2:]
-	}
-	return unixPath
 }
 
 // AddKeployAgentToCompose adds the keploy-agent service to an existing Docker Compose file
