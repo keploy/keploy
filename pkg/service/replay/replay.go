@@ -99,6 +99,18 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
+func getBackdateTimestamp(testCases []*models.TestCase) time.Time {
+	var backdate time.Time
+	if len(testCases) > 0 && testCases[0] != nil {
+		if testCases[0].Kind == models.HTTP {
+			backdate = testCases[0].HTTPReq.Timestamp
+		} else if testCases[0].Kind == models.GRPC_EXPORT {
+			backdate = testCases[0].GrpcReq.Timestamp
+		}
+	}
+	return backdate
+}
+
 func (r *Replayer) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
@@ -732,15 +744,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
-		// Get backdate timestamp based on test case kind
-		var backdate time.Time
-		if len(testCases) > 0 && testCases[0] != nil {
-			if testCases[0].Kind == models.HTTP {
-				backdate = testCases[0].HTTPReq.Timestamp
-			} else if testCases[0].Kind == models.GRPC_EXPORT {
-				backdate = testCases[0].GrpcReq.Timestamp
-			}
-		}
+		backdate := getBackdateTimestamp(testCases)
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
@@ -831,15 +835,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
-		// Get backdate timestamp based on test case kind
-		var backdate time.Time
-		if len(testCases) > 0 && testCases[0] != nil {
-			if testCases[0].Kind == models.HTTP {
-				backdate = testCases[0].HTTPReq.Timestamp
-			} else if testCases[0].Kind == models.GRPC_EXPORT {
-				backdate = testCases[0].GrpcReq.Timestamp
-			}
-		}
+		backdate := getBackdateTimestamp(testCases)
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
