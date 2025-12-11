@@ -309,6 +309,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// The Agent command (which runs inside that child process) must be configured to accept these new flags, otherwise, the subprocess will crash with an “unknown flag” error.
+		cmd.Flags().StringSlice("include", c.cfg.DebugModules.Include, "List of modules to include in debug logs")
+		cmd.Flags().StringSlice("exclude", c.cfg.DebugModules.Exclude, "List of modules to exclude from debug logs")
 
 	default:
 		return errors.New("unknown command name")
@@ -572,6 +575,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
 
+	if c.cfg.EnableTesting {
+		// Add mode to logger to debug the keploy during testing
+		logger, err := log.AddMode(cmd.Name())
+		*c.logger = *logger
+		if err != nil {
+			errMsg := "failed to add mode to logger"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.DisableTele = true
+	}
+
 	// Check if we have active debug module filtering from config file
 	hasIncludeModules := len(c.cfg.DebugModules.Include) > 0
 	hasExcludeModules := len(c.cfg.DebugModules.Exclude) > 0
@@ -609,18 +624,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Port = port
 		c.cfg.E2E = true
-	}
-
-	if c.cfg.EnableTesting {
-		// Add mode to logger to debug the keploy during testing
-		logger, err := log.AddMode(cmd.Name())
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to add mode to logger"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.DisableTele = true
 	}
 
 	if c.cfg.DisableANSI {

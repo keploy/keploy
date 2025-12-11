@@ -674,6 +674,14 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if a.conf.Debug {
 		args = append(args, "--debug")
+
+		if len(a.conf.DebugModules.Include) > 0 {
+			args = append(args, "--include", strings.Join(a.conf.DebugModules.Include, ","))
+		}
+
+		if len(a.conf.DebugModules.Exclude) > 0 {
+			args = append(args, "--exclude", strings.Join(a.conf.DebugModules.Exclude, ","))
+		}
 	}
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")

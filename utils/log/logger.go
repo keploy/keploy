@@ -126,18 +126,17 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 }
 
 func AddMode(mode string) (*zap.Logger, error) {
-	cfg := LogCfg
-	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+	LogCfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		emoji := "\U0001F430"
 		modeStr := fmt.Sprintf("Keploy(%s):", mode)
 		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339))
 	}
 
-	encoder := NewANSIConsoleEncoder(cfg.EncoderConfig)
+	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
 		zapcore.AddSync(os.Stdout),
-		cfg.Level,
+		LogCfg.Level,
 	)
 
 	logger := zap.New(core)
@@ -218,9 +217,10 @@ func matchesHierarchy(name string, patterns []string) bool {
 
 func (mc *moduleCore) With(fields []zapcore.Field) zapcore.Core {
 	return &moduleCore{
-		Core:    mc.Core.With(fields),
-		include: mc.include,
-		exclude: mc.exclude,
+		Core:      mc.Core.With(fields),
+		include:   mc.include,
+		exclude:   mc.exclude,
+		debugMode: mc.debugMode,
 	}
 }
 
