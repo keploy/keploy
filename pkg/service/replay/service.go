@@ -102,7 +102,7 @@ type TestHooks interface {
 	BeforeTestRun(ctx context.Context, testRunID string) error
 	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
-	BeforeTestResult(ctx context.Context) error
+	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
 }

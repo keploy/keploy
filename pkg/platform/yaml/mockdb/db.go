@@ -78,7 +78,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		}
 		mockYamls = append(mockYamls, doc)
 	}
-	mocks, err := decodeMocks(mockYamls, ys.Logger)
+	mocks, err := DecodeMocks(mockYamls, ys.Logger)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			}
 
 			// Decode each YAML document into models.Mock as it is read.
-			mocks, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+			mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
 			if err != nil {
 				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.String("session", filepath.Base(path)))
 				return nil, err
@@ -251,7 +251,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			}
 
 			// Decode each YAML document into models.Mock as it is read.
-			mocks, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+			mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
 			if err != nil {
 				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.String("session", filepath.Base(path)))
 				return nil, err
