@@ -12,16 +12,18 @@ import (
 	"go.uber.org/zap"
 )
 
+type field string
+
 const (
-    fieldPassedTests    = "passed_tests"
-    fieldFailedTests    = "failed_tests"
-    fieldTestSet        = "test_set"
-    fieldTestSets       = "test_sets"
-    fieldRunStatus      = "run_status"
-    fieldUtilizedMocks  = "utilized_mocks"
-    fieldTests          = "tests"
-    fieldMocks          = "mocks"
-    fieldMock           = "mock"
+    fldPassedTests    field = "passed_tests"
+    fldFailedTests    field = "failed_tests"
+    fldTestSet        field = "test_set"
+    fldTestSets       field = "test_sets"
+    fldRunStatus      field = "run_status"
+    fldUtilizedMocks  field = "utilized_mocks"
+    fldTests          field = "tests"
+    fldMocks          field = "mocks"
+    fldMock           field = "mock"
 )
 
 var teleURL = "https://telemetry.keploy.io/analytics"
@@ -68,40 +70,40 @@ func (tel *Telemetry) Ping() {
 
 func (tel *Telemetry) TestSetRun(success int, failure int, testSet string, runStatus string) {
 	dataMap := &sync.Map{}
-	dataMap.Store(fieldPassedTests, success)
-	dataMap.Store(fieldFailedTests, failure)
-	dataMap.Store(fieldTestSet, testSet)
-	dataMap.Store(fieldRunStatus, runStatus)
+	dataMap.Store(fldPassedTests, success)
+	dataMap.Store(fldFailedTests, failure)
+	dataMap.Store(fldTestSet, testSet)
+	dataMap.Store(fldRunStatus, runStatus)
 	go tel.SendTelemetry("TestSetRun", dataMap)
 }
 
 func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus string) {
 	dataMap := &sync.Map{}
-	dataMap.Store(fieldPassedTests, success)
-	dataMap.Store(fieldFailedTests, failure)
-	dataMap.Store(fieldTestSets, testSets)
-	dataMap.Store(fieldRunStatus, runStatus)
+	dataMap.Store(fldPassedTests, success)
+	dataMap.Store(fldFailedTests, failure)
+	dataMap.Store(fldTestSets, testSets)
+	dataMap.Store(fldRunStatus, runStatus)
 	go tel.SendTelemetry("TestRun", dataMap)
 }
 
 // MockTestRun is Telemetry event for the Mocking feature test run
 func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 	dataMap := &sync.Map{}
-	dataMap.Store(fieldUtilizedMocks, utilizedMocks)
+	dataMap.Store(fldUtilizedMocks, utilizedMocks)
 	go tel.SendTelemetry("MockTestRun", dataMap)
 }
 
 // RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
 func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int) {
 	dataMap := &sync.Map{}
-	dataMap.Store(fieldTestSet, testSet)
-	dataMap.Store(fieldTests, testsTotal)
+	dataMap.Store(fldTestSet, testSet)
+	dataMap.Store(fldTests, testsTotal)
 
 	mockMap := &sync.Map{}
 	for k, v := range mockTotal {
 		mockMap.Store(k, v)
 	}
-	dataMap.Store(fieldMocks, mockMap)
+	dataMap.Store(fldMocks, mockMap)
 
 	go tel.SendTelemetry("RecordedTestSuite", dataMap)
 }
@@ -109,7 +111,7 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 func (tel *Telemetry) RecordedTestAndMocks() {
 	dataMap := &sync.Map{}
 	mapcheck := make(map[string]int)
-	dataMap.Store(fieldMocks, mapcheck)
+	dataMap.Store(fldMocks, mapcheck)
 	go tel.SendTelemetry("RecordedTestAndMocks", dataMap)
 }
 
@@ -125,13 +127,13 @@ func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 		mockMap.Store(k, v)
 	}
 	dataMap := &sync.Map{}
-	dataMap.Store(fieldMocks, mockMap)
+	dataMap.Store(fldMocks, mockMap)
 	go tel.SendTelemetry("RecordedMocks", dataMap)
 }
 
 func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
 	dataMap := &sync.Map{}
-	dataMap.Store(fieldMock, mockType)
+	dataMap.Store(fldMock, mockType)
 	go tel.SendTelemetry("RecordedTestCaseMock", dataMap)
 }
 
