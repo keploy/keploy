@@ -10,6 +10,8 @@
 set -Eeuo pipefail
 
 MODE=${1:-incoming}
+
+# TODO: remove it after v3 latest release 
 BIG_PAYLOAD=${2:-false}
 
 BIG_PAYLOAD_FLAG=""
