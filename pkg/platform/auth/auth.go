@@ -29,7 +29,7 @@ func New(serverURL string, installationID string, logger *zap.Logger, gitHubClie
 	return &Auth{
 		serverURL:      serverURL,
 		installationID: installationID,
-		logger:         logger,
+		logger:         logger.Named(models.AuthService),
 		GitHubClientID: gitHubClientID,
 	}
 }

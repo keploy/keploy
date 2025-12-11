@@ -40,11 +40,13 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	if err != nil {
 		return nil, err
 	}
+
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, cfg)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, auth, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
+
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
@@ -73,6 +75,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	var err error
 
 	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
+		// Inject named logger for Docker client
 		client, err = docker.New(logger, c)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create docker client")

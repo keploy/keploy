@@ -33,7 +33,7 @@ type Hooks struct {
 func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, instrumentation Instrumentation, mock *mock) TestHooks {
 	return &Hooks{
 		cfg:             cfg,
-		logger:          logger,
+		logger:          logger.Named(models.ReplayHooksService),
 		tsConfigDB:      tsConfigDB,
 		storage:         storage,
 		auth:            auth,

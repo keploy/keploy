@@ -29,7 +29,7 @@ type TestYaml struct {
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
 	return &TestYaml{
 		TcsPath: tcsPath,
-		logger:  logger,
+		logger:  logger.Named(models.TestDBService),
 	}
 }
 

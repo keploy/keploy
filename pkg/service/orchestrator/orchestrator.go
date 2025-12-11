@@ -26,7 +26,7 @@ func New(logger *zap.Logger, record record.Service, tools tools.Service, replay 
 	globalMockCh := make(chan *models.Mock, 1000) // Buffered channel to prevent blocking
 
 	return &Orchestrator{
-		logger:                 logger,
+		logger:                 logger.Named(models.RerecordService),
 		record:                 record,
 		replay:                 replay,
 		tools:                  tools,
