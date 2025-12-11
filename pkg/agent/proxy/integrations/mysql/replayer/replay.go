@@ -77,6 +77,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 			PreferRecordedCaps: true,
 			StmtIDToQuery:      make(map[uint32]string),
 			NextStmtID:         1,
+			StmtHistory:        wire.NewPreparedStmtHistory(),
 		}
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
