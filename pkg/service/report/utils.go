@@ -41,9 +41,9 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 	fmt.Fprintf(w, "\tTotal test passed: %d\n", pass)
 	fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
 	if dur > 0 {
-		fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
+		fmt.Fprintf(w, "\tTotal test execution time: %q\n", fmtDuration(dur))
 	} else {
-		fmt.Fprintf(w, "\tTotal time taken: %q\n", "N/A")
+		fmt.Fprintf(w, "\tTotal test execution time: %q\n", "N/A")
 	}
 	fmt.Fprintln(w, "\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
 	tt := "N/A"
