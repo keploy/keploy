@@ -68,14 +68,13 @@ type Proxy struct {
 	DatabasePorts     []uint32 // ports to treat as MySQL-compatible databases
 }
 
-func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 	// Default database ports if not configured
-	databasePorts := opts.Agent.DatabasePorts
+	databasePorts := opts.DatabasePorts
 	if len(databasePorts) == 0 {
 		databasePorts = []uint32{3306, 4000} // MySQL default port and TiDB default port
 	}
 
-func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort, // default: 16789
@@ -89,7 +88,6 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 		MockManagers:      sync.Map{},
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough: opts.Record.GlobalPassthrough,
-		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		DatabasePorts:     databasePorts,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 	}
@@ -407,7 +405,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
-	//checking for the destination port of MySQL-compatible databases (configurable via agent.databasePorts)
+	//checking for the destination port of MySQL-compatible databases (configurable via databasePorts)
 	// Default ports: MySQL (3306) and TiDB (4000)
 	isDatabasePort := false
 	for _, dbPort := range p.DatabasePorts {
