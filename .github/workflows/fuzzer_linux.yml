@@ -244,6 +244,7 @@ jobs:
           REPLAY_SRC: ${{ matrix.config.replay_src }}
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
+          # TODO: remove true as an arg after latest v3 release 
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }} true
   
   postgres_fuzzer:
