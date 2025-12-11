@@ -526,11 +526,17 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}
+	if idc.conf.Record.Synchronous {
+		command = append(command, "--sync")
+	}
 	if opts.EnableTesting {
 		command = append(command, "--enable-testing")
 	}
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
 		command = append(command, "--config-path", opts.ConfigPath)
+	}
+	if len(opts.ExtraArgs) > 0 {
+		command = append(command, opts.ExtraArgs...)
 	}
 
 	if opts.GlobalPassthrough {
@@ -681,17 +687,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	)
 
 	return serviceNode, nil
-}
-
-// convertPathToUnixStyleForCompose converts Windows paths to Unix style for Docker Compose
-func convertPathToUnixStyleForCompose(path string) string {
-	// Replace backslashes with forward slashes
-	unixPath := strings.ReplaceAll(path, "\\", "/")
-	// Remove 'C:' and similar drive letters
-	if len(unixPath) > 1 && unixPath[1] == ':' {
-		unixPath = unixPath[2:]
-	}
-	return unixPath
 }
 
 // AddKeployAgentToCompose adds the keploy-agent service to an existing Docker Compose file
