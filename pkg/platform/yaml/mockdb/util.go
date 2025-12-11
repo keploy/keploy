@@ -9,7 +9,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
-	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 )
 
