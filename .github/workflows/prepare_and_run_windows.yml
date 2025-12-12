@@ -107,6 +107,9 @@ jobs:
     needs: [docker-image-build]
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    env:
+      DOCKER_API_VERSION: 1.41
+
 
     steps:
 
@@ -133,6 +136,9 @@ jobs:
   cleanup:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, Windows, X64]
+    env:
+      DOCKER_API_VERSION: 1.41
+
     needs: [run_golang_docker_windows]
     steps:
 
