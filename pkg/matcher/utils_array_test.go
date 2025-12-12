@@ -11,12 +11,12 @@ import (
 // where arrays like [1,1,1] would incorrectly match [1,2,3] with ignoreOrdering=true
 func TestArrayMatchingWithIgnoreOrder_PrimitiveValues(t *testing.T) {
 	tests := []struct {
-		name          string
-		expected      string
-		actual        string
-		ignoreOrder   bool
-		shouldMatch   bool
-		description   string
+		name        string
+		expected    string
+		actual      string
+		ignoreOrder bool
+		shouldMatch bool
+		description string
 	}{
 		{
 			name:        "identical arrays with duplicates should match",
@@ -113,10 +113,10 @@ func TestArrayMatchingWithIgnoreOrder_PrimitiveValues(t *testing.T) {
 			// Parse JSON strings
 			var expectedJSON interface{}
 			var actualJSON interface{}
-			
+
 			err := json.Unmarshal([]byte(tt.expected), &expectedJSON)
 			assert.NoError(t, err, "Failed to unmarshal expected JSON")
-			
+
 			err = json.Unmarshal([]byte(tt.actual), &actualJSON)
 			assert.NoError(t, err, "Failed to unmarshal actual JSON")
 
@@ -132,7 +132,7 @@ func TestArrayMatchingWithIgnoreOrder_PrimitiveValues(t *testing.T) {
 
 			// Assert
 			assert.NoError(t, err, "matchJSONWithNoiseHandlingIndexed should not return error")
-			
+
 			if tt.shouldMatch {
 				assert.True(t, result.matches, "Expected arrays to match: %s", tt.description)
 			} else {
@@ -178,10 +178,10 @@ func TestArrayMatchingWithIgnoreOrder_StringValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var expectedJSON interface{}
 			var actualJSON interface{}
-			
+
 			err := json.Unmarshal([]byte(tt.expected), &expectedJSON)
 			assert.NoError(t, err)
-			
+
 			err = json.Unmarshal([]byte(tt.actual), &actualJSON)
 			assert.NoError(t, err)
 
@@ -236,10 +236,10 @@ func TestArrayMatchingWithIgnoreOrder_BooleanValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var expectedJSON interface{}
 			var actualJSON interface{}
-			
+
 			err := json.Unmarshal([]byte(tt.expected), &expectedJSON)
 			assert.NoError(t, err)
-			
+
 			err = json.Unmarshal([]byte(tt.actual), &actualJSON)
 			assert.NoError(t, err)
 
@@ -294,10 +294,10 @@ func TestArrayMatchingWithIgnoreOrder_MixedPrimitiveTypes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var expectedJSON interface{}
 			var actualJSON interface{}
-			
+
 			err := json.Unmarshal([]byte(tt.expected), &expectedJSON)
 			assert.NoError(t, err)
-			
+
 			err = json.Unmarshal([]byte(tt.actual), &actualJSON)
 			assert.NoError(t, err)
 
