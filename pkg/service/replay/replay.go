@@ -99,15 +99,30 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
-func getBackdateTimestamp(testCases []*models.TestCase) time.Time {
-	var backdate time.Time
-	if len(testCases) > 0 && testCases[0] != nil {
-		if testCases[0].Kind == models.HTTP {
-			backdate = testCases[0].HTTPReq.Timestamp
-		} else if testCases[0].Kind == models.GRPC_EXPORT {
-			backdate = testCases[0].GrpcReq.Timestamp
-		}
+// backdate extracts the timestamp from the first test case for mock backdating.
+// It handles HTTP and gRPC test cases, returning zero time if test cases are empty
+// or the kind is unrecognized.
+func (r *Replayer) backdate(testCases []*models.TestCase) time.Time {
+	if len(testCases) == 0 || testCases[0] == nil {
+		r.logger.Warn("no test cases available for backdate timestamp")
+		return time.Time{}
 	}
+
+	var backdate time.Time
+	switch testCases[0].Kind {
+	case models.HTTP:
+		backdate = testCases[0].HTTPReq.Timestamp
+	case models.GRPC_EXPORT:
+		backdate = testCases[0].GrpcReq.Timestamp
+	default:
+		r.logger.Warn("unknown test case kind for backdate", zap.String("kind", string(testCases[0].Kind)))
+		return time.Time{}
+	}
+
+	if backdate.IsZero() {
+		r.logger.Warn("backdate timestamp is zero", zap.String("testCase", testCases[0].Name), zap.String("kind", string(testCases[0].Kind)))
+	}
+
 	return backdate
 }
 
@@ -744,7 +759,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
-		backdate := getBackdateTimestamp(testCases)
+		backdate := r.backdate(testCases)
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
@@ -835,7 +850,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
-		backdate := getBackdateTimestamp(testCases)
+		backdate := r.backdate(testCases)
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,

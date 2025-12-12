@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 func TestGetBackdateTimestamp_GRPCFirstTestCase(t *testing.T) {
@@ -28,7 +29,8 @@ func TestGetBackdateTimestamp_GRPCFirstTestCase(t *testing.T) {
 		},
 	}
 
-	backdate := getBackdateTimestamp(testCases)
+	r := &Replayer{logger: zap.NewNop()}
+	backdate := r.backdate(testCases)
 
 	if !backdate.Equal(grpcTimestamp) {
 		t.Errorf("Expected backdate to be %v, got %v", grpcTimestamp, backdate)
@@ -60,7 +62,8 @@ func TestGetBackdateTimestamp_HTTPFirstTestCase(t *testing.T) {
 		},
 	}
 
-	backdate := getBackdateTimestamp(testCases)
+	r := &Replayer{logger: zap.NewNop()}
+	backdate := r.backdate(testCases)
 
 	if !backdate.Equal(httpTimestamp) {
 		t.Errorf("Expected backdate to be %v, got %v", httpTimestamp, backdate)
@@ -70,7 +73,8 @@ func TestGetBackdateTimestamp_HTTPFirstTestCase(t *testing.T) {
 func TestGetBackdateTimestamp_EmptyTestCases(t *testing.T) {
 	testCases := []*models.TestCase{}
 
-	backdate := getBackdateTimestamp(testCases)
+	r := &Replayer{logger: zap.NewNop()}
+	backdate := r.backdate(testCases)
 
 	if !backdate.IsZero() {
 		t.Errorf("Expected zero time for empty test cases, got %v", backdate)
@@ -80,10 +84,10 @@ func TestGetBackdateTimestamp_EmptyTestCases(t *testing.T) {
 func TestGetBackdateTimestamp_NilTestCase(t *testing.T) {
 	testCases := []*models.TestCase{nil}
 
-	backdate := getBackdateTimestamp(testCases)
+	r := &Replayer{logger: zap.NewNop()}
+	backdate := r.backdate(testCases)
 
 	if !backdate.IsZero() {
 		t.Errorf("Expected zero time for nil test case, got %v", backdate)
 	}
 }
-
