@@ -17,13 +17,15 @@ import (
 )
 
 type TestReportVerdict struct {
-	total     int
-	passed    int
-	failed    int
-	ignored   int
-	status    bool
-	duration  time.Duration
-	timeTaken string
+	total         int
+	passed        int
+	failed        int
+	ignored       int
+	status        bool
+	duration      time.Duration
+	timeTaken     string
+	executionTime time.Duration
+	waitTime      time.Duration
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
