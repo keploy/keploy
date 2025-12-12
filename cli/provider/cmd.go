@@ -247,6 +247,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("sync", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -302,8 +303,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
-		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
+		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
+
+		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
+		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 
 	default:
 		return errors.New("unknown command name")
@@ -953,6 +958,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
@@ -1106,15 +1112,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
 			}
-
-			protoCfg, err := parseProtoFlags(c.logger, cmd)
-			if err != nil {
-				return err
-			}
-
-			c.cfg.Test.ProtoFile = protoCfg.ProtoFile
-			c.cfg.Test.ProtoDir = protoCfg.ProtoDir
-			c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, protoCfg.ProtoInclude...)
 		}
 		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
 		if err != nil {
@@ -1220,6 +1217,27 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.DnsPort = dnsPort
+
+		synchronous, err := cmd.Flags().GetBool("sync")
+		if err != nil {
+			errMsg := "failed to get the synchronous flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.Synchronous = synchronous
+		buildDelay, err := cmd.Flags().GetUint64("build-delay")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get build-delay flag")
+			return nil // Or return an error
+		}
+		c.cfg.Agent.BuildDelay = buildDelay
+
+		passThroughPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
+			return nil // Or return an error
+		}
+		c.cfg.Agent.PassThroughPorts = passThroughPorts
 	}
 
 	return nil

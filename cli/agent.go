@@ -16,7 +16,7 @@ func init() {
 	Register("agent", Agent)
 }
 
-func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
 		Short: "starts keploy agent for hooking and starting proxy",
@@ -41,7 +41,7 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
-			routes.New(router, a, logger)
+			routes.ActiveHooks.New(router, a, logger)
 			go func() {
 				select {
 				case <-ctx.Done():
