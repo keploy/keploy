@@ -141,15 +141,15 @@ func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-      
+
 			if pm.synchronous {
 				go func(cc net.Conn) {
 					processMu.Lock()
 					defer processMu.Unlock()
-					handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts)
+					pm.handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan)
 				}(clientConn)
 			} else {
-				go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
+				go pm.handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan)
 			}
 
 		}
