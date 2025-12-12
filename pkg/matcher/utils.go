@@ -292,6 +292,12 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 					if used[j] {
 						continue
 					}
+					// Skip structural matching for primitives that weren't found by findAndClaimPrimitiveEqual
+					if isPrimitive(e[i]) && isPrimitive(a[j]) {
+						continue
+					}
+
+					// Only do structural matching for non-primitives
 					childKey := key
 					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering)
 					if err == nil && res.matches {
@@ -332,8 +338,26 @@ func anyRegexpMatchStr(s string, regs []*regexp.Regexp) bool {
 	return false
 }
 
+func isPrimitive(v interface{}) bool {
+	switch v.(type) {
+	case nil, string, float64, bool:
+		return true
+	default:
+		return false
+	}
+}
+
 func findAndClaimPrimitiveEqual(x interface{}, arr []interface{}, used []bool) (int, bool) {
 	switch v := x.(type) {
+	case nil:
+		for i, y := range arr {
+			if used[i] {
+				continue
+			}
+			if y == nil {
+				return i, true
+			}
+		}
 	case string:
 		for i, y := range arr {
 			if used[i] {
