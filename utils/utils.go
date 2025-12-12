@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -779,10 +781,28 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
-	// Find all descendant PIDs of the given PID & then signal them.
-	// Any shell doesn't signal its children when it receives a signal.
-	// Children may have their own process groups, so we need to signal them separately.
+	// Windows: /proc and process group semantics don't exist. Use taskkill to kill the tree.
+	if runtime.GOOS == "windows" {
+		logger.Debug("Interrupting process tree on windows using taskkill", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
+		// Try graceful taskkill first (without /F). If it fails, try forced kill.
+		cmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T")
+		if err := cmd.Run(); err != nil {
+			logger.Debug("taskkill graceful failed, attempting force", zap.Int("pid", ppid), zap.Error(err))
+			if err2 := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T", "/F").Run(); err2 != nil {
+				logger.Error("taskkill failed", zap.Int("pid", ppid), zap.Error(err2))
+				return err2
+			}
+		}
+
+		// Wait a short while for processes to exit (same helper used elsewhere)
+		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
+			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
+		}
+		return nil
+	}
+
+	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
 	children, err := findChildPIDs(ppid)
@@ -850,7 +870,21 @@ func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) erro
 
 // isProcessRunning checks if a particular process is still running using os.FindProcess
 func isProcessRunning(pid int) (bool, error) {
-	// Try to find the process
+	// On Windows use tasklist to check PID presence because signalling with 0 fails.
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH").Output()
+		if err != nil {
+			return false, err
+		}
+		s := strings.TrimSpace(string(out))
+		// When no matching task, tasklist prints a message containing "No tasks are running"
+		if s == "" || strings.Contains(s, "No tasks are running which match the specified criteria") || strings.Contains(s, "INFO: No tasks are running") {
+			return false, nil
+		}
+		return true, nil
+	}
+
+	// POSIX: try to find the process and signal 0 to check existence
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false, err // Process lookup failed
@@ -860,10 +894,10 @@ func isProcessRunning(pid int) (bool, error) {
 	err = process.Signal(syscall.Signal(0))
 	if err != nil {
 		// If error occurs when signaling, it means the process is no longer running
+		// If there’s another error, consider the process as still running
 		if errors.Is(err, os.ErrProcessDone) || err == syscall.ESRCH {
 			return false, nil
 		}
-		// If there’s another error, consider the process as still running
 		return true, nil
 	}
 

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
@@ -327,6 +328,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
+
+	spew.Dump(destInfo)
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
