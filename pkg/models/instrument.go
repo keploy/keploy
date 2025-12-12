@@ -84,6 +84,7 @@ type SetupOptions struct {
 	AgentPort         uint32
 	AppPorts          []string
 	AppNetworks       []string
+	NetworkAliases    map[string][]string
 	BuildDelay        uint64
 	PassThroughPorts  []uint
 	ConfigPath        string
