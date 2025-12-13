@@ -255,7 +255,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				if ctx.Err() == context.Canceled {
 					continue
 				}
-				insertMockErrChan <- err
+				select {
+					case insertMockErrChan <- err:
+					case <-ctx.Done():
+						return ctx.Err()	
+				}
+				
 			} else {
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
