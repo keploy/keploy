@@ -105,7 +105,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return err
 	}
 
-	// Set the host header explicitely because the `http.ReadRequest`` trim the host header
+	// Set the host header explicitly because the `http.ReadRequest`` trim the host header
 	// func ReadRequest(b *bufio.Reader) (*Request, error) {
 	// 	req, err := readRequest(b)
 	// 	if err != nil {
