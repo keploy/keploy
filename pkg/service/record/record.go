@@ -107,12 +107,15 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+
+		defer close(appErrChan)
+		defer close(insertTestErrChan)
+		defer close(insertMockErrChan)
+
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
-	defer close(appErrChan)
-	defer close(insertTestErrChan)
-	defer close(insertMockErrChan)
+	
 
 	if reRecordCfg.TestSet != "" {
 		// --- TARGETING AN EXISTING TEST SET ---
@@ -215,7 +218,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					if ctx.Err() == context.Canceled {
 						continue
 					}
-					insertTestErrChan <- err
+					select {
+						case insertTestErrChan <- err:
+						case <-ctx.Done():
+							return ctx.Err()
+					}
+					
 				} else {
 					testCount++
 					r.telemetry.RecordedTestAndMocks()
