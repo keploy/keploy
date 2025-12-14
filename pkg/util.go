@@ -150,6 +150,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// convert testcase to string and render the template values.
 	// Render any template values in the test case before simulation.
 	// Render any template values in the test case before simulation.
+
+	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template plcaeholders
+		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
+		if err == nil {
+			tc.HTTPReq.URL = decoded
+		}
+	}
+
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
 		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
