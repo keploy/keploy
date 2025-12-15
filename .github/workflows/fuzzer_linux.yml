@@ -288,26 +288,15 @@ jobs:
         with:
           go-version: ">=1.23"
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
-      
-      - name: Install AWS CLI
-        run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install --update
-
-      - name: Download and Extract Postgres Fuzzer
+      - name: Build Postgres Fuzzer from branch
         id: postgres_fuzzer
         run: |
           set -e
-          KEY="releases/postgres-fuzzer/latest/postgres-fuzzer-linux-amd64.tar.gz"
-          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
-          tar -xzf postgres-fuzzer-linux-amd64.tar.gz
+          # Clone the postgres fuzzer repo and checkout the fix branch
+          git clone https://github.com/keploy/go-fuzzers.git
+          cd go-fuzzers/postgres
+          git checkout pg-fuzzer-fix || git checkout main  # Fallback to main if branch doesn't exist
+          go build -o postgres-fuzzer .
           chmod +x ./postgres-fuzzer
           echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
 
