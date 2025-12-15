@@ -296,6 +296,29 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}
 }
 
+// sendHTTPErrorResponse sends an HTTP error response to the client when destination dial fails
+// after reading an HTTP request. This prevents the client from hanging waiting for a response.
+func (p *Proxy) sendHTTPErrorResponse(srcConn net.Conn, initialBuf []byte, logger *zap.Logger, statusCode int, statusText string) {
+	if !util.IsHTTPReq(initialBuf) {
+		return
+	}
+	
+	errorMsg := fmt.Sprintf("Keploy: Failed to connect to destination server")
+	errResp := fmt.Sprintf("HTTP/1.1 %d %s\r\n"+
+		"Content-Type: text/plain\r\n"+
+		"Connection: close\r\n"+
+		"Content-Length: %d\r\n"+
+		"\r\n"+
+		"%s",
+		statusCode, statusText, len(errorMsg), errorMsg)
+	
+	if _, writeErr := srcConn.Write([]byte(errResp)); writeErr != nil {
+		utils.LogError(logger, writeErr, "failed to write HTTP error response to client")
+	} else {
+		logger.Debug("sent HTTP error response to client", zap.Int("statusCode", statusCode), zap.String("statusText", statusText))
+	}
+}
+
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
@@ -569,6 +592,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				// Send HTTP error response if we've already read an HTTP request
+				p.sendHTTPErrorResponse(srcConn, initialBuf, logger, 500, "Internal Server Error")
 				return err
 			}
 		}
@@ -581,6 +606,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				// Send HTTP error response if we've already read an HTTP request
+				p.sendHTTPErrorResponse(srcConn, initialBuf, logger, 500, "Internal Server Error")
 				return err
 			}
 		}
