@@ -228,7 +228,7 @@ endsec
 section "Generate Fuzzer Traffic"
 # Trigger traffic and explicitly kill the Keploy process after a delay
 send_requests
-sleep 15
+sleep 20
 endsec
 
 section "Stop Recording"
