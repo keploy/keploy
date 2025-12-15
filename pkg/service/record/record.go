@@ -108,9 +108,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 
-		defer close(appErrChan)
-		defer close(insertTestErrChan)
-		defer close(insertMockErrChan)
+		close(appErrChan)
+		close(insertTestErrChan)
+		close(insertMockErrChan)
 
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
