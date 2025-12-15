@@ -57,7 +57,7 @@ func (cs *Csharp) PreProcess(_ bool) (string, error) {
 
 	isFileExists, err := utils.FileExists(dotnetCoveragePath)
 	if err != nil {
-		cs.logger.Warn("error checking dotnet-coverage tool existance: %s", zap.Error(err))
+		cs.logger.Warn("error checking dotnet-coverage tool existence: %s", zap.Error(err))
 		return cs.cmd, err
 	}
 
