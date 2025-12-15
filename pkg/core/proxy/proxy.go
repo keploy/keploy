@@ -345,11 +345,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	case 4:
 		p.logger.Debug("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
+		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port), zap.String("dstAddr", dstAddr))
 	case 6:
 		p.logger.Debug("the destination is ipv6")
-		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
-		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+		ipv6Str := util.ToIPv6AddressStr(destInfo.IPv6Addr)
+		dstAddr = fmt.Sprintf("[%v]:%v", ipv6Str, destInfo.Port)
+		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.String("IPv6String", ipv6Str), zap.Uint32("DestPort", destInfo.Port), zap.String("dstAddr", dstAddr))
 	}
 
 	// This is used to handle the parser errors
@@ -391,7 +392,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
-		dstConn, err = net.Dial("tcp", dstAddr)
+		dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
@@ -416,7 +417,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	if isDatabasePort {
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
+			dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
@@ -577,7 +578,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	} else {
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
+			dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
