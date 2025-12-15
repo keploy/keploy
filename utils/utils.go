@@ -379,7 +379,7 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
-var VersionIdenitfier string
+var VersionIdentifier string
 var LogFile *os.File
 
 func GetVersionAsComment() string {
