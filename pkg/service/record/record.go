@@ -115,8 +115,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
-	
-
 	if reRecordCfg.TestSet != "" {
 		// --- TARGETING AN EXISTING TEST SET ---
 		newTestSetID = reRecordCfg.TestSet
@@ -219,11 +217,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 						continue
 					}
 					select {
-						case insertTestErrChan <- err:
-						case <-ctx.Done():
-							return ctx.Err()
+					case insertTestErrChan <- err:
+					case <-ctx.Done():
+						return ctx.Err()
 					}
-					
+
 				} else {
 					testCount++
 					r.telemetry.RecordedTestAndMocks()
@@ -256,11 +254,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					continue
 				}
 				select {
-					case insertMockErrChan <- err:
-					case <-ctx.Done():
-						return ctx.Err()	
+				case insertMockErrChan <- err:
+				case <-ctx.Done():
+					return ctx.Err()
 				}
-				
+
 			} else {
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
