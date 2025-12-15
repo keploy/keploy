@@ -288,14 +288,18 @@ jobs:
         with:
           go-version: ">=1.23"
 
+      - name: Clone go-fuzzers repo
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/go-fuzzers
+          ref: pg-fuzzer-fix
+          path: go-fuzzers
+
       - name: Build Postgres Fuzzer from branch
         id: postgres_fuzzer
         run: |
           set -e
-          # Clone the postgres fuzzer repo and checkout the fix branch
-          git clone https://github.com/keploy/go-fuzzers.git
           cd go-fuzzers/postgres
-          git checkout pg-fuzzer-fix || git checkout main  # Fallback to main if branch doesn't exist
           go build -o postgres-fuzzer .
           chmod +x ./postgres-fuzzer
           echo "path=$(realpath ./postgres-fuzzer)" >> $GITHUB_OUTPUT
