@@ -36,7 +36,7 @@ func PrintLogo(wr io.Writer, disableANSI bool) {
 	if os.Getenv("BINARY_TO_DOCKER") != "true" {
 		printKeployLogo(wr, disableANSI, Logo)
 		// print version to the same writer
-		_, err := fmt.Fprintf(wr, "%s: %v\n\n", utils.VersionIdenitfier, utils.Version)
+		_, err := fmt.Fprintf(wr, "%s: %v\n\n", utils.VersionIdentifier, utils.Version)
 		if err != nil {
 			log.Fatalf("Error printing version: %v", err)
 		}
