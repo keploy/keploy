@@ -64,12 +64,14 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	var stopReason string
 	// defining all the channels and variables required for the record
 	var runAppError models.AppError
-	var appErrChan = make(chan models.AppError, 1)
+	var appErrChan = make(chan models.AppError, 10)
 	var insertTestErrChan = make(chan error, 10)
 	var insertMockErrChan = make(chan error, 10)
 	var newTestSetID string
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
+
+	done := make(chan struct{})
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -108,6 +110,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
 		close(appErrChan)
 		close(insertTestErrChan)
 		close(insertMockErrChan)
@@ -167,6 +173,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	if r.config.CommandType == string(utils.DockerCompose) {
 
 		runAppErrGrp.Go(func() error {
+			defer close(done)
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
@@ -219,7 +226,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					select {
 					case insertTestErrChan <- err:
 					case <-ctx.Done():
+						logger.Debug("context cancelled while sending error", zap.Error(err))
 						return ctx.Err()
+					case <-time.After(5 * time.Second):
+						return fmt.Errorf("timeout sending error to channel")
 					}
 
 				} else {
@@ -256,7 +266,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				select {
 				case insertMockErrChan <- err:
 				case <-ctx.Done():
+					logger.Debug("context cancelled while sending error", zap.Error(err))
 					return ctx.Err()
+				case <-time.After(5 * time.Second):
+					return fmt.Errorf("timeout sending error to channel")
 				}
 
 			} else {
@@ -269,6 +282,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	if r.config.CommandType != string(utils.DockerCompose) {
 		runAppErrGrp.Go(func() error {
+			defer close(done)
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
 				return nil
