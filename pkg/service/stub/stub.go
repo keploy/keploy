@@ -407,7 +407,7 @@ func (s *Stub) getStubSetID(ctx context.Context) (string, error) {
 // getNextStubSetID generates the next stub set ID
 func (s *Stub) getNextStubSetID(ctx context.Context) (string, error) {
 	stubDir := s.config.Path
-	
+
 	// Ensure the directory exists
 	if err := os.MkdirAll(stubDir, os.ModePerm); err != nil {
 		return "", fmt.Errorf("failed to create stub directory: %w", err)
@@ -456,7 +456,7 @@ func (s *Stub) getStubSetForReplay(ctx context.Context) (string, error) {
 // getLatestStubSetID finds the most recent stub set
 func (s *Stub) getLatestStubSetID(ctx context.Context) (string, error) {
 	stubDir := s.config.Path
-	
+
 	entries, err := os.ReadDir(stubDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to read stub directory: %w", err)
@@ -495,11 +495,11 @@ func (s *Stub) printRecordSummary(stubSetID string, mockCountMap map[string]int)
 	s.logger.Info("━━━━━━━━━━━━━━━━━━━━")
 	s.logger.Info("Stub Set", zap.String("id", stubSetID))
 	s.logger.Info("Total Mocks", zap.Int("count", total))
-	
+
 	for kind, count := range mockCountMap {
 		s.logger.Info("  "+kind, zap.Int("count", count))
 	}
-	
+
 	s.logger.Info("━━━━━━━━━━━━━━━━━━━━")
 	s.logger.Info("To replay these mocks, run:")
 	s.logger.Info(fmt.Sprintf("  keploy stub replay -c \"<your-test-command>\" --name %s", stubSetID))
