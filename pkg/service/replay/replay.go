@@ -390,7 +390,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
 			if r.config.Test.MaxFailAttempts == 0 {
-				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
+				utils.LogError(r.logger, nil, "no. of testset failure occurred during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
 			if len(failedTcIDs) == 0 {
