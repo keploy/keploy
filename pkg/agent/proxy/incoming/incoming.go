@@ -31,6 +31,7 @@ type IngressProxyManager struct {
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
+	fmt.Println("here is the sync :", cfg.Agent.Synchronous)
 	pm := &IngressProxyManager{
 		logger:      logger,
 		hooks:       h,
@@ -121,7 +122,8 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		var processMu sync.Mutex
+		// var processMu sync.Mutex
+		sem := make(chan struct{}, 1)
 		for {
 			select {
 			case <-ctx.Done():
@@ -141,15 +143,44 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-			if pm.synchronous {
-				go func(cc net.Conn) {
-					processMu.Lock()
-					defer processMu.Unlock()
-					handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts)
-				}(clientConn)
-			} else {
-				go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
-			}
+			fmt.Println("getting here")
+			go func(cc net.Conn) {
+				// We pass 'sem' to the handler
+				handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts, pm.synchronous, sem)
+			}(clientConn)
+			// go func(cc net.Conn) {
+			//     // If Synchronous mode is enabled, we enforce the lock BEFORE reading anything.
+			//     if pm.synchronous {
+			// 		fmt.Println("Waiting for lock...")
+			// 		fmt.Println(time.Now().Unix())
+			//         select {
+			//         // 2. Acquire Lock (Wait here if another request is processing)
+			//         case sem <- struct{}{}:
+			//             // Lock Acquired!
+			//             defer func() { <-sem }() // 5. Release Lock (Deferred)
+
+			//         // If the server is shutting down, stop waiting and drop the connection.
+			//         case <-ctx.Done():
+			//             cc.Close()
+			//             return
+			//         }
+			// 		fmt.Println("lock acquired")
+			// 		fmt.Println(time.Now().Unix())
+			//     }
+
+			//     // 3 & 4. Read Buffer, Dial, and Process
+			//     // We are now holding the lock (if synchronous).
+			//     handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts)
+			// }(clientConn)
+			// if pm.synchronous {
+			// 	go func(cc net.Conn) {
+			// 		processMu.Lock()
+			// 		defer processMu.Unlock()
+			// 		handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts)
+			// 	}(clientConn)
+			// } else {
+			// 	go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
+			// }
 		}
 	}()
 	return func() error {
@@ -162,7 +193,7 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions) {
+func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions, synchronous bool, sem chan struct{}) {
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
@@ -185,7 +216,7 @@ func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr strin
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
-		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, opts)
+		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, opts, synchronous, sem)
 	}
 }
 
