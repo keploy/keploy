@@ -91,11 +91,11 @@ type Record struct {
 
 // Stub is used for mock-only recording/replaying with external test frameworks
 type Stub struct {
-	Name          string        `json:"name" yaml:"name" mapstructure:"name"`                   // Name of the stub/mock set (auto-generated if empty)
-	Path          string        `json:"path" yaml:"path" mapstructure:"path"`                   // Path to store/load mocks
+	Name          string        `json:"name" yaml:"name" mapstructure:"name"`                      // Name of the stub/mock set (auto-generated if empty)
+	Path          string        `json:"path" yaml:"path" mapstructure:"path"`                      // Path to store/load mocks
 	RecordTimer   time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"` // Timer for stub recording
 	MongoPassword string        `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
-	Ports         []uint        `json:"ports" yaml:"ports" mapstructure:"ports"`               // Additional ports to intercept
+	Ports         []uint        `json:"ports" yaml:"ports" mapstructure:"ports"` // Additional ports to intercept
 }
 
 type ReRecord struct {

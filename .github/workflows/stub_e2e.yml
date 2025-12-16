@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.24'
+  GO_VERSION: '>=1.23'
   NODE_VERSION: '20'
   PYTHON_VERSION: '3.11'
   MOCK_SERVER_PORT: '9000'

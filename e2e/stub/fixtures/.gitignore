@@ -1,6 +1,6 @@
-# Binary output
-mock-server
-test-client
+# Binary output (executables, not source directories)
+mock-server/mock-server
+test-client/test-client
 
 # Keploy artifacts
 keploy.yml
