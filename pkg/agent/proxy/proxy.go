@@ -679,6 +679,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		}
 		p.clientConnections = nil
 	}
+	p.clientConnections = nil
 	p.connMutex.Unlock()
 
 	p.connMutex.Lock()
