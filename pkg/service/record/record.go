@@ -226,7 +226,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					select {
 					case insertTestErrChan <- err:
 					case <-ctx.Done():
-						logger.Debug("context cancelled while sending error", zap.Error(err))
+						r.logger.Debug("context cancelled while sending error", zap.Error(err))
 						return ctx.Err()
 					case <-time.After(5 * time.Second):
 						return fmt.Errorf("timeout sending error to channel")
@@ -266,7 +266,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				select {
 				case insertMockErrChan <- err:
 				case <-ctx.Done():
-					logger.Debug("context cancelled while sending error", zap.Error(err))
+					r.logger.Debug("context cancelled while sending error", zap.Error(err))
 					return ctx.Err()
 				case <-time.After(5 * time.Second):
 					return fmt.Errorf("timeout sending error to channel")
