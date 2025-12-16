@@ -1,3 +1,3 @@
 module github.com/keploy/keploy/e2e/stub/fixtures/test-client
 
-go 1.21
+go 1.23
