@@ -46,7 +46,9 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			}()
 			err = replay.Start(ctx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to replay")
+				if ctx.Err() != context.Canceled {
+					utils.LogError(logger, err, "failed to replay")
+				}
 			}
 
 			return nil

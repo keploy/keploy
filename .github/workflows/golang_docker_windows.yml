@@ -62,7 +62,7 @@ jobs:
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
-
+      
       - id: image
         uses: ./.github/actions/download-image
         with:
