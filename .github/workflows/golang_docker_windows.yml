@@ -63,15 +63,14 @@ jobs:
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
 
-      # Login against a Docker registry except on PR
-      # https://github.com/docker/login-action
       - name: Log into registry ${{ env.REGISTRY }}
-        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+        uses: akashkumar7902/login-action@master
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
+          registry: ghcr.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          retries: 5
+      
       - id: image
         uses: ./.github/actions/download-image
         with:

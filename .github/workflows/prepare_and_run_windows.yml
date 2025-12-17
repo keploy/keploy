@@ -120,14 +120,13 @@ jobs:
         if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
     
-    # Login against a Docker registry except on PR
-    # https://github.com/docker/login-action
-    - name: Log into registry ${{ env.REGISTRY }}
-      uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+    - name: Log into registry
+      uses: akashkumar7902/login-action@master
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
+        registry: ghcr.io
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        retries: 5
   
     - name: Pull Docker image
       shell: powershell
