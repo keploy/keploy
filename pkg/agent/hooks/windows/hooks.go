@@ -83,8 +83,9 @@ func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Ag
 }
 
 func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
-	// Ensure the WinDivert artifacts are present under $HOME/.keploy.
-	if err := h.ensureWinDivertAssets(); err != nil {
+	// Ensure the WinDivert artifacts are present in the executable's directory.
+	dllPath, err := h.ensureWinDivertAssets()
+	if err != nil {
 		// Log and return the error so load fails fast if writing assets fails.
 		h.logger.Error("failed to ensure windivert assets", zap.Error(err))
 		return err
@@ -104,7 +105,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
-	err := StartRedirector(clientPID, agentPID, h.proxyPort, uint32(3000), h.dnsPort, "C:\\Users\\keploy\\ayush_work\\keploy\\pkg\\agent\\hooks\\windows\\assets\\WinDivert.dll", mode)
+	err = StartRedirector(clientPID, agentPID, h.proxyPort, uint32(3000), h.dnsPort, dllPath, mode)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err
@@ -113,40 +114,37 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 	return nil
 }
 
-// ensureWinDivertAssets checks $HOME/.keploy and writes the embedded
-// WinDivert DLL/SYS files if they are missing.
-func (h *Hooks) ensureWinDivertAssets() error {
-	home, err := os.UserHomeDir()
+// ensureWinDivertAssets writes the embedded WinDivert DLL/SYS files to the
+// executable's directory (where Windows automatically searches for DLLs).
+// Returns the path to the DLL file.
+func (h *Hooks) ensureWinDivertAssets() (string, error) {
+	// Get the executable's directory - Windows searches here first for DLLs
+	exePath, err := os.Executable()
 	if err != nil {
-		h.logger.Warn("unable to determine user home directory, skipping writing windivert files", zap.Error(err))
-		return nil
+		h.logger.Error("unable to determine executable path", zap.Error(err))
+		return "", fmt.Errorf("failed to get executable path: %w", err)
 	}
+	exeDir := filepath.Dir(exePath)
 
-	keployDir := filepath.Join(home, ".keploy")
-	if err := os.MkdirAll(keployDir, 0o755); err != nil {
-		h.logger.Error("failed to create .keploy dir", zap.Error(err))
-		return fmt.Errorf("failed to create keploy dir: %w", err)
-	}
-
-	dllPath := filepath.Join(keployDir, "WinDivert.dll")
+	dllPath := filepath.Join(exeDir, "WinDivert.dll")
 	if _, err := os.Stat(dllPath); errors.Is(err, os.ErrNotExist) {
 		h.logger.Info("writing WinDivert.dll", zap.String("path", dllPath))
 		if err := os.WriteFile(dllPath, windivertDLL, 0o644); err != nil {
 			h.logger.Error("failed to write WinDivert.dll", zap.Error(err))
-			return fmt.Errorf("failed to write WinDivert.dll: %w", err)
+			return "", fmt.Errorf("failed to write WinDivert.dll: %w", err)
 		}
 	}
 
-	sysPath := filepath.Join(keployDir, "WinDivert64.sys")
+	sysPath := filepath.Join(exeDir, "WinDivert64.sys")
 	if _, err := os.Stat(sysPath); errors.Is(err, os.ErrNotExist) {
 		h.logger.Info("writing WinDivert64.sys", zap.String("path", sysPath))
 		if err := os.WriteFile(sysPath, windivert64DLL, 0o644); err != nil {
 			h.logger.Error("failed to write WinDivert64.sys", zap.Error(err))
-			return fmt.Errorf("failed to write WinDivert64.sys: %w", err)
+			return "", fmt.Errorf("failed to write WinDivert64.sys: %w", err)
 		}
 	}
 
-	return nil
+	return dllPath, nil
 }
 
 func (h *Hooks) unLoad(_ context.Context) {
