@@ -1426,10 +1426,42 @@ func isValidGRPCIdentifier(name string) bool {
 }
 
 func GetContainerIPv4() (string, error) {
+	return GetContainerIPv4WithRetry(5, 1*time.Second)
+}
+
+// GetContainerIPv4WithRetry attempts to get the container's IPv4 address with retry logic.
+// This is useful when containers are starting up or network interfaces are being initialized.
+// Parameters:
+//   - maxRetries: Maximum number of retry attempts
+//   - initialDelay: Initial delay between retries (doubles with each retry)
+func GetContainerIPv4WithRetry(maxRetries int, initialDelay time.Duration) (string, error) {
+	var lastErr error
+	delay := initialDelay
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		ip, err := getContainerIPv4Internal()
+		if err == nil {
+			return ip, nil
+		}
+
+		lastErr = err
+
+		// If this is not the last attempt, wait before retrying
+		if attempt < maxRetries {
+			time.Sleep(delay)
+			delay *= 2 // Exponential backoff
+		}
+	}
+
+	return "", fmt.Errorf("failed to get container IP after %d attempts: %w", maxRetries+1, lastErr)
+}
+
+// getContainerIPv4Internal is the internal implementation that attempts to find the container's IPv4 address once
+func getContainerIPv4Internal() (string, error) {
 	// Get all network interfaces
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get network interfaces: %w", err)
 	}
 
 	// Iterate over the interfaces
@@ -1463,5 +1495,5 @@ func GetContainerIPv4() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("could not find a non-loopback IP for the container")
+	return "", fmt.Errorf("could not find a non-loopback IPv4 address on any network interface")
 }
