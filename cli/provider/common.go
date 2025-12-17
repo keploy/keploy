@@ -2,6 +2,7 @@ package provider
 
 import (
 	"go.keploy.io/server/v3/pkg/models"
+	flakinessdb "go.keploy.io/server/v3/pkg/platform/sql/flakiness"
 	"go.keploy.io/server/v3/pkg/platform/storage"
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
 	mapdb "go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
@@ -19,4 +20,5 @@ type commonPlatformServices struct {
 	YamlReportDb  *reportdb.TestReport
 	YamlTestSetDB *testset.Db[*models.TestSet]
 	Storage       *storage.Storage
+	FlakinessDB   *flakinessdb.FlakinessDB
 }

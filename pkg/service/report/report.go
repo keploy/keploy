@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/sql/flakiness"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -31,8 +32,9 @@ type Report struct {
 	testDB   TestDB
 
 	// performance: single buffered writer and a reusable pretty printer
-	out     *bufio.Writer
-	printer *pp.PrettyPrinter
+	out         *bufio.Writer
+	flakinessDB *flakiness.FlakinessDB
+	printer     *pp.PrettyPrinter
 }
 
 type item struct {
@@ -46,12 +48,13 @@ const (
 	TestRunPrefix = "test-run-"
 )
 
-func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestDB) *Report {
+func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestDB, flakinessDb *flakiness.FlakinessDB) *Report {
 	r := &Report{
-		logger:   logger,
-		config:   cfg,
-		reportDB: reportDB,
-		testDB:   testDB,
+		logger:      logger,
+		config:      cfg,
+		reportDB:    reportDB,
+		testDB:      testDB,
+		flakinessDB: flakinessDb,
 	}
 	// 1MB buffered writer
 	r.out = bufio.NewWriterSize(os.Stdout, 1<<20)
@@ -333,6 +336,10 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	default:
 	}
 
+	if r.config.Report.Flakiness {
+		return r.generateFlakinessReport(ctx)
+	}
+
 	if r.config.Report.ReportPath != "" {
 		// File mode (single test-set file)
 		return r.generateReportFromFile(ctx, r.config.Report.ReportPath)
@@ -391,6 +398,42 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	}
 	r.logger.Info(fmt.Sprintf("✂️ CLI output truncated - see the %s report file for the complete diff.", latestRunID))
 	r.logger.Info("Report generation completed successfully")
+	return nil
+}
+
+func (r *Report) generateFlakinessReport(ctx context.Context) error {
+	r.logger.Info("Generating Flakiness Report...")
+
+	stats, err := r.flakinessDB.GetFlakyTests(ctx, 0.20)
+	if err != nil {
+		return err
+	}
+
+	if len(stats) == 0 {
+		r.logger.Info("No flaky tests detected!")
+		return nil
+	}
+
+	header := "\n\tTest Name\t\tFlakiness Rate\t\tTotal Runs\tPassed\tFailed\tLast Seen\n"
+	if _, err := pp.Printf(header); err != nil {
+		return err
+	}
+
+	for _, s := range stats {
+		if s.FlakinessRate > 0.5 {
+			pp.SetColorScheme(models.GetFailingColorScheme())
+		} else {
+			pp.SetColorScheme(models.GetPassingColorScheme())
+		}
+
+		// Format: TestName | 25.00% | 10 | 8 | 2 | 2023-10-25
+		rate := fmt.Sprintf("%.2f%%", s.FlakinessRate*100)
+
+		_, _ = pp.Printf("\t%s\t\t%s\t\t%d\t\t%d\t%d\t%s\n",
+			s.TestName, rate, s.TotalRuns, s.Passes, s.Failures, s.LastSeen.Format("2006-01-02 15:04"))
+	}
+
+	pp.Printf("\n")
 	return nil
 }
 

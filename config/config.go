@@ -149,6 +149,9 @@ type Test struct {
 	ProtoFile           string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
 	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
+	TrackFlakiness      bool                `json:"trackFlakiness" yaml:"trackFlakiness" mapstructure:"trackFlakiness"`
+	FlakyOnly           bool                `json:"flakyOnly" yaml:"flakyOnly" mapstructure:"flakyOnly"`
+	Runs                int                 `json:"runs" yaml:"runs" mapstructure:"runs"`
 }
 
 type Report struct {
@@ -156,6 +159,7 @@ type Report struct {
 	ShowFullBody     bool                `json:"showFullBody" yaml:"showFullBody" mapstructure:"showFullBody"`
 	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
 	Summary          bool                `json:"summary" yaml:"summary" mapstructure:"summary"`
+	Flakiness        bool                `json:"flakiness" yaml:"flakiness" mapstructure:"flakiness"`
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
 }
 

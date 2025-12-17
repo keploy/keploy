@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/http"
+	flakinessdb "go.keploy.io/server/v3/pkg/platform/sql/flakiness"
 	"go.keploy.io/server/v3/pkg/platform/storage"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/platform/yaml/configdb/testset"
@@ -42,9 +43,9 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, cfg)
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg, commonServices.FlakinessDB)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, auth, cfg)
-	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
+	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB, commonServices.FlakinessDB)
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
@@ -102,6 +103,13 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	instrumentation := http.New(logger, client, c)
 
+	dbPath := filepath.Join(c.Path, "flakiness.db")
+	dsn := "file:" + dbPath + "?cache=shared&mode=rwc"
+	flakinessDB, err := flakinessdb.New(logger, dsn)
+	if err != nil {
+		logger.Warn(fmt.Sprintf("failed to initialise flakiness database"))
+	}
+
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
 	mapDB := mapdb.New(logger, c.Path, "")
@@ -118,6 +126,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
 			Storage:       storage,
+			FlakinessDB:   flakinessDB,
 		},
 		instrumentation,
 	}, nil

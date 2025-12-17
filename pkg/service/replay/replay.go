@@ -30,6 +30,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/java"
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
+	"go.keploy.io/server/v3/pkg/platform/sql/flakiness"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -51,23 +52,25 @@ const UNKNOWN_TEST = "UNKNOWN_TEST"
 var HookImpl TestHooks
 
 type Replayer struct {
-	logger          *zap.Logger
-	testDB          TestDB
-	mockDB          MockDB
-	mappingDB       MappingDB
-	reportDB        ReportDB
-	testSetConf     TestSetConfig
-	telemetry       Telemetry
-	instrumentation Instrumentation
-	config          *config.Config
-	auth            service.Auth
-	mock            *mock
-	instrument      bool
-	isLastTestSet   bool
-	isLastTestCase  bool
+	logger           *zap.Logger
+	testDB           TestDB
+	mockDB           MockDB
+	mappingDB        MappingDB
+	reportDB         ReportDB
+	testSetConf      TestSetConfig
+	telemetry        Telemetry
+	instrumentation  Instrumentation
+	config           *config.Config
+	auth             service.Auth
+	mock             *mock
+	instrument       bool
+	isLastTestSet    bool
+	isLastTestCase   bool
+	flakinessTracker *FlakinessTracker
+	flakyTestsMap    map[string]bool
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config, flakinessDB *flakiness.FlakinessDB) Service {
 
 	// TODO: add some comment.
 	mock := &mock{
@@ -82,20 +85,24 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, instrumentation, mock))
 	}
 
+	tracker := NewFlakinessTracker(logger, flakinessDB)
+
 	instrument := config.Command != ""
 	return &Replayer{
-		logger:          logger,
-		testDB:          testDB,
-		mockDB:          mockDB,
-		mappingDB:       mappingDB,
-		reportDB:        reportDB,
-		testSetConf:     testSetConf,
-		telemetry:       telemetry,
-		instrumentation: instrumentation,
-		config:          config,
-		instrument:      instrument,
-		auth:            auth,
-		mock:            mock,
+		logger:           logger,
+		testDB:           testDB,
+		mockDB:           mockDB,
+		mappingDB:        mappingDB,
+		reportDB:         reportDB,
+		testSetConf:      testSetConf,
+		telemetry:        telemetry,
+		instrumentation:  instrumentation,
+		config:           config,
+		instrument:       instrument,
+		auth:             auth,
+		mock:             mock,
+		flakinessTracker: tracker,
+		flakyTestsMap:    make(map[string]bool),
 	}
 }
 
@@ -136,6 +143,27 @@ func (r *Replayer) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 	}()
+
+	if r.config.Test.FlakyOnly {
+		r.logger.Info("fetching flaky tests for filtering...")
+		flakyTests, err := r.flakinessTracker.GetFlakyTests(ctx, 0.2)
+		if err != nil {
+			r.logger.Error("failed to fetch flaky tests", zap.Error(err))
+			return err
+		}
+
+		count := 0
+		for _, ft := range flakyTests {
+			r.flakyTestsMap[ft.TestName] = true
+			count++
+		}
+		r.logger.Info("running in flaky-only mode", zap.Int("count", count))
+
+		if count == 0 {
+			r.logger.Warn("no flaky tests found matching the threshold")
+			return nil
+		}
+	}
 
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
@@ -943,7 +971,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	for idx, testCase := range testCases {
-
+		if r.config.Test.FlakyOnly {
+			if _, isFlaky := r.flakyTestsMap[testCase.Name]; !isFlaky {
+				continue // Skip non-flaky tests
+			}
+		}
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true

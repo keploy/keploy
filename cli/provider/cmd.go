@@ -269,6 +269,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		c.AddUncommonFlags(cmd)
 
 	case "report":
+		cmd.Flags().Bool("flakiness", c.cfg.Report.Flakiness, "Generate a report specifically for flaky tests")
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to report e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringP("report-path", "r", "", "Absolute path to a report file")
@@ -342,6 +343,9 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().String("owner", c.cfg.ReRecord.Owner, "Git user to be referenced for commiting config change")
 		}
 		if cmd.Name() == "test" {
+			cmd.Flags().Bool("track-flakiness", c.cfg.Test.TrackFlakiness, "Enable recording of test results to detect flakiness")
+			cmd.Flags().Bool("flaky-only", c.cfg.Test.FlakyOnly, "Run only the tests identified as flaky")
+			cmd.Flags().Int("runs", 1, "Number of times to run the tests (useful for reproducing flakiness)")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
 			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
@@ -422,6 +426,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"protoInclude":          "proto-include",
 		"allowHighRisk":         "allow-high-risk",
 		"disableMapping":        "disable-mapping",
+		"trackFlakiness":        "track-flakiness",
+		"flakyOnly":             "flaky-only",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -661,6 +667,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 
+		c.cfg.Report.Flakiness, _ = cmd.Flags().GetBool("flakiness")
+
 		// validate the report path if provided
 		if reportPath != "" {
 
@@ -827,6 +835,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.ReRecord.AmendTestSet = updateTestSet
+		}
+
+		if cmd.Name() == "test" {
+			c.cfg.Test.TrackFlakiness, _ = cmd.Flags().GetBool("track-flakiness")
+			c.cfg.Test.FlakyOnly, _ = cmd.Flags().GetBool("flaky-only")
+
+			runs, _ := cmd.Flags().GetInt("runs")
+			if runs < 1 {
+				return fmt.Errorf("--runs must be at least 1")
+			}
+			c.cfg.Test.Runs = runs
 		}
 
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {

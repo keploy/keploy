@@ -110,6 +110,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/keploy/jsonDiff v1.0.8
+	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.10.0
 	github.com/wI2L/jsondiff v0.5.0
