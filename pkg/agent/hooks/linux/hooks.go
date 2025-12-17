@@ -414,7 +414,7 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent) (structs.Pr
 
 		return proxyInfo, nil
 	}
-	AgentIP, err := utils.GetContainerIPv4() // in case of docker we will get the container's IP fron within the container
+	AgentIP, err := utils.GetContainerIPv4() // in case of docker we will get the container's IP from within the container
 	if err != nil {
 		return structs.ProxyInfo{}, fmt.Errorf("failed to get the IP address of the app container: %w", err)
 	}
