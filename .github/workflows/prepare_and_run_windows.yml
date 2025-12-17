@@ -120,14 +120,6 @@ jobs:
         if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
     
-    - name: Log into registry
-      uses: akashkumar7902/login-action@master
-      with:
-        registry: ghcr.io
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-        retries: 5
-  
     - name: Pull Docker image
       shell: powershell
       run: |

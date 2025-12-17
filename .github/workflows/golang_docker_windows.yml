@@ -62,14 +62,6 @@ jobs:
           New-Item -Path "./bin" -ItemType Directory -Force | Out-Null
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
-
-      - name: Log into registry ${{ env.REGISTRY }}
-        uses: akashkumar7902/login-action@master
-        with:
-          registry: ghcr.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          retries: 5
       
       - id: image
         uses: ./.github/actions/download-image
