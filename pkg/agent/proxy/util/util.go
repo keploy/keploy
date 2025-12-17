@@ -109,7 +109,8 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
-					logger.Warn("Failed buffer ", zap.String("base64 encoded: ", util.EncodeBase64(buffer)))
+					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
+
 				}
 				errChannel <- err
 				return
