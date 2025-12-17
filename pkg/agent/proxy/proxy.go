@@ -322,46 +322,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	sourcePort := remoteAddr.Port
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-	// ADD RETRY LOGIC HERE
-	var destInfo *agent.NetworkAddress
-	var err error
-	maxRetries := 10
-	retryDelay := 5 * time.Millisecond
-
-	for i := 0; i < maxRetries; i++ {
-		destInfo, err = p.DestInfo.Get(ctx, uint16(sourcePort))
-		if err == nil {
-			break
-		}
-
-		// Check if context is cancelled
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		// Only retry on "key does not exist" errors
-		if !strings.Contains(err.Error(), "key does not exist") {
-			utils.LogError(p.logger, err, "failed to fetch the destination info (non-retryable)", zap.Int("Source port", sourcePort))
-			return err
-		}
-
-		if i < maxRetries-1 {
-			p.logger.Debug("destination info not yet available, retrying",
-				zap.Int("Source port", sourcePort),
-				zap.Int("Attempt", i+1),
-				zap.Duration("Delay", retryDelay))
-			time.Sleep(retryDelay)
-			retryDelay *= 2 // exponential backoff
-			if retryDelay > 100*time.Millisecond {
-				retryDelay = 100 * time.Millisecond // cap at 100ms
-			}
-		}
-	}
-
+	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to fetch the destination info after retries",
-			zap.Int("Source port", sourcePort),
-			zap.Int("Max retries", maxRetries))
+		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
 
