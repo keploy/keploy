@@ -122,7 +122,6 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// var processMu sync.Mutex
 		sem := make(chan struct{}, 1)
 		for {
 			select {
@@ -143,44 +142,10 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-			fmt.Println("getting here")
+
 			go func(cc net.Conn) {
-				// We pass 'sem' to the handler
 				handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts, pm.synchronous, sem)
 			}(clientConn)
-			// go func(cc net.Conn) {
-			//     // If Synchronous mode is enabled, we enforce the lock BEFORE reading anything.
-			//     if pm.synchronous {
-			// 		fmt.Println("Waiting for lock...")
-			// 		fmt.Println(time.Now().Unix())
-			//         select {
-			//         // 2. Acquire Lock (Wait here if another request is processing)
-			//         case sem <- struct{}{}:
-			//             // Lock Acquired!
-			//             defer func() { <-sem }() // 5. Release Lock (Deferred)
-
-			//         // If the server is shutting down, stop waiting and drop the connection.
-			//         case <-ctx.Done():
-			//             cc.Close()
-			//             return
-			//         }
-			// 		fmt.Println("lock acquired")
-			// 		fmt.Println(time.Now().Unix())
-			//     }
-
-			//     // 3 & 4. Read Buffer, Dial, and Process
-			//     // We are now holding the lock (if synchronous).
-			//     handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts)
-			// }(clientConn)
-			// if pm.synchronous {
-			// 	go func(cc net.Conn) {
-			// 		processMu.Lock()
-			// 		defer processMu.Unlock()
-			// 		handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts)
-			// 	}(clientConn)
-			// } else {
-			// 	go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
-			// }
 		}
 	}()
 	return func() error {
