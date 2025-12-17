@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -459,6 +460,12 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
 func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
+	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
+		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
+		if err == nil {
+			tc.HTTPReq.URL = decoded
+		}
+	}
 	// Render any template values in the test case before simulation
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
 		testCaseBytes, err := json.Marshal(tc)

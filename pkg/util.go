@@ -146,6 +146,13 @@ func IsTime(stringDate string) bool {
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
+
+	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
+		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
+		if err == nil {
+			tc.HTTPReq.URL = decoded
+		}
+	}
 	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
 	// Render any template values in the test case before simulation.
