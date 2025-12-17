@@ -1432,7 +1432,7 @@ func GetContainerIPv4() (string, error) {
 // GetContainerIPv4WithRetry attempts to get the container's IPv4 address with retry logic.
 // This is useful when containers are starting up or network interfaces are being initialized.
 // Parameters:
-//   - maxRetries: Maximum number of retry attempts
+//   - maxRetries: Number of retry attempts after the initial attempt (total attempts = maxRetries + 1)
 //   - initialDelay: Initial delay between retries (doubles with each retry)
 func GetContainerIPv4WithRetry(maxRetries int, initialDelay time.Duration) (string, error) {
 	var lastErr error
