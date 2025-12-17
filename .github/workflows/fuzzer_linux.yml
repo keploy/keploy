@@ -254,7 +254,7 @@ jobs:
       matrix:
         config:
           - job: record_latest_replay_build
-            record_src: build-no-race
+            record_src: latest
             replay_src: build-no-race
           - job: record_build_replay_latest
             record_src: build-no-race
