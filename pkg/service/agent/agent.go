@@ -185,8 +185,8 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	}
 	DNSIPv4, err := utils.GetContainerIPv4()
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to get container IP")
-		return hookErr
+		utils.LogError(a.logger, err, "failed to get container IP address. This can happen if the container is still starting up or if network interfaces are not ready yet")
+		return fmt.Errorf("failed to get the IP address of the app container: %w", err)
 	}
 	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
