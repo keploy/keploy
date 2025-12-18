@@ -216,3 +216,76 @@ jobs:
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
+
+  mongo_fuzzer:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_latest
+            record_src: build-no-race
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+
+    name: Mongo Fuzzer (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+      
+      - name: Checkout Fuzzer repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/fuzzer
+          path: fuzzer
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Keploy Binary (for Record)
+        id: record_keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - name: Download Keploy Binary (for Replay)
+        id: replay_keploy
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - name: Download and Extract Mongo Fuzzer
+        id: mongo_fuzzer
+        run: |
+          set -e
+          KEY="releases/mongo-fuzzer/latest/mongo-fuzzer-linux-amd64.tar.gz"
+          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          tar -xzf mongo-fuzzer-linux-amd64.tar.gz
+          chmod +x ./mongo-fuzzer
+          echo "path=$(realpath ./mongo-fuzzer)" >> $GITHUB_OUTPUT
+
+      - name: Run Mongo Fuzzer Test
+        env:
+          RECORD_KEPLOY_BIN:    ${{ steps.record_keploy.outputs.path }}
+          REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}
+          MONGO_FUZZER_BIN:     ${{ steps.mongo_fuzzer.outputs.path }}
+        run: |
+          chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mongo/golang-linux.sh
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mongo/golang-linux.sh
