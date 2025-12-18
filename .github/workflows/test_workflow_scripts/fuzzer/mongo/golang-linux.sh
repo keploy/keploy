@@ -8,7 +8,10 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+# --- Change to the fuzzer infrastructure directory ---
+# The workflow checks out the fuzzer repo to './fuzzer', so we cd into its mongo subdirectory.
 cd ./fuzzer/mongo
+
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
@@ -35,8 +38,8 @@ final_cleanup() {
   dump_logs
 
   section "Stopping Mongo cluster..."
-  # Run docker compose from the correct directory using a subshell
-  (cd ./fuzzer-infra && docker compose down -v) || true
+  # We are already in the correct directory, so no subshell is needed.
+  docker compose down -v || true
   endsec
 
   if [[ $rc -eq 0 ]]; then
@@ -151,7 +154,7 @@ send_requests() {
         "mongodb://localhost:27017",
         "mongodb://localhost:27037"
       ],
-      "database": "fuzzer-infra",
+      "database": "fuzztest",
       "drop_db_first": true,
       "username": "admin",
       "password": "password",
@@ -172,11 +175,10 @@ mkdir -p golden/
 sudo chmod +x $MONGO_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
 
-# Start the sharded Mongo cluster environment from the checked-out infra directory
-# We run this in a subshell `(...)` to avoid changing the working directory of the main script.
-(cd ./fuzzer-infra && chmod +x ./init_cluster.sh && ./init_cluster.sh)
-
-sleep 30
+# Start the sharded Mongo cluster environment.
+# We are already in the correct directory.
+chmod +x ./init_cluster.sh
+./init_cluster.sh
 
 # Generate Keploy configuration and add noise parameter
 sudo "$RECORD_KEPLOY_BIN" config --generate
@@ -215,7 +217,7 @@ endsec
 # --- Teardown before Replay ---
 section "Shutting Down Mongo Cluster for Replay"
 # Tear down the entire docker compose environment to ensure replay relies on mocks
-(cd ./fuzzer-infra && docker compose down -v) || true
+docker compose down -v || true
 echo "✅ Mongo cluster stopped. Replay will rely on Keploy mocks."
 endsec
 
