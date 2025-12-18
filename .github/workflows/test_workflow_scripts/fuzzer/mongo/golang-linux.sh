@@ -69,7 +69,7 @@ check_for_errors() {
       exit 1
     fi
   fi
-  echo "No critical errors found in $logfile."
+  echo "No critical errors in $logfile."
 }
 
 # Validates the Keploy test report to ensure all test sets passed
@@ -182,7 +182,8 @@ chmod +x ./init_cluster.sh
 
 # Generate Keploy configuration and add noise parameter
 sudo "$RECORD_KEPLOY_BIN" config --generate
-sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
+# --- THIS IS THE CORRECTED LINE ---
+sed -i 's|globalNoise: {}|globalNoise:\n    global: { body: { "duration_ms": [] } }|' ./keploy.yml
 echo "Keploy config generated and updated."
 endsec
 
