@@ -33,7 +33,7 @@ try {
 # Parameterize the application's base URL
 $env:APP_BASE_URL = if ($env:APP_BASE_URL) { $env:APP_BASE_URL } else { 'http://localhost:8080' }
 $MONGO_HOST = "localhost"
-$MONGO_PORT = "27017"
+$MONGO_PORT = 27017
 
 Write-Host "Using RECORD_BIN = $env:RECORD_BIN"
 Write-Host "Using REPLAY_BIN = $env:REPLAY_BIN"
