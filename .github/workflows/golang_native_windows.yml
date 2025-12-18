@@ -16,6 +16,9 @@ jobs:
           - name: go-dedup
             path: go-dedup
             script_dir: go-dedup
+          - name: gin-mongo
+            path:  gin-mongo
+            script_dir: gin-mongo
         config:
           - job: record_build_replay_build
             record_src: build
@@ -39,7 +42,7 @@ jobs:
         with:
           clean: true
 
-      # --- CLI binaries (same as before) ---
+      # --- CLI binaries ---
       - name: Download Record Binary (${{ matrix.config.record_src }})
         uses: actions/download-artifact@v4
         with:
@@ -74,7 +77,6 @@ jobs:
           path: samples-go
           clean: true
 
-      # Your existing run step
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
