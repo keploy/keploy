@@ -137,23 +137,17 @@ if (-not (Test-Path $configFile)) { throw "Config file '$configFile' not found a
   Set-Content -Path $configFile -Encoding UTF8
 Write-Host "Updated global noise in keploy.yml to ignore 'ts' and 'error'."
 
-# --- Update main.go to use localhost instead of mongoDb hostname ---
-Write-Host "Updating main.go to use localhost for MongoDB connection..."
+# --- Update main.go to use 127.0.0.1 instead of mongoDb hostname ---
+Write-Host "Updating main.go to use 127.0.0.1 for MongoDB connection..."
 $mainGoPath = ".\main.go"
 if (Test-Path $mainGoPath) {
   $content = Get-Content $mainGoPath -Raw
-  # Fix: Use Case-Insensitive regex and allow for optional space after colon
-  # This matches "mongoDb:27017", "mongodb:27017", or "mongoDb: 27017"
-  $newContent = $content -replace 'mongo[Dd]b:\s*27017', 'localhost:27017'
+  
+  # REPLACE 'localhost' with '127.0.0.1' to avoid IPv6 issues on Windows
+  $newContent = $content -replace 'mongo[Dd]b:\s*27017', '127.0.0.1:27017'
   
   Set-Content -Path $mainGoPath -Value $newContent -Encoding UTF8
-  
-  # Verification Step
-  if ($newContent -match 'localhost:27017') {
-      Write-Host "Successfully updated MongoDB host to localhost in main.go"
-  } else {
-      Write-Warning "Failed to update MongoDB host in main.go. Regex did not match."
-  }
+  Write-Host "Updated MongoDB host in main.go to 127.0.0.1:27017"
 }
 
 # --- Helpers for record flow ---
