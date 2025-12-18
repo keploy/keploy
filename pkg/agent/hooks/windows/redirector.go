@@ -51,7 +51,6 @@ func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy, dnsPort uint
 	if rc == 0 {
 		return fmt.Errorf("start_redirector failed (already running or error)")
 	}
-	fmt.Println(rc)
 	return nil
 }
 
