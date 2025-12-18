@@ -110,9 +110,7 @@ Remove-KeployDirs -Candidates $candidates
 Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
 Write-Host "Pre-clean complete."
 
-# --- Start MongoDB container ---
 Write-Host "Starting MongoDB container..."
-docker pull mongo:5.0
 docker rm -f mongoDb 2>$null | Out-Null
 docker run -d --name mongoDb -p 27017:27017 mongo:5.0
 if ($LASTEXITCODE -ne 0) {
@@ -135,17 +133,27 @@ $configFile = ".\keploy.yml"
 if (-not (Test-Path $configFile)) { throw "Config file '$configFile' not found after generation." }
 
 # Add noise to ignore 'ts' field in response body (timestamp from URL shortener)
-(Get-Content $configFile -Raw) -replace 'global:\s*\{\s*\}', 'global:  {"body": {"ts": []}}' |
+(Get-Content $configFile -Raw) -replace 'global:\s*\{\s*\}', 'global:  {"body": {"ts": [], "error": []}}' |
   Set-Content -Path $configFile -Encoding UTF8
-Write-Host "Updated global noise in keploy.yml to ignore 'ts'."
+Write-Host "Updated global noise in keploy.yml to ignore 'ts' and 'error'."
 
 # --- Update main.go to use localhost instead of mongoDb hostname ---
 Write-Host "Updating main.go to use localhost for MongoDB connection..."
 $mainGoPath = ".\main.go"
 if (Test-Path $mainGoPath) {
-  (Get-Content $mainGoPath -Raw) -replace 'mongoDb: 27017', 'localhost:27017' |
-    Set-Content -Path $mainGoPath -Encoding UTF8
-  Write-Host "Updated MongoDB host in main.go"
+  $content = Get-Content $mainGoPath -Raw
+  # Fix: Use Case-Insensitive regex and allow for optional space after colon
+  # This matches "mongoDb:27017", "mongodb:27017", or "mongoDb: 27017"
+  $newContent = $content -replace 'mongo[Dd]b:\s*27017', 'localhost:27017'
+  
+  Set-Content -Path $mainGoPath -Value $newContent -Encoding UTF8
+  
+  # Verification Step
+  if ($newContent -match 'localhost:27017') {
+      Write-Host "Successfully updated MongoDB host to localhost in main.go"
+  } else {
+      Write-Warning "Failed to update MongoDB host in main.go. Regex did not match."
+  }
 }
 
 # --- Helpers for record flow ---
