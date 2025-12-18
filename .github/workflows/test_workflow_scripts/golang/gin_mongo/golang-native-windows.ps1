@@ -211,21 +211,24 @@ function Sync-Logs {
     } catch {}
 }
 
-# Wait for app readiness
-Write-Host "Waiting for app to respond on $base/url …"
+# Wait for app readiness without generating extra HTTP test cases
+Write-Host "Waiting for app port to be reachable at $base …"
 $deadline = (Get-Date).AddMinutes(5)
+$baseUri = [Uri]$base
+$probePort = if ($baseUri.Port -gt 0) { $baseUri.Port } else { 80 }
 do {
   Sync-Logs -job $recJob
   try {
-    # Try a simple POST to check if app is ready
-    $testBody = @{url="https://test.com"} | ConvertTo-Json
-    $r = Invoke-WebRequest -Method POST -Uri "$base/url" -Body $testBody -ContentType "application/json" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
-    if ($r.StatusCode -eq 200) { 
-      Write-Host "Application is ready!"
-      break 
-    }
-  } catch { 
-    Start-Sleep 3 
+    $client = New-Object System.Net.Sockets.TcpClient
+    $client.ReceiveTimeout = 2000
+    $client.SendTimeout = 2000
+    $client.Connect($baseUri.Host, $probePort)
+    $client.Close()
+    Write-Host "Application port is reachable."
+    Start-Sleep -Seconds 2
+    break
+  } catch {
+    Start-Sleep 3
   }
 } while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
 
