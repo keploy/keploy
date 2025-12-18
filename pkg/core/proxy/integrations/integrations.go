@@ -47,6 +47,8 @@ func Register(name IntegrationType, p *Parsers) {
 type MockMemDb interface {
 	GetFilteredMocks() ([]*models.Mock, error)
 	GetUnFilteredMocks() ([]*models.Mock, error)
+	GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error)
+	GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error)
 	UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool
 	DeleteFilteredMock(mock models.Mock) bool
 	DeleteUnFilteredMock(mock models.Mock) bool
