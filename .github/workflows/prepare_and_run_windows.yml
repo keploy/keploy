@@ -43,13 +43,25 @@ jobs:
           fetch-depth: 0
           clean: true
 
+      - name: Add MinGW gcc to PATH
+        shell: pwsh
+        run: |
+          $gccBin = "C:\msys64\mingw64\bin"
+          if (!(Test-Path "$gccBin\gcc.exe")) { throw "gcc.exe not found at $gccBin" }
+          echo $gccBin >> $env:GITHUB_PATH
+          $env:Path = "$gccBin;$env:Path"
+          where.exe gcc
+          gcc --version
+
+
       - name: CGO toolchain sanity
         shell: pwsh
         run: |
           Write-Host "PATH=$env:PATH"
-          where gcc
+          where.exe gcc
           gcc --version
           go env CGO_ENABLED CC CXX GOOS GOARCH
+
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: powershell
