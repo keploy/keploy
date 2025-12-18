@@ -2,9 +2,9 @@ name: Golang On Windows (Native)
 on:
   workflow_call:
 
-# concurrency:
-#   group: native-windows-tests-${{ github.ref }}
-#   cancel-in-progress: true
+concurrency:
+  group: native-windows-tests-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   golang_native_windows:
@@ -17,8 +17,11 @@ jobs:
             path: go-dedup
             script_dir: go-dedup
           - name: gin-mongo
-            path:  gin-mongo
+            path: gin-mongo
             script_dir: gin_mongo
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http-pokeapi
         config:
           - job: record_build_replay_build
             record_src: build
