@@ -2,9 +2,9 @@ name: Golang On Windows (Native)
 on:
   workflow_call:
 
-concurrency:
-  group: native-windows-tests-${{ github.ref }}
-  cancel-in-progress: false
+# concurrency:
+#   group: native-windows-tests-${{ github.ref }}
+#   cancel-in-progress: true
 
 jobs:
   golang_native_windows:
