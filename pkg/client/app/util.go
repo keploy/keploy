@@ -39,12 +39,13 @@ func findComposeFile(cmd string) []string {
 	return []string{}
 }
 
-func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath string) string {
+func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string) string {
 	// Ensure newComposeFile starts with ./
 	if !strings.HasPrefix(newComposeFile, "./") {
 		newComposeFile = "./" + newComposeFile
 	}
 
+	var modifiedCmd string
 	// Define a regular expression pattern to match "-f <file>"
 	pattern := `(-f\s+("[^"]+"|'[^']+'|\S+))`
 	re := regexp.MustCompile(pattern)
@@ -68,21 +69,25 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath string) s
 
 				// Check if this file matches the appComposePath
 				if actualFile == appComposePath {
-					return strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
+					modifiedCmd = strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
+					return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
 				}
 			}
 		}
 		// If no matching compose path found, return original command
-		return appCmd
+		modifiedCmd = appCmd
+		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
 	}
 
 	// If the pattern doesn't exist, inject the new Compose file right after "docker-compose" or "docker compose"
 	upIdx := strings.Index(appCmd, " up")
 	if upIdx != -1 {
-		return fmt.Sprintf("%s -f %s%s", appCmd[:upIdx], newComposeFile, appCmd[upIdx:])
+		modifiedCmd = fmt.Sprintf("%s -f %s%s", appCmd[:upIdx], newComposeFile, appCmd[upIdx:])
+		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
 	}
 
-	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
+	modifiedCmd = fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
+	return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName)
 }
 
 func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
@@ -108,4 +113,41 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 	}
 
 	return false
+}
+
+// ensureComposeExitOnAppFailure ensures that the docker-compose command will exit when the application
+// container stops by injecting --abort-on-container-exit and --exit-code-from flags if not already present.
+// It inserts these flags immediately after the "up" subcommand if found, otherwise appends them to the end.
+//
+// Parameters:
+//   - appCmd: the docker-compose command to modify
+//   - serviceName: the name of the service whose exit code should be monitored (empty string skips --exit-code-from)
+//
+// Returns: the modified command with the necessary flags added
+func ensureComposeExitOnAppFailure(appCmd, serviceName string) string {
+	// If the user already passed one of these flags, don't touch the command.
+	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--exit-code-from") {
+		return appCmd
+	}
+
+	// Arguments we want to inject.
+	args := []string{"--abort-on-container-exit"}
+	if serviceName != "" {
+		args = append(args, "--exit-code-from", serviceName)
+	}
+
+	parts := strings.Fields(appCmd)
+	for i, p := range parts {
+		if p == "up" {
+			// Insert flags immediately after "up"
+			newParts := make([]string, 0, len(parts)+len(args))
+			newParts = append(newParts, parts[:i+1]...)
+			newParts = append(newParts, args...)
+			newParts = append(newParts, parts[i+1:]...)
+			return strings.Join(newParts, " ")
+		}
+	}
+
+	// Fallback: no explicit "up" token detected — do not append flags.
+	return appCmd
 }
