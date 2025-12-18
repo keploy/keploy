@@ -79,18 +79,18 @@ function Remove-KeployDirs {
 # --- Helper: wait for MongoDB to be ready ---
 function Wait-ForMongo {
   param(
-    [string]$Host = "localhost",
+    [string]$MongoHost = "localhost",
     [int]$Port = 27017,
     [int]$TimeoutSeconds = 120
   )
   
-  Write-Host "Waiting for MongoDB at ${Host}:${Port}..."
+  Write-Host "Waiting for MongoDB at ${MongoHost}:${Port}..."
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   
   while ((Get-Date) -lt $deadline) {
     try {
       $tcpClient = New-Object System.Net.Sockets.TcpClient
-      $tcpClient.Connect($Host, $Port)
+      $tcpClient.Connect($MongoHost, $Port)
       $tcpClient.Close()
       Write-Host "MongoDB is ready!"
       return $true
@@ -120,7 +120,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Wait for MongoDB to be ready
-if (-not (Wait-ForMongo -Host $MONGO_HOST -Port $MONGO_PORT)) {
+if (-not (Wait-ForMongo -MongoHost $MONGO_HOST -Port $MONGO_PORT)) {
   Write-Error "MongoDB failed to start"
   docker logs mongoDb
   exit 1

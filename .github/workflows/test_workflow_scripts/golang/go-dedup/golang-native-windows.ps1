@@ -146,7 +146,7 @@ $recArgs = @(
   '--debug'
 )
 
-Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
+Write-Host "Starting keploy record (expecting test-set-$expectedTestSetIndex)…"
 Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
 # 2. Start Keploy in a background job.
