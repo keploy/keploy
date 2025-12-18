@@ -43,6 +43,7 @@ var totalTestPassed int
 var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
+var totalDelayTime time.Duration // tracks user-provided delay to exclude from execution time summary
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
 
@@ -306,11 +307,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
-				stopReason = fmt.Sprintf("failed to run test set: %v", err)
-				utils.LogError(r.logger, err, stopReason)
 				if ctx.Err() == context.Canceled {
 					return err
 				}
+				stopReason = fmt.Sprintf("failed to run test set: %v", err)
+				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
 			}
 			switch testSetStatus {
@@ -558,6 +559,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
+	startTime := time.Now()
+
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
 		runTestSetCtxCancel()
@@ -740,7 +743,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to mock outgoing")
+			if ctx.Err() != context.Canceled {
+				utils.LogError(r.logger, err, "failed to mock outgoing")
+			}
 			return models.TestSetStatusFailed, err
 		}
 
@@ -784,6 +789,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
+		// Track delay to exclude from execution time summary
+		totalDelayTime += time.Duration(r.config.Test.Delay) * time.Second
 	}
 
 	if cmdType != utils.DockerCompose {
@@ -829,7 +836,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to mock outgoing")
+			if ctx.Err() != context.Canceled {
+				utils.LogError(r.logger, err, "failed to mock outgoing")
+			}
 			return models.TestSetStatusFailed, err
 		}
 
@@ -888,12 +897,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			case <-runTestSetCtx.Done():
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
+			// Track delay to exclude from execution time summary
+			totalDelayTime += time.Duration(r.config.Test.Delay) * time.Second
 
 		}
 	}
-
-	// Start timing test execution after application delay
-	startTime := time.Now()
 
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
@@ -1392,11 +1400,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			pp.SetColorScheme(models.GetPassingColorScheme())
 		}
 		if testReport.Ignored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTest Execution Time: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, timeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, timeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTest Execution Time: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		}
@@ -1515,15 +1523,20 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
 
-		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTaken)
+		// Subtract application delay from total time to show actual test execution time
+		actualTestTimeTaken := totalTestTimeTaken - totalDelayTime
+		if actualTestTimeTaken < 0 {
+			actualTestTimeTaken = 0
+		}
+		totalTestTimeTakenStr := timeWithUnits(actualTestTimeTaken)
 
 		if totalTestIgnored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal test execution time: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test execution time: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
