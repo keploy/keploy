@@ -43,6 +43,14 @@ jobs:
           fetch-depth: 0
           clean: true
 
+      - name: CGO toolchain sanity
+        shell: pwsh
+        run: |
+          Write-Host "PATH=$env:PATH"
+          where gcc
+          gcc --version
+          go env CGO_ENABLED CC CXX GOOS GOARCH
+
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: powershell
         run: |
