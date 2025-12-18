@@ -1258,6 +1258,8 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 
 	var firstErr error
 
+	isFullStringMatch := re.MatchString(input) && re.FindString(input) == input
+
 	result := re.ReplaceAllStringFunc(input, func(match string) string {
 		// Only parse and execute the matched placeholder, not the entire string.
 		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
@@ -1276,10 +1278,34 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 			return match
 		}
 
-		return output.String()
+		if isFullStringMatch {
+			return output.String()
+		}
+
+		// Ensure the placeholder result is safe to embed inside JSON strings by
+		// escaping control characters like newlines, quotes, and backslashes.
+		// This prevents errors such as `invalid character '\n' in string literal`
+		// when we later json.Unmarshal the rendered testcase.
+		return jsonEscapeString(output.String())
 	})
 
 	return result, firstErr
+}
+
+// jsonEscapeString returns a JSON-safe representation of s suitable for
+// embedding directly inside a JSON string literal. It escapes characters
+// that must not appear unescaped in JSON strings (newlines, quotes, etc.)
+// but does not add surrounding quotes.
+func jsonEscapeString(s string) string {
+	if s == "" {
+		return ""
+	}
+	b, err := json.Marshal(s)
+	if err != nil || len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		return s
+	}
+	// Strip the surrounding quotes added by json.Marshal.
+	return string(b[1 : len(b)-1])
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
