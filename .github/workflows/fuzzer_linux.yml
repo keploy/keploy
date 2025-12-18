@@ -245,7 +245,7 @@ jobs:
         with:
           repository: keploy/fuzzer
           path: fuzzer
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ secrets.PRO_ACCESS_TOKEN }}
 
       - name: Download Keploy Binary (for Record)
         id: record_keploy
