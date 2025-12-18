@@ -8,6 +8,7 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+cd ./fuzzer/mongo
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
