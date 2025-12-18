@@ -112,8 +112,9 @@ Write-Host "Pre-clean complete."
 
 # --- Start MongoDB container ---
 Write-Host "Starting MongoDB container..."
+docker pull mongo:5.0
 docker rm -f mongoDb 2>$null | Out-Null
-docker run -d --name mongoDb -p 27017:27017 mongo:latest
+docker run -d --name mongoDb -p 27017:27017 mongo:5.0
 if ($LASTEXITCODE -ne 0) {
   Write-Error "Failed to start MongoDB container"
   exit 1
