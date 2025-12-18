@@ -76,12 +76,6 @@ jobs:
           repository: keploy/samples-go
           path: samples-go
           clean: true
-
-      - name: Pull Docker Images
-        shell: pwsh
-        run: |
-          docker pull docker.io/mongo:5.0
-
       - name: Run ${{ matrix.app.name }} application (Windows)
         env:
           RECORD_BIN:  ${{ steps.setup_record.outputs.bin_name }}
