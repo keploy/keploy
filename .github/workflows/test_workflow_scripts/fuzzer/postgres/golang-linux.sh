@@ -243,7 +243,7 @@ else
   echo "No Keploy record process found to kill."
 fi
 
-sleep 5
+sleep 10
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
