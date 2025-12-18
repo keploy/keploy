@@ -21,7 +21,7 @@ jobs:
             script_dir: gin_mongo
           - name: http-pokeapi
             path: http-pokeapi
-            script_dir: http-pokeapi
+            script_dir: http_pokeapi
         config:
           - job: record_build_replay_build
             record_src: build
