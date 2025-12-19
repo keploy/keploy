@@ -243,9 +243,9 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	}
 
 	if grandDur > 0 {
-		fmt.Fprintf(r.out, "\n\tTotal time taken: %q\n", fmtDuration(grandDur))
+		fmt.Fprintf(r.out, "\n\tTotal test execution time: %q\n", fmtDuration(grandDur))
 	} else {
-		fmt.Fprintf(r.out, "\n\tTotal time taken: %q\n", "N/A")
+		fmt.Fprintf(r.out, "\n\tTotal test execution time: %q\n", "N/A")
 	}
 
 	// Tabwriter over the same buffered writer.
