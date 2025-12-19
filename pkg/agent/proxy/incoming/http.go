@@ -72,6 +72,8 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			releaseLock()
 			chunked = true
 		} else if synchronous {
+			// we will close connection in case of keep alive (to allow multiple clients to make connections)
+			// if we don't close a connection in synchronous mode, the next request from other client will be blocked
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}

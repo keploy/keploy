@@ -31,7 +31,6 @@ type IngressProxyManager struct {
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
-	fmt.Println("here is the sync :", cfg.Agent.Synchronous)
 	pm := &IngressProxyManager{
 		logger:      logger,
 		hooks:       h,
