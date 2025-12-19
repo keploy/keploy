@@ -36,7 +36,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var firstRun bool
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
@@ -45,6 +44,8 @@ var totalTestIgnored int
 var totalTestTimeTaken time.Duration
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
+var totalExecTime time.Duration
+var totalWaitTime time.Duration
 
 const UNKNOWN_TEST = "UNKNOWN_TEST"
 
@@ -244,7 +245,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	firstRun = true
+
+	err = HookImpl.BeforeTestRun(ctx, testRunID)
+	if err != nil {
+		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+	}
+
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -303,6 +310,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestFailed = initFailed
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
+
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
@@ -517,13 +525,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	passPortsUint := config.GetByPassPorts(r.config)
-	passPortsUint32 := make([]uint32, len(passPortsUint)) // slice type of uint32
-	for i, port := range passPortsUint {
-		passPortsUint32[i] = uint32(port)
-	}
-
-	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint})
+	err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -559,6 +561,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
 	startTime := time.Now()
+	var execTime time.Duration
+	var waitTime time.Duration
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
@@ -579,14 +583,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.logger.Warn("no valid test cases found to run for test set", zap.String("test-set", testSetID))
 
 		testReport := &models.TestReport{
-			Version:   models.GetVersion(),
-			TestSet:   testSetID,
-			Status:    string(models.TestSetStatusNoTestsToRun),
-			Total:     0,
-			Ignored:   0,
-			TimeTaken: time.Since(startTime).String(),
+			Version:       models.GetVersion(),
+			TestSet:       testSetID,
+			Status:        string(models.TestSetStatusNoTestsToRun),
+			Total:         0,
+			Ignored:       0,
+			TimeTaken:     time.Since(startTime).String(),
+			ExecutionTime: "0s",
+			WaitTime:      "0s",
 		}
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
+
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert report")
 			return models.TestSetStatusFailed, err
@@ -721,17 +728,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-agentReadyCh:
 		}
 
-		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
-		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
-		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, firstRun)
-		if err != nil {
-			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
-			utils.LogError(r.logger, err, stopReason)
-		}
-		firstRun = false
-		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
-
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -739,7 +735,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -783,11 +778,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Delay for user application to run
+		delayStart := time.Now()
 		select {
 		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			waitTime += time.Since(delayStart)
 		case <-runTestSetCtx.Done():
+			waitTime += time.Since(delayStart)
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
+
 	}
 
 	if cmdType != utils.DockerCompose {
@@ -802,14 +801,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		if firstRun {
-			err = HookImpl.BeforeTestRun(ctx, testRunID)
-			if err != nil {
-				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
-				utils.LogError(r.logger, err, stopReason)
-			}
-			firstRun = false
-		}
+
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
@@ -820,9 +812,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
-		// Prepare header noise configuration for mock matching
-		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
-
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -830,7 +819,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1049,7 +1037,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
 		go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
 
+		// Track execution time around SimulateRequest
+		startExec := time.Now()
 		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
+		testCaseExecTime := time.Since(startExec)
+		execTime += testCaseExecTime
 
 		// Stop monitoring for this specific test case
 		testCaseProxyErrCancel()
@@ -1155,11 +1147,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		// log the consumed mocks during the test run of the test case for test set
-		r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
-
 		if !testPass {
+			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
+			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 		}
@@ -1198,30 +1189,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Form:       testCase.HTTPReq.Form,
 						Timestamp:  testCase.HTTPReq.Timestamp,
 					},
-					Res:          *httpResp,
-					TestCasePath: filepath.Join(r.config.Path, testSetID),
-					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-					Noise:        testCase.Noise,
-					Result:       *testResult,
-					TimeTaken:    time.Since(started).String(),
+					Res:           *httpResp,
+					TestCasePath:  filepath.Join(r.config.Path, testSetID),
+					MockPath:      filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					Noise:         testCase.Noise,
+					Result:        *testResult,
+					TimeTaken:     time.Since(started).String(),
+					ExecutionTime: testCaseExecTime.String(),
+					WaitTime:      (time.Since(started) - testCaseExecTime).String(),
 				}
 			case models.GRPC_EXPORT:
 				grpcResp := resp.(*models.GrpcResp)
 
 				testCaseResult = &models.TestResult{
-					Kind:         models.GRPC_EXPORT,
-					Name:         testSetID,
-					Status:       testStatus,
-					Started:      started.Unix(),
-					Completed:    time.Now().UTC().Unix(),
-					TestCaseID:   testCase.Name,
-					GrpcReq:      testCase.GrpcReq,
-					GrpcRes:      *grpcResp,
-					TestCasePath: filepath.Join(r.config.Path, testSetID),
-					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-					Noise:        testCase.Noise,
-					Result:       *testResult,
-					TimeTaken:    time.Since(started).String(),
+					Kind:          models.GRPC_EXPORT,
+					Name:          testSetID,
+					Status:        testStatus,
+					Started:       started.Unix(),
+					Completed:     time.Now().UTC().Unix(),
+					TestCaseID:    testCase.Name,
+					GrpcReq:       testCase.GrpcReq,
+					GrpcRes:       *grpcResp,
+					TestCasePath:  filepath.Join(r.config.Path, testSetID),
+					MockPath:      filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					Noise:         testCase.Noise,
+					Result:        *testResult,
+					TimeTaken:     time.Since(started).String(),
+					ExecutionTime: testCaseExecTime.String(),
+					WaitTime:      (time.Since(started) - testCaseExecTime).String(),
 				}
 			}
 
@@ -1246,16 +1241,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// We need to sleep for a second to avoid mismatching of mocks during keploy testing via test-bench
 		if r.config.EnableTesting {
-			r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
+			waitTime += time.Second
 			time.Sleep(time.Second)
 		}
+
 	}
 
-	err = HookImpl.BeforeTestResult(ctx)
-	if err != nil {
-		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
@@ -1303,18 +1294,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testReport = &models.TestReport{
-		Version:    models.GetVersion(),
-		TestSet:    testSetID,
-		Status:     string(testSetStatus),
-		Total:      testCasesCount,
-		Success:    success,
-		Failure:    failure,
-		Ignored:    ignored,
-		Tests:      testCaseResults,
-		TimeTaken:  timeTaken.String(),
-		HighRisk:   riskHigh,
-		MediumRisk: riskMed,
-		LowRisk:    riskLow,
+		Version:       models.GetVersion(),
+		TestSet:       testSetID,
+		Status:        string(testSetStatus),
+		Total:         testCasesCount,
+		Success:       success,
+		Failure:       failure,
+		Ignored:       ignored,
+		Tests:         testCaseResults,
+		TimeTaken:     timeTaken.String(),
+		ExecutionTime: execTime.String(),
+		WaitTime:      waitTime.String(),
+		HighRisk:      riskHigh,
+		MediumRisk:    riskMed,
+		LowRisk:       riskLow,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1370,13 +1363,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
-		total:     testReport.Total,
-		failed:    testReport.Failure,
-		passed:    testReport.Success,
-		ignored:   testReport.Ignored,
-		status:    testSetStatus == models.TestSetStatusPassed,
-		duration:  timeTaken,
-		timeTaken: timeTaken.String(),
+		total:         testReport.Total,
+		failed:        testReport.Failure,
+		passed:        testReport.Success,
+		ignored:       testReport.Ignored,
+		status:        testSetStatus == models.TestSetStatusPassed,
+		duration:      timeTaken,
+		timeTaken:     timeTaken.String(),
+		executionTime: execTime,
+		waitTime:      waitTime,
 	}
 
 	completeTestReport[testSetID] = verdict
@@ -1385,8 +1380,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTestFailed += testReport.Failure
 	totalTestIgnored += testReport.Ignored
 	totalTestTimeTaken += timeTaken
+	totalExecTime += execTime
+	totalWaitTime += waitTime
 
 	timeTakenStr := timeWithUnits(timeTaken)
+	execTimeStr := timeWithUnits(execTime)
+	waitTimeStr := timeWithUnits(waitTime)
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
@@ -1395,11 +1394,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			pp.SetColorScheme(models.GetPassingColorScheme())
 		}
 		if testReport.Ignored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, timeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tExecution time: %s\n"+"\tUser wait time: %s\n"+"\tTotal runtime: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, execTimeStr, waitTimeStr, timeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tExecution time: %s\n"+"\tUser wait time: %s\n"+"\tTotal runtime: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, execTimeStr, waitTimeStr, timeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		}
@@ -1519,14 +1518,16 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		})
 
 		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTaken)
+		totalExecTimeStr := timeWithUnits(totalExecTime)
+		totalWaitTimeStr := timeWithUnits(totalWaitTime)
 
 		if totalTestIgnored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tExecution time: %s\n"+"\tUser wait time: %s\n"+"\tTotal runtime: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalExecTimeStr, totalWaitTimeStr, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tExecution time: %s\n"+"\tUser wait time: %s\n"+"\tTotal runtime: %s\n", totalTests, totalTestPassed, totalTestFailed, totalExecTimeStr, totalWaitTimeStr, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
@@ -1879,34 +1880,12 @@ func (r *Replayer) authenticateUser(ctx context.Context) error {
 	r.mock.setToken(token)
 	return nil
 }
+
 func (r *Replayer) DownloadMocks(ctx context.Context) error {
 	// Authenticate the user for mock registry
 	err := r.authenticateUser(ctx)
 	if err != nil {
 		return err
-	}
-
-	if len(r.config.MockDownload.RegistryIDs) > 0 {
-		for _, registryID := range r.config.MockDownload.RegistryIDs {
-			// Use the registry ID to download mocks directly
-			r.logger.Info("Downloading mocks using registry ID",
-				zap.String("registryID", registryID),
-				zap.String("app", r.config.AppName))
-
-			err = r.mock.downloadByRegistryID(ctx, registryID, r.config.AppName)
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return err
-				}
-				utils.LogError(r.logger, err, "failed to download mocks using registry ID", zap.String("registryID", registryID))
-				continue
-			}
-
-			r.logger.Info("Successfully downloaded mocks using registry ID",
-				zap.String("registryID", registryID),
-				zap.String("outputFile", fmt.Sprintf("%s.mocks.yaml", registryID)))
-		}
-		return nil
 	}
 
 	testSets, err := r.GetSelectedTestSets(ctx)
