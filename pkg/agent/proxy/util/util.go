@@ -447,6 +447,9 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			return nil, ctx.Err()
 
 		case buffer := <-clientBufferChannel:
+			if buffer == nil || len(buffer) == 0 {
+				continue
+			}
 			_, err := destConn.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write subsequent request to destination")
@@ -454,6 +457,9 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			}
 
 		case buffer := <-destBufferChannel:
+			if buffer == nil || len(buffer) == 0 {
+				continue
+			}
 			_, err := clientConn.Write(buffer)
 			if err != nil {
 				if ctx.Err() != nil {
