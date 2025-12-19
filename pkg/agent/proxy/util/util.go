@@ -447,7 +447,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			return nil, ctx.Err()
 
 		case buffer := <-clientBufferChannel:
-			if buffer == nil || len(buffer) == 0 {
+			if len(buffer) == 0 {
 				continue
 			}
 			_, err := destConn.Write(buffer)
@@ -457,7 +457,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			}
 
 		case buffer := <-destBufferChannel:
-			if buffer == nil || len(buffer) == 0 {
+			if len(buffer) == 0 {
 				continue
 			}
 			_, err := clientConn.Write(buffer)
