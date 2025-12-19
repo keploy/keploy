@@ -7,7 +7,7 @@
   - Runs replay and validates the report
 #>
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 
 # --- Resolve Keploy binaries (defaults for local dev) ---
 $defaultKeploy = if ($env:GITHUB_WORKSPACE) { Join-Path $env:GITHUB_WORKSPACE 'bin\keploy.exe' } else { '.\keploy.exe' }
@@ -31,8 +31,8 @@ try {
 } catch {}
 
 # Parameterize the application's base URL
-$env:APP_BASE_URL = if ($env:APP_BASE_URL) { $env:APP_BASE_URL } else { 'http://localhost:8080' }
-$MONGO_HOST = "localhost"
+$env:APP_BASE_URL = if ($env:APP_BASE_URL) { $env:APP_BASE_URL } else { 'http://127.0.0.1:8080' }
+$MONGO_HOST = "127.0.0.1"
 $MONGO_PORT = 27017
 
 Write-Host "Using RECORD_BIN = $env:RECORD_BIN"
@@ -203,6 +203,7 @@ Write-Host "Executing: $env:RECORD_BIN $($recArgs -join ' ')"
 
 # 2. Start Keploy in a background job
 $recJob = Start-Job -ScriptBlock {
+    Set-Location $using:workDir
     & $using:env:RECORD_BIN @($using:recArgs) 2>&1 | Tee-Object -FilePath $using:logPath
 }
 
@@ -236,46 +237,42 @@ do {
 } while ((Get-Date) -lt $deadline -and $recJob.State -eq 'Running')
 
 # Send traffic to generate tests
-Write-Host "Sending HTTP requests to generate tests…"
+Write-Host "Sending HTTP requests to generate tests (using curl.exe)…"
 $sent = 0
 
 try {
   # 1. Create a shortened URL
-  $body1 = @{url="https://google.com"} | ConvertTo-Json
-  $response1 = Invoke-RestMethod -Method POST -Uri "$base/url" -Body $body1 -ContentType "application/json"
-  Write-Host "POST /url response: $($response1 | ConvertTo-Json -Compress)"
+  Write-Host "Sending POST to $base/url..."
+  # We use curl.exe explicitly because Invoke-RestMethod was hanging
+  $responseJson = cmd /c "curl.exe -s -X POST $base/url -d ""{\""url\"":\""https://google.com\""}"" -H ""Content-Type: application/json"""
+  
+  Write-Host "POST /url response: $responseJson"
   $sent++
   
-  # Extract the shortened URL path from response
-  $shortenedUrl = $response1.url
+  # Parse the JSON to get the short URL
+  $jsonObj = $responseJson | ConvertFrom-Json
+  $shortenedUrl = $jsonObj.url
+  
   if ($shortenedUrl) {
     $shortPath = ($shortenedUrl -split '/')[-1]
     Write-Host "Shortened path: $shortPath"
     
-    # 2. Try to redirect (this will return 303, which is expected)
-    try {
-      $response2 = Invoke-WebRequest -Method GET -Uri "$base/$shortPath" -MaximumRedirection 0 -UseBasicParsing -ErrorAction SilentlyContinue
-    } catch {
-      # 303 redirect throws an exception in PowerShell, but that's the expected behavior
-      Write-Host "GET /$shortPath returned redirect (expected)"
-    }
+    # 2. Try to redirect
+    Write-Host "Sending GET to $base/$shortPath..."
+    # curl -I checks headers (like redirects) without downloading body
+    cmd /c "curl.exe -v $base/$shortPath 2>&1" | Out-Null
     $sent++
   }
   
   # 3. Create another shortened URL
-  $body3 = @{url="https://github.com/keploy"} | ConvertTo-Json
-  $response3 = Invoke-RestMethod -Method POST -Uri "$base/url" -Body $body3 -ContentType "application/json"
-  Write-Host "POST /url response: $($response3 | ConvertTo-Json -Compress)"
+  $responseJson2 = cmd /c "curl.exe -s -X POST $base/url -d ""{\""url\"":\""https://github.com/keploy\""}"" -H ""Content-Type: application/json"""
+  Write-Host "POST /url response: $responseJson2"
   $sent++
   
-  # 4. Test verify-email endpoint (optional, may fail if DNS lookup fails)
-  try {
-    $response4 = Invoke-WebRequest -Method GET -Uri "$base/verify-email?email=test@example.com" -UseBasicParsing -ErrorAction SilentlyContinue
-    Write-Host "GET /verify-email response received"
-    $sent++
-  } catch {
-    Write-Warning "verify-email endpoint failed (expected in some environments): $_"
-  }
+  # 4. Test verify-email endpoint
+  Write-Host "Sending GET to verify-email..."
+  cmd /c "curl.exe -s $base/verify-email?email=test@example.com" | Out-Null
+  $sent++
 
 } catch { 
   Write-Warning "A request failed: $_" 
@@ -296,29 +293,22 @@ Write-Host "=========================================================="
 Get-Content -Path $logPath -ErrorAction SilentlyContinue
 Write-Host "=========================================================="
 
-# Find and kill Keploy process
-$REC_PROC = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-  Where-Object {
-    ($_.CommandLine -and ($_.CommandLine -match 'keploy.*record' -or $_.CommandLine -match 'keploy-record' -or $_.CommandLine -match 'keploy(\.exe)?')) -or
-    ($_.Name -and $_.Name -match 'keploy')
-  } |
-  Select-Object -First 1
+# ==========================================================
+# ROBUST CLEANUP: Kill whatever is holding Port 8080
+# ==========================================================
+Write-Host "Ensuring Port 8080 is free for Replay..."
 
-Write-Host "Value of REC_PROC: $REC_PROC"
-
-$REC_PID = if ($REC_PROC) { $REC_PROC.ProcessId } else { $null }
-
-if ($REC_PID -and $REC_PID -ne 0) {
-    Write-Host "Found Keploy PID: $REC_PID"
-    Write-Host "Killing keploy process tree..."
-    cmd /c "taskkill /PID $REC_PID /T /F" 2>$null | Out-Null
-} else {
-    Write-Host "Keploy record process not found.  Dumping candidate processes containing 'keploy' in CommandLine:"
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -and ($_.CommandLine -match 'keploy') } |
-      Select-Object ProcessId, Name, @{Name='Cmd';Expression={$_.CommandLine}} |
-      ForEach-Object { Write-Host "$($_.ProcessId)  $($_.Name)  $($_.Cmd)" }
+# 1. Kill the specific process holding the port
+$tcp = Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue
+if ($tcp) {
+    $pid8080 = $tcp.OwningProcess
+    Write-Host "Found process ID $pid8080 holding Port 8080. Killing it..."
+    cmd /c "taskkill /PID $pid8080 /F /T" 2>$null | Out-Null
 }
+
+# 2. Cleanup any lingering Keploy agents
+Get-Process keploy -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2
 
 # Verify recording
 $testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"

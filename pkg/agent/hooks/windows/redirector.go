@@ -29,8 +29,6 @@ import "C"
 import (
 	"fmt"
 	"unsafe"
-
-	"github.com/davecgh/go-spew/spew"
 )
 
 // StartRedirector initializes and starts the Windows redirector with configuration
@@ -69,9 +67,6 @@ func StopRedirector() error {
 func GetDestination(srcPort uint32) (WinDest, bool) {
 	dest := C.get_destination(C.uint(srcPort))
 	// defer C.free_windest(dest)
-
-	spew.Dump(dest)
-
 	return WinDest{
 		IPVersion: uint32(dest.ip_version),
 		DestIP4:   uint32(dest.dest_ip4),
