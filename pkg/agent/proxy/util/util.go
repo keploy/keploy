@@ -411,7 +411,11 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	passthroughContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	go func() {
+		defer wg.Done()
 		defer Recover(logger, clientConn, nil)
 		defer close(destBufferChannel)
 		defer func(destConn net.Conn) {
@@ -425,9 +429,16 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	}()
 
 	go func() {
+		defer wg.Done()
 		defer Recover(logger, clientConn, nil)
 		defer close(clientBufferChannel)
 		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
+	}()
+
+	// Goroutine to close errChannel after both ReadBuffConn goroutines finish
+	go func() {
+		wg.Wait()
+		close(errChannel)
 	}()
 
 	for {
@@ -452,7 +463,11 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				return nil, err
 			}
 
-		case err := <-errChannel:
+		case err, ok := <-errChannel:
+			if !ok {
+				// errChannel closed, no more errors
+				continue
+			}
 			// nolint:staticcheck
 			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 				if err == io.EOF {
