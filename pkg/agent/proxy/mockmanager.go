@@ -144,12 +144,11 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 	
 	if flt == nil {
 		// Tree doesn't exist, create it
-		flt, _ = m.ensureKindTrees(kind)
-		// Re-acquire lock to verify it's still in the map (another goroutine might have replaced the map)
+		_, _ = m.ensureKindTrees(kind)
+		// Unconditionally re-read from map to ensure we use the tree from current map state
+		// (another goroutine might have replaced the map or created the tree)
 		m.treesMu.RLock()
-		if existing := m.filteredByKind[kind]; existing != nil {
-			flt = existing // Use the existing tree if map was replaced
-		}
+		flt = m.filteredByKind[kind]
 		m.treesMu.RUnlock()
 	}
 
@@ -173,12 +172,11 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 	
 	if unf == nil {
 		// Tree doesn't exist, create it
-		_, unf = m.ensureKindTrees(kind)
-		// Re-acquire lock to verify it's still in the map (another goroutine might have replaced the map)
+		_, _ = m.ensureKindTrees(kind)
+		// Unconditionally re-read from map to ensure we use the tree from current map state
+		// (another goroutine might have replaced the map or created the tree)
 		m.treesMu.RLock()
-		if existing := m.unfilteredByKind[kind]; existing != nil {
-			unf = existing // Use the existing tree if map was replaced
-		}
+		unf = m.unfilteredByKind[kind]
 		m.treesMu.RUnlock()
 	}
 
@@ -201,11 +199,8 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 
 	// rebuild per-kind filtered maps from scratch to avoid stale entries
-	// Read map length under lock to avoid race with concurrent readers
-	m.treesMu.RLock()
-	mapLen := len(m.filteredByKind)
-	m.treesMu.RUnlock()
-	newFilteredByKind := make(map[models.Kind]*TreeDb, mapLen)
+	// Use reasonable default capacity (len() is just a hint, not correctness-critical)
+	newFilteredByKind := make(map[models.Kind]*TreeDb, 8)
 	touched := map[models.Kind]struct{}{}
 
 	for index, mock := range mocks {
@@ -241,11 +236,8 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 
 	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
-	// Read map length under lock to avoid race with concurrent readers
-	m.treesMu.RLock()
-	mapLen := len(m.unfilteredByKind)
-	m.treesMu.RUnlock()
-	newUnfilteredByKind := make(map[models.Kind]*TreeDb, mapLen)
+	// Use reasonable default capacity (len() is just a hint, not correctness-critical)
+	newUnfilteredByKind := make(map[models.Kind]*TreeDb, 8)
 	touched := map[models.Kind]struct{}{}
 
 	for index, mock := range mocks {
