@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
@@ -63,14 +64,14 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, models.FilePermReadWrite)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
 	}
 
-	err = os.Chmod("keploy-logs.txt", 0777)
+	err = os.Chmod("keploy-logs.txt", models.FilePermReadWrite)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
+		return nil, nil, fmt.Errorf("failed to set the log file permission to 0644: %v", err)
 	}
 
 	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))

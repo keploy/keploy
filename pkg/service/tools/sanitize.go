@@ -17,6 +17,7 @@ import (
 	"github.com/zricethezav/gitleaks/v8/detect"
 	"github.com/zricethezav/gitleaks/v8/report"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -886,19 +887,19 @@ func SanitizeFileInPlace(path, testName string, aggSecrets map[string]string) er
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(path, out.Bytes(), 0777); err != nil {
+	if err := os.WriteFile(path, out.Bytes(), models.FilePermReadWrite); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
 
-// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with 0777 perms.
+// WriteSecretsYAML writes the aggregated secrets map to secret.yaml with secure permissions.
 func WriteSecretsYAML(path string, secrets map[string]string) error {
 	b, err := yaml.Marshal(secrets)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0777)
+	return os.WriteFile(path, b, models.FilePermPrivate)
 }
 
 // DesanitizeFileInPlace reads a sanitized YAML file and replaces placeholders with actual secret values.
@@ -935,7 +936,7 @@ func DesanitizeFileInPlace(path string, secrets map[string]string) error {
 	}
 	_ = enc.Close()
 
-	err = os.WriteFile(path, out.Bytes(), 0777)
+	err = os.WriteFile(path, out.Bytes(), models.FilePermReadWrite)
 	if err != nil {
 		return fmt.Errorf("write desanitized %s: %w", path, err)
 	}

@@ -307,7 +307,7 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 	// Check if the test file exists
 	if _, err := os.Stat(testFilePath); os.IsNotExist(err) {
 		// Create the test file if it does not exist
-		file, err := os.OpenFile(testFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		file, err := os.OpenFile(testFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, models.FilePermReadWrite)
 		if err != nil {
 			return false, err
 		}

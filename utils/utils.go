@@ -469,12 +469,12 @@ jobs:
 	filePath := "/githubactions/keploy.yml"
 
 	//create the file path
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filePath), models.DirPermDefault); err != nil {
 		logger.Error("Error creating directory for GitHub Actions workflow file", zap.Error(err))
 		return
 	}
 	// Write the content to the file
-	if err := os.WriteFile(filePath, []byte(actionsFileContent), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(actionsFileContent), models.FilePermReadWrite); err != nil {
 		logger.Error("Error writing GitHub Actions workflow file", zap.Error(err))
 		return
 	}
@@ -712,9 +712,9 @@ func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	return path
 }
 
-// makeDirectory creates a directory if not exists with all user access
+// makeDirectory creates a directory if not exists with secure permissions
 func makeDirectory(path string) error {
-	err := os.MkdirAll(path, 0777)
+	err := os.MkdirAll(path, models.DirPermDefault)
 	if err != nil {
 		return err
 	}
@@ -1146,7 +1146,7 @@ func IsDockerCmd(kind CmdType) bool {
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"
 
-	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, models.FilePermReadWrite)
 	if err != nil {
 		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
 	}
