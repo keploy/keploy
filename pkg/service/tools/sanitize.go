@@ -887,7 +887,7 @@ func SanitizeFileInPlace(path, testName string, aggSecrets map[string]string) er
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(path, out.Bytes(), models.FilePermReadWrite); err != nil {
+	if err := os.WriteFile(path, out.Bytes(), models.FilePermPrivate); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
