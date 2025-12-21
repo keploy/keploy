@@ -33,62 +33,75 @@ function Kill-Tree {
     }
 }
 
+function Drain-JobOutput {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Job] $Job,
+        [Parameter(Mandatory)] [string] $LogFile
+    )
+
+    # Drain what's currently buffered (NO -Keep => won't repeat)
+    $data = Receive-Job -Job $Job -ErrorAction SilentlyContinue
+    if ($null -eq $data) { return }
+
+    $lines = $data | Out-String -Stream
+    if ($lines.Count -eq 0) { return }
+
+    # Show in console + append to file
+    $lines | Tee-Object -FilePath $LogFile -Append
+}
+
 # --- Helper: Send Traffic with Timeout and Log Streaming ---
 function Send-Request {
-    param($Job) # Accept the background job to check its status
-    
+    param(
+        [Parameter(Mandatory)] $Job,
+        [Parameter(Mandatory)] [string] $LogFile
+    )
+
     $port = 8080
     $baseUrl = "http://localhost:$port"
-    $appStarted = $false
     $retries = 0
-    $maxRetries = 20 # 20 * 3 seconds = 60 seconds timeout
-    
+    $maxRetries = 20  # 20 * 3s = 60s
+
     Write-Host "Waiting for Port $port to open..."
-    
-    # Health check loop (TCP Port Check)
-    while (-not $appStarted) {
-        # 1. Check if the background job has crashed or failed
+
+    while ($true) {
+        # Print any NEW logs from job (won't repeat)
+        Drain-JobOutput -Job $Job -LogFile $LogFile
+
+        # If job died, fail fast
         if ($Job.State -ne 'Running') {
-            Write-Error "Background job stopped unexpectedly (State: $($Job.State))! Dumping logs..."
-            
-            $logs = Receive-Job -Job $Job -Keep
-            if ($logs) { $logs | Write-Host }
-            
-            if ($Job.ChildJobs[0].Error) {
-                Write-Error $Job.ChildJobs[0].Error
+            Write-Error "Background job stopped unexpectedly (State: $($Job.State))."
+            Drain-JobOutput -Job $Job -LogFile $LogFile
+
+            if ($Job.ChildJobs -and $Job.ChildJobs[0].Error -and $Job.ChildJobs[0].Error.Count -gt 0) {
+                Write-Error ($Job.ChildJobs[0].Error | Out-String)
             }
             throw "Application failed to start."
         }
 
-        # 2. Print any new logs from the app while waiting
-        if ($Job.HasMoreData) {
-            Receive-Job -Job $Job -Keep | Write-Host
-        }
-
-        # 3. Check Timeout
+        # Timeout
         if ($retries -ge $maxRetries) {
             throw "Timeout waiting for app to start."
         }
 
-        # 4. TCP Port Check
+        # TCP check
         try {
             $tcpClient = New-Object System.Net.Sockets.TcpClient
             $tcpClient.Connect("localhost", $port)
-            
             if ($tcpClient.Connected) {
-                $appStarted = $true
                 $tcpClient.Close()
+                break
             }
         } catch {
-            # Connection failed, wait and retry
             $retries++
             Start-Sleep -Seconds 3
         }
     }
-    
-    Write-Host "✅ Port $port is open. App started."
 
-    # Record Test Cases
+    Write-Host "✅ Port $port is open. App started."
+    Drain-JobOutput -Job $Job -LogFile $LogFile  # flush any last startup logs
+
+    # Traffic
     try {
         Write-Host "Sending traffic..."
         Invoke-RestMethod -Method Post -Uri "$baseUrl/url" -ContentType 'application/json' -Body (@{ url = "https://google.com" } | ConvertTo-Json) | Out-Null
@@ -100,6 +113,8 @@ function Send-Request {
     } catch {
         Write-Warning "Error sending traffic: $_"
     }
+
+    Drain-JobOutput -Job $Job -LogFile $LogFile  # flush logs after traffic
 }
 
 # =============================================================================
@@ -200,10 +215,10 @@ for ($i = 1; $i -le 2; $i++) {
 
     # Drive Traffic (passing the job to check for crashes)
     try {
-        Send-Request -Job $recJob
+        Send-Request -Job $recJob -LogFile $logFile
     } catch {
         Write-Error $_
-        Receive-Job $recJob -Keep | Tee-Object -FilePath $logFile
+        Drain-JobOutput -Job $recJob -LogFile $logFile
         exit 1
     }
 
@@ -222,7 +237,7 @@ for ($i = 1; $i -le 2; $i++) {
     }
 
     Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
-    Receive-Job $recJob -Keep | Tee-Object -FilePath $logFile
+    Drain-JobOutput -Job $recJob -LogFile $logFile
     Write-Host "⬆️⬆️⬆️ End Keploy Record Logs ⬆️⬆️⬆️`n"
     
     Remove-Job $recJob -Force
