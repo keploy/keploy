@@ -33,15 +33,36 @@ function Kill-Tree {
     }
 }
 
-# --- Helper: Send Traffic ---
+# --- Helper: Send Traffic with Timeout and Log Streaming ---
 function Send-Request {
+    param($Job) # Accept the background job to check its status
+    
     $baseUrl = "http://localhost:8080"
     $appStarted = $false
+    $retries = 0
+    $maxRetries = 20 # 20 * 3 seconds = 60 seconds timeout
     
     Write-Host "Waiting for App to start at $baseUrl..."
     
     # Health check loop
     while (-not $appStarted) {
+        # 1. Check if the background job has crashed
+        if ($Job.State -ne 'Running') {
+            Write-Error "Background job stopped unexpectedly! Dumping logs..."
+            Receive-Job -Job $Job -Keep
+            throw "Application failed to start."
+        }
+
+        # 2. Print any new logs from the app while waiting
+        if ($Job.HasMoreData) {
+            Receive-Job -Job $Job -Keep | Write-Host
+        }
+
+        # 3. Check Timeout
+        if ($retries -ge $maxRetries) {
+            throw "Timeout waiting for app to start."
+        }
+
         try {
             $response = Invoke-WebRequest -Method Post `
                 -Uri "$baseUrl/url" `
@@ -53,28 +74,20 @@ function Send-Request {
                 $appStarted = $true
             }
         } catch {
+            $retries++
             Start-Sleep -Seconds 3
         }
     }
-    Write-Host "App started."
+    Write-Host "✅ App started."
 
     # Record Test Cases
     try {
-        # 1. Post Google
+        Write-Host "Sending traffic..."
         Invoke-RestMethod -Method Post -Uri "$baseUrl/url" -ContentType 'application/json' -Body (@{ url = "https://google.com" } | ConvertTo-Json) | Out-Null
-        
-        # 2. Post Facebook
         Invoke-RestMethod -Method Post -Uri "$baseUrl/url" -ContentType 'application/json' -Body (@{ url = "https://facebook.com" } | ConvertTo-Json) | Out-Null
-
-        # 3. Get ShortURL
         Invoke-WebRequest -Method Get -Uri "$baseUrl/CJBKJd92" -ErrorAction SilentlyContinue | Out-Null
-
-        # 4. Verify Email 1
         Invoke-RestMethod -Method Get -Uri "$baseUrl/verify-email?email=test@gmail.com" -Headers @{ Accept = "application/json" } | Out-Null
-
-        # 5. Verify Email 2
         Invoke-RestMethod -Method Get -Uri "$baseUrl/verify-email?email=admin@yahoo.com" -Headers @{ Accept = "application/json" } | Out-Null
-        
         Write-Host "Traffic generation complete."
     } catch {
         Write-Warning "Error sending traffic: $_"
@@ -89,11 +102,22 @@ Write-Host "Checking out branch 'native-linux'..."
 git fetch origin
 git checkout native-linux
 
-# Start Mongo
-Write-Host "Starting MongoDB container..."
-$mongoCmd = "docker run --rm -d -p27017:27017 --name mongoDb mongo"
-Write-Host "⏳ Executing: $mongoCmd"
-Invoke-Expression $mongoCmd
+# Start Mongo Service (Replaces Docker)
+Write-Host "Starting local MongoDB Service..."
+try {
+    # Service is disabled by default on runner, enable it first
+    Set-Service -Name "MongoDB" -StartupType Manual
+    Start-Service -Name "MongoDB"
+    Write-Host "✅ MongoDB Service started."
+} catch {
+    Write-Error "Failed to start MongoDB Service. Ensure it is installed (default on windows-latest)."
+    Write-Error $_
+    exit 1
+}
+
+# Wait a moment for Mongo to actually be ready
+Write-Host "Waiting 5 seconds for MongoDB to initialize..."
+Start-Sleep -Seconds 5
 
 # Cleanup existing config
 if (Test-Path "./keploy.yml") {
@@ -105,12 +129,10 @@ Write-Host "Generating Keploy config..."
 Write-Host "⏳ Executing: $env:RECORD_BIN config --generate"
 & $env:RECORD_BIN config --generate
 
-# Update Config (sed equivalents)
+# Update Config
 $configFile = ".\keploy.yml"
 $configContent = Get-Content $configFile -Raw
-# Update global noise
 $configContent = $configContent -replace 'global: \{\}', 'global: {"body": {"ts":[]}}'
-# Update ports
 $configContent = $configContent -replace 'ports: 0', 'ports: 27017'
 Set-Content -Path $configFile -Value $configContent
 
@@ -136,7 +158,6 @@ for ($i = 1; $i -le 2; $i++) {
     $appName = "javaApp_${i}" 
     $logFile = "${appName}.txt"
     
-    # Using ${i} to separate variable from colon
     Write-Host "`n=== Iteration ${i}: Recording ==="
     
     Write-Host "⏳ Executing (Background): $env:RECORD_BIN record -c `"./ginApp.exe`""
@@ -147,11 +168,14 @@ for ($i = 1; $i -le 2; $i++) {
         & $using:env:RECORD_BIN record -c "./ginApp.exe" 2>&1
     }
 
-    # Wait briefly for process to initialize
-    Start-Sleep -Seconds 5
-
-    # Drive Traffic
-    Send-Request
+    # Drive Traffic (passing the job to check for crashes)
+    try {
+        Send-Request -Job $recJob
+    } catch {
+        Write-Error $_
+        Receive-Job $recJob -Keep | Tee-Object -FilePath $logFile
+        exit 1
+    }
 
     # Wait for Keploy to process
     Write-Host "Waiting 10 seconds for recording..."
@@ -168,7 +192,7 @@ for ($i = 1; $i -le 2; $i++) {
         Write-Warning "Keploy process not found to kill."
     }
 
-    # Retrieve logs from job AND PRINT THEM using Tee-Object
+    # Retrieve logs from job AND PRINT THEM
     Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
     Receive-Job $recJob -Keep | Tee-Object -FilePath $logFile
     Write-Host "⬆️⬆️⬆️ End Keploy Record Logs ⬆️⬆️⬆️`n"
@@ -192,27 +216,25 @@ for ($i = 1; $i -le 2; $i++) {
 # 3. Test Phase
 # =============================================================================
 
-# Shutdown Mongo (Keploy should use mocks now)
 Write-Host "Shutting down mongo before test mode..."
-Write-Host "⏳ Executing: docker stop mongoDb"
-docker stop mongoDb 2>$null
-docker rm mongoDb 2>$null
-Write-Host "MongoDB stopped."
+Write-Host "⏳ Executing: Stop-Service -Name MongoDB"
+try {
+    Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
+    Write-Host "MongoDB Service stopped."
+} catch {
+    Write-Warning "Could not stop MongoDB service: $_"
+}
 
-# Run Test Mode
 Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
 
 Write-Host "⏳ Executing: $env:REPLAY_BIN test -c `"./ginApp.exe`" --delay 7"
-# Tee-Object prints to console AND file
 & $env:REPLAY_BIN test -c "./ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
 
 # =============================================================================
 # 4. Validation & Coverage
 # =============================================================================
 
-# Extract Coverage
-# Regex looks for "Total Coverage Percentage: 55.5%"
 $covMatch = Select-String -Path $testLogFile -Pattern "Total Coverage Percentage:\s+([0-9]+(\.[0-9]+)?)" | Select-Object -Last 1
 
 if (-not $covMatch) {
@@ -220,7 +242,6 @@ if (-not $covMatch) {
     exit 1
 }
 
-# Parse the number
 $coveragePercent = [double]$covMatch.Matches.Groups[1].Value
 Write-Host "📊 Extracted coverage: ${coveragePercent}%"
 
@@ -231,7 +252,6 @@ if ($coveragePercent -lt 50.0) {
     Write-Host "✅ Coverage meets threshold (>= 50%)"
 }
 
-# Check Logs for Errors/Races
 if (Select-String -Path $testLogFile -Pattern "ERROR") {
     Write-Error "Error found in pipeline..."
     Get-Content $testLogFile
@@ -244,7 +264,6 @@ if (Select-String -Path $testLogFile -Pattern "WARNING: DATA RACE") {
     exit 1
 }
 
-# Validate Report Status for both test sets (0 and 1)
 $allPassed = $true
 
 0..1 | ForEach-Object {
@@ -253,10 +272,8 @@ $allPassed = $true
     
     if (Test-Path $reportFile) {
         $statusLine = Select-String -Path $reportFile -Pattern "status:" | Select-Object -First 1
-        # Extract "PASSED" from "status: PASSED"
         $status = ($statusLine.ToString() -split ":")[1].Trim()
         
-        # Using ${idx} to separate variable from colon
         Write-Host "Test status for test-set-${idx}: $status"
         
         if ($status -ne "PASSED") {
