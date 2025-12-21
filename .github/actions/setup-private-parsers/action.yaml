@@ -6,7 +6,7 @@ inputs:
     description: 'The private SSH deploy key for the integrations repository.'
     required: true
   go-cache:
-    description: 'Whether to enable Go module caching.'
+    description: 'Whether to enable Go module caching (default: true).'
     required: false
     default: 'true'
   integration-ref:
@@ -20,10 +20,10 @@ runs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ">=1.24" # Ensure this version is available in your timeline
+        go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
-    # --- Linux/macOS Setup ---
+    # --- Linux/macOS: Add Known Hosts ---
     - name: Add GitHub to known hosts (non-Windows)
       if: runner.os != 'Windows'
       shell: bash
@@ -31,7 +31,7 @@ runs:
         mkdir -p ~/.ssh
         ssh-keyscan github.com >> ~/.ssh/known_hosts
 
-    # --- Windows Setup ---
+    # --- Windows: Add Known Hosts ---
     - name: Add GitHub to known hosts (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
@@ -43,13 +43,13 @@ runs:
         # Using ascii ensures no BOM issues with SSH
         ssh-keyscan github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii -Append
 
-    # --- SSH Agent ---
+    # --- SSH Agent (Common) ---
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    # --- Dependency & File Creation (Linux/macOS) ---
+    # --- Linux/macOS: Fetch & Create File ---
     - name: Config Git & Fetch (non-Windows)
       if: runner.os != 'Windows'
       shell: bash
@@ -73,7 +73,7 @@ runs:
         )
         EOF
 
-    # --- Dependency & File Creation (Windows) ---
+    # --- Windows: Fetch & Create File ---
     - name: Configure Git, Fetch Dependencies, and Create Parsers File (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
@@ -89,9 +89,8 @@ runs:
         Write-Host "Creating extraparsers.go..."
         New-Item -ItemType Directory -Path "pkg/agent/proxy" -Force | Out-Null
         
-        # IMPORTANT: The lines below must stay indented relative to the YAML file, 
-        # but the "@ must align with the start of the variable assignment ($doc =).
-        $doc = @"
+        # FIX 1: Indentation of Here-String is now safe for YAML
+        $content = @"
         //go:build linux
 
         package proxy
@@ -101,11 +100,20 @@ runs:
         )
         "@
         
-        $doc | Set-Content -Path "pkg/agent/proxy/extraparsers.go" -Encoding UTF8
+        $content | Set-Content -Path "pkg/agent/proxy/extraparsers.go" -Encoding UTF8
 
-    # --- Tidy ---
-    - name: Go Mod Tidy
+    # --- Tidy (Split to avoid WSL error) ---
+    - name: Add any missing Go modules (non-Windows)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         echo "Tidying up Go modules..."
+        go mod tidy
+
+    # FIX 2: Explicitly use pwsh on Windows to avoid 'bash' invoking WSL
+    - name: Add any missing Go modules (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Write-Host "Tidying up Go modules..."
         go mod tidy
