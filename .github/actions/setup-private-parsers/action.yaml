@@ -23,18 +23,27 @@ runs:
         go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
-    - name: Add GitHub to known hosts
+    - name: Add GitHub to known hosts (non-Windows)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         mkdir -p ~/.ssh
         ssh-keyscan github.com >> ~/.ssh/known_hosts
+    - name: Add GitHub to known hosts (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $sshDir = Join-Path $Env:USERPROFILE ".ssh"
+        New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+        ssh-keyscan github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii -Append
 
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    - name: Configure Git, Fetch Dependencies, and Create Parsers File
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File (non-Windows)
+      if: runner.os != 'Windows'
       shell: bash
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
@@ -55,8 +64,39 @@ runs:
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
         EOF
-    - name: Add any missing Go modules
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        INTEGRATION_REF: ${{ inputs.integration-ref }}
+      run: |
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+        Write-Host "Fetching private integrations dependency via SSH..."
+        $env:GOPRIVATE = "github.com/keploy/integrations"
+        go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
+
+        Write-Host "Creating extraparsers.go..."
+        New-Item -ItemType Directory -Path "pkg/agent/proxy" -Force | Out-Null
+        @"
+//go:build linux
+
+package proxy
+
+import (
+	_ "github.com/keploy/integrations/pkg/parsers"
+)
+"@ | Set-Content -Path "pkg/agent/proxy/extraparsers.go" -Encoding UTF8
+
+    - name: Add any missing Go modules (non-Windows)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         echo "Tidying up Go modules..."
-        go mod tidy    
+        go mod tidy
+    - name: Add any missing Go modules (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Write-Host "Tidying up Go modules..."
+        go mod tidy
