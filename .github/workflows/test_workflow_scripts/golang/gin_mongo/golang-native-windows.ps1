@@ -127,14 +127,25 @@ if (-not (Wait-ForMongo -MongoHost $MONGO_HOST -Port $MONGO_PORT)) {
 
 # --- Generate keploy.yml and add noise for timestamp ---
 Write-Host "Generating keploy config..."
-& $env:RECORD_BIN config --generate
+$currentDir = (Get-Location).Path
+Write-Host "Current directory: $currentDir"
+
+# Generate config with explicit path to current directory
+& $env:RECORD_BIN config --generate --path "."
 
 $configFile = ".\keploy.yml"
 if (-not (Test-Path $configFile)) { throw "Config file '$configFile' not found after generation." }
 
+# Update the path in the config to use current directory explicitly
+$configContent = Get-Content $configFile -Raw
+$configContent = $configContent -replace 'path:\s*""', "path: `"$currentDir/keploy`""
+$configContent = $configContent -replace 'path:\s*"."', "path: `"$currentDir/keploy`""
+
 # Add noise to ignore 'ts' field in response body (timestamp from URL shortener)
-(Get-Content $configFile -Raw) -replace 'global:\s*\{\s*\}', 'global:  {"body": {"ts": [], "error": []}}' |
-  Set-Content -Path $configFile -Encoding UTF8
+$configContent = $configContent -replace 'global:\s*\{\s*\}', 'global:  {"body": {"ts": [], "error": []}}'
+
+Set-Content -Path $configFile -Value $configContent -Encoding UTF8
+Write-Host "Updated keploy.yml - path set to: $currentDir/keploy"
 Write-Host "Updated global noise in keploy.yml to ignore 'ts' and 'error'."
 
 # --- Update main.go to use 127.0.0.1 instead of mongoDb hostname ---
@@ -340,20 +351,34 @@ if ($tcp) {
 Get-Process keploy -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 
-# Verify recording
-$testSetPath = ".\keploy\test-set-$expectedTestSetIndex\tests"
-if (-not (Test-Path $testSetPath)) { 
-  Write-Error "Test directory not found at $testSetPath"
+# Verify recording - check both possible locations
+$testSetPath1 = ".\keploy\test-set-$expectedTestSetIndex\tests"
+$testSetPath2 = Join-Path $workDir "keploy\test-set-$expectedTestSetIndex\tests"
+
+$testSetPath = $null
+if (Test-Path $testSetPath1) {
+  $testSetPath = $testSetPath1
+  Write-Host "Found tests at: $testSetPath1"
+} elseif (Test-Path $testSetPath2) {
+  $testSetPath = $testSetPath2
+  Write-Host "Found tests at: $testSetPath2"
+} else {
+  Write-Error "Test directory not found at either location:"
+  Write-Error "  Location 1: $testSetPath1"  
+  Write-Error "  Location 2: $testSetPath2"
   Get-Content .\keploy_agent.log -ErrorAction SilentlyContinue
+  Get-Content $logPath -ErrorAction SilentlyContinue
   exit 1 
 }
+
 $testCount = (Get-ChildItem -Path $testSetPath -Filter "test-*.yaml").Count
 if ($testCount -eq 0) { 
   Write-Error "No test files were created.  Review the full logs in the file '$logPath'"
   exit 1 
 }
 
-Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex"
+Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedTestSetIndex at $testSetPath"
+
 
 # =========================
 # ========== REPLAY =======
