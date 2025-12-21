@@ -37,32 +37,26 @@ function Kill-Tree {
 function Send-Request {
     param($Job) # Accept the background job to check its status
     
-    $baseUrl = "http://localhost:8080"
+    $port = 8080
+    $baseUrl = "http://localhost:$port"
     $appStarted = $false
     $retries = 0
     $maxRetries = 20 # 20 * 3 seconds = 60 seconds timeout
     
-    Write-Host "Waiting for App to start at $baseUrl..."
+    Write-Host "Waiting for Port $port to open..."
     
-    # Health check loop
+    # Health check loop (TCP Port Check)
     while (-not $appStarted) {
         # 1. Check if the background job has crashed or failed
         if ($Job.State -ne 'Running') {
             Write-Error "Background job stopped unexpectedly (State: $($Job.State))! Dumping logs..."
             
-            # Retrieve any available logs, including errors
             $logs = Receive-Job -Job $Job -Keep
-            if ($logs) {
-                $logs | Write-Host
-            } else {
-                Write-Warning "No logs captured from the background job. Possible path or startup error."
-            }
+            if ($logs) { $logs | Write-Host }
             
-            # Check for specific job failure reason
             if ($Job.ChildJobs[0].Error) {
                 Write-Error $Job.ChildJobs[0].Error
             }
-            
             throw "Application failed to start."
         }
 
@@ -76,22 +70,23 @@ function Send-Request {
             throw "Timeout waiting for app to start."
         }
 
+        # 4. TCP Port Check
         try {
-            $response = Invoke-WebRequest -Method Post `
-                -Uri "$baseUrl/url" `
-                -ContentType 'application/json' `
-                -Body (@{ url = "https://facebook.com" } | ConvertTo-Json) `
-                -ErrorAction SilentlyContinue
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $tcpClient.Connect("localhost", $port)
             
-            if ($response.StatusCode -eq 200) {
+            if ($tcpClient.Connected) {
                 $appStarted = $true
+                $tcpClient.Close()
             }
         } catch {
+            # Connection failed, wait and retry
             $retries++
             Start-Sleep -Seconds 3
         }
     }
-    Write-Host "✅ App started."
+    
+    Write-Host "✅ Port $port is open. App started."
 
     # Record Test Cases
     try {
@@ -118,7 +113,6 @@ git checkout native-linux
 # Start Mongo Service (Replaces Docker)
 Write-Host "Starting local MongoDB Service..."
 try {
-    # Service is disabled by default on runner, enable it first
     Set-Service -Name "MongoDB" -StartupType Manual
     Start-Service -Name "MongoDB"
     Write-Host "✅ MongoDB Service started."
@@ -152,6 +146,15 @@ Set-Content -Path $configFile -Value $configContent
 # Cleanup existing tests
 Remove-KeployDirs -Candidates @(".\keploy")
 
+# --- FIX: Patch main.go for Localhost MongoDB ---
+$mainFile = ".\main.go"
+if (Test-Path $mainFile) {
+    Write-Host "Patching main.go to use localhost for MongoDB..."
+    $txt = Get-Content $mainFile -Raw
+    $txt = $txt -replace 'mongodb://mongoDb:27017', 'mongodb://localhost:27017'
+    Set-Content -Path $mainFile -Value $txt
+}
+
 # Build the binary
 Write-Host "Building Go binary..."
 $buildCmd = 'go build -cover "-coverpkg=./..." -o ginApp.exe .'
@@ -173,10 +176,7 @@ for ($i = 1; $i -le 2; $i++) {
     
     Write-Host "`n=== Iteration ${i}: Recording ==="
     
-    # --- FIX: Resolve Absolute Paths for Background Job ---
     $currentDir = (Get-Location).Path
-    
-    # Use Get-Command to find the binary in the PATH (fixes the Resolve-Path error)
     $keployPath = (Get-Command $env:RECORD_BIN).Source
     $appPath    = (Resolve-Path ".\ginApp.exe").Path
     
@@ -185,16 +185,12 @@ for ($i = 1; $i -le 2; $i++) {
     Write-Host "  Keploy:  $keployPath"
     Write-Host "  App:     $appPath"
 
-    # Start Keploy Record in Background Job (With explicit paths)
+    # Start Keploy Record in Background Job
     $recJob = Start-Job -ScriptBlock {
         param($workDir, $keployBin, $appBin)
-        
-        # Force the job to run in the correct directory
         Set-Location -Path $workDir
         $env:Path = $using:env:Path
-        
         Write-Host "Job started. Executing: $keployBin record -c $appBin"
-        
         try {
             & $keployBin record -c $appBin 2>&1
         } catch {
@@ -211,7 +207,6 @@ for ($i = 1; $i -le 2; $i++) {
         exit 1
     }
 
-    # Wait for Keploy to process
     Write-Host "Waiting 10 seconds for recording..."
     Start-Sleep -Seconds 10
 
@@ -226,14 +221,12 @@ for ($i = 1; $i -le 2; $i++) {
         Write-Warning "Keploy process not found to kill."
     }
 
-    # Retrieve logs from job AND PRINT THEM
     Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
     Receive-Job $recJob -Keep | Tee-Object -FilePath $logFile
     Write-Host "⬆️⬆️⬆️ End Keploy Record Logs ⬆️⬆️⬆️`n"
     
     Remove-Job $recJob -Force
 
-    # Check for Errors in logs
     if (Select-String -Path $logFile -Pattern "ERROR") {
         Write-Error "Error found in pipeline (Iteration $i)..."
         exit 1
@@ -251,7 +244,6 @@ for ($i = 1; $i -le 2; $i++) {
 # =============================================================================
 
 Write-Host "Shutting down mongo before test mode..."
-Write-Host "⏳ Executing: Stop-Service -Name MongoDB"
 try {
     Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
     Write-Host "MongoDB Service stopped."
@@ -262,7 +254,6 @@ try {
 Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
 
-# Replay also benefits from Get-Command to resolve PATH
 $keployPath = (Get-Command $env:REPLAY_BIN).Source
 Write-Host "⏳ Executing: $keployPath test -c `"./ginApp.exe`" --delay 7"
 & $keployPath test -c "./ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
