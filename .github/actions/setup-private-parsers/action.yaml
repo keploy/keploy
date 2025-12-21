@@ -74,7 +74,7 @@ runs:
 
         Write-Host "Fetching private integrations dependency via SSH..."
         $env:GOPRIVATE = "github.com/keploy/integrations"
-        go get "github.com/keploy/integrations@$env:INTEGRATION_REF"
+        go get "github.com/keploy/integrations@${{ inputs.integration-ref }}"
 
         Write-Host "Creating extraparsers.go..."
         New-Item -ItemType Directory -Path "pkg/agent/proxy" -Force | Out-Null
