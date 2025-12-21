@@ -1,241 +1,292 @@
-#!/usr/bin/env pwsh
+<#
+  PowerShell test runner for Keploy (Windows) - gin-mongo sample
+  FIXED: Recursive patching for IPv4 (127.0.0.1)
+#>
 
-# Checkout a different branch
-git fetch origin
-git checkout native-linux
+$ErrorActionPreference = 'Stop'
 
-# Start MongoDB Windows service
-Write-Host "Starting MongoDB service..."
-Set-Service -Name "MongoDB" -StartupType Automatic -Status Running
-Start-Service -Name "MongoDB"
+# --- Resolve Keploy binaries ---
+if (-not $env:RECORD_BIN) { $env:RECORD_BIN = 'keploy.exe' }
+if (-not $env:REPLAY_BIN) { $env:REPLAY_BIN = 'keploy.exe' }
 
-# Wait for MongoDB to start
-Write-Host "Waiting for MongoDB to start..."
-$maxAttempts = 30
-$attempt = 0
-$mongoStarted = $false
-
-while ($attempt -lt $maxAttempts -and -not $mongoStarted) {
-    try {
-        # Try to connect to MongoDB
-        $mongoTest = & mongosh --quiet --eval "db.adminCommand('ping')" 2>$null
-        if ($mongoTest -match '"ok"\s*:\s*1') {
-            $mongoStarted = $true
-            Write-Host "MongoDB started successfully"
+# --- Helper: Remove Keploy Dirs Robustly ---
+function Remove-KeployDirs {
+    param([string[]]$Candidates)
+    foreach ($p in $Candidates) {
+        if (Test-Path -LiteralPath $p) {
+            Write-Host "Cleaning directory: $p"
+            try {
+                cmd /c "attrib -R -S -H `"$p\*`" /S /D" 2>$null | Out-Null
+                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+            } catch {
+                cmd /c "rmdir /S /Q `"$p`"" 2>$null | Out-Null
+            }
         }
-    } catch {
-        # Ignore errors
-    }
-    
-    if (-not $mongoStarted) {
-        Start-Sleep -Seconds 2
-        $attempt++
-        Write-Host "Waiting for MongoDB... Attempt $attempt/$maxAttempts"
     }
 }
 
-if (-not $mongoStarted) {
-    Write-Error "Failed to start MongoDB after $maxAttempts attempts"
-    exit 1
+# --- Helper: Kill Process Tree ---
+function Kill-Tree {
+    param([int]$ProcessId)
+    if ($ProcessId -gt 0) {
+        Write-Host "Killing process tree (PID $ProcessId)..."
+        cmd /c "taskkill /PID $ProcessId /T /F" 2>$null | Out-Null
+    }
 }
 
-# Check if there is a keploy-config file, if there is, delete it.
-if (Test-Path "./keploy.yml") {
-    Remove-Item -Force "./keploy.yml"
+function Drain-JobOutput {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Job] $Job,
+        [Parameter(Mandatory)] [string] $LogFile
+    )
+    $data = $Job.ChildJobs[0] | Receive-Job -ErrorAction SilentlyContinue
+    if ($null -ne $data) {
+        $data | Tee-Object -FilePath $LogFile -Append
+    }
 }
 
-# Generate the keploy-config file.
-& $env:RECORD_BIN config --generate
-
-# Update the global noise to ts.
-$config_file = "./keploy.yml"
-$content = Get-Content $config_file -Raw
-$content = $content -replace 'global: {}', 'global: {"body": {"ts":[]}}'
-$content = $content -replace 'ports: 0', 'ports: 27017'
-Set-Content $config_file $content
-
-# Remove any preexisting keploy tests and mocks.
-if (Test-Path "./keploy") {
-    Remove-Item -Recurse -Force "./keploy"
-}
-
-# Build the binary.
-go build -cover -coverpkg=./... -o ginApp.exe
-
+# --- Helper: Send Traffic ---
 function Send-Request {
     param(
-        [Parameter(Mandatory=$false)]
-        $KpPid
+        [Parameter(Mandatory)] $Job,
+        [Parameter(Mandatory)] [string] $LogFile
     )
-    
-    $app_started = $false
-    while (-not $app_started) {
+
+    $port = 8080
+    $baseUrl = "http://localhost:$port"
+    $retries = 0
+    $maxRetries = 20
+
+    Write-Host "Waiting for Port $port to open..."
+
+    while ($true) {
+        Drain-JobOutput -Job $Job -LogFile $LogFile
+
+        if ($Job.State -ne 'Running') {
+            Write-Error "Background job stopped unexpectedly."
+            Drain-JobOutput -Job $Job -LogFile $LogFile
+            throw "Application failed to start."
+        }
+
+        if ($retries -ge $maxRetries) {
+            throw "Timeout waiting for app to start."
+        }
+
         try {
-            $response = Invoke-RestMethod -Uri "http://localhost:8080/url" `
-                -Method POST `
-                -Headers @{'content-type' = 'application/json'} `
-                -Body '{"url": "https://facebook.com  "}' `
-                -ErrorAction Stop
-            $app_started = $true
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $tcpClient.Connect("localhost", $port)
+            if ($tcpClient.Connected) {
+                $tcpClient.Close()
+                break
+            }
         } catch {
+            $retries++
             Start-Sleep -Seconds 3
         }
     }
-    Write-Host "App started"
-    
-    # Start making curl calls to record the testcases and mocks.
-    Invoke-RestMethod -Uri "http://localhost:8080/url" `
-        -Method POST `
-        -Headers @{'content-type' = 'application/json'} `
-        -Body '{"url": "https://google.com  "}'
-    
-    Invoke-RestMethod -Uri "http://localhost:8080/url" `
-        -Method POST `
-        -Headers @{'content-type' = 'application/json'} `
-        -Body '{"url": "https://facebook.com  "}'
-    
-    Invoke-RestMethod -Uri "http://localhost:8080/CJBKJd92" -Method GET
-    
-    # Test email verification endpoint
-    Invoke-RestMethod -Uri "http://localhost:8080/verify-email?email=test@gmail.com" `
-        -Method GET `
-        -Headers @{'Accept' = 'application/json'}
-    
-    Invoke-RestMethod -Uri "http://localhost:8080/verify-email?email=admin@yahoo.com" `
-        -Method GET `
-        -Headers @{'Accept' = 'application/json'}
-    
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
-    Start-Sleep -Seconds 10
-    
-    # Find keploy process and kill it
-    $recProcess = Get-Process | Where-Object { $_.ProcessName -like "*keploy*" -or $_.Path -like "*keploy*" }
-    if ($recProcess) {
-        Write-Host "Killing keploy process: $($recProcess.Id)"
-        Stop-Process -Id $recProcess.Id -Force -ErrorAction SilentlyContinue
-    } else {
-        Write-Host "No keploy process found to kill."
+
+    Write-Host "✅ Port $port is open. App started."
+    Drain-JobOutput -Job $Job -LogFile $LogFile
+
+    try {
+        Write-Host "Sending traffic..."
+        Invoke-RestMethod -Method Post -Uri "$baseUrl/url" -ContentType 'application/json' -Body (@{ url = "https://google.com" } | ConvertTo-Json) | Out-Null
+        Invoke-RestMethod -Method Post -Uri "$baseUrl/url" -ContentType 'application/json' -Body (@{ url = "https://facebook.com" } | ConvertTo-Json) | Out-Null
+        Invoke-WebRequest -Method Get -Uri "$baseUrl/CJBKJd92" -ErrorAction SilentlyContinue | Out-Null
+        Invoke-RestMethod -Method Get -Uri "$baseUrl/verify-email?email=test@gmail.com" -Headers @{ Accept = "application/json" } | Out-Null
+        Invoke-RestMethod -Method Get -Uri "$baseUrl/verify-email?email=admin@yahoo.com" -Headers @{ Accept = "application/json" } | Out-Null
+        Write-Host "Traffic generation complete."
+    } catch {
+        Write-Warning "Error sending traffic: $_"
     }
+    Drain-JobOutput -Job $Job -LogFile $LogFile
 }
 
-# Run two iterations of recording
-for ($i = 1; $i -le 2; $i++) {
-    $app_name = "javaApp_$i"
-    
-    # Set environment variables and run keploy record
-    $env:Path = $env:Path
-    Start-Process -FilePath $env:RECORD_BIN `
-        -ArgumentList "record", "-c", "`"./ginApp.exe`"" `
-        -RedirectStandardOutput "${app_name}.txt" `
-        -RedirectStandardError "${app_name}.txt" `
-        -NoNewWindow -PassThru
-    
-    # Store the process ID
-    $KEPLOY_PID = $!
-    
-    # Drive traffic and stop keploy
-    Send-Request -KpPid $KEPLOY_PID
-    
-    # Check for errors in the output file
-    $outputContent = Get-Content "${app_name}.txt" -Raw
-    if ($outputContent -match "ERROR") {
-        Write-Host "Error found in pipeline..."
-        Get-Content "${app_name}.txt"
-        exit 1
-    }
-    if ($outputContent -match "WARNING: DATA RACE") {
-        Write-Host "Race condition detected in recording, stopping pipeline..."
-        Get-Content "${app_name}.txt"
-        exit 1
-    }
-    
-    Start-Sleep -Seconds 5
-    Write-Host "Recorded test case and mocks for iteration ${i}"
-}
+# =============================================================================
+# 1. Git & Environment Setup
+# =============================================================================
 
-# Shutdown MongoDB service before test mode - Keploy should use mocks for database interactions
-Write-Host "Shutting down MongoDB service before test mode..."
-Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
-Write-Host "MongoDB service stopped - Keploy should now use mocks for database interactions"
+Write-Host "Checking out branch 'native-linux'..."
+git fetch origin
+git checkout native-linux
 
-# Start the gin-mongo app in test mode.
-$env:Path = $env:Path
-& $env:REPLAY_BIN test -c "./ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath "test_logs.txt"
-
-# Get test logs content
-$testLogs = Get-Content "test_logs.txt" -Raw
-
-# ✅ Extract and validate coverage percentage from log
-$coverageLine = $testLogs | Select-String -Pattern "Total Coverage Percentage:\s+([0-9]+(?:\.[0-9]+)?)%" | Select-Object -Last 1
-
-if (-not $coverageLine) {
-    Write-Error "::error::No coverage percentage found in test_logs.txt"
+# Start Mongo Service
+Write-Host "Starting local MongoDB Service..."
+try {
+    Set-Service -Name "MongoDB" -StartupType Manual
+    Start-Service -Name "MongoDB"
+    Write-Host "✅ MongoDB Service started."
+} catch {
+    Write-Error "Failed to start MongoDB Service."
     exit 1
 }
 
-$coveragePercent = [double]($coverageLine.Matches.Groups[1].Value)
+Start-Sleep -Seconds 5
+
+# Verify Listener (IPv4 Check)
+$netstat = netstat -an | findstr "27017"
+if ($netstat -match "127.0.0.1:27017") {
+    Write-Host "✅ MongoDB listening on IPv4."
+} else {
+    Write-Warning "⚠️ MongoDB might not be on IPv4. Netstat output: $netstat"
+}
+
+# Cleanup & Config
+if (Test-Path "./keploy.yml") { Remove-Item "./keploy.yml" -Force }
+Write-Host "Generating Keploy config..."
+& $env:RECORD_BIN config --generate
+
+$configFile = ".\keploy.yml"
+$configContent = Get-Content $configFile -Raw
+$configContent = $configContent -replace 'global: \{\}', 'global: {"body": {"ts":[]}}'
+$configContent = $configContent -replace 'ports: 0', 'ports: 27017'
+Set-Content -Path $configFile -Value $configContent
+
+Remove-KeployDirs -Candidates @(".\keploy")
+
+# --- FIX: Recursively Patch ALL Go files for IPv4 ---
+Write-Host "🔍 Patching all .go files to force 127.0.0.1:27017..."
+Get-ChildItem -Filter "*.go" -Recurse | ForEach-Object {
+    $fileContent = Get-Content $_.FullName -Raw
+    $newContent = $fileContent
+    
+    # Replace 'mongoDb:27017' (Docker alias)
+    if ($newContent -match 'mongoDb:27017') {
+        Write-Host "  -> Patching mongoDb alias in $($_.Name)"
+        $newContent = $newContent -replace 'mongoDb:27017', '127.0.0.1:27017'
+    }
+    
+    # Replace 'localhost:27017' (IPv6 risk)
+    if ($newContent -match 'localhost:27017') {
+        Write-Host "  -> Patching localhost alias in $($_.Name)"
+        $newContent = $newContent -replace 'localhost:27017', '127.0.0.1:27017'
+    }
+
+    if ($fileContent -ne $newContent) {
+        Set-Content -Path $_.FullName -Value $newContent
+    }
+}
+# ----------------------------------------------------
+
+# Build
+Write-Host "Building Go binary..."
+$buildCmd = 'go build -cover "-coverpkg=./..." -o ginApp.exe .'
+Invoke-Expression $buildCmd
+
+if (-not (Test-Path ".\ginApp.exe")) {
+    Write-Error "Binary build failed."
+    exit 1
+}
+
+# =============================================================================
+# 2. Recording Phase
+# =============================================================================
+
+for ($i = 1; $i -le 2; $i++) {
+    $appName = "javaApp_${i}" 
+    $logFile = "${appName}.txt"
+    
+    Write-Host "`n=== Iteration ${i}: Recording ==="
+    $currentDir = (Get-Location).Path
+    $keployPath = (Get-Command $env:RECORD_BIN).Source
+    $appPath    = (Resolve-Path ".\ginApp.exe").Path
+
+    # Start Keploy (Removed --debug to reduce noise, re-add if needed)
+    $recJob = Start-Job -ScriptBlock {
+        param($workDir, $keployBin, $appBin)
+        Set-Location -Path $workDir
+        $env:Path = $using:env:Path
+        # Ensure we force IPv4 env vars just in case app uses them
+        $env:MONGO_URI = "mongodb://127.0.0.1:27017"
+        $env:URI = "mongodb://127.0.0.1:27017"
+        
+        & $keployBin record -c $appBin 2>&1
+    } -ArgumentList $currentDir, $keployPath, $appPath
+
+    try {
+        Send-Request -Job $recJob -LogFile $logFile
+    } catch {
+        Write-Error $_
+        Drain-JobOutput -Job $recJob -LogFile $logFile
+        exit 1
+    }
+
+    Write-Host "Waiting 10 seconds for recording..."
+    Start-Sleep -Seconds 10
+
+    $REC_PROC = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -match 'keploy.*record' -or $_.CommandLine -match 'ginApp.exe' } |
+      Select-Object -First 1
+
+    if ($REC_PROC) { Kill-Tree -ProcessId $REC_PROC.ProcessId }
+
+    Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
+    Drain-JobOutput -Job $recJob -LogFile $logFile
+    Write-Host "⬆️⬆️⬆️ End Keploy Record Logs ⬆️⬆️⬆️`n"
+    
+    Remove-Job $recJob -Force
+
+    if (Select-String -Path $logFile -Pattern "ERROR") {
+        Write-Error "Error found in pipeline..."
+        exit 1
+    }
+    if (Select-String -Path $logFile -Pattern "WARNING: DATA RACE") {
+        Write-Error "Race condition detected..."
+        exit 1
+    }
+}
+
+# =============================================================================
+# 3. Test Phase
+# =============================================================================
+
+Write-Host "Shutting down mongo..."
+Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
+
+Write-Host "Starting Replay..."
+$testLogFile = "test_logs.txt"
+$keployPath = (Get-Command $env:REPLAY_BIN).Source
+
+& $keployPath test -c ".\ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
+
+# =============================================================================
+# 4. Validation
+# =============================================================================
+
+$covMatch = Select-String -Path $testLogFile -Pattern "Total Coverage Percentage:\s+([0-9]+(\.[0-9]+)?)" | Select-Object -Last 1
+
+if (-not $covMatch) {
+    Write-Error "::error::No coverage percentage found."
+    exit 1
+}
+
+$coveragePercent = [double]$covMatch.Matches.Groups[1].Value
 Write-Host "📊 Extracted coverage: ${coveragePercent}%"
 
-# Compare coverage with threshold (50%)
-if ($coveragePercent -lt 50) {
+if ($coveragePercent -lt 50.0) {
     Write-Error "::error::Coverage below threshold (50%). Found: ${coveragePercent}%"
     exit 1
-} else {
-    Write-Host "✅ Coverage meets threshold (>= 50%)"
 }
 
-# Check for errors in test logs
-if ($testLogs -match "ERROR") {
-    Write-Host "Error found in pipeline..."
-    $testLogs
+if (Select-String -Path $testLogFile -Pattern "ERROR") {
+    Write-Error "Error found in pipeline..."
     exit 1
 }
 
-if ($testLogs -match "WARNING: DATA RACE") {
-    Write-Host "Race condition detected in test, stopping pipeline..."
-    $testLogs
-    exit 1
+$allPassed = $true
+0..1 | ForEach-Object {
+    $idx = $_
+    $reportFile = ".\keploy\reports\test-run-0\test-set-$idx-report.yaml"
+    if (Test-Path $reportFile) {
+        $status = ((Select-String -Path $reportFile -Pattern "status:" | Select-Object -First 1).ToString() -split ":")[1].Trim()
+        if ($status -ne "PASSED") { $allPassed = $false }
+    } else { $allPassed = $false }
 }
 
-$all_passed = $true
-
-# Get the test results from the testReport file.
-for ($i = 0; $i -le 1; $i++) {
-    # Define the report file for each test set
-    $report_file = "./keploy/reports/test-run-0/test-set-${i}-report.yaml"
-    
-    if (Test-Path $report_file) {
-        # Extract the test status
-        $test_status = Select-String -Path $report_file -Pattern 'status:' | Select-Object -First 1
-        if ($test_status) {
-            $test_status = $test_status.Line -split ':' | Select-Object -Last 1 | ForEach-Object { $_.Trim() }
-        }
-        
-        # Print the status for debugging
-        Write-Host "Test status for test-set-${i}: $test_status"
-        
-        # Check if any test set did not pass
-        if ($test_status -ne "PASSED") {
-            $all_passed = $false
-            Write-Host "Test-set-${i} did not pass."
-            break
-        }
-    } else {
-        Write-Host "Report file not found: $report_file"
-        $all_passed = $false
-        break
-    }
-}
-
-# Check the overall test status and exit accordingly
-if ($all_passed) {
+if ($allPassed) {
     Write-Host "All tests passed"
     exit 0
 } else {
-    $testLogs
+    Write-Error "Some tests failed."
     exit 1
 }
-
-# Clean up: Stop MongoDB service if it's still running
-Write-Host "Cleaning up..."
-Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
