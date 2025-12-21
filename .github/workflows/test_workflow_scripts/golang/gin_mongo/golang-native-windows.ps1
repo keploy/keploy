@@ -227,9 +227,9 @@ function Kill-Tree {
 # ========== RECORD =======
 # =========================
 $containerName = "gin-mongo"
-$logPath = "$containerName.record.txt"
 $expectedTestSetIndex = 0
-$workDir = Get-RunnerWorkPath
+$workDir = (Get-Location).Path
+$logPath = Join-Path $workDir "$containerName.record.txt"
 $base = $env:APP_BASE_URL
 
 # 1. Configure the command for Keploy (using absolute path to pre-built binary)
@@ -237,6 +237,7 @@ $goCmd = $appAbsPath
 $recArgs = @(
   'record',
   '-c', $goCmd,
+  '--path', './keploy',
   '--generate-github-actions=false',
   '--debug'
 )
@@ -390,7 +391,7 @@ Write-Host "Successfully recorded $testCount test file(s) in test-set-$expectedT
 Write-Host "MongoDB container will remain running for replay phase..."
 Start-Sleep -Seconds 5
 
-$testLog = "$containerName.test.txt"
+$testLog = Join-Path $workDir "$containerName.test.txt"
 
 $testArgs = @(
   'test',
