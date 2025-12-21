@@ -47,7 +47,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: true
+          go-cache: false
 
       - name: Add MinGW gcc to PATH
         shell: pwsh
@@ -105,7 +105,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: true
+          go-cache: false
 
       - name: Set PR image tag
         run: echo "PR_IMAGE_TAG=ttl.sh/keploy/keploy:${GITHUB_SHA::7}" >> $GITHUB_ENV
