@@ -39,15 +39,13 @@ function Drain-JobOutput {
         [Parameter(Mandatory)] [string] $LogFile
     )
 
-    # Drain what's currently buffered (NO -Keep => won't repeat)
-    $data = Receive-Job -Job $Job -ErrorAction SilentlyContinue
-    if ($null -eq $data) { return }
-
-    $lines = $data | Out-String -Stream
-    if ($lines.Count -eq 0) { return }
-
-    # Show in console + append to file
-    $lines | Tee-Object -FilePath $LogFile -Append
+    # Use ChildJobs[0] to ensure the buffer is actually cleared after reading
+    $data = $Job.ChildJobs[0] | Receive-Job -ErrorAction SilentlyContinue
+    
+    if ($null -ne $data) {
+        # Pipe directly to Tee-Object to avoid extra newlines from Out-String
+        $data | Tee-Object -FilePath $LogFile -Append
+    }
 }
 
 # --- Helper: Send Traffic with Timeout and Log Streaming ---
