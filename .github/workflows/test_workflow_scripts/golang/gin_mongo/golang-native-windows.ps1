@@ -5,8 +5,8 @@
 $ErrorActionPreference = 'Stop'
 
 # --- Resolve Keploy binaries ---
-if (-not $env:RECORD_BIN) { $env:RECORD_BIN = '.\keploy.exe' }
-if (-not $env:REPLAY_BIN) { $env:REPLAY_BIN = '.\keploy.exe' }
+if (-not $env:RECORD_BIN) { $env:RECORD_BIN = 'keploy.exe' }
+if (-not $env:REPLAY_BIN) { $env:REPLAY_BIN = 'keploy.exe' }
 
 # --- Helper: Remove Keploy Dirs Robustly ---
 function Remove-KeployDirs {
@@ -175,7 +175,9 @@ for ($i = 1; $i -le 2; $i++) {
     
     # --- FIX: Resolve Absolute Paths for Background Job ---
     $currentDir = (Get-Location).Path
-    $keployPath = (Resolve-Path $env:RECORD_BIN).Path
+    
+    # Use Get-Command to find the binary in the PATH (fixes the Resolve-Path error)
+    $keployPath = (Get-Command $env:RECORD_BIN).Source
     $appPath    = (Resolve-Path ".\ginApp.exe").Path
     
     Write-Host "Background Job Info:"
@@ -260,8 +262,8 @@ try {
 Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
 
-# Replay also benefits from absolute paths
-$keployPath = (Resolve-Path $env:REPLAY_BIN).Path
+# Replay also benefits from Get-Command to resolve PATH
+$keployPath = (Get-Command $env:REPLAY_BIN).Source
 Write-Host "⏳ Executing: $keployPath test -c `"./ginApp.exe`" --delay 7"
 & $keployPath test -c "./ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
 
