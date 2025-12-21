@@ -395,6 +395,7 @@ $testLog = "$containerName.test.txt"
 $testArgs = @(
   'test',
   '-c', $appAbsPath,
+  '--path', './keploy',
   '--api-timeout', '60',
   '--delay', '20',
   '--generate-github-actions=false'
