@@ -128,6 +128,8 @@ if (-not (Wait-ForMongo -MongoHost $MONGO_HOST -Port $MONGO_PORT)) {
 # --- Generate keploy.yml and add noise for timestamp ---
 Write-Host "Generating keploy config..."
 $currentDir = (Get-Location).Path
+# Convert backslashes to forward slashes for YAML compatibility
+$currentDirYaml = $currentDir -replace '\\', '/'
 Write-Host "Current directory: $currentDir"
 
 # Generate config with explicit path to current directory
@@ -136,16 +138,16 @@ Write-Host "Current directory: $currentDir"
 $configFile = ".\keploy.yml"
 if (-not (Test-Path $configFile)) { throw "Config file '$configFile' not found after generation." }
 
-# Update the path in the config to use current directory explicitly
+# Update the path in the config to use current directory explicitly (with forward slashes)
 $configContent = Get-Content $configFile -Raw
-$configContent = $configContent -replace 'path:\s*""', "path: `"$currentDir/keploy`""
-$configContent = $configContent -replace 'path:\s*"."', "path: `"$currentDir/keploy`""
+$configContent = $configContent -replace 'path:\s*""', "path: `"$currentDirYaml/keploy`""
+$configContent = $configContent -replace 'path:\s*"."', "path: `"$currentDirYaml/keploy`""
 
 # Add noise to ignore 'ts' field in response body (timestamp from URL shortener)
 $configContent = $configContent -replace 'global:\s*\{\s*\}', 'global:  {"body": {"ts": [], "error": []}}'
 
 Set-Content -Path $configFile -Value $configContent -Encoding UTF8
-Write-Host "Updated keploy.yml - path set to: $currentDir/keploy"
+Write-Host "Updated keploy.yml - path set to: $currentDirYaml/keploy"
 Write-Host "Updated global noise in keploy.yml to ignore 'ts' and 'error'."
 
 # --- Update main.go to use 127.0.0.1 instead of mongoDb hostname ---
