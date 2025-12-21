@@ -150,6 +150,29 @@ if (Test-Path $mainGoPath) {
   Write-Host "Updated MongoDB host in main.go to 127.0.0.1:27017"
 }
 
+# =========================
+# ===== PRE-BUILD APP =====
+# =========================
+# Pre-build the Go application to avoid timeouts during Keploy recording
+Write-Host "Pre-building Go application to avoid timeouts..."
+
+# Download all dependencies first
+go mod download
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Failed to download Go dependencies"
+  exit 1
+}
+
+# Build the application binary
+go build -o app.exe .
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Failed to build Go application"
+  exit 1
+}
+
+Write-Host "Build complete. Created app.exe"
+Write-Host ""
+
 # --- Helpers for record flow ---
 function Test-RecordingComplete {
   param(
@@ -180,6 +203,7 @@ function Kill-Tree {
   }
 }
 
+
 # =========================
 # ========== RECORD =======
 # =========================
@@ -189,8 +213,8 @@ $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
 $base = $env:APP_BASE_URL
 
-# 1. Configure the go run command for Keploy
-$goCmd = "go run ."
+# 1. Configure the command for Keploy (using pre-built binary)
+$goCmd = ".\app.exe"
 $recArgs = @(
   'record',
   '-c', $goCmd,
@@ -337,7 +361,7 @@ $testLog = "$containerName.test.txt"
 
 $testArgs = @(
   'test',
-  '-c', 'go run .',
+  '-c', '.\app.exe',
   '--api-timeout', '60',
   '--delay', '20',
   '--generate-github-actions=false'
