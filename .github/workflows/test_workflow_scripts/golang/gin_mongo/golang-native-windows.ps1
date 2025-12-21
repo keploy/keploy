@@ -166,7 +166,7 @@ $mainFile = ".\main.go"
 if (Test-Path $mainFile) {
     Write-Host "Patching main.go to use localhost for MongoDB..."
     $txt = Get-Content $mainFile -Raw
-    $txt = $txt -replace 'mongodb://mongoDb:27017', 'mongodb://localhost:27017'
+    $txt = $txt -replace 'mongodb://mongoDb:27017', 'mongodb://127.0.0.1:27017'
     Set-Content -Path $mainFile -Value $txt
 }
 
@@ -271,7 +271,7 @@ $testLogFile = "test_logs.txt"
 
 $keployPath = (Get-Command $env:REPLAY_BIN).Source
 Write-Host "⏳ Executing: $keployPath test -c `"./ginApp.exe`" --delay 7"
-& $keployPath test -c "./ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
+& $keployPath test -c ".\ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
 
 # =============================================================================
 # 4. Validation & Coverage
