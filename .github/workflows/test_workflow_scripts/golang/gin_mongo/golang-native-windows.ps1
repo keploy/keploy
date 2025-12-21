@@ -110,12 +110,15 @@ Remove-KeployDirs -Candidates $candidates
 Remove-Item -LiteralPath ".\keploy.yml" -Force -ErrorAction SilentlyContinue
 Write-Host "Pre-clean complete."
 
-Write-Host "Starting MongoDB container..."
-docker rm -f mongoDb 2>$null | Out-Null
-docker run -d --name mongoDb -p 27017:27017 mongo:5.0
-if ($LASTEXITCODE -ne 0) {
-  Write-Error "Failed to start MongoDB container"
-  exit 1
+Write-Host "Starting local MongoDB Service..."
+try {
+    # The service is disabled by default on the runner, so enable it first
+    Set-Service -Name "MongoDB" -StartupType Manual
+    Start-Service -Name "MongoDB"
+    Write-Host "MongoDB Service started."
+} catch {
+    Write-Error "Failed to start MongoDB Service: $_"
+    exit 1
 }
 
 # Wait for MongoDB to be ready
@@ -426,8 +429,7 @@ if ($status -ne 'PASSED') {
 
 Write-Host "All tests passed successfully!"
 
-# Cleanup
-Write-Host "Cleaning up MongoDB container..."
-docker rm -f mongoDb 2>$null | Out-Null
+Write-Host "Stopping MongoDB Service..."
+Stop-Service -Name "MongoDB" -ErrorAction SilentlyContinue
 
 exit 0
