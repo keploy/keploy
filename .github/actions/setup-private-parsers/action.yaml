@@ -74,7 +74,7 @@ runs:
         EOF
 
     # --- Dependency & File Creation (Windows) ---
-- name: Configure Git, Fetch Dependencies, and Create Parsers File (Windows)
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       env:
