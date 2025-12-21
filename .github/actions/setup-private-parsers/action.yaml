@@ -91,8 +91,6 @@ runs:
         
         # FIX 1: Indentation of Here-String is now safe for YAML
         $content = @"
-        //go:build linux
-
         package proxy
 
         import (
