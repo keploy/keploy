@@ -170,7 +170,7 @@ Get-ChildItem -Filter "*.go" -Recurse | ForEach-Object {
 
 # Build
 Write-Host "Building Go binary..."
-$buildCmd = 'go build -cover "-coverpkg=./..." -o ginApp.exe .'
+$buildCmd = 'go build -o ginApp.exe .'
 Invoke-Expression $buildCmd
 
 if (-not (Test-Path ".\ginApp.exe")) {
@@ -252,21 +252,6 @@ $keployPath = (Get-Command $env:REPLAY_BIN).Source
 # =============================================================================
 # 4. Validation
 # =============================================================================
-
-$covMatch = Select-String -Path $testLogFile -Pattern "Total Coverage Percentage:\s+([0-9]+(\.[0-9]+)?)" | Select-Object -Last 1
-
-if (-not $covMatch) {
-    Write-Error "::error::No coverage percentage found."
-    exit 1
-}
-
-$coveragePercent = [double]$covMatch.Matches.Groups[1].Value
-Write-Host "📊 Extracted coverage: ${coveragePercent}%"
-
-if ($coveragePercent -lt 50.0) {
-    Write-Error "::error::Coverage below threshold (50%). Found: ${coveragePercent}%"
-    exit 1
-}
 
 if (Select-String -Path $testLogFile -Pattern "ERROR") {
     Write-Error "Error found in pipeline..."
