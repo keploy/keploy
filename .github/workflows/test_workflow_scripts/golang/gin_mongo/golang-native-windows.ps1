@@ -46,10 +46,23 @@ function Send-Request {
     
     # Health check loop
     while (-not $appStarted) {
-        # 1. Check if the background job has crashed
+        # 1. Check if the background job has crashed or failed
         if ($Job.State -ne 'Running') {
-            Write-Error "Background job stopped unexpectedly! Dumping logs..."
-            Receive-Job -Job $Job -Keep
+            Write-Error "Background job stopped unexpectedly (State: $($Job.State))! Dumping logs..."
+            
+            # Retrieve any available logs, including errors
+            $logs = Receive-Job -Job $Job -Keep
+            if ($logs) {
+                $logs | Write-Host
+            } else {
+                Write-Warning "No logs captured from the background job. Possible path or startup error."
+            }
+            
+            # Check for specific job failure reason
+            if ($Job.ChildJobs[0].Error) {
+                Write-Error $Job.ChildJobs[0].Error
+            }
+            
             throw "Application failed to start."
         }
 
@@ -160,13 +173,32 @@ for ($i = 1; $i -le 2; $i++) {
     
     Write-Host "`n=== Iteration ${i}: Recording ==="
     
-    Write-Host "⏳ Executing (Background): $env:RECORD_BIN record -c `"./ginApp.exe`""
+    # --- FIX: Resolve Absolute Paths for Background Job ---
+    $currentDir = (Get-Location).Path
+    $keployPath = (Resolve-Path $env:RECORD_BIN).Path
+    $appPath    = (Resolve-Path ".\ginApp.exe").Path
+    
+    Write-Host "Background Job Info:"
+    Write-Host "  WorkDir: $currentDir"
+    Write-Host "  Keploy:  $keployPath"
+    Write-Host "  App:     $appPath"
 
-    # Start Keploy Record in Background Job
+    # Start Keploy Record in Background Job (With explicit paths)
     $recJob = Start-Job -ScriptBlock {
+        param($workDir, $keployBin, $appBin)
+        
+        # Force the job to run in the correct directory
+        Set-Location -Path $workDir
         $env:Path = $using:env:Path
-        & $using:env:RECORD_BIN record -c "./ginApp.exe" 2>&1
-    }
+        
+        Write-Host "Job started. Executing: $keployBin record -c $appBin"
+        
+        try {
+            & $keployBin record -c $appBin 2>&1
+        } catch {
+            Write-Error "CRITICAL: Failed to launch process: $_"
+        }
+    } -ArgumentList $currentDir, $keployPath, $appPath
 
     # Drive Traffic (passing the job to check for crashes)
     try {
@@ -228,8 +260,10 @@ try {
 Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
 
-Write-Host "⏳ Executing: $env:REPLAY_BIN test -c `"./ginApp.exe`" --delay 7"
-& $env:REPLAY_BIN test -c "./ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
+# Replay also benefits from absolute paths
+$keployPath = (Resolve-Path $env:REPLAY_BIN).Path
+Write-Host "⏳ Executing: $keployPath test -c `"./ginApp.exe`" --delay 7"
+& $keployPath test -c "./ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
 
 # =============================================================================
 # 4. Validation & Coverage
