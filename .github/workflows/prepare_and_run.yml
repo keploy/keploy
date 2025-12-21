@@ -16,7 +16,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: true
+          go-cache: false
 
       - name: Build Keploy (non-race)
         run: |
