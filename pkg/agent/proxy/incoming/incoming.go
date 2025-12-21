@@ -121,7 +121,7 @@ func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		var processMu sync.Mutex
+		sem := make(chan struct{}, 1)
 		for {
 			select {
 			case <-ctx.Done():
@@ -142,16 +142,9 @@ func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.
 				return
 			}
 
-			if pm.synchronous {
-				go func(cc net.Conn) {
-					processMu.Lock()
-					defer processMu.Unlock()
-					pm.handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan)
-				}(clientConn)
-			} else {
-				go pm.handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan)
-			}
-
+			go func(cc net.Conn) {
+				pm.handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, sem)
+			}(clientConn)
 		}
 	}()
 	return func() error {
@@ -164,7 +157,7 @@ func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase) {
+func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}) {
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
@@ -191,7 +184,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
-		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t)
+		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem)
 	}
 }
 
