@@ -4,11 +4,40 @@
 git fetch origin
 git checkout native-linux
 
-# Note: The sudoers modification is removed as it's not applicable/needed on Windows
-# In Windows, administrative permissions are handled differently
+# Start MongoDB Windows service
+Write-Host "Starting MongoDB service..."
+Set-Service -Name "MongoDB" -StartupType Automatic -Status Running
+Start-Service -Name "MongoDB"
 
-# Start mongo before starting keploy.
-docker run --rm -d -p 27017:27017 --name mongoDb mongo
+# Wait for MongoDB to start
+Write-Host "Waiting for MongoDB to start..."
+$maxAttempts = 30
+$attempt = 0
+$mongoStarted = $false
+
+while ($attempt -lt $maxAttempts -and -not $mongoStarted) {
+    try {
+        # Try to connect to MongoDB
+        $mongoTest = & mongosh --quiet --eval "db.adminCommand('ping')" 2>$null
+        if ($mongoTest -match '"ok"\s*:\s*1') {
+            $mongoStarted = $true
+            Write-Host "MongoDB started successfully"
+        }
+    } catch {
+        # Ignore errors
+    }
+    
+    if (-not $mongoStarted) {
+        Start-Sleep -Seconds 2
+        $attempt++
+        Write-Host "Waiting for MongoDB... Attempt $attempt/$maxAttempts"
+    }
+}
+
+if (-not $mongoStarted) {
+    Write-Error "Failed to start MongoDB after $maxAttempts attempts"
+    exit 1
+}
 
 # Check if there is a keploy-config file, if there is, delete it.
 if (Test-Path "./keploy.yml") {
@@ -124,11 +153,10 @@ for ($i = 1; $i -le 2; $i++) {
     Write-Host "Recorded test case and mocks for iteration ${i}"
 }
 
-# Shutdown mongo before test mode - Keploy should use mocks for database interactions
-Write-Host "Shutting down mongo before test mode..."
-docker stop mongoDb 2>$null
-docker rm mongoDb 2>$null
-Write-Host "MongoDB stopped - Keploy should now use mocks for database interactions"
+# Shutdown MongoDB service before test mode - Keploy should use mocks for database interactions
+Write-Host "Shutting down MongoDB service before test mode..."
+Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
+Write-Host "MongoDB service stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
 $env:Path = $env:Path
@@ -207,3 +235,7 @@ if ($all_passed) {
     $testLogs
     exit 1
 }
+
+# Clean up: Stop MongoDB service if it's still running
+Write-Host "Cleaning up..."
+Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
