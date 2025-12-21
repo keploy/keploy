@@ -1,5 +1,6 @@
 <#
   PowerShell test runner for Keploy (Windows) - gin-mongo sample
+  UPDATED: With Debugging Steps
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -139,6 +140,22 @@ try {
 Write-Host "Waiting 5 seconds for MongoDB to initialize..."
 Start-Sleep -Seconds 5
 
+# --- DEBUG: Check Network Listener ---
+Write-Host "🔍 DEBUG: Checking Port 27017 Listener..."
+$netstat = netstat -an | findstr "27017"
+if (-not $netstat) {
+    Write-Error "CRITICAL: Nothing is listening on port 27017. MongoDB failed to bind."
+} else {
+    Write-Host $netstat
+    # Check for IPv4 (127.0.0.1) vs IPv6 ([::1])
+    if ($netstat -match "127.0.0.1:27017") {
+        Write-Host "✅ MongoDB is listening on IPv4 Loopback."
+    } elseif ($netstat -match "\[::1\]:27017") {
+        Write-Warning "⚠️ MongoDB is listening on IPv6 Only. 127.0.0.1 connection might fail."
+    }
+}
+# -------------------------------------
+
 # Cleanup existing config
 if (Test-Path "./keploy.yml") {
     Remove-Item "./keploy.yml" -Force
@@ -166,6 +183,15 @@ if (Test-Path $mainFile) {
     $txt = Get-Content $mainFile -Raw
     $txt = $txt -replace 'mongodb://mongoDb:27017', 'mongodb://127.0.0.1:27017'
     Set-Content -Path $mainFile -Value $txt
+    
+    # --- DEBUG: Verify Patch ---
+    Write-Host "🔍 DEBUG: Verifying main.go connection string..."
+    $checkPatch = Get-Content $mainFile | Select-String "mongodb://"
+    Write-Host "Found line: $checkPatch"
+    if ($checkPatch -notmatch "127.0.0.1") {
+        Write-Warning "⚠️ Patch might have failed. Expected 127.0.0.1"
+    }
+    # ---------------------------
 }
 
 # Build the binary
@@ -178,6 +204,21 @@ if (-not (Test-Path ".\ginApp.exe")) {
     Write-Error "Binary build failed. ginApp.exe not found."
     exit 1
 }
+
+# --- DEBUG: Pre-flight Connectivity Check ---
+Write-Host "🔍 DEBUG: Testing direct TCP connection to MongoDB (127.0.0.1:27017)..."
+try {
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    $tcp.Connect("127.0.0.1", 27017)
+    if ($tcp.Connected) {
+        Write-Host "✅ Direct connection successful."
+        $tcp.Close()
+    }
+} catch {
+    Write-Error "❌ Direct connection to MongoDB failed: $_"
+    Write-Warning "If this fails, the issue is Windows/Mongo, not Keploy."
+}
+# --------------------------------------------
 
 # =============================================================================
 # 2. Recording Phase (Loop 1..2)
@@ -203,9 +244,10 @@ for ($i = 1; $i -le 2; $i++) {
         param($workDir, $keployBin, $appBin)
         Set-Location -Path $workDir
         $env:Path = $using:env:Path
-        Write-Host "Job started. Executing: $keployBin record -c $appBin"
+        # UPDATED: Added --debug flag
+        Write-Host "Job started. Executing: $keployBin record -c $appBin --debug"
         try {
-            & $keployBin record -c $appBin 2>&1
+            & $keployBin record -c $appBin --debug 2>&1
         } catch {
             Write-Error "CRITICAL: Failed to launch process: $_"
         }
