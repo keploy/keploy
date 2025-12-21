@@ -170,7 +170,13 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 
-Write-Host "Build complete. Created app.exe"
+# Validate and get Absolute Path
+if (-not (Test-Path ".\app.exe")) {
+  Write-Error "FATAL: app.exe was not found after build!"
+  exit 1
+}
+$appAbsPath = (Resolve-Path ".\app.exe").Path
+Write-Host "Build complete. App executable located at: $appAbsPath"
 Write-Host ""
 
 # --- Helpers for record flow ---
@@ -213,8 +219,8 @@ $expectedTestSetIndex = 0
 $workDir = Get-RunnerWorkPath
 $base = $env:APP_BASE_URL
 
-# 1. Configure the command for Keploy (using pre-built binary)
-$goCmd = ".\app.exe"
+# 1. Configure the command for Keploy (using absolute path to pre-built binary)
+$goCmd = $appAbsPath
 $recArgs = @(
   'record',
   '-c', $goCmd,
@@ -361,7 +367,7 @@ $testLog = "$containerName.test.txt"
 
 $testArgs = @(
   'test',
-  '-c', '.\app.exe',
+  '-c', $appAbsPath,
   '--api-timeout', '60',
   '--delay', '20',
   '--generate-github-actions=false'
