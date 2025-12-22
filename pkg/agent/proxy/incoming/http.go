@@ -14,7 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
-
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -72,6 +72,12 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			releaseLock()
 			chunked = true
 		} else if synchronous {
+
+			mgr := syncMock.Get()
+			if !mgr.GetFirstReqSeen() {
+				mgr.SetFirstRequestSignaled()
+			}
+
 			// we will close connection in case of keep alive (to allow multiple clients to make connections)
 			// if we don't close a connection in synchronous mode, the next request from other client will be blocked
 			req.Close = true
@@ -139,7 +145,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		go func() {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, opts)
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, opts, synchronous)
 		}()
 
 		if synchronous {

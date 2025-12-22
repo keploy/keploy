@@ -11,12 +11,12 @@ import (
 	"strconv"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/utils"
-
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -180,7 +180,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
-	mocks <- &models.Mock{
+	newMock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
 		Kind:    models.HTTP,
@@ -206,5 +206,13 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ResTimestampMock: mock.ResTimestampMock,
 		},
 	}
+
+	if opts.Synchronous {
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.AddMock(newMock)
+			return nil
+		}
+	}
+	mocks <- newMock
 	return nil
 }

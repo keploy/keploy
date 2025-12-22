@@ -958,7 +958,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
-
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
