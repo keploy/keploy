@@ -74,7 +74,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		} else if synchronous {
 
 			mgr := syncMock.Get()
-			if !mgr.FirstReqSeen {
+			if !mgr.GetFirstReqSeen() {
 				mgr.SetFirstRequestSignaled()
 			}
 

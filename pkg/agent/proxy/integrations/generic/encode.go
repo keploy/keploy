@@ -97,9 +97,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					},
 				}
 				if opts.Synchronous {
-					fmt.Println("synchronous recording in generic parser")
 					if mgr := syncMock.Get(); mgr != nil {
-						fmt.Println("adding mock to manager")
 						mgr.AddMock(mock)
 						return ctx.Err()
 					}
@@ -141,9 +139,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						},
 					}
 					if opts.Synchronous {
-						fmt.Println("synchronous recording in generic parser")
 						if mgr := syncMock.Get(); mgr != nil {
-							fmt.Println("adding mock to manager")
 							mgr.AddMock(mock)
 						}
 					} else {

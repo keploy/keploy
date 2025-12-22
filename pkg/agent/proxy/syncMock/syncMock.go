@@ -11,13 +11,13 @@ type SyncMockManager struct {
 	mu           sync.Mutex
 	buffer       []*models.Mock
 	outChan      chan<- *models.Mock
-	FirstReqSeen bool
+	firstReqSeen bool
 }
 
 // Global instance is initialized at package load time
 var instance = &SyncMockManager{
 	buffer:       make([]*models.Mock, 0, 100),
-	FirstReqSeen: false,
+	firstReqSeen: false,
 }
 
 // Get returns the global manager.
@@ -37,7 +37,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	defer m.mu.Unlock()
 
 	// storing startup mocks until first request is seen
-	if !m.FirstReqSeen && m.outChan != nil {
+	if !m.firstReqSeen && m.outChan != nil {
 		m.outChan <- mock
 		return
 	}
@@ -46,8 +46,14 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
 	m.mu.Lock()
-	m.FirstReqSeen = true
+	m.firstReqSeen = true
 	m.mu.Unlock()
+}
+
+func (m *SyncMockManager) GetFirstReqSeen() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.firstReqSeen
 }
 
 func (m *SyncMockManager) ResolveRange(start, end time.Time, keep bool) {
