@@ -14,6 +14,7 @@ func init() {
 	gob.Register(primitive.A{})
 	gob.Register(primitive.Binary{})
 	gob.Register(primitive.M{})
+	gob.Register(primitive.ObjectID{})
 }
 
 type Kind string

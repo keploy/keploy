@@ -105,7 +105,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 
 func (r *Replayer) Start(ctx context.Context) error {
 
-	fmt.Println("Starting replay...")
+	r.logger.Info("🟢 Starting Keploy replay...")
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
@@ -150,7 +150,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	fmt.Println("Test Sets to be Replayed:", testSetIDs)
+	r.logger.Info("Test Sets to be Replayed", zap.Strings("testSets", testSetIDs))
 
 	if len(testSetIDs) == 0 {
 		recordCmd := models.HighlightGrayString("keploy record")
@@ -735,7 +735,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():
