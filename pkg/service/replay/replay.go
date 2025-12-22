@@ -43,6 +43,7 @@ var totalTestPassed int
 var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
+var totalDelayTime time.Duration // tracks user-provided delay to exclude from execution time summary
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
 
@@ -788,6 +789,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case <-runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
+		// Track delay to exclude from execution time summary
+		totalDelayTime += time.Duration(r.config.Test.Delay) * time.Second
 	}
 
 	if cmdType != utils.DockerCompose {
@@ -894,6 +897,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			case <-runTestSetCtx.Done():
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
+			// Track delay to exclude from execution time summary
+			totalDelayTime += time.Duration(r.config.Test.Delay) * time.Second
 
 		}
 	}
@@ -1518,7 +1523,12 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
 
-		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTaken)
+		// Subtract application delay from total time to show actual test execution time
+		actualTestTimeTaken := totalTestTimeTaken - totalDelayTime
+		if actualTestTimeTaken < 0 {
+			actualTestTimeTaken = 0
+		}
+		totalTestTimeTakenStr := timeWithUnits(actualTestTimeTaken)
 
 		if totalTestIgnored > 0 {
 			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
