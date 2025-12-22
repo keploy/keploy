@@ -10,10 +10,10 @@ Contributors are expected to adhere to the [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## Prerequisites for the contributors
 
-Contributors should have knowledge of git, go, and markdown for most projects since the project work heavily depends on them.
+Contributors should have knowledge of Git, Go, and Markdown for most projects since the project work heavily depends on them.
 We encourage Contributors to set up Keploy for local development and play around with the code and tests to get more comfortable with the project. 
 
-Sections
+## Sections
 
 - <a name="contributing"> General Contribution Flow</a>
   - <a name="#commit-signing">Developer Certificate of Origin</a>
@@ -69,7 +69,7 @@ To ensure that each change is relevant and properly peer reviewed, please adhere
 This means that if you are outside the Keploy organization, you must fork the repository and create PRs from branches on your own fork.
 The README in GitHub's [first-contributions repo](https://github.com/firstcontributions/first-contributions) provides an example.
 
-## ## How to set up the docs website locally?
+##  How to set up the docs website locally?
 
 1. Fork the repository
 
@@ -85,8 +85,8 @@ git clone https://github.com/<GITHUB_USERNAME>/keploy.git
 
 3. Go into the directory containing the project and edit the changes.
 
-
-When we merge your PR, a new build automatically occurs and your changes publish to [https://keploy.io](https://github.com/keploy/keploy).
+When we merge your PR, a new build automatically occurs. Documentation-related changes are published via the keploy/docs repository.
+[https://keploy.io](https://github.com/keploy/keploy).
 
 ## <a name="contributing-keploy">Keploy Contribution Flow</a>
 

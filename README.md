@@ -90,7 +90,7 @@ This helps expand API Schema, Statement, and Branch Coverage.
 
 ### Other Capabilities
 
-- 🌐 **CI/CD Integration:** Run tests with mocks anywhere you like—locally on the CLI, in your CI pipeline (Jenkins, Github Actions..) , or even across a Kubernetes cluster. [Read more](https://keploy.io/docs/running-keploy/api-testing-cicd/)
+- 🌐 **CI/CD Integration:** Run tests with mocks anywhere you like—locally on the CLI, in your CI pipeline (Jenkins, GitHub Actions..) , or even across a Kubernetes cluster. [Read more](https://keploy.io/docs/running-keploy/api-testing-cicd/)
 
 - 🎭 **Multi-Purpose Mocks**: You can also use Keploy-generated Mocks, as server Tests!
 
@@ -102,6 +102,7 @@ This helps expand API Schema, Statement, and Branch Coverage.
 ---
 
 ## Quick Start
+> ⚠️ **Prerequisite:** Keploy currently requires Linux or macOS with `curl` installed.
 
 ### 1. Install Keploy Agent
 
