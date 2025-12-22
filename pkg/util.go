@@ -24,6 +24,10 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/araddon/dateparse"
+	"github.com/google/uuid"
+	"github.com/oklog/ulid/v2"
+	"github.com/segmentio/ksuid"
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/utils"
@@ -484,16 +488,17 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	return &rendered, nil
 }
 
+
 // DetectNoiseFieldsInResp inspects a rendered HTTP response and returns a map
 // of noise fields that should be marked on the testcase so matchers ignore
-// them during comparison. It uses current templated values from utils.
+// them during comparison. It uses current templated values from utils and library-based detection.
 func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 	noise := make(map[string][]string)
 	if resp == nil {
 		return noise
 	}
 
-	// headers: if a header value contains a templated value, mark header.<name>
+	// headers: if a header value contains a templated value or matches noise pattern
 	for hk, hv := range resp.Header {
 		for _, v := range utils.TemplatizedValues {
 			if v == nil {
@@ -509,12 +514,18 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 				break
 			}
 		}
+		// Pattern check (automatic denoise)
+		if isNoiseValue(hv) {
+			key := fmt.Sprintf("header.%s", strings.ToLower(hk))
+			noise[key] = []string{}
+		}
 	}
 
-	// body: if JSON, traverse and mark specific json paths where templated values appear
+	// body: if JSON, traverse and mark specific json paths where templated values appear or match patterns
 	var parsed interface{}
 	if json.Valid([]byte(resp.Body)) {
 		if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
+			// Template check
 			for _, v := range utils.TemplatizedValues {
 				if v == nil {
 					continue
@@ -533,6 +544,13 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 					noise["body"] = []string{}
 				}
 			}
+
+			// Pattern check (automatic denoise)
+			patternPaths := findJSONPathsWithPatterns(parsed, "")
+			for _, p := range patternPaths {
+				key := fmt.Sprintf("body.%s", p)
+				noise[key] = []string{}
+			}
 		}
 	} else {
 		// non-json body: if any templated literal present, mark the full body as noisy
@@ -549,9 +567,47 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 				break
 			}
 		}
+		// Pattern check for raw body
+		if isNoiseValue(resp.Body) {
+			noise["body"] = []string{}
+		}
 	}
 
 	return noise
+}
+
+// isNoiseValue checks if the string matches common noise patterns (Timestamp or Random ID)
+func isNoiseValue(s string) bool {
+	return LooksLikeTimestamp(s) || LooksLikeRandomID(s)
+}
+
+// findJSONPathsWithPatterns recursively searches parsed JSON for values matching noise patterns
+func findJSONPathsWithPatterns(node interface{}, prefix string) []string {
+	var paths []string
+	switch t := node.(type) {
+	case map[string]interface{}:
+		for k, v := range t {
+			p := k
+			if prefix != "" {
+				p = prefix + "." + k
+			}
+			paths = append(paths, findJSONPathsWithPatterns(v, p)...)
+		}
+	case []interface{}:
+		for i, v := range t {
+			idx := fmt.Sprintf("%d", i)
+			p := idx
+			if prefix != "" {
+				p = prefix + "." + idx
+			}
+			paths = append(paths, findJSONPathsWithPatterns(v, p)...)
+		}
+	case string:
+		if isNoiseValue(t) {
+			paths = append(paths, prefix)
+		}
+	}
+	return paths
 }
 
 // findJSONPathsWithValue recursively searches parsed JSON for values equal to target
@@ -586,6 +642,68 @@ func findJSONPathsWithValue(node interface{}, target, prefix string) []string {
 		}
 	}
 	return paths
+}
+
+// LooksLikeTimestamp returns true if the string looks like a timestamp
+// Uses dateparse library for comprehensive timestamp detection covering 50+ formats
+func LooksLikeTimestamp(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+
+	// Use dateparse library for automatic format detection
+	_, err := dateparse.ParseAny(s)
+	if err == nil {
+		return true
+	}
+
+	return false
+}
+
+var (
+	objectIDRe  = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
+	base62IDRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,36}$`)
+	nanoIDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{21,22}$`)
+	snowflakeRe = regexp.MustCompile(`^\d{18,19}$`)
+)
+
+// LooksLikeRandomID uses specialized libraries to detect various random ID formats:
+// UUID, KSUID, ULID, NanoID, Snowflake IDs, MongoDB ObjectIDs, and generic high-entropy IDs
+func LooksLikeRandomID(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+
+	// Library-based detection (most accurate)
+	if _, err := uuid.Parse(s); err == nil {
+		return true
+	}
+
+	if len(s) == 27 {
+		if _, err := ksuid.Parse(s); err == nil {
+			return true
+		}
+	}
+
+	if len(s) == 26 {
+		if _, err := ulid.Parse(s); err == nil {
+			return true
+		}
+	}
+
+	// Regex-based detection for formats without libraries
+	if objectIDRe.MatchString(s) || snowflakeRe.MatchString(s) || nanoIDRe.MatchString(s) {
+		return true
+	}
+
+	// Fallback: generic high-entropy IDs
+	if !base62IDRe.MatchString(s) {
+		return false
+	}
+
+	return false
 }
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
