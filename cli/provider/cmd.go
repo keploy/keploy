@@ -959,6 +959,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Record.Metadata = metadata
 
+			if !c.cfg.Record.Synchronous {
+				synchronous, err := cmd.Flags().GetBool("sync")
+				if err != nil {
+					errMsg := "failed to get the synchronous flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.Synchronous = synchronous
+			}
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {

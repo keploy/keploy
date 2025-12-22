@@ -10,13 +10,15 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 
 	var genericRequests []models.Payload
 
@@ -82,7 +84,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				metadata["type"] = "config"
 				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 				// Save the mock
-				mocks <- &models.Mock{
+				mock := &models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.GENERIC,
@@ -94,6 +96,15 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						Metadata:         metadata,
 					},
 				}
+				if opts.Synchronous {
+					fmt.Println("synchronous recording in generic parser")
+					if mgr := syncMock.GetMockManager(ctx); mgr != nil {
+						fmt.Println("adding mock to manager")
+						mgr.AddMock(mock)
+						return ctx.Err()
+					}
+				}
+				mocks <- mock
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
@@ -116,8 +127,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
 					metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-					// Save the mock
-					mocks <- &models.Mock{
+					// create the mock
+					mock := &models.Mock{
 						Version: models.GetVersion(),
 						Name:    "mocks",
 						Kind:    models.GENERIC,
@@ -128,6 +139,15 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 							ResTimestampMock: resTimestamp,
 							Metadata:         metadata,
 						},
+					}
+					if opts.Synchronous {
+						fmt.Println("synchronous recording in generic parser")
+						if mgr := syncMock.GetMockManager(ctx); mgr != nil {
+							fmt.Println("adding mock to manager")
+							mgr.AddMock(mock)
+						}
+					} else {
+						mocks <- mock
 					}
 
 				}(genericRequestsCopy, genericResponseCopy, reqTS, resTS)
