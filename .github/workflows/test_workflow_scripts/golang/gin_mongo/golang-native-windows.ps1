@@ -253,8 +253,14 @@ $keployPath = (Get-Command $env:REPLAY_BIN).Source
 # 4. Validation
 # =============================================================================
 
-if (Select-String -Path $testLogFile -Pattern "ERROR") {
+# Filter out known harmless errors (like taskkill "process not found")
+$logErrors = Select-String -Path $testLogFile -Pattern "ERROR"
+$realErrors = $logErrors | Where-Object { $_.Line -notmatch "The process .* not found" }
+
+if ($realErrors) {
     Write-Error "Error found in pipeline..."
+    # Optional: print the actual errors found for debugging
+    $realErrors | ForEach-Object { Write-Host $_ }
     exit 1
 }
 
