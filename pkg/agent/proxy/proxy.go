@@ -373,7 +373,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
 					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 				}
-				return
 			}
 		}
 
@@ -385,7 +384,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 					// Log other errors
 					utils.LogError(p.logger, err, "failed to close the destination connection")
 				}
-				return
 			}
 		}
 
@@ -667,34 +665,38 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	<-ctx.Done()
 
 	p.logger.Info("stopping proxy server...")
-
+	var cleanupErrors []error
 	p.connMutex.Lock()
 	for _, clientConn := range p.clientConnections {
-		err := clientConn.Close()
-		if err != nil {
-			return
+		if err := clientConn.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
+
 		}
 	}
+	p.clientConnections = nil
 	p.connMutex.Unlock()
-
 	if p.Listener != nil {
-		err := p.Listener.Close()
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to stop proxy server")
+		if err := p.Listener.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close listener: %w", err))
+		}
+		p.Listener = nil
+	}
+	if p.UDPDNSServer != nil || p.TCPDNSServer != nil {
+		if err := p.stopDNSServers(ctx); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
+
 		}
 	}
 
-	// stop dns servers
-	err := p.stopDNSServers(ctx)
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to stop the dns servers")
-		return
-	}
-
-	// Close the error channel
 	p.CloseErrorChannel()
-
-	p.logger.Info("proxy stopped...")
+	if len(cleanupErrors) > 0 {
+		for _, err := range cleanupErrors {
+			utils.LogError(p.logger, err, "cleanup error in StopProxyServer")
+		}
+		p.logger.Warn("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
+	} else {
+		p.logger.Info("proxy stopped cleanly...")
+	}
 }
 
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {

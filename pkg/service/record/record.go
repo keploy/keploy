@@ -314,7 +314,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case models.ErrUnExpected:
 			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
 		case models.ErrInternal:
-			stopReason = "internal error occured while hooking into the application, hence stopping keploy"
+			stopReason = "internal error occurred while hooking into the application, hence stopping keploy"
 		case models.ErrAppStopped:
 			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
 			r.logger.Warn(stopReason, zap.Error(appErr))
@@ -325,7 +325,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
-			stopReason = "unknown error recieved from application, hence stopping keploy"
+			stopReason = "unknown error received from application, hence stopping keploy"
 		}
 
 	case err = <-insertTestErrChan:

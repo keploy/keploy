@@ -320,11 +320,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
-				stopReason = fmt.Sprintf("failed to run test set: %v", err)
-				utils.LogError(r.logger, err, stopReason)
 				if ctx.Err() == context.Canceled {
 					return err
 				}
+				stopReason = fmt.Sprintf("failed to run test set: %v", err)
+				utils.LogError(r.logger, err, stopReason)
 				return fmt.Errorf("%s", stopReason)
 			}
 			switch testSetStatus {
@@ -403,7 +403,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
 			if r.config.Test.MaxFailAttempts == 0 {
-				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
+				utils.LogError(r.logger, nil, "no. of testset failure occurred during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
 			if len(failedTcIDs) == 0 {
@@ -764,7 +764,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to mock outgoing")
+			if ctx.Err() != context.Canceled {
+				utils.LogError(r.logger, err, "failed to mock outgoing")
+			}
 			return models.TestSetStatusFailed, err
 		}
 
@@ -853,7 +855,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to mock outgoing")
+			if ctx.Err() != context.Canceled {
+				utils.LogError(r.logger, err, "failed to mock outgoing")
+			}
 			return models.TestSetStatusFailed, err
 		}
 
