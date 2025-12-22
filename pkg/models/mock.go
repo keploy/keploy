@@ -1,10 +1,21 @@
 package models
 
 import (
+	"encoding/gob"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
+
+func init() {
+	gob.Register(primitive.D{})
+	gob.Register(primitive.E{})
+	gob.Register(primitive.A{})
+	gob.Register(primitive.Binary{})
+	gob.Register(primitive.M{})
+	gob.Register(primitive.ObjectID{})
+}
 
 type Kind string
 
