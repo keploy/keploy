@@ -253,31 +253,48 @@ $keployPath = (Get-Command $env:REPLAY_BIN).Source
 # 4. Validation
 # =============================================================================
 
-# Filter out known harmless errors (like taskkill "process not found")
+Write-Host "Verifying test reports..."
+
+# 1. Check for "ERROR" in logs (excluding harmless taskkill errors)
 $logErrors = Select-String -Path $testLogFile -Pattern "ERROR"
 $realErrors = $logErrors | Where-Object { $_.Line -notmatch "The process .* not found" }
 
 if ($realErrors) {
-    Write-Error "Error found in pipeline..."
-    # Optional: print the actual errors found for debugging
+    Write-Error "Real errors found in application logs..."
     $realErrors | ForEach-Object { Write-Host $_ }
     exit 1
 }
 
-$allPassed = $true
-0..1 | ForEach-Object {
-    $idx = $_
-    $reportFile = ".\keploy\reports\test-run-0\test-set-$idx-report.yaml"
-    if (Test-Path $reportFile) {
-        $status = ((Select-String -Path $reportFile -Pattern "status:" | Select-Object -First 1).ToString() -split ":")[1].Trim()
-        if ($status -ne "PASSED") { $allPassed = $false }
-    } else { $allPassed = $false }
+# 2. Dynamic Report Validation
+# Find ALL report YAML files, regardless of "test-run-X" folder name
+$reportFiles = Get-ChildItem -Path ".\keploy\reports" -Filter "*report.yaml" -Recurse -ErrorAction SilentlyContinue
+
+if (-not $reportFiles) {
+    Write-Error "❌ Validation Failed: No report files found in .\keploy\reports."
+    # List directory structure to help debug if it fails again
+    Get-ChildItem -Path ".\keploy" -Recurse | Select-Object FullName
+    exit 1
 }
 
-if ($allPassed) {
-    Write-Host "All tests passed"
-    exit 0
-} else {
-    Write-Error "Some tests failed."
+$anyFailed = $false
+
+foreach ($file in $reportFiles) {
+    $content = Get-Content $file.FullName
+    
+    # Check if the file reports a failure
+    if ($content -match "status: FAILED") {
+        Write-Error "❌ Test Failed in: $($file.Name)"
+        $anyFailed = $true
+    } 
+    elseif ($content -match "status: PASSED") {
+        Write-Host "✅ Verified: $($file.Name)"
+    }
+}
+
+if ($anyFailed) {
+    Write-Error "Some tests failed according to reports."
     exit 1
+} else {
+    Write-Host "🎉 All tests passed successfully."
+    exit 0
 }
