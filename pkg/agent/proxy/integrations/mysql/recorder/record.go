@@ -128,10 +128,9 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		},
 	}
 	if opts.Synchronous {
-		if mgr := syncMock.GetMockManager(ctx); mgr != nil {
-			mgr.AddMock(mysqlMock)
-			return
-		}
+		mgr := syncMock.Get()
+		mgr.AddMock(mysqlMock)
+		return
 	}
 
 	mocks <- mysqlMock

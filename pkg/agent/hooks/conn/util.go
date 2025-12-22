@@ -112,7 +112,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// Mocks: mocks,
 	}
 	if synchronous {
-		if mgr := syncMock.GetMockManager(ctx); mgr != nil { // dumping the test case from mock manager in synchronous mode
+		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
 			mgr.ResolveRange(reqTimeTest, resTimeTest, true)
 		}
 	}

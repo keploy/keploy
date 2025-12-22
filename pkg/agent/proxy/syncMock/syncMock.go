@@ -1,8 +1,6 @@
 package manager
 
 import (
-	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -13,54 +11,33 @@ type SyncMockManager struct {
 	mu           sync.Mutex
 	buffer       []*models.Mock
 	outChan      chan<- *models.Mock
-	firstReqSeen bool
+	FirstReqSeen bool
 }
 
-type contextKey struct{}
+// Global instance is initialized at package load time
+var instance = &SyncMockManager{
+	buffer:       make([]*models.Mock, 0, 100),
+	FirstReqSeen: false,
+}
 
-var mockManagerKey = contextKey{}
-
-// Context Helpers
-func GetMockManager(ctx context.Context) *SyncMockManager {
-	if val, ok := ctx.Value(mockManagerKey).(*SyncMockManager); ok {
-		return val
-	}
-	// Fallback to shared instance if not in context
+// Get returns the global manager.
+func Get() *SyncMockManager {
 	return instance
 }
 
-func WithMockManager(ctx context.Context, mgr *SyncMockManager) context.Context {
-	return context.WithValue(ctx, mockManagerKey, mgr)
-}
-
-var (
-	instance *SyncMockManager
-	once     sync.Once
-)
-
-// GetSharedManager ensures both proxies see the exact same object.
-func GetSharedManager(outChan chan<- *models.Mock) *SyncMockManager {
-	if outChan != nil {
-		once.Do(func() {
-			instance = &SyncMockManager{
-				buffer:  make([]*models.Mock, 0, 100),
-				outChan: outChan,
-			}
-		})
-	}
-	return instance
-}
-
-func ResetSharedManager() {
-	instance = nil
-	once = sync.Once{}
+// SetOutputChannel allows the Outgoing Proxy to "plug in" the channel later.
+func (m *SyncMockManager) SetOutputChannel(out chan<- *models.Mock) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outChan = out
 }
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.firstReqSeen {
+	// storing startup mocks until first request is seen
+	if !m.FirstReqSeen && m.outChan != nil {
 		m.outChan <- mock
 		return
 	}
@@ -69,7 +46,7 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
 	m.mu.Lock()
-	m.firstReqSeen = true
+	m.FirstReqSeen = true
 	m.mu.Unlock()
 }
 
@@ -87,7 +64,6 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, keep bool) {
 		// Mocks WITHIN this request window:
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
-				fmt.Println("storing mock :", mock.Name)
 				m.outChan <- mock
 			}
 			// We skip these, effectively discarding them from the slice

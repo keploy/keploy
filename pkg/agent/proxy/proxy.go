@@ -346,9 +346,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	mgr := syncMock.GetSharedManager(rule.MC)
-	ctx = syncMock.WithMockManager(ctx, mgr)
-
+	mgr := syncMock.Get()
+	mgr.SetOutputChannel(rule.MC)
 	var dstAddr string
 
 	switch destInfo.Version {
