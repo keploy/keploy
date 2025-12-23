@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/checkpoint"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/swarm"
+	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
@@ -65,20 +67,20 @@ func (m *MockDockerClient) DialHijack(ctx context.Context, url, proto string, me
 }
 func (m *MockDockerClient) Dialer() func(context.Context) (net.Conn, error) { return nil }
 func (m *MockDockerClient) Close() error                                    { return nil }
-func (m *MockDockerClient) CheckpointCreate(ctx context.Context, container string, options types.CheckpointCreateOptions) error {
+func (m *MockDockerClient) CheckpointCreate(ctx context.Context, containerID string, options checkpoint.CreateOptions) error {
 	return nil
 }
-func (m *MockDockerClient) CheckpointDelete(ctx context.Context, container string, options types.CheckpointDeleteOptions) error {
+func (m *MockDockerClient) CheckpointDelete(ctx context.Context, containerID string, options checkpoint.DeleteOptions) error {
 	return nil
 }
-func (m *MockDockerClient) CheckpointList(ctx context.Context, container string, options types.CheckpointListOptions) ([]types.Checkpoint, error) {
+func (m *MockDockerClient) CheckpointList(ctx context.Context, containerID string, options checkpoint.ListOptions) ([]checkpoint.Summary, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ContainerAttach(ctx context.Context, container string, options types.ContainerAttachOptions) (types.HijackedResponse, error) {
+func (m *MockDockerClient) ContainerAttach(ctx context.Context, containerID string, options container.AttachOptions) (types.HijackedResponse, error) {
 	return types.HijackedResponse{}, nil
 }
-func (m *MockDockerClient) ContainerCommit(ctx context.Context, container string, options types.ContainerCommitOptions) (types.IDResponse, error) {
-	return types.IDResponse{}, nil
+func (m *MockDockerClient) ContainerCommit(ctx context.Context, containerID string, options container.CommitOptions) (container.CommitResponse, error) {
+	return container.CommitResponse{}, nil
 }
 func (m *MockDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *v1.Platform, containerName string) (container.CreateResponse, error) {
 	return container.CreateResponse{}, nil
@@ -86,19 +88,19 @@ func (m *MockDockerClient) ContainerCreate(ctx context.Context, config *containe
 func (m *MockDockerClient) ContainerDiff(ctx context.Context, container string) ([]container.FilesystemChange, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ContainerExecAttach(ctx context.Context, execID string, config types.ExecStartCheck) (types.HijackedResponse, error) {
+func (m *MockDockerClient) ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
 	return types.HijackedResponse{}, nil
 }
-func (m *MockDockerClient) ContainerExecCreate(ctx context.Context, container string, config types.ExecConfig) (types.IDResponse, error) {
-	return types.IDResponse{}, nil
+func (m *MockDockerClient) ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+	return container.ExecCreateResponse{}, nil
 }
-func (m *MockDockerClient) ContainerExecInspect(ctx context.Context, execID string) (types.ContainerExecInspect, error) {
-	return types.ContainerExecInspect{}, nil
+func (m *MockDockerClient) ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error) {
+	return container.ExecInspect{}, nil
 }
-func (m *MockDockerClient) ContainerExecResize(ctx context.Context, execID string, options types.ResizeOptions) error {
+func (m *MockDockerClient) ContainerExecResize(ctx context.Context, execID string, options container.ResizeOptions) error {
 	return nil
 }
-func (m *MockDockerClient) ContainerExecStart(ctx context.Context, execID string, config types.ExecStartCheck) error {
+func (m *MockDockerClient) ContainerExecStart(ctx context.Context, execID string, config container.ExecStartOptions) error {
 	return nil
 }
 func (m *MockDockerClient) ContainerExport(ctx context.Context, container string) (io.ReadCloser, error) {
@@ -113,35 +115,35 @@ func (m *MockDockerClient) ContainerInspectWithRaw(ctx context.Context, containe
 func (m *MockDockerClient) ContainerKill(ctx context.Context, container, signal string) error {
 	return nil
 }
-func (m *MockDockerClient) ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error) {
+func (m *MockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]types.Container, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ContainerLogs(ctx context.Context, container string, options types.ContainerLogsOptions) (io.ReadCloser, error) {
+func (m *MockDockerClient) ContainerLogs(ctx context.Context, containerID string, options container.LogsOptions) (io.ReadCloser, error) {
 	return nil, nil
 }
 func (m *MockDockerClient) ContainerPause(ctx context.Context, container string) error { return nil }
-func (m *MockDockerClient) ContainerRemove(ctx context.Context, container string, options types.ContainerRemoveOptions) error {
+func (m *MockDockerClient) ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error {
 	return nil
 }
-func (m *MockDockerClient) ContainerRename(ctx context.Context, container, newContainerName string) error {
+func (m *MockDockerClient) ContainerRename(ctx context.Context, containerID, newContainerName string) error {
 	return nil
 }
-func (m *MockDockerClient) ContainerResize(ctx context.Context, container string, options types.ResizeOptions) error {
+func (m *MockDockerClient) ContainerResize(ctx context.Context, containerID string, options container.ResizeOptions) error {
 	return nil
 }
 func (m *MockDockerClient) ContainerRestart(ctx context.Context, container string, options container.StopOptions) error {
 	return nil
 }
-func (m *MockDockerClient) ContainerStatPath(ctx context.Context, container, path string) (types.ContainerPathStat, error) {
-	return types.ContainerPathStat{}, nil
+func (m *MockDockerClient) ContainerStatPath(ctx context.Context, containerID, path string) (container.PathStat, error) {
+	return container.PathStat{}, nil
 }
-func (m *MockDockerClient) ContainerStats(ctx context.Context, container string, stream bool) (types.ContainerStats, error) {
-	return types.ContainerStats{}, nil
+func (m *MockDockerClient) ContainerStats(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error) {
+	return container.StatsResponseReader{}, nil
 }
-func (m *MockDockerClient) ContainerStatsOneShot(ctx context.Context, container string) (types.ContainerStats, error) {
-	return types.ContainerStats{}, nil
+func (m *MockDockerClient) ContainerStatsOneShot(ctx context.Context, containerID string) (container.StatsResponseReader, error) {
+	return container.StatsResponseReader{}, nil
 }
-func (m *MockDockerClient) ContainerStart(ctx context.Context, container string, options types.ContainerStartOptions) error {
+func (m *MockDockerClient) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
 	return nil
 }
 func (m *MockDockerClient) ContainerStop(ctx context.Context, container string, options container.StopOptions) error {
@@ -159,14 +161,14 @@ func (m *MockDockerClient) ContainerUpdate(ctx context.Context, containerID stri
 func (m *MockDockerClient) ContainerWait(ctx context.Context, container string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	return nil, nil
 }
-func (m *MockDockerClient) CopyFromContainer(ctx context.Context, container, srcPath string) (io.ReadCloser, types.ContainerPathStat, error) {
-	return nil, types.ContainerPathStat{}, nil
+func (m *MockDockerClient) CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, container.PathStat, error) {
+	return nil, container.PathStat{}, nil
 }
-func (m *MockDockerClient) CopyToContainer(ctx context.Context, container, path string, content io.Reader, options types.CopyToContainerOptions) error {
+func (m *MockDockerClient) CopyToContainer(ctx context.Context, containerID, path string, content io.Reader, options container.CopyToContainerOptions) error {
 	return nil
 }
-func (m *MockDockerClient) ContainersPrune(ctx context.Context, pruneFilters filters.Args) (types.ContainersPruneReport, error) {
-	return types.ContainersPruneReport{}, nil
+func (m *MockDockerClient) ContainersPrune(ctx context.Context, pruneFilters filters.Args) (container.PruneReport, error) {
+	return container.PruneReport{}, nil
 }
 func (m *MockDockerClient) DistributionInspect(ctx context.Context, image, encodedRegistryAuth string) (registry.DistributionInspect, error) {
 	return registry.DistributionInspect{}, nil
@@ -178,42 +180,42 @@ func (m *MockDockerClient) BuildCachePrune(ctx context.Context, opts types.Build
 	return nil, nil
 }
 func (m *MockDockerClient) BuildCancel(ctx context.Context, id string) error { return nil }
-func (m *MockDockerClient) ImageCreate(ctx context.Context, parentReference string, options types.ImageCreateOptions) (io.ReadCloser, error) {
+func (m *MockDockerClient) ImageCreate(ctx context.Context, parentReference string, options image.CreateOptions) (io.ReadCloser, error) {
 	return nil, nil
 }
 func (m *MockDockerClient) ImageHistory(ctx context.Context, imageID string) ([]image.HistoryResponseItem, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ImageImport(ctx context.Context, source types.ImageImportSource, ref string, options types.ImageImportOptions) (io.ReadCloser, error) {
+func (m *MockDockerClient) ImageImport(ctx context.Context, source image.ImportSource, ref string, options image.ImportOptions) (io.ReadCloser, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ImageInspectWithRaw(ctx context.Context, image string) (types.ImageInspect, []byte, error) {
+func (m *MockDockerClient) ImageInspectWithRaw(ctx context.Context, imageID string) (types.ImageInspect, []byte, error) {
 	return types.ImageInspect{}, nil, nil
 }
-func (m *MockDockerClient) ImageList(ctx context.Context, options types.ImageListOptions) ([]types.ImageSummary, error) {
+func (m *MockDockerClient) ImageList(ctx context.Context, options image.ListOptions) ([]image.Summary, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ImageLoad(ctx context.Context, input io.Reader, quiet bool) (types.ImageLoadResponse, error) {
-	return types.ImageLoadResponse{}, nil
+func (m *MockDockerClient) ImageLoad(ctx context.Context, input io.Reader, quiet bool) (image.LoadResponse, error) {
+	return image.LoadResponse{}, nil
 }
-func (m *MockDockerClient) ImagePull(ctx context.Context, ref string, options types.ImagePullOptions) (io.ReadCloser, error) {
+func (m *MockDockerClient) ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ImagePush(ctx context.Context, ref string, options types.ImagePushOptions) (io.ReadCloser, error) {
+func (m *MockDockerClient) ImagePush(ctx context.Context, ref string, options image.PushOptions) (io.ReadCloser, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ImageRemove(ctx context.Context, image string, options types.ImageRemoveOptions) ([]types.ImageDeleteResponseItem, error) {
+func (m *MockDockerClient) ImageRemove(ctx context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) ImageSearch(ctx context.Context, term string, options types.ImageSearchOptions) ([]registry.SearchResult, error) {
+func (m *MockDockerClient) ImageSearch(ctx context.Context, term string, options registry.SearchOptions) ([]registry.SearchResult, error) {
 	return nil, nil
 }
 func (m *MockDockerClient) ImageSave(ctx context.Context, images []string) (io.ReadCloser, error) {
 	return nil, nil
 }
 func (m *MockDockerClient) ImageTag(ctx context.Context, image, ref string) error { return nil }
-func (m *MockDockerClient) ImagesPrune(ctx context.Context, pruneFilter filters.Args) (types.ImagesPruneReport, error) {
-	return types.ImagesPruneReport{}, nil
+func (m *MockDockerClient) ImagesPrune(ctx context.Context, pruneFilter filters.Args) (image.PruneReport, error) {
+	return image.PruneReport{}, nil
 }
 func (m *MockDockerClient) NodeInspectWithRaw(ctx context.Context, nodeID string) (swarm.Node, []byte, error) {
 	return swarm.Node{}, nil, nil
@@ -227,27 +229,27 @@ func (m *MockDockerClient) NodeRemove(ctx context.Context, nodeID string, option
 func (m *MockDockerClient) NodeUpdate(ctx context.Context, nodeID string, version swarm.Version, node swarm.NodeSpec) error {
 	return nil
 }
-func (m *MockDockerClient) NetworkConnect(ctx context.Context, network, container string, config *network.EndpointSettings) error {
+func (m *MockDockerClient) NetworkConnect(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error {
 	return nil
 }
-func (m *MockDockerClient) NetworkCreate(ctx context.Context, name string, options types.NetworkCreate) (types.NetworkCreateResponse, error) {
-	return types.NetworkCreateResponse{}, nil
+func (m *MockDockerClient) NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+	return network.CreateResponse{}, nil
 }
 func (m *MockDockerClient) NetworkDisconnect(ctx context.Context, network, container string, force bool) error {
 	return nil
 }
-func (m *MockDockerClient) NetworkInspect(ctx context.Context, network string, options types.NetworkInspectOptions) (types.NetworkResource, error) {
-	return types.NetworkResource{}, nil
+func (m *MockDockerClient) NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
+	return network.Inspect{}, nil
 }
-func (m *MockDockerClient) NetworkInspectWithRaw(ctx context.Context, network string, options types.NetworkInspectOptions) (types.NetworkResource, []byte, error) {
-	return types.NetworkResource{}, nil, nil
+func (m *MockDockerClient) NetworkInspectWithRaw(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, []byte, error) {
+	return network.Inspect{}, nil, nil
 }
-func (m *MockDockerClient) NetworkList(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error) {
+func (m *MockDockerClient) NetworkList(ctx context.Context, options network.ListOptions) ([]network.Inspect, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) NetworkRemove(ctx context.Context, network string) error { return nil }
-func (m *MockDockerClient) NetworksPrune(ctx context.Context, pruneFilter filters.Args) (types.NetworksPruneReport, error) {
-	return types.NetworksPruneReport{}, nil
+func (m *MockDockerClient) NetworkRemove(ctx context.Context, networkID string) error { return nil }
+func (m *MockDockerClient) NetworksPrune(ctx context.Context, pruneFilter filters.Args) (network.PruneReport, error) {
+	return network.PruneReport{}, nil
 }
 func (m *MockDockerClient) PluginList(ctx context.Context, filter filters.Args) (types.PluginsListResponse, error) {
 	return types.PluginsListResponse{}, nil
@@ -279,8 +281,8 @@ func (m *MockDockerClient) PluginInspectWithRaw(ctx context.Context, name string
 func (m *MockDockerClient) PluginCreate(ctx context.Context, createContext io.Reader, options types.PluginCreateOptions) error {
 	return nil
 }
-func (m *MockDockerClient) ServiceCreate(ctx context.Context, service swarm.ServiceSpec, options types.ServiceCreateOptions) (types.ServiceCreateResponse, error) {
-	return types.ServiceCreateResponse{}, nil
+func (m *MockDockerClient) ServiceCreate(ctx context.Context, service swarm.ServiceSpec, options types.ServiceCreateOptions) (swarm.ServiceCreateResponse, error) {
+	return swarm.ServiceCreateResponse{}, nil
 }
 func (m *MockDockerClient) ServiceInspectWithRaw(ctx context.Context, serviceID string, options types.ServiceInspectOptions) (swarm.Service, []byte, error) {
 	return swarm.Service{}, nil, nil
@@ -289,13 +291,13 @@ func (m *MockDockerClient) ServiceList(ctx context.Context, options types.Servic
 	return nil, nil
 }
 func (m *MockDockerClient) ServiceRemove(ctx context.Context, serviceID string) error { return nil }
-func (m *MockDockerClient) ServiceUpdate(ctx context.Context, serviceID string, version swarm.Version, service swarm.ServiceSpec, options types.ServiceUpdateOptions) (types.ServiceUpdateResponse, error) {
-	return types.ServiceUpdateResponse{}, nil
+func (m *MockDockerClient) ServiceUpdate(ctx context.Context, serviceID string, version swarm.Version, service swarm.ServiceSpec, options types.ServiceUpdateOptions) (swarm.ServiceUpdateResponse, error) {
+	return swarm.ServiceUpdateResponse{}, nil
 }
-func (m *MockDockerClient) ServiceLogs(ctx context.Context, serviceID string, options types.ContainerLogsOptions) (io.ReadCloser, error) {
+func (m *MockDockerClient) ServiceLogs(ctx context.Context, serviceID string, options container.LogsOptions) (io.ReadCloser, error) {
 	return nil, nil
 }
-func (m *MockDockerClient) TaskLogs(ctx context.Context, taskID string, options types.ContainerLogsOptions) (io.ReadCloser, error) {
+func (m *MockDockerClient) TaskLogs(ctx context.Context, taskID string, options container.LogsOptions) (io.ReadCloser, error) {
 	return nil, nil
 }
 func (m *MockDockerClient) TaskInspectWithRaw(ctx context.Context, taskID string) (swarm.Task, []byte, error) {
@@ -334,10 +336,10 @@ func (m *MockDockerClient) SecretInspectWithRaw(ctx context.Context, name string
 func (m *MockDockerClient) SecretUpdate(ctx context.Context, id string, version swarm.Version, secret swarm.SecretSpec) error {
 	return nil
 }
-func (m *MockDockerClient) Events(ctx context.Context, options types.EventsOptions) (<-chan events.Message, <-chan error) {
+func (m *MockDockerClient) Events(ctx context.Context, options events.ListOptions) (<-chan events.Message, <-chan error) {
 	return nil, nil
 }
-func (m *MockDockerClient) Info(ctx context.Context) (types.Info, error) { return types.Info{}, nil }
+func (m *MockDockerClient) Info(ctx context.Context) (system.Info, error) { return system.Info{}, nil }
 func (m *MockDockerClient) RegistryLogin(ctx context.Context, auth registry.AuthConfig) (registry.AuthenticateOKBody, error) {
 	return registry.AuthenticateOKBody{}, nil
 }
@@ -351,8 +353,8 @@ func (m *MockDockerClient) VolumeInspect(ctx context.Context, volumeID string) (
 func (m *MockDockerClient) VolumeInspectWithRaw(ctx context.Context, volumeID string) (volume.Volume, []byte, error) {
 	return volume.Volume{}, nil, nil
 }
-func (m *MockDockerClient) VolumesPrune(ctx context.Context, pruneFilter filters.Args) (types.VolumesPruneReport, error) {
-	return types.VolumesPruneReport{}, nil
+func (m *MockDockerClient) VolumesPrune(ctx context.Context, pruneFilter filters.Args) (volume.PruneReport, error) {
+	return volume.PruneReport{}, nil
 }
 func (m *MockDockerClient) VolumeUpdate(ctx context.Context, volumeID string, version swarm.Version, options volume.UpdateOptions) error {
 	return nil
@@ -370,17 +372,17 @@ func (m *MockDockerClient) ConfigInspectWithRaw(ctx context.Context, name string
 func (m *MockDockerClient) ConfigUpdate(ctx context.Context, id string, version swarm.Version, config swarm.ConfigSpec) error {
 	return nil
 }
-func (m *MockDockerClient) ContainersPruneReport(ctx context.Context, cfg filters.Args) (types.ContainersPruneReport, error) {
-	return types.ContainersPruneReport{}, nil
+func (m *MockDockerClient) ContainersPruneReport(ctx context.Context, cfg filters.Args) (container.PruneReport, error) {
+	return container.PruneReport{}, nil
 }
-func (m *MockDockerClient) VolumesPruneReport(ctx context.Context, cfg filters.Args) (types.VolumesPruneReport, error) {
-	return types.VolumesPruneReport{}, nil
+func (m *MockDockerClient) VolumesPruneReport(ctx context.Context, cfg filters.Args) (volume.PruneReport, error) {
+	return volume.PruneReport{}, nil
 }
-func (m *MockDockerClient) ImagesPruneReport(ctx context.Context, cfg filters.Args) (types.ImagesPruneReport, error) {
-	return types.ImagesPruneReport{}, nil
+func (m *MockDockerClient) ImagesPruneReport(ctx context.Context, cfg filters.Args) (image.PruneReport, error) {
+	return image.PruneReport{}, nil
 }
-func (m *MockDockerClient) NetworksPruneReport(ctx context.Context, cfg filters.Args) (types.NetworksPruneReport, error) {
-	return types.NetworksPruneReport{}, nil
+func (m *MockDockerClient) NetworksPruneReport(ctx context.Context, cfg filters.Args) (network.PruneReport, error) {
+	return network.PruneReport{}, nil
 }
 func (m *MockDockerClient) BuildCachePruneReport(ctx context.Context, cfg types.BuildCachePruneOptions) (types.BuildCachePruneReport, error) {
 	return types.BuildCachePruneReport{}, nil
@@ -418,8 +420,8 @@ func TestCreateVolumeVolumeInUse(t *testing.T) {
 	// Cleanup function
 	defer func() {
 		t.Logf("→ Cleaning up test containers and volume...")
-		_ = client.ContainerRemove(ctx, container1Name, types.ContainerRemoveOptions{Force: true})
-		_ = client.ContainerRemove(ctx, container2Name, types.ContainerRemoveOptions{Force: true})
+		_ = client.ContainerRemove(ctx, container1Name, container.RemoveOptions{Force: true})
+		_ = client.ContainerRemove(ctx, container2Name, container.RemoveOptions{Force: true})
 		_ = client.VolumeRemove(ctx, testVolName, true)
 		t.Logf("✓ Cleanup complete")
 	}()
@@ -434,7 +436,7 @@ func TestCreateVolumeVolumeInUse(t *testing.T) {
 
 	// Step 2: Pull busybox image
 	t.Logf("Step 2: Pulling busybox image...")
-	pullReader, err := client.ImagePull(ctx, "busybox:latest", types.ImagePullOptions{})
+	pullReader, err := client.ImagePull(ctx, "busybox:latest", image.PullOptions{})
 	if err != nil {
 		t.Skipf("Cannot pull image (Docker registry might be unavailable): %v", err)
 	}
@@ -456,7 +458,7 @@ func TestCreateVolumeVolumeInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create container 1: %v", err)
 	}
-	err = client.ContainerStart(ctx, resp1.ID, types.ContainerStartOptions{})
+	err = client.ContainerStart(ctx, resp1.ID, container.StartOptions{})
 	if err != nil {
 		t.Fatalf("Failed to start container 1: %v", err)
 	}
@@ -473,7 +475,7 @@ func TestCreateVolumeVolumeInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create container 2: %v", err)
 	}
-	err = client.ContainerStart(ctx, resp2.ID, types.ContainerStartOptions{})
+	err = client.ContainerStart(ctx, resp2.ID, container.StartOptions{})
 	if err != nil {
 		t.Fatalf("Failed to start container 2: %v", err)
 	}
