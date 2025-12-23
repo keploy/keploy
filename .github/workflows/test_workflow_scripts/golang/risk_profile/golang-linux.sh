@@ -7,7 +7,6 @@
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
-
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
