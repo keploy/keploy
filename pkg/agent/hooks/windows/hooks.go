@@ -83,6 +83,12 @@ func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Ag
 }
 
 func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
+	// Check if running with administrator privileges (required for WinDivert)
+	if !isAdmin() {
+		h.logger.Error("Keploy on Windows requires Administrator privileges to load the network driver.")
+		return errors.New("administrator privileges required")
+	}
+
 	// Ensure the WinDivert artifacts are present in the executable's directory.
 	dllPath, err := h.ensureWinDivertAssets()
 	if err != nil {
