@@ -36,6 +36,34 @@ wait_for_mysql() {
   endsec; return 1
 }
 
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
+}
+
 send_request() {
   local kp_pid="$1"
 
@@ -107,11 +135,14 @@ run_record_iteration() {
 
   # Wait for keploy exit and capture code
   section "Stop Recording"
-  sleep 10
+  
+  # Wait for at least 10 tests to be recorded
+  wait_for_tests 10 60
+  
   echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
   pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill $pid
   wait "$pid" 2>/dev/null || true
-  sleep 30
+  sleep 5
   echo "Recording stopped."
   endsec
 

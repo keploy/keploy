@@ -185,10 +185,11 @@ send_grpc_requests() {
     sleep 3
 }
 
-# Validates the Keploy test report to ensure all test sets passed
+# Validates the Keploy test report to ensure all existing test sets passed
+# Args: $1 = expected number of test sets (optional)
 check_test_report() {
-    local expected_test_sets=$1
-    echo "Checking test reports (expecting $expected_test_sets test sets)..."
+    local expected_test_sets=${1:-0}
+    echo "Checking test reports..."
     
     if [ ! -d "./keploy/reports" ]; then
         echo "Test report directory not found!"
@@ -202,27 +203,42 @@ check_test_report() {
         return 1
     fi
     
+    # Find all test-set report files dynamically
+    local report_files
+    report_files=$(ls "$latest_report_dir"/test-set-*-report.yaml 2>/dev/null)
+    
+    if [ -z "$report_files" ]; then
+        echo "No test set reports found in $latest_report_dir"
+        return 1
+    fi
+    
     local all_passed=true
-    # Loop through expected test sets
-    for ((i=0; i<expected_test_sets; i++)); do
-        report_file="$latest_report_dir/test-set-$i-report.yaml"
-        
-        if [ ! -f "$report_file" ]; then
-            echo "Report file not found: $report_file"
-            all_passed=false
-            break
-        fi
+    local test_set_count=0
+    
+    # Loop through all existing test set reports
+    for report_file in $report_files; do
+        test_set_count=$((test_set_count + 1))
+        local test_set_name
+        test_set_name=$(basename "$report_file" | sed 's/-report.yaml//')
         
         local test_status
         test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
         
-        echo "Status for test-set-$i: $test_status"
+        echo "Status for $test_set_name: $test_status"
         if [ "$test_status" != "PASSED" ]; then
             all_passed=false
-            echo "Test set $i did not pass."
+            echo "Test set $test_set_name did not pass."
         fi
     done
 
+    echo "Found $test_set_count test set(s)."
+    
+    # If expected count specified, verify it
+    if [ "$expected_test_sets" -gt 0 ] && [ "$test_set_count" -ne "$expected_test_sets" ]; then
+        echo "Expected $expected_test_sets test set(s), but found $test_set_count"
+        return 1
+    fi
+    
     if [ "$all_passed" = false ]; then
         echo "One or more test sets failed."
         return 1
@@ -230,6 +246,35 @@ check_test_report() {
 
     echo "All tests passed in reports."
     return 0
+}
+
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        # Count test files across all test sets
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
 }
 
 # --- Main Logic ---
@@ -247,21 +292,42 @@ sleep 4
 
 echo "✅ Built grpc-secret binary"
 
-# --- Record 2 test sets ---
-echo "📝 Phase 1: Recording 2 test sets with all 4 endpoints..."
+# --- Record test cases ---
+# We send 4 gRPC requests, each generates 2 test cases (request + reflection) = 8 tests per iteration
+# Recording twice should give us 16 tests total (may be in 1 or 2 test sets depending on timing)
+echo "📝 Phase 1: Recording test cases with all 4 endpoints (2 iterations)..."
+
+EXPECTED_TESTS_PER_ITERATION=8
+TOTAL_EXPECTED_TESTS=0
 
 for i in 1 2; do
     app_name="grpcSecret_${i}"
     echo "Recording iteration $i..."
     
+    # Track tests before this iteration
+    tests_before=0
+    if [ -d "./keploy" ]; then
+        tests_before=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    
     # Start keploy record in background
     sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-secret" --generateGithubActions=false 2>&1 | tee ${app_name}.txt &
     
-    # Send all 4 gRPC requests
-    send_grpc_requests &
+    # Send all 4 gRPC requests (not in background - wait for them to complete)
+    send_grpc_requests
     
-    # Wait for requests to complete
-    sleep 15
+    # Calculate expected total tests after this iteration
+    TOTAL_EXPECTED_TESTS=$((tests_before + EXPECTED_TESTS_PER_ITERATION))
+    
+    # Wait for tests to be captured before killing keploy
+    if ! wait_for_tests $TOTAL_EXPECTED_TESTS 60; then
+        echo "❌ Failed to record expected tests in iteration $i"
+        cat "${app_name}.txt"
+        exit 1
+    fi
+    
+    # Give keploy a moment to finish writing files
+    sleep 2
     
     # Kill keploy
     kill_keploy_process
@@ -269,9 +335,17 @@ for i in 1 2; do
     # Check for errors and race conditions
     check_for_errors "${app_name}.txt"
     
-    sleep 5
-    echo "✅ Recorded test set ${i}"
+    sleep 3
+    echo "✅ Recorded iteration ${i} (total tests: $TOTAL_EXPECTED_TESTS)"
 done
+
+# Verify total recorded tests
+final_test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+echo "📊 Total recorded tests: $final_test_count (expected: 16)"
+if [ "$final_test_count" -lt 16 ]; then
+    echo "❌ Not enough tests recorded. Expected at least 16, got $final_test_count"
+    exit 1
+fi
 
 # --- Run keploy test (before sanitize) ---
 echo "🧪 Phase 2: Running keploy test (before sanitize)..."
@@ -280,8 +354,8 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --gene
 # Check for errors and race conditions
 check_for_errors test_before_sanitize.txt
 
-# Verify test sets passed
-if ! check_test_report 2; then
+# Verify test sets passed (dynamically checks all existing test sets)
+if ! check_test_report; then
     echo "⚠️ Test report check before sanitize: some tests may have failed (expected)"
 else
     echo "✅ All tests passed before sanitize"
@@ -304,8 +378,8 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --gene
 # Check for errors and race conditions
 check_for_errors test_after_sanitize.txt
 
-# Verify all test sets passed
-if ! check_test_report 2; then
+# Verify all test sets passed (dynamically checks all existing test sets)
+if ! check_test_report; then
     echo "❌ Test report check failed after sanitize."
     cat test_after_sanitize.txt
     exit 1

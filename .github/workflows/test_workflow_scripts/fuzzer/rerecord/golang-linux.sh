@@ -40,6 +40,34 @@ wait_for_http() {
   return 1
 }
 
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
+}
+
 # --- Main Execution Logic ---
 
 export ASSERT_CHAINS_WITH=$(realpath ./fuzzer_chains.yaml)
@@ -68,7 +96,8 @@ $RERECORD_CLIENT_BIN -url http://localhost:8080 -calls 50 -chaining true -time 1
 echo "Fuzzer client finished generating traffic."
 endsec
 
-sleep 10
+# Wait for at least 1 test to be recorded
+wait_for_tests 1 60
 
 # --- 3. Stop Recording ---
 section "Stop Recording"

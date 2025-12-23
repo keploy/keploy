@@ -217,38 +217,60 @@ check_report_for_risk_profiles() {
     echo "✅ All test cases in the report match their expected outcomes."
 }
 
-# Validates the Keploy test report to ensure all test sets passed
+# Validates the Keploy test report to ensure all existing test sets passed
+# Args: $1 = expected number of test sets (optional)
 check_test_report() {
+    local expected_test_sets=${1:-0}
     echo "Checking test reports..."
+    
     if [ ! -d "./keploy/reports" ]; then
         echo "Test report directory not found!"
         return 1
     fi
 
     local latest_report_dir
-    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1)
     if [ -z "$latest_report_dir" ]; then
         echo "No test run directory found in ./keploy/reports/"
         return 1
     fi
     
+    # Find all test-set report files dynamically
+    local report_files
+    report_files=$(ls "$latest_report_dir"/test-set-*-report.yaml 2>/dev/null)
+    
+    if [ -z "$report_files" ]; then
+        echo "No test set reports found in $latest_report_dir"
+        return 1
+    fi
+    
     local all_passed=true
-    # Loop through all generated report files
-    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
-        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
-        
+    local test_set_count=0
+    
+    # Loop through all existing test set reports
+    for report_file in $report_files; do
+        test_set_count=$((test_set_count + 1))
         local test_set_name
-        test_set_name=$(basename "$report_file" -report.yaml)
+        test_set_name=$(basename "$report_file" | sed 's/-report.yaml//')
+        
         local test_status
         test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
         
-        echo "Status for ${test_set_name}: $test_status"
+        echo "Status for $test_set_name: $test_status"
         if [ "$test_status" != "PASSED" ]; then
             all_passed=false
-            echo "Test set ${test_set_name} did not pass."
+            echo "Test set $test_set_name did not pass."
         fi
     done
 
+    echo "Found $test_set_count test set(s)."
+    
+    # If expected count specified, verify it
+    if [ "$expected_test_sets" -gt 0 ] && [ "$test_set_count" -ne "$expected_test_sets" ]; then
+        echo "Expected $expected_test_sets test set(s), but found $test_set_count"
+        return 1
+    fi
+    
     if [ "$all_passed" = false ]; then
         echo "One or more test sets failed."
         return 1
@@ -256,6 +278,35 @@ check_test_report() {
 
     echo "All tests passed in reports."
     return 0
+}
+
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        # Count test files across all test sets
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
 }
 
 # Checks that the safe normalize run produced the expected warnings
@@ -312,7 +363,9 @@ endsec
 
 section "Generating traffic using curl.sh..."
 bash ./curl.sh
-sleep 5
+
+# Wait for at least 1 test to be recorded before stopping keploy
+wait_for_tests 1 60
 endsec
 
 section "Stopping Keploy record process (PID: $KEPLOY_PID)..."

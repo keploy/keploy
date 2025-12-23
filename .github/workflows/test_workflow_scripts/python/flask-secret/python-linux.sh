@@ -36,6 +36,34 @@ $RECORD_BIN config --generate
 rm -rf keploy/  # Clean old test data
 sleep 5  # Allow time for configuration changes
 
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
+}
+
 send_request(){
     mode="$1"
 
@@ -60,8 +88,15 @@ send_request(){
         done
     fi
 
-    # Wait for keploy to flush recordings, then stop it
-    sleep 10
+    # Wait for tests to be recorded based on mode
+    if [ "$mode" = "astro" ]; then
+        wait_for_tests 1 60
+    elif [ "$mode" = "secrets" ]; then
+        wait_for_tests 3 60
+    else
+        wait_for_tests 3 60
+    fi
+    
     pid=$(pgrep keploy | head -n 1)
     if [ -n "$pid" ]; then
         echo "$pid Keploy PID"

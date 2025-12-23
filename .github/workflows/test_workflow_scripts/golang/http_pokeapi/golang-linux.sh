@@ -28,6 +28,34 @@ sudo "$RECORD_BIN" config --generate
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
 
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
+}
+
 send_request() {
     local index=$1  
 
@@ -60,8 +88,9 @@ send_request() {
 
     curl -s -X GET http://localhost:8080/api/greet?format=xml
 
-    # Wait for 7 seconds for Keploy to record the tcs and mocks.
-    sleep 7
+    # Wait for at least 6 tests to be recorded
+    wait_for_tests 6 60
+    
     pid=$(pgrep keploy)
     echo "$pid Keploy PID"
     echo "Killing Keploy"

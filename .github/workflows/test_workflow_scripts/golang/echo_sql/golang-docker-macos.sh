@@ -89,6 +89,34 @@ container_kill() {
     sudo kill $pid
 }
 
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
+}
+
 send_request(){
     echo "Sending requests to the application..."
     sleep 10
@@ -117,8 +145,8 @@ send_request(){
 
     curl -X GET http://localhost:${APP_PORT}/health
 
-    # Wait for 3 seconds for keploy to record the test cases and mocks.
-    sleep 3
+    # Wait for at least 3 tests to be recorded
+    wait_for_tests 3 60
     echo "Requests sent successfully."
 }
 
