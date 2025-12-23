@@ -166,7 +166,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tc, err := a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
+	var tc <-chan *models.TestCase
+
+	tc, err = a.svc.StartIncomingProxy(ctx, incomingReq.IncomingOptions)
+
 	if err != nil {
 		stopReason := "failed to start the ingress proxy"
 		a.logger.Error(stopReason, zap.Error(err))
