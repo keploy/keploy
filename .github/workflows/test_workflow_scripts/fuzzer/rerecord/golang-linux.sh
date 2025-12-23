@@ -96,16 +96,27 @@ $RERECORD_CLIENT_BIN -url http://localhost:8080 -calls 50 -chaining true -time 1
 echo "Fuzzer client finished generating traffic."
 endsec
 
-# Wait for at least 1 test to be recorded
-wait_for_tests 1 60
+# Give Keploy time to process and write all captured tests
+echo "Waiting for Keploy to flush all tests to disk..."
+sleep 10
+
+# Wait for tests to be recorded - fuzzer makes 50 calls, expect at least 40 tests
+# (some may be deduplicated or filtered)
+wait_for_tests 40 120
 
 # --- 3. Stop Recording ---
 section "Stop Recording"
+
+# Give Keploy additional time to ensure all tests are written
+sleep 5
+
 REC_PID="$(pgrep -n -f 'keploy record' || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 if [ -n "$REC_PID" ]; then
     sudo kill -INT "$REC_PID" 2>/dev/null || true
+    # Wait for graceful shutdown
+    sleep 5
 else
     echo "No keploy process found to kill."
 fi

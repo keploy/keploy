@@ -6,21 +6,50 @@ set -euo pipefail
 # for the below shource make it such a way that if the file is not present or already present it does not error
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
-# Function to find available port
+# Port lock directory for concurrent execution safety
+PORT_LOCK_DIR="$HOME/.keploy-port-locks"
+mkdir -p "$PORT_LOCK_DIR"
+
+# Function to find available port with file-based locking
+# This prevents race conditions when multiple pipelines start simultaneously
 find_available_port() {
     local start_port=${1:-8080}
     local port=$start_port
-    while lsof -i:$port >/dev/null 2>&1; do
+    local max_port=$((start_port + 100))
+    
+    while [ $port -lt $max_port ]; do
+        # Check if port is in use by the system
+        if ! lsof -i:$port >/dev/null 2>&1; then
+            # Try to acquire a lock file for this port
+            local lock_file="$PORT_LOCK_DIR/port-$port.lock"
+            if ( set -o noclobber; echo "$JOB_ID" > "$lock_file" ) 2>/dev/null; then
+                # Successfully acquired lock
+                echo $port
+                return 0
+            fi
+        fi
         port=$((port + 1))
     done
-    echo $port
+    
+    # Fallback: return a port even if we couldn't lock it
+    echo $start_port
 }
 
-# Find 4 available ports
+# Cleanup port locks on exit
+cleanup_port_locks() {
+    rm -f "$PORT_LOCK_DIR/port-$APP_PORT.lock" 2>/dev/null || true
+    rm -f "$PORT_LOCK_DIR/port-$DB_PORT.lock" 2>/dev/null || true
+    rm -f "$PORT_LOCK_DIR/port-$PROXY_PORT.lock" 2>/dev/null || true
+    rm -f "$PORT_LOCK_DIR/port-$DNS_PORT.lock" 2>/dev/null || true
+    # Clean up stale lock files older than 1 hour
+    find "$PORT_LOCK_DIR" -name "port-*.lock" -type f -mmin +60 -delete 2>/dev/null || true
+}
+
+# Find 4 available ports with sufficient spacing to avoid conflicts
 APP_PORT=$(find_available_port 8080)
-DB_PORT=$(find_available_port $((APP_PORT + 1)))
-PROXY_PORT=$(find_available_port $((DB_PORT + 1)))
-DNS_PORT=$(find_available_port $((PROXY_PORT + 1)))
+DB_PORT=$(find_available_port $((APP_PORT + 10)))
+PROXY_PORT=$(find_available_port $((DB_PORT + 10)))
+DNS_PORT=$(find_available_port $((PROXY_PORT + 10)))
 
 # Generate unique container names with JOB_ID suffix
 APP_CONTAINER="flaskApp_${JOB_ID}"
@@ -32,19 +61,21 @@ echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
 
 # Cleanup function to remove containers
+# Only removes containers specific to THIS job (using JOB_ID) to avoid affecting concurrent pipelines
 cleanup() {
-    echo "Cleaning up containers..."
+    echo "Cleaning up containers for job ${JOB_ID}..."
     docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_1" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_2" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_test_1" >/dev/null 2>&1 || true
     docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
-    docker rm -f mongo >/dev/null 2>&1 || true
-    # Clean up any keploy agent containers created by this job
-    docker ps -a --filter "name=keploy-v3" --format "{{.Names}}" | while read -r name; do
+    # Only remove exited keploy-v3 containers to avoid affecting other concurrent pipelines
+    docker ps -a --filter "name=keploy-v3" --filter "status=exited" --format "{{.Names}}" | while read -r name; do
         [ -n "$name" ] && docker rm -f "$name" 2>/dev/null || true
     done
+    # Release port locks
+    cleanup_port_locks
     echo "Cleanup completed"
 }
 
