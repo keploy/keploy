@@ -73,10 +73,14 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    pid=$(pgrep keploy)
+    pid=$(pgrep -f keploy || true)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
-    sudo kill $pid
+    if [ -n "$pid" ]; then
+        sudo kill $pid 2>/dev/null || true
+    fi
+    # Give Keploy time to cleanup eBPF resources properly
+    sleep 5
 }
 
 

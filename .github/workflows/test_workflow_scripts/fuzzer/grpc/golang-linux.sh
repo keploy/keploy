@@ -150,12 +150,14 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Stop keploy record
- pid=$(pgrep keploy || true)
+ pid=$(pgrep -f keploy || true)
  echo "$pid Keploy PID"
  if [ -n "${pid:-}" ]; then
    echo "Killing keploy"
-   sudo kill "$pid" || true
+   sudo kill "$pid" 2>/dev/null || true
  fi
+ # Give Keploy time to cleanup eBPF resources properly
+ sleep 5
 
  echo "Ensuring fuzzer server is stopped..."
  sleep 10
@@ -241,12 +243,13 @@ elif [ "$MODE" = "outgoing" ]; then
  sleep 10
 
 
- pid=$(pgrep keploy || true)
+ pid=$(pgrep -f keploy || true)
  echo "$pid Keploy PID"
  if [ -n "${pid:-}" ]; then
    echo "Killing keploy"
-   sudo kill "$pid" || true
+   sudo kill "$pid" 2>/dev/null || true
  fi
+ # Give Keploy time to cleanup eBPF resources properly
  sleep 5
 
  echo "Ensuring fuzzer client is stopped..."

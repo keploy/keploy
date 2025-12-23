@@ -316,7 +316,9 @@ sleep 5
 endsec
 
 section "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+pid=$(pgrep -f keploy || true) && [ -n "$pid" ] && sudo kill "$pid" 2>/dev/null || true
+# Give Keploy time to cleanup eBPF resources properly
+sleep 5
 wait "$pid" 2>/dev/null || true
 sleep 5
 check_for_errors "record.log"

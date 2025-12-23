@@ -22,10 +22,14 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
-    pid=$(pgrep -n keploy)
+    pid=$(pgrep -n -f keploy || true)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
-    sudo kill $pid
+    if [ -n "$pid" ]; then
+        sudo kill $pid 2>/dev/null || true
+    fi
+    # Give Keploy time to cleanup eBPF resources properly
+    sleep 5
 }
 
 send_request(){

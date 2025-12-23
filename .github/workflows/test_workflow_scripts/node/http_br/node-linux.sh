@@ -67,10 +67,14 @@ send_request(){
     echo "Killing node server.js"
     kill $node_pid
     wait $node_pid 2>/dev/null
-    pid=$(pgrep keploy)
+    pid=$(pgrep -f keploy || true)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
-    sudo kill $pid
+    if [ -n "$pid" ]; then
+        sudo kill $pid 2>/dev/null || true
+    fi
+    # Give Keploy time to cleanup eBPF resources properly
+    sleep 5
 }
 
 # Record and test sessions in a loop

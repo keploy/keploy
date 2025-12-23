@@ -91,7 +91,14 @@ send_request() {
   sleep 10
   echo "$kp_pid Keploy PID"
   echo "Killing Keploy"
-  sudo kill "$kp_pid" 2>/dev/null || true
+  # Use pgrep to find actual keploy process and kill it
+  local pid
+  pid=$(pgrep -f keploy || true)
+  if [ -n "$pid" ]; then
+    sudo kill "$pid" 2>/dev/null || true
+  fi
+  # Give Keploy time to cleanup eBPF resources properly
+  sleep 5
 }
 
 run_record_iteration() {

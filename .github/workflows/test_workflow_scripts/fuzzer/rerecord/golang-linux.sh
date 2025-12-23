@@ -77,6 +77,8 @@ echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 if [ -n "$REC_PID" ]; then
     sudo kill -INT "$REC_PID" 2>/dev/null || true
+    # Give Keploy time to cleanup eBPF resources properly
+    sleep 5
 else
     echo "No keploy process found to kill."
 fi

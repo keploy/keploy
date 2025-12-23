@@ -5,12 +5,12 @@ source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 # Function to cleanup any remaining keploy processes
 cleanup_keploy() {
     echo "Cleaning up any remaining keploy processes..."
-    local pids=$(pgrep keploy)
+    local pids=$(pgrep -f keploy)
     if [ -n "$pids" ]; then
         echo "Found keploy processes: $pids"
         echo "$pids" | xargs -r sudo kill -9 2>/dev/null || true
         sleep 1
-        if pgrep keploy >/dev/null; then
+        if pgrep -f keploy >/dev/null; then
             echo "Warning: Some keploy processes may still be running"
         else
             echo "All keploy processes cleaned up successfully"
@@ -62,7 +62,7 @@ send_request(){
 
     # Wait for keploy to flush recordings, then stop it
     sleep 10
-    pid=$(pgrep keploy | head -n 1)
+    pid=$(pgrep -f keploy | head -n 1)
     if [ -n "$pid" ]; then
         echo "$pid Keploy PID"
         echo "Killing keploy"
@@ -84,11 +84,14 @@ send_request(){
             echo "Successfully killed keploy gracefully"
         fi
         
+        # Give Keploy time to cleanup eBPF resources properly
+        sleep 5
+        
         # Wait a bit and verify the process is gone
         sleep 2
-        if pgrep keploy >/dev/null; then
+        if pgrep -f keploy >/dev/null; then
             echo "Warning: Keploy process may still be running"
-            pgrep keploy | xargs -r sudo kill -9 2>/dev/null || true
+            pgrep -f keploy | xargs -r sudo kill -9 2>/dev/null || true
         fi
     else
         echo "No keploy process found to kill"

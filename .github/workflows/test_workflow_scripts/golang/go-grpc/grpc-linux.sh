@@ -146,7 +146,9 @@ wait_for_port() {
 
 # Kills the keploy process and waits for it to terminate
 kill_keploy_process() {
-    pid=$(pgrep keploy || true) && [ -n "$pid" ] && sudo kill "$pid"
+    pid=$(pgrep -f keploy || true) && [ -n "$pid" ] && sudo kill "$pid" 2>/dev/null || true
+    # Give Keploy time to cleanup eBPF resources properly
+    sleep 5
     wait "$pid" 2>/dev/null || true
 }
 

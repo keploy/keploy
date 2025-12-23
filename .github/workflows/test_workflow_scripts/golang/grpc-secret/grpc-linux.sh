@@ -82,7 +82,7 @@ check_for_errors() {
 
 # Kills the keploy process gracefully
 kill_keploy_process() {
-    pid=$(pgrep keploy | head -n 1)
+    pid=$(pgrep -f keploy | head -n 1)
     if [ -n "$pid" ]; then
         echo "$pid Keploy PID"
         echo "Killing keploy"
@@ -104,11 +104,14 @@ kill_keploy_process() {
             echo "Successfully killed keploy gracefully"
         fi
         
+        # Give Keploy time to cleanup eBPF resources properly
+        sleep 5
+        
         # Wait and verify the process is gone
         sleep 2
-        if pgrep keploy >/dev/null; then
+        if pgrep -f keploy >/dev/null; then
             echo "Warning: Keploy process may still be running"
-            pgrep keploy | xargs -r sudo kill -9 2>/dev/null || true
+            pgrep -f keploy | xargs -r sudo kill -9 2>/dev/null || true
         fi
     else
         echo "No keploy process found to kill"
