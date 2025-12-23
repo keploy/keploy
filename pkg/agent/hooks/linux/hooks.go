@@ -306,42 +306,62 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
-	if err := h.socket.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the socket")
+	if h.socket != nil {
+		if err := h.socket.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the socket")
+		}
 	}
 
-	if err := h.udpp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the udpp4")
+	if h.udpp4 != nil {
+		if err := h.udpp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udpp4")
+		}
 	}
 
-	if err := h.connect4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect4")
+	if h.connect4 != nil {
+		if err := h.connect4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect4")
+		}
 	}
 
-	if err := h.gp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp4")
+	if h.gp4 != nil {
+		if err := h.gp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp4")
+		}
 	}
 
-	if err := h.tcpv4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4")
+	if h.tcpv4 != nil {
+		if err := h.tcpv4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv4")
+		}
 	}
 
-	if err := h.tcpv4Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
+	if h.tcpv4Ret != nil {
+		if err := h.tcpv4Ret.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
+		}
 	}
 
-	if err := h.connect6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect6")
+	if h.connect6 != nil {
+		if err := h.connect6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect6")
+		}
 	}
-	if err := h.gp6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp6")
+	if h.gp6 != nil {
+		if err := h.gp6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp6")
+		}
 	}
 
-	if err := h.tcpv6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6")
+	if h.tcpv6 != nil {
+		if err := h.tcpv6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv6")
+		}
 	}
-	if err := h.tcpv6Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+	if h.tcpv6Ret != nil {
+		if err := h.tcpv6Ret.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+		}
 	}
 
 	// Close eBPF objects with proper synchronization
