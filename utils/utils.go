@@ -284,15 +284,20 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 //	return logger
 //}
 
-// LogError logs the error with the provided fields if the error is not context.Canceled.
+// LogError logs the error with the provided fields if the error is not context.Canceled
+// or os.ErrProcessDone (which is a harmless race condition when stopping processes).
 func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	if logger == nil {
 		fmt.Println("Failed to log error. Logger is nil.")
 		return
 	}
-	if !errors.Is(err, context.Canceled) {
-		logger.Error(msg, append(fields, zap.Error(err))...)
+	// Skip logging for harmless errors:
+	// - context.Canceled: normal cancellation
+	// - os.ErrProcessDone: race condition when process already exited
+	if errors.Is(err, context.Canceled) || errors.Is(err, os.ErrProcessDone) {
+		return
 	}
+	logger.Error(msg, append(fields, zap.Error(err))...)
 }
 
 // RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
