@@ -646,8 +646,10 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	// closing all events
 	//other
-	if err := h.socket.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the socket")
+	if h.socket != nil {
+		if err := h.socket.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the socket")
+		}
 	}
 
 	// Reset the app ID with proper synchronization
@@ -656,101 +658,159 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	h.m.Unlock()
 
 	if !opts.E2E {
-		if err := h.udpp4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the udpp4")
+		if h.udpp4 != nil {
+			if err := h.udpp4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the udpp4")
+			}
 		}
 
-		if err := h.connect4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the connect4")
+		if h.connect4 != nil {
+			if err := h.connect4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the connect4")
+			}
 		}
 
-		if err := h.gp4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the gp4")
+		if h.gp4 != nil {
+			if err := h.gp4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the gp4")
+			}
 		}
 
-		if err := h.tcppv4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcppv4")
+		if h.tcppv4 != nil {
+			if err := h.tcppv4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the tcppv4")
+			}
 		}
 
-		if err := h.tcpv4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv4")
+		if h.tcpv4 != nil {
+			if err := h.tcpv4.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the tcpv4")
+			}
 		}
 
-		if err := h.tcpv4Ret.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
+		if h.tcpv4Ret != nil {
+			if err := h.tcpv4Ret.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
+			}
 		}
 
-		if err := h.connect6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the connect6")
+		if h.connect6 != nil {
+			if err := h.connect6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the connect6")
+			}
 		}
-		if err := h.gp6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the gp6")
+		if h.gp6 != nil {
+			if err := h.gp6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the gp6")
+			}
 		}
-		if err := h.tcppv6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcppv6")
+		if h.tcppv6 != nil {
+			if err := h.tcppv6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the tcppv6")
+			}
 		}
-		if err := h.tcpv6.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv6")
+		if h.tcpv6 != nil {
+			if err := h.tcpv6.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the tcpv6")
+			}
 		}
-		if err := h.tcpv6Ret.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+		if h.tcpv6Ret != nil {
+			if err := h.tcpv6Ret.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+			}
 		}
 	}
-	if err := h.accept.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the accept")
+	if h.accept != nil {
+		if err := h.accept.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the accept")
+		}
 	}
-	if err := h.acceptRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the acceptRet")
+	if h.acceptRet != nil {
+		if err := h.acceptRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the acceptRet")
+		}
 	}
-	if err := h.accept4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the accept4")
+	if h.accept4 != nil {
+		if err := h.accept4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the accept4")
+		}
 	}
-	if err := h.accept4Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the accept4Ret")
+	if h.accept4Ret != nil {
+		if err := h.accept4Ret.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the accept4Ret")
+		}
 	}
-	if err := h.read.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the read")
+	if h.read != nil {
+		if err := h.read.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the read")
+		}
 	}
-	if err := h.readRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the readRet")
+	if h.readRet != nil {
+		if err := h.readRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the readRet")
+		}
 	}
-	if err := h.write.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the write")
+	if h.write != nil {
+		if err := h.write.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the write")
+		}
 	}
-	if err := h.writeRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the writeRet")
+	if h.writeRet != nil {
+		if err := h.writeRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the writeRet")
+		}
 	}
-	if err := h.writev.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the writev")
+	if h.writev != nil {
+		if err := h.writev.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the writev")
+		}
 	}
-	if err := h.writevRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the writevRet")
+	if h.writevRet != nil {
+		if err := h.writevRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the writevRet")
+		}
 	}
 
-	if err := h.readv.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the readv")
+	if h.readv != nil {
+		if err := h.readv.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the readv")
+		}
 	}
-	if err := h.readvRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the readvRet")
+	if h.readvRet != nil {
+		if err := h.readvRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the readvRet")
+		}
 	}
 
-	if err := h.close.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the close")
+	if h.close != nil {
+		if err := h.close.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the close")
+		}
 	}
-	if err := h.closeRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the closeRet")
+	if h.closeRet != nil {
+		if err := h.closeRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the closeRet")
+		}
 	}
-	if err := h.sendto.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the sendto")
+	if h.sendto != nil {
+		if err := h.sendto.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sendto")
+		}
 	}
-	if err := h.sendtoRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the sendtoRet")
+	if h.sendtoRet != nil {
+		if err := h.sendtoRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sendtoRet")
+		}
 	}
-	if err := h.recvfrom.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the recvfrom")
+	if h.recvfrom != nil {
+		if err := h.recvfrom.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the recvfrom")
+		}
 	}
-	if err := h.recvfromRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the recvfromRet")
+	if h.recvfromRet != nil {
+		if err := h.recvfromRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the recvfromRet")
+		}
 	}
 
 	// Close eBPF objects with proper synchronization
@@ -760,12 +820,16 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	}
 	h.objectsMutex.Unlock()
 
-	if err := h.connect.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect")
+	if h.connect != nil {
+		if err := h.connect.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect")
+		}
 	}
 
-	if err := h.connectRet.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connectRet")
+	if h.connectRet != nil {
+		if err := h.connectRet.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connectRet")
+		}
 	}
 
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
