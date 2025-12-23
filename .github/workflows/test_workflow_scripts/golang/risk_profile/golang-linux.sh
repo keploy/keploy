@@ -60,7 +60,9 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for critical errors in $logfile..."
   if [ -f "$logfile" ]; then
-    if grep "ERROR" "$logfile" | grep "Keploy:"; then
+    # Find critical Keploy errors, but exclude specific non-critical ones.
+    # "signal: terminated" is expected when we intentionally kill keploy during shutdown.
+    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation" | grep -v "failed to send test report request" | grep -v "signal: terminated"; then
       echo "::error::Critical error found in $logfile. Failing the build."
       exit 1
     fi
