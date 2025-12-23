@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -126,25 +127,43 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		tcs = append(tcs, tc)
 	}
 
-	// Sort test cases by their actual timestamp, whether HTTP or gRPC
+	// Sort test cases by request timestamp, response timestamp, then test name numerically
 	sort.SliceStable(tcs, func(i, j int) bool {
-		var timeI, timeJ time.Time
+		var reqTimeI, reqTimeJ, respTimeI, respTimeJ time.Time
 
-		// Determine which timestamp to use for test case i based on its Kind
+		// Get request and response timestamps for test case i
 		if tcs[i].Kind == models.HTTP {
-			timeI = tcs[i].HTTPReq.Timestamp
+			reqTimeI = tcs[i].HTTPReq.Timestamp
+			respTimeI = tcs[i].HTTPResp.Timestamp
 		} else if tcs[i].Kind == models.GRPC_EXPORT {
-			timeI = tcs[i].GrpcReq.Timestamp
+			reqTimeI = tcs[i].GrpcReq.Timestamp
+			respTimeI = tcs[i].GrpcResp.Timestamp
 		}
 
-		// Determine which timestamp to use for test case j based on its Kind
+		// Get request and response timestamps for test case j
 		if tcs[j].Kind == models.HTTP {
-			timeJ = tcs[j].HTTPReq.Timestamp
+			reqTimeJ = tcs[j].HTTPReq.Timestamp
+			respTimeJ = tcs[j].HTTPResp.Timestamp
 		} else if tcs[j].Kind == models.GRPC_EXPORT {
-			timeJ = tcs[j].GrpcReq.Timestamp
+			reqTimeJ = tcs[j].GrpcReq.Timestamp
+			respTimeJ = tcs[j].GrpcResp.Timestamp
 		}
 
-		return timeI.Before(timeJ)
+		// First, compare by request timestamp
+		if !reqTimeI.Equal(reqTimeJ) {
+			return reqTimeI.Before(reqTimeJ)
+		}
+
+		// If request timestamps are equal, compare by response timestamp
+		if !respTimeI.Equal(respTimeJ) {
+			return respTimeI.Before(respTimeJ)
+		}
+
+		// If both timestamps are equal, compare by test name numerically
+		// Extract numeric part from test names (e.g., "test-2" -> 2, "test-11" -> 11)
+		numI := extractTestNumber(tcs[i].Name)
+		numJ := extractTestNumber(tcs[j].Name)
+		return numI < numJ
 	})
 
 	return tcs, nil
@@ -281,4 +300,23 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		return err
 	}
 	return nil
+}
+
+// extractTestNumber extracts the numeric part from test names like "test-2" or "test-11"
+// Returns the number as an integer, or 0 if no number is found
+func extractTestNumber(name string) int {
+	// Find the last occurrence of "-" and extract everything after it
+	parts := strings.Split(name, "-")
+	if len(parts) < 2 {
+		return 0
+	}
+
+	// Try to parse the last part as a number
+	numStr := parts[len(parts)-1]
+	num, err := strconv.Atoi(numStr)
+	if err != nil {
+		return 0
+	}
+
+	return num
 }
