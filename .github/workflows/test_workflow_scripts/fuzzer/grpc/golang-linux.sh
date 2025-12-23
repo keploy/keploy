@@ -11,15 +11,6 @@ set -Eeuo pipefail
 
 MODE=${1:-incoming}
 
-# Detect keploy version - use --bigPayload for v2 (build), skip for v3+ (latest)
-KEPLOY_VERSION=$($RECORD_BIN version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
-echo "Detected Keploy version: $KEPLOY_VERSION"
-BIG_PAYLOAD_FLAG="--bigPayload"
-if [[ "$KEPLOY_VERSION" =~ ^v?3\. ]]; then
-  echo "v3 detected, skipping --bigPayload flag"
-  BIG_PAYLOAD_FLAG=""
-fi
-
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
   echo "📌 Setting up Keploy API Key..."
@@ -132,7 +123,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Start server with keploy in record mode
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
+ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
  sleep 10
 
 

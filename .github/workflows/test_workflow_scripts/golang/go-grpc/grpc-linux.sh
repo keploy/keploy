@@ -16,15 +16,6 @@ endsec()  { echo "::endgroup::"; }
 
 MODE=${1:-incoming}
 
-# Detect keploy version - use --bigPayload for v2 (build), skip for v3+ (latest)
-KEPLOY_VERSION=$($RECORD_BIN version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
-echo "Detected Keploy version: $KEPLOY_VERSION"
-BIG_PAYLOAD_FLAG="--bigPayload"
-if [[ "$KEPLOY_VERSION" =~ ^v?3\. ]]; then
-  echo "v3 detected, skipping --bigPayload flag"
-  BIG_PAYLOAD_FLAG=""
-fi
-
 # --- Helper Functions ---
 
 # Kills all running application and keploy processes
@@ -203,7 +194,7 @@ if [ "$MODE" = "incoming" ]; then
     
     section "🔴 Recording incoming gRPC calls..."
     ./grpc-client &> client_incoming.log &
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" $BIG_PAYLOAD_FLAG --generateGithubActions=false 2>&1 | tee record_incoming.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
     wait_for_port 50051
     sleep 5
     send_requests
@@ -231,7 +222,7 @@ elif [ "$MODE" = "outgoing" ]; then
     section "🔴 Recording outgoing gRPC calls..."
     ./grpc-server &> server_outgoing.log &
     wait_for_port 50051
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" $BIG_PAYLOAD_FLAG --generateGithubActions=false 2>&1 | tee record_outgoing.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
     send_requests
     sleep 15 # Allow time for traces to be recorded
     kill_keploy_process
