@@ -15,12 +15,14 @@ section() { echo "::group::$*"; }
 endsec()  { echo "::endgroup::"; }
 
 MODE=${1:-incoming}
-BIG_PAYLOAD=${2:-false}
 
-BIG_PAYLOAD_FLAG=""
-if [ "$BIG_PAYLOAD" = "true" ]; then
-  echo "🚀 Big payload mode enabled."
-  BIG_PAYLOAD_FLAG="--bigPayload"
+# Detect keploy version - use --bigPayload for v2 (build), skip for v3+ (latest)
+KEPLOY_VERSION=$($RECORD_BIN version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+echo "Detected Keploy version: $KEPLOY_VERSION"
+BIG_PAYLOAD_FLAG="--bigPayload"
+if [[ "$KEPLOY_VERSION" =~ ^v?3\. ]]; then
+  echo "v3 detected, skipping --bigPayload flag"
+  BIG_PAYLOAD_FLAG=""
 fi
 
 # --- Helper Functions ---
@@ -150,6 +152,19 @@ kill_keploy_process() {
     # Give Keploy time to cleanup eBPF resources properly
     sleep 5
     wait "$pid" 2>/dev/null || true
+    # Also kill any lingering grpc-server/grpc-client processes to free the port
+    pkill -f './grpc-server' 2>/dev/null || true
+    pkill -f './grpc-client' 2>/dev/null || true
+    sleep 2
+    # Wait for port 50051 to be released
+    for i in {1..10}; do
+      if ! nc -z localhost 50051 2>/dev/null; then
+        echo "Port 50051 is now free."
+        break
+      fi
+      echo "Waiting for port 50051 to be released..."
+      sleep 1
+    done
 }
 
 # --- Main Logic ---

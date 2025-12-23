@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
-          path: samples-go
+          path: samples-go-${{ github.run_id }}-${{ matrix.app.name }}
         
       - name: Ensure Docker Compose is available (macOS)
         shell: bash
@@ -88,10 +88,10 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
-          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+          JOB_ID: ${{ github.run_id }}-${{ matrix.app.name }}-${{ matrix.config.job }}-${{ github.run_attempt }}
         shell: bash
         run: |
-          cd samples-go/${{ matrix.app.path }}
+          cd samples-go-${{ github.run_id }}-${{ matrix.app.name }}/${{ matrix.app.path }}
           bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-macos.sh
 
       - name: Clean up git config
@@ -99,3 +99,9 @@ jobs:
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
+
+      - name: Clean up samples directory
+        if: always()
+        continue-on-error: true
+        run: |
+          rm -rf samples-go-${{ github.run_id }}-${{ matrix.app.name }}

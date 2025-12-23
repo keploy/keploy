@@ -11,6 +11,15 @@ set -Eeuo pipefail
 
 MODE=${1:-incoming}
 
+# Detect keploy version - use --bigPayload for v2 (build), skip for v3+ (latest)
+KEPLOY_VERSION=$($RECORD_BIN version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+echo "Detected Keploy version: $KEPLOY_VERSION"
+BIG_PAYLOAD_FLAG="--bigPayload"
+if [[ "$KEPLOY_VERSION" =~ ^v?3\. ]]; then
+  echo "v3 detected, skipping --bigPayload flag"
+  BIG_PAYLOAD_FLAG=""
+fi
+
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
   echo "📌 Setting up Keploy API Key..."
@@ -123,7 +132,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Start server with keploy in record mode
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
+ sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
  sleep 10
 
 
@@ -163,6 +172,15 @@ if [ "$MODE" = "incoming" ]; then
  sleep 10
  sudo pkill -f "$FUZZER_SERVER_BIN" || true
  sleep 2 # Give a moment for the port to be released
+ # Wait for port 50051 to be released
+ for i in {1..10}; do
+   if ! nc -z localhost 50051 2>/dev/null; then
+     echo "Port 50051 is now free."
+     break
+   fi
+   echo "Waiting for port 50051 to be released..."
+   sleep 1
+ done
 
  echo "Waiting for processes to settle"
 
@@ -256,6 +274,15 @@ elif [ "$MODE" = "outgoing" ]; then
  sleep 10
  sudo pkill -f "$FUZZER_CLIENT_BIN" || true
  sleep 2 # Give a moment for the port to be released
+ # Wait for port 18080 to be released
+ for i in {1..10}; do
+   if ! nc -z localhost 18080 2>/dev/null; then
+     echo "Port 18080 is now free."
+     break
+   fi
+   echo "Waiting for port 18080 to be released..."
+   sleep 1
+ done
 
  check_for_errors server_outgoing.txt
  check_for_errors record_outgoing.txt

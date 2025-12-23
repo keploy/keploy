@@ -27,19 +27,29 @@ APP_CONTAINER="echoApp_${JOB_ID}"
 DB_CONTAINER="postgresDb_${JOB_ID}"
 KEPLOY_CONTAINER="keploy_${JOB_ID}"
 APP_IMAGE="go-app-${JOB_ID}"
+# Use unique compose project name for network isolation
+export COMPOSE_PROJECT_NAME="echosql_${JOB_ID}"
+NETWORK_NAME="${COMPOSE_PROJECT_NAME}_default"
 
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
+echo "Using compose project - $COMPOSE_PROJECT_NAME"
 
 # Cleanup function to remove containers
 cleanup() {
     echo "Cleaning up containers and services..."
-    docker compose down >/dev/null 2>&1 || true
+    # Use project name for compose down to ensure correct cleanup
+    COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" docker compose down -v --remove-orphans >/dev/null 2>&1 || true
     docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "echoApp" >/dev/null 2>&1 || true
     docker rm -f "postgresDb" >/dev/null 2>&1 || true
+    # Clean up job-specific network if it still exists
+    docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+    # Clean up job-specific images
+    docker rmi "${COMPOSE_PROJECT_NAME}-${APP_CONTAINER}" >/dev/null 2>&1 || true
+    docker rmi "$APP_IMAGE" >/dev/null 2>&1 || true
     echo "Cleanup completed"
 }
 

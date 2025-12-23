@@ -116,6 +116,19 @@ kill_keploy_process() {
     else
         echo "No keploy process found to kill"
     fi
+    
+    # Also kill any lingering grpc-secret processes to free the port
+    pkill -f './grpc-secret' 2>/dev/null || true
+    sleep 2
+    # Wait for port 50051 to be released
+    for i in {1..10}; do
+      if ! nc -z localhost 50051 2>/dev/null; then
+        echo "Port 50051 is now free."
+        break
+      fi
+      echo "Waiting for port 50051 to be released..."
+      sleep 1
+    done
 }
 
 # Send all 4 gRPC requests

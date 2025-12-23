@@ -72,16 +72,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-python
-          path: samples-python
+          path: samples-python-${{ github.run_id }}-${{ matrix.job }}
 
       - name: Run the flask-mongo application (macOS)
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
-          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+          JOB_ID: ${{ github.run_id }}-${{ matrix.job }}-${{ github.run_attempt }}
         shell: bash
         run: |
-          cd samples-python/flask-mongo
+          cd samples-python-${{ github.run_id }}-${{ matrix.job }}/flask-mongo
           bash ./../../.github/workflows/test_workflow_scripts/python-docker-macos.sh
 
       - name: Clean up git config
@@ -89,3 +89,9 @@ jobs:
         continue-on-error: true
         run: |
           git config --global --unset url."git@github.com:".insteadOf
+
+      - name: Clean up samples directory
+        if: always()
+        continue-on-error: true
+        run: |
+          rm -rf samples-python-${{ github.run_id }}-${{ matrix.job }}

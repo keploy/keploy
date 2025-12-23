@@ -82,6 +82,18 @@ if [ -n "$REC_PID" ]; then
 else
     echo "No keploy process found to kill."
 fi
+# Also kill any lingering app processes to free the port
+pkill -f "$RERECORD_SERVER_BIN" 2>/dev/null || true
+sleep 2
+# Wait for port 8080 to be released
+for i in {1..10}; do
+  if ! nc -z localhost 8080 2>/dev/null; then
+    echo "Port 8080 is now free."
+    break
+  fi
+  echo "Waiting for port 8080 to be released..."
+  sleep 1
+done
 
 # Check recording logs for errors
 if grep -i "ERROR" record.log; then

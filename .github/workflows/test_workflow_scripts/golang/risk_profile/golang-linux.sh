@@ -316,11 +316,23 @@ sleep 5
 endsec
 
 section "Stopping Keploy record process (PID: $KEPLOY_PID)..."
+# Kill keploy process
 pid=$(pgrep -f keploy || true) && [ -n "$pid" ] && sudo kill "$pid" 2>/dev/null || true
 # Give Keploy time to cleanup eBPF resources properly
 sleep 5
 wait "$pid" 2>/dev/null || true
-sleep 5
+# Also kill any lingering my-app processes to free port 8080
+pkill -f './my-app' 2>/dev/null || true
+sleep 2
+# Wait for port 8080 to be released
+for i in {1..10}; do
+  if ! nc -z localhost 8080 2>/dev/null; then
+    echo "Port 8080 is now free."
+    break
+  fi
+  echo "Waiting for port 8080 to be released..."
+  sleep 1
+done
 check_for_errors "record.log"
 endsec
 

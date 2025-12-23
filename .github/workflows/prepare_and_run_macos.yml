@@ -7,9 +7,8 @@ on:
   # push:
   #   branches: [ v2 ]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+# Note: No workflow-level concurrency - macOS jobs are isolated via JOB_ID
+# Each job uses unique container names, networks, and ports
 
 jobs:
   build-and-upload:
@@ -134,6 +133,10 @@ jobs:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/v2')) }}
     runs-on: [self-hosted, macOS, native]
     needs: [run_python_docker_macos, run_golang_docker_macos]
+    # Ensure only one cleanup runs at a time across all workflows
+    concurrency:
+      group: macos-docker-cleanup
+      cancel-in-progress: false
     steps:
       - name: Unlock keychain
         if: runner.os == 'macOS'

@@ -207,7 +207,18 @@ pid=$(pgrep -f keploy || true) && [ -n "$pid" ] && sudo kill "$pid" 2>/dev/null 
 # Give Keploy time to cleanup eBPF resources properly
 sleep 5
 wait "$pid" 2>/dev/null || true
-sleep 5
+# Also kill any lingering app processes to free the port
+pkill -f "$MYSQL_FUZZER_BIN" 2>/dev/null || true
+sleep 2
+# Wait for port 18080 to be released
+for i in {1..10}; do
+  if ! nc -z localhost 18080 2>/dev/null; then
+    echo "Port 18080 is now free."
+    break
+  fi
+  echo "Waiting for port 18080 to be released..."
+  sleep 1
+done
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
