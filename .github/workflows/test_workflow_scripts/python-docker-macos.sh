@@ -38,8 +38,13 @@ cleanup() {
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_1" >/dev/null 2>&1 || true
     docker rm -f "${APP_CONTAINER}_2" >/dev/null 2>&1 || true
+    docker rm -f "${APP_CONTAINER}_test_1" >/dev/null 2>&1 || true
     docker rm -f "$KEPLOY_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f mongo >/dev/null 2>&1 || true
+    # Clean up any keploy agent containers created by this job
+    docker ps -a --filter "name=keploy-v3" --format "{{.Names}}" | while read -r name; do
+        [ -n "$name" ] && docker rm -f "$name" 2>/dev/null || true
+    done
     echo "Cleanup completed"
 }
 
@@ -114,9 +119,30 @@ send_request_and_shutdown() {
 
 }
 
+# Function to cleanup keploy containers between iterations
+# Only cleans up exited keploy-v3 containers to avoid affecting concurrent pipelines
+cleanup_between_iterations() {
+    echo "Cleaning up keploy containers between iterations..."
+    # Stop and remove any exited keploy agent containers (safe for concurrent runs)
+    docker ps -a --filter "name=keploy-v3" --filter "status=exited" --format "{{.Names}}" | while read -r name; do
+        [ -n "$name" ] && docker rm -f "$name" 2>/dev/null || true
+    done
+    # Also try to remove the specific keploy container for this job
+    docker ps -a --filter "name=$KEPLOY_CONTAINER" --format "{{.Names}}" | while read -r name; do
+        [ -n "$name" ] && docker rm -f "$name" 2>/dev/null || true
+    done
+    # Give time for ports to be released
+    sleep 3
+}
+
 # --- Record sessions ---
 for i in 1 2; do
   container_name="${APP_CONTAINER}_${i}"
+
+  # Clean up any leftover keploy containers from previous iteration (except first iteration)
+  if [ "$i" -gt 1 ]; then
+    cleanup_between_iterations
+  fi
 
   # Run the request and shutdown sequence in the background
   send_request_and_shutdown "$container_name" &
@@ -157,6 +183,9 @@ done
 # --- Stop Mongo before test ---
 echo "Shutting down mongo before test mode..."
 docker stop $DB_CONTAINER >/dev/null 2>&1 || true
+
+# Clean up any leftover keploy containers from recording
+cleanup_between_iterations
 
 # --- Test phase ---
 test_container="${APP_CONTAINER}_test_1"
