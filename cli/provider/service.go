@@ -35,7 +35,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
 		Version:        utils.Version,
-		GlobalMap:      TeleGlobalMap,
+		GlobalMap:      &TeleGlobalMap,
 		InstallationID: n.cfg.InstallationID,
 	})
 	tel.Ping()

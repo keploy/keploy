@@ -20,14 +20,14 @@ type Telemetry struct {
 	logger         *zap.Logger
 	InstallationID string
 	KeployVersion  string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	client         *http.Client
 }
 
 type Options struct {
 	Enabled        bool
 	Version        string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	InstallationID string
 }
 
@@ -136,10 +136,12 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...*sync.Map) {
 		}
 
 		hasGlobalMap := false
-		tel.GlobalMap.Range(func(key, value interface{}) bool {
-			hasGlobalMap = true
-			return false // Stop iteration after finding the first element
-		})
+		if tel.GlobalMap != nil {
+			tel.GlobalMap.Range(func(key, value interface{}) bool {
+				hasGlobalMap = true
+				return false // Stop iteration after finding the first element
+			})
+		}
 
 		if hasGlobalMap {
 			// event.Meta["global-map"] = syncMapToMap(tel.GlobalMap)
