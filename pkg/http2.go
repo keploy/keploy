@@ -366,12 +366,29 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 				_, hasAuthority := stream.grpcReq.Headers.PseudoHeaders[":authority"]
 				_, hasPath := stream.grpcReq.Headers.PseudoHeaders[":path"]
 
-				// If both are missing, this stream likely had HPACK decoding issues
-				// Log warning and skip this stream to avoid test failures
+				// If both are missing, this stream likely had severe HPACK decoding issues
+				// Log warning and skip this stream to avoid broken test cases
 				if !hasAuthority && !hasPath {
 					sm.logger.Warn("Skipping gRPC stream with missing pseudo-headers (possible HPACK decode issue)",
 						zap.Uint32("streamID", id))
 					continue
+				}
+
+				// Add fallback for :authority if missing
+				// This can happen due to HPACK dynamic table desync when some frames are missed
+				// The default port 50051 can be overridden by Keploy's port replacement during replay
+				if !hasAuthority {
+					sm.logger.Debug("Adding fallback :authority header for gRPC stream",
+						zap.Uint32("streamID", id),
+						zap.String("path", stream.grpcReq.Headers.PseudoHeaders[":path"]))
+					stream.grpcReq.Headers.PseudoHeaders[":authority"] = "localhost:50051"
+				}
+
+				// Add fallback for :path if missing (should rarely happen for gRPC)
+				if !hasPath {
+					sm.logger.Warn("Missing :path header in gRPC stream, using root path",
+						zap.Uint32("streamID", id))
+					stream.grpcReq.Headers.PseudoHeaders[":path"] = "/"
 				}
 
 				// Add fallback for :method if missing (gRPC always uses POST)
