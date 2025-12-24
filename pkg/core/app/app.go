@@ -16,7 +16,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"go.keploy.io/server/v2/pkg/platform/docker"
@@ -364,7 +363,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		filters.KeyValuePair{Key: "action", Value: "start"},
 	)
 
-	messages, errCh2 := a.docker.Events(ctx, types.EventsOptions{
+	messages, errCh2 := a.docker.Events(ctx, events.ListOptions{
 		Filters: eventFilter,
 	})
 
