@@ -787,7 +787,10 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 
 	uniqueProcess, err := uniqueProcessGroups(children)
 	if err != nil {
-		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
+		// This is a benign race condition - the process may have already exited
+		// before we could read its /proc/PID/status. This is expected during shutdown,
+		// so we log at Debug level instead of Error. The fallback to 'children' works fine.
+		logger.Warn("failed to find unique process groups (process may have already exited)", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
 	}
 
