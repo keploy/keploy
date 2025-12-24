@@ -21,7 +21,8 @@ jobs:
 
       - name: Download the latest released binary of keploy
         run: |
-          curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+          TAG=$(curl -s https://api.github.com/repos/keploy/keploy/releases | jq -r '[.[] | select(.tag_name | startswith("v2"))][0].tag_name')
+          curl --silent --location "https://github.com/keploy/keploy/releases/download/${TAG}/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
           sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keployR
       
       # Get the pilot for tests and mocks assertion
