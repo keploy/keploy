@@ -55,6 +55,7 @@ type App struct {
 	inodeChan        chan uint64
 	EnableTesting    bool
 	Mode             models.Mode
+	GracefulShutdown bool // Tracks whether shutdown was intentional (after successful test completion)
 }
 
 type Options struct {
@@ -260,6 +261,13 @@ func (a *App) GetAppCommand() string {
 
 func (a *App) Kind(_ context.Context) utils.CmdType {
 	return a.kind
+}
+
+// SetGracefulShutdown marks the app for graceful shutdown.
+// When set to true, context cancellation during shutdown will be treated as
+// a successful exit rather than an error.
+func (a *App) SetGracefulShutdown(graceful bool) {
+	a.GracefulShutdown = graceful
 }
 
 // injectNetwork attaches the given network to the keploy container
@@ -546,7 +554,13 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	select {
 	case <-ctx.Done():
-		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
+		// If this is a graceful shutdown (initiated by successful test completion),
+		// don't treat it as an error - the app exited cleanly as expected.
+		if a.GracefulShutdown {
+			a.logger.Debug("graceful shutdown completed successfully")
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+		}
+		a.logger.Debug("context cancelled unexpectedly while waiting for app to exit", zap.Error(ctx.Err()))
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	default:
 		if a.Mode == models.MODE_RECORD && a.EnableTesting {

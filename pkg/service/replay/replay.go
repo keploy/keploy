@@ -491,6 +491,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 	if r.appCtxCancel != nil {
+		// Signal graceful shutdown before cancelling context so the app layer
+		// knows this is an intentional exit, not an unexpected crash
+		r.instrumentation.SetGracefulShutdown(r.config.AppID, true)
 		r.appCtxCancel()
 		if r.appErrGrp != nil {
 			err := r.appErrGrp.Wait()

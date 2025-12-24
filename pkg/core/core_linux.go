@@ -199,6 +199,18 @@ func (c *Core) GetHookUnloadDone(id uint64) <-chan struct{} {
 	return c.GetUnloadDone()
 }
 
+// SetGracefulShutdown marks the app for graceful shutdown.
+// When set to true, context cancellation during shutdown will be treated as
+// a successful exit rather than an error.
+func (c *Core) SetGracefulShutdown(id uint64, graceful bool) {
+	a, err := c.getApp(id)
+	if err != nil {
+		c.logger.Debug("failed to get app for graceful shutdown", zap.Uint64("id", id), zap.Error(err))
+		return
+	}
+	a.SetGracefulShutdown(graceful)
+}
+
 func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
 	a, err := c.getApp(id)
 	if err != nil {

@@ -15,6 +15,10 @@ type Instrumentation interface {
 	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	// GetHookUnloadDone returns a channel that signals when hooks are completely unloaded
 	GetHookUnloadDone(id uint64) <-chan struct{}
+	// SetGracefulShutdown marks the app for graceful shutdown.
+	// When set to true, context cancellation during shutdown will be treated as
+	// a successful exit rather than an error.
+	SetGracefulShutdown(id uint64, graceful bool)
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error

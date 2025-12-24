@@ -63,3 +63,7 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 func (c *Core) GetErrorChannel() <-chan error {
 	return nil
 }
+
+func (c *Core) SetGracefulShutdown(id uint64, graceful bool) {
+	// No-op on non-Linux platforms since instrumentation is not supported
+}
