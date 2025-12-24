@@ -22,14 +22,40 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
-    pid=$(pgrep -n -f keploy || true)
-    echo "$pid Keploy PID" 
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    if [ -n "$pid" ]; then
-        sudo kill $pid 2>/dev/null || true
-    fi
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
     # Give Keploy time to cleanup eBPF resources properly
     sleep 5
+}
+
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
 }
 
 # Checks a log file for critical errors, excluding expected shutdown messages
@@ -58,7 +84,7 @@ check_for_errors() {
 }
 
 send_request(){
-    sleep 10
+    sleep 30
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8080/CJBKJd92; then
@@ -93,8 +119,8 @@ send_request(){
       --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
       --header 'Accept: application/json'
 
-    # Wait for 5 seconds for keploy to record the tcs and mocks.
-    sleep 5
+    # Wait for at least 5 tests to be recorded
+    wait_for_tests 5 60
     container_kill
     wait
 }
@@ -102,7 +128,7 @@ send_request(){
 for i in {1..2}; do
     container_name="ginApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p 8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name" &> "${container_name}.txt"
 
     if ! check_for_errors "${container_name}.txt"; then
         cat "${container_name}.txt"
@@ -121,7 +147,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false --debug &> "${test_container}.txt"
 
 if ! check_for_errors "${test_container}.txt"; then
     cat "${test_container}.txt"

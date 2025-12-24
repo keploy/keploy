@@ -16,18 +16,44 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 container_kill() {
-    pid=$(pgrep -n -f keploy || true)
-    echo "$pid Keploy PID"
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    if [ -n "$pid" ]; then
-        sudo kill $pid 2>/dev/null || true
-    fi
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
     # Give Keploy time to cleanup eBPF resources properly
     sleep 5
 }
 
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
+}
+
 send_request(){
-    sleep 10
+    sleep 30
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8082/health; then
@@ -53,8 +79,8 @@ send_request(){
 
     curl -X GET http://localhost:8082/health
 
-    # Wait for 5 seconds for keploy to record the test cases and mocks.
-    sleep 5
+    # Wait for at least 3 tests to be recorded
+    wait_for_tests 3 60
     container_kill
     wait
 }
@@ -86,7 +112,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false --disableMockUpload &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker compose up" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false --disableMockUpload --debug &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

@@ -384,11 +384,12 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 					stream.grpcReq.Headers.PseudoHeaders[":authority"] = "localhost:50051"
 				}
 
-				// Add fallback for :path if missing (should rarely happen for gRPC)
+				// If :path is missing, we cannot provide a valid fallback since gRPC requires
+				// paths in format /package.Service/Method. Skip this stream.
 				if !hasPath {
-					sm.logger.Warn("Missing :path header in gRPC stream, using root path",
+					sm.logger.Warn("Skipping gRPC stream with missing :path header (cannot use fallback)",
 						zap.Uint32("streamID", id))
-					stream.grpcReq.Headers.PseudoHeaders[":path"] = "/"
+					continue
 				}
 
 				// Add fallback for :method if missing (gRPC always uses POST)

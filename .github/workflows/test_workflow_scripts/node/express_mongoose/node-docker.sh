@@ -13,18 +13,44 @@ sudo rm -rf keploy/
 docker build -t node-app:1.0 .
 
 container_kill() {
-    pid=$(pgrep -n -f keploy || true)
-    echo "$pid Keploy PID" 
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
     echo "Killing keploy"
-    if [ -n "$pid" ]; then
-        sudo kill $pid 2>/dev/null || true
-    fi
+    sudo kill -INT "$REC_PID" 2>/dev/null || true
     # Give Keploy time to cleanup eBPF resources properly
     sleep 5
 }
 
+# Wait for a minimum number of test cases to be recorded
+wait_for_tests() {
+    local min_tests=$1
+    local max_wait=${2:-60}
+    local waited=0
+    
+    echo "Waiting for at least $min_tests test(s) to be recorded..."
+    
+    while [ $waited -lt $max_wait ]; do
+        local test_count=0
+        if [ -d "./keploy" ]; then
+            test_count=$(find ./keploy -name "test-*.yaml" -path "*/tests/*" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        
+        if [ "$test_count" -ge "$min_tests" ]; then
+            echo "Found $test_count test(s) recorded."
+            return 0
+        fi
+        
+        echo "Currently $test_count test(s), waiting... ($waited/$max_wait sec)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    
+    echo "Timeout waiting for tests. Only found $test_count test(s)."
+    return 1
+}
+
 send_request(){
-    sleep 10
+    sleep 30
    # Wait for the application to start.
     app_started=false
     while [ "$app_started" = false ]; do
@@ -54,8 +80,9 @@ send_request(){
         }'
 
     curl -X GET http://localhost:8000/students
-    # Wait for 5 seconds for keploy to record the tcs and mocks.
-    sleep 5
+    
+    # Wait for at least 3 tests to be recorded
+    wait_for_tests 3 60
     container_kill
     wait
 }
@@ -64,7 +91,7 @@ for i in {1..2}; do
     # Start keploy in record mode.
     container_name="nodeApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p 8000:8000 --name "${container_name}" --network keploy-network node-app:1.0" --container-name "${container_name}"    &> "${container_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p 8000:8000 --name ${container_name} --network keploy-network node-app:1.0" --container-name "${container_name}" &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
@@ -88,7 +115,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start keploy in test mode.
 test_container="nodeApp_test"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p 8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 100 --delay 15 --generate-github-actions=false --debug &> "${test_container}.txt"
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
