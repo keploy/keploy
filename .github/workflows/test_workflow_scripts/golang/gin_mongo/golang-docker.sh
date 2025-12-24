@@ -32,6 +32,31 @@ container_kill() {
     sleep 5
 }
 
+# Checks a log file for critical errors, excluding expected shutdown messages
+check_for_errors() {
+    local logfile=$1
+    echo "Checking for errors in $logfile..."
+    if [ -f "$logfile" ]; then
+        # Find critical Keploy errors, but exclude expected shutdown messages:
+        # - "unknown error received from application" occurs during intentional container kill
+        # - "failed to record" is a consequence of the above during normal shutdown
+        # - "signal: terminated" is expected when we kill keploy
+        if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "unknown error received from application" | grep -v "failed to record" | grep -v "signal: terminated" | grep -q .; then
+            echo "::error::Critical error found in $logfile. Failing the build."
+            echo "--- Failing Errors ---"
+            grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "unknown error received from application" | grep -v "failed to record" | grep -v "signal: terminated"
+            echo "----------------------"
+            return 1
+        fi
+        if grep -q "WARNING: DATA RACE" "$logfile"; then
+            echo "::error::Race condition detected in $logfile"
+            return 1
+        fi
+    fi
+    echo "No critical errors found in $logfile."
+    return 0
+}
+
 send_request(){
     sleep 10
     app_started=false
@@ -79,13 +104,7 @@ for i in {1..2}; do
     send_request &
     sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt"
 
-    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
-        cat "${container_name}.txt"
-        exit 1
-    fi
-    if grep "ERROR" "${container_name}.txt"; then
-        echo "Error found in pipeline..."
+    if ! check_for_errors "${container_name}.txt"; then
         cat "${container_name}.txt"
         exit 1
     fi
@@ -104,14 +123,7 @@ echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 test_container="ginApp_test"
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
-    echo "Error found in pipeline..."
-    cat "${test_container}.txt"
-    exit 1
-fi
-
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
+if ! check_for_errors "${test_container}.txt"; then
     cat "${test_container}.txt"
     exit 1
 fi

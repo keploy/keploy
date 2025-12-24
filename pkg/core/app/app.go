@@ -454,10 +454,18 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		if err != nil && errors.Is(err, context.Canceled) {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
+		// If err is nil, the app exited cleanly
+		if err == nil {
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case err := <-errCh2:
 		if err != nil && errors.Is(err, context.Canceled) {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
+		}
+		// If err is nil, the app exited cleanly
+		if err == nil {
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
