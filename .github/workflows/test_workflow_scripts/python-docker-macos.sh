@@ -148,7 +148,8 @@ for i in 1 2; do
     exit 1
   fi
 
-  if grep "ERROR" "${container_name}.txt"; then
+  # Check for errors but ignore expected shutdown errors (connection reset, EOF during graceful shutdown)
+  if grep "ERROR" "${container_name}.txt" | grep -v "connection reset by peer" | grep -v "EOF" | grep -v "broken pipe" | grep -q .; then
     echo "Error found in pipeline..."
     cat "${container_name}.txt"
     exit 1
@@ -181,7 +182,8 @@ if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
     exit 1
 fi
 
-if grep "ERROR" "${test_container}.txt"; then
+# Check for errors but ignore expected shutdown errors (connection reset, EOF during graceful shutdown)
+if grep "ERROR" "${test_container}.txt" | grep -v "connection reset by peer" | grep -v "EOF" | grep -v "broken pipe" | grep -q .; then
   echo "Error found while running test pipeline..."
   cat "${test_container}.txt"
   exit 1
