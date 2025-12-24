@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -62,7 +63,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		reqTimestamp := result.reqTimestamp
 		resTimestamp := result.resTimestamp
-		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, resTimestamp)
+		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, resTimestamp, opts)
 
 		// reset the requests and responses
 		requests = []mysql.Request{}
@@ -82,7 +83,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx)
+		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")
@@ -106,7 +107,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 }
 
-func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time) {
+func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time, opts models.OutgoingOptions) {
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
@@ -126,5 +127,11 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			ResTimestampMock: resTimestampMock,
 		},
 	}
+	if opts.Synchronous {
+		mgr := syncMock.Get()
+		mgr.AddMock(mysqlMock)
+		return
+	}
+
 	mocks <- mysqlMock
 }
