@@ -38,14 +38,13 @@ import (
 )
 
 var (
-	completeTestReport   = make(map[string]TestReportVerdict)
-	firstRun             bool
-	completeTestReportMu sync.RWMutex
-	totalTests           int
-	totalTestPassed      int
-	totalTestFailed      int
-	totalTestIgnored     int
-	totalTestTimeTaken   time.Duration
+	completeTestReport = make(map[string]TestReportVerdict)
+	firstRun           bool
+	totalTests         int
+	totalTestPassed    int
+	totalTestFailed    int
+	totalTestIgnored   int
+	totalTestTimeTaken time.Duration
 )
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
@@ -69,6 +68,7 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
+	stateMu         sync.Mutex
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -159,11 +159,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf("%s", errMsg)
 	}
 
-	completeTestReportMu.Lock()
+	r.stateMu.Lock()
 	completeTestReport = make(map[string]TestReportVerdict)
 	totalTests, totalTestPassed, totalTestFailed, totalTestIgnored = 0, 0, 0, 0
 	totalTestTimeTaken = 0
-	completeTestReportMu.Unlock()
+	r.stateMu.Unlock()
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
@@ -287,13 +287,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.isLastTestSet = true
 		}
 
-		completeTestReportMu.RLock()
+		r.stateMu.Lock()
 		initTotal := totalTests
 		initPassed := totalTestPassed
 		initFailed := totalTestFailed
 		initIgnored := totalTestIgnored
 		initTimeTaken := totalTestTimeTaken
-		completeTestReportMu.RUnlock()
+		r.stateMu.Unlock()
 
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
@@ -309,13 +309,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
 			// gathered from rerunning, instead only metrics from the last rerun would get added to the variables.
-			completeTestReportMu.Lock()
+			r.stateMu.Lock()
 			totalTests = initTotal
 			totalTestPassed = initPassed
 			totalTestFailed = initFailed
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
-			completeTestReportMu.Unlock()
+			r.stateMu.Unlock()
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
@@ -364,7 +364,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 				break
 			}
 			failedTcIDs := getFailedTCs(tcResults)
+			r.stateMu.Lock()
 			failedTCsBySetID[testSet] = failedTcIDs
+			r.stateMu.Unlock()
 
 			// checking for flakiness when --must-pass flag is not set
 			// else if --must-pass is set, delete the failed testcases and rerun
@@ -472,10 +474,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
-	completeTestReportMu.RLock()
+	r.stateMu.Lock()
 	passed := totalTestPassed
 	failed := totalTestFailed
-	completeTestReportMu.RUnlock()
+	r.stateMu.Unlock()
 	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus)
 
 	if !abortTestRun {
@@ -639,12 +641,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			timeTaken: timeTaken.String(),
 		}
 
-		completeTestReportMu.Lock()
+		r.stateMu.Lock()
 		completeTestReport[testSetID] = verdict
 		totalTests += testReport.Total
 		totalTestIgnored += testReport.Ignored
 		totalTestTimeTaken += timeTaken
-		completeTestReportMu.Unlock()
+		r.stateMu.Unlock()
 
 		return models.TestSetStatusIgnored, nil
 	}
@@ -1401,14 +1403,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		timeTaken: timeTaken.String(),
 	}
 
-	completeTestReportMu.Lock()
+	r.stateMu.Lock()
 	completeTestReport[testSetID] = verdict
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
 	totalTestIgnored += testReport.Ignored
 	totalTestTimeTaken += timeTaken
-	completeTestReportMu.Unlock()
+	r.stateMu.Unlock()
 
 	timeTakenStr := timeWithUnits(timeTaken)
 
@@ -1523,7 +1525,7 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
-	completeTestReportMu.RLock()
+	r.stateMu.Lock()
 	totalTestsSnapshot := totalTests
 	totalTestPassedSnapshot := totalTestPassed
 	totalTestFailedSnapshot := totalTestFailed
@@ -1533,7 +1535,11 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	for key, val := range completeTestReport {
 		reportSnapshot[key] = val
 	}
-	completeTestReportMu.RUnlock()
+	failedTCsBySetIDSnapshot := make(map[string][]string, len(failedTCsBySetID))
+	for key, val := range failedTCsBySetID {
+		failedTCsBySetIDSnapshot[key] = val
+	}
+	r.stateMu.Unlock()
 
 	if totalTestsSnapshot > 0 {
 		testSuiteNames := make([]string, 0, len(reportSnapshot))
@@ -1612,7 +1618,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 			if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
 				failedCasesStr := "-"
-				if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+				if failedCases, ok := failedTCsBySetIDSnapshot[testSuiteName]; ok && len(failedCases) > 0 {
 					failedCasesStr = strings.Join(failedCases, ", ")
 				}
 				format.WriteString("\t%s")

@@ -14,9 +14,9 @@ type TestRunReport struct {
 }
 
 // GetCompleteTestRunReport returns a copy of the current test run report map.
-func GetCompleteTestRunReport() map[string]TestRunReport {
-	completeTestReportMu.RLock()
-	defer completeTestReportMu.RUnlock()
+func (r *Replayer) GetCompleteTestRunReport() map[string]TestRunReport {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 
 	snapshot := make(map[string]TestRunReport, len(completeTestReport))
 	for key, val := range completeTestReport {
@@ -34,8 +34,8 @@ func GetCompleteTestRunReport() map[string]TestRunReport {
 }
 
 // GetTestRunTotals returns aggregate totals across all test sets in the current run.
-func GetTestRunTotals() (total, passed, failed int) {
-	completeTestReportMu.RLock()
-	defer completeTestReportMu.RUnlock()
+func (r *Replayer) GetTestRunTotals() (total, passed, failed int) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	return totalTests, totalTestPassed, totalTestFailed
 }
