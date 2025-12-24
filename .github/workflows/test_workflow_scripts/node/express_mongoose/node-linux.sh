@@ -186,6 +186,14 @@ for i in 1 2; do
 
   endsec
   echo "Recorded test case and mocks for iteration ${i}"
+
+  # Cleanup: ensure ports are released before next iteration
+  echo "Cleaning up ports before next iteration..."
+  sudo fuser -k 16789/tcp 2>/dev/null || true
+  sudo fuser -k 26789/tcp 2>/dev/null || true
+  sudo fuser -k 8000/tcp 2>/dev/null || true
+  # Give time for ports to be fully released
+  sleep 3
 done
 
 # Optional tweak to a mock; guard if file exists
