@@ -315,6 +315,11 @@ func (p *grpcTestCaseProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod str
 		if _, ok := hdr.PseudoHeaders[":authority"]; !ok || hdr.PseudoHeaders[":authority"] == "" {
 			if p.destConn != nil && p.destConn.RemoteAddr() != nil {
 				hdr.PseudoHeaders[":authority"] = p.destConn.RemoteAddr().String()
+			} else {
+				// Fallback to a default value - this should rarely happen
+				// but ensures test cases are always replayable
+				p.logger.Warn("Using fallback :authority header - destConn unavailable")
+				hdr.PseudoHeaders[":authority"] = "localhost:grpc"
 			}
 		}
 
