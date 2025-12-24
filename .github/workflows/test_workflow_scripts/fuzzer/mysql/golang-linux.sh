@@ -273,6 +273,13 @@ endsec
 section "Shutting Down MySQL for Replay"
 docker stop mysql-container || true
 echo "✅ MySQL container stopped. Replay will rely on Keploy mocks."
+
+# Cleanup: ensure Keploy ports are released before replay
+echo "Cleaning up ports before replay..."
+sudo fuser -k 16789/tcp 2>/dev/null || true
+sudo fuser -k 26789/tcp 2>/dev/null || true
+sudo fuser -k 18080/tcp 2>/dev/null || true
+sleep 3
 endsec
 
 # --- Replay Phase ---

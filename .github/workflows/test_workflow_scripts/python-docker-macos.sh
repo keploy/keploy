@@ -154,6 +154,9 @@ send_request_and_shutdown() {
 # Only cleans up exited keploy-v3 containers to avoid affecting concurrent pipelines
 cleanup_between_iterations() {
     echo "Cleaning up keploy containers between iterations..."
+    # Reset MongoDB state for consistent IDs
+    docker exec $DB_CONTAINER mongosh --quiet --eval "db.students.drop()" 2>/dev/null || true
+    echo "Database collection dropped for clean iteration"
     # Stop and remove any exited keploy agent containers (safe for concurrent runs)
     docker ps -a --filter "name=keploy-v3" --filter "status=exited" --format "{{.Names}}" | while read -r name; do
         [ -n "$name" ] && docker rm -f "$name" 2>/dev/null || true

@@ -337,6 +337,13 @@ for i in 1 2; do
     
     sleep 3
     echo "✅ Recorded iteration ${i} (total tests: $TOTAL_EXPECTED_TESTS)"
+
+    # Cleanup: ensure ports are released before next iteration
+    echo "Cleaning up ports before next iteration..."
+    sudo fuser -k 16789/tcp 2>/dev/null || true
+    sudo fuser -k 26789/tcp 2>/dev/null || true
+    sudo fuser -k 50051/tcp 2>/dev/null || true
+    sleep 3
 done
 
 # Verify total recorded tests

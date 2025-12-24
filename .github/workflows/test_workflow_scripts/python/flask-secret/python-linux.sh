@@ -140,6 +140,13 @@ for i in 1 2; do
     sleep 5
     wait
     echo "Recorded test case and mocks for iteration ${i}"
+
+    # Cleanup: ensure ports are released before next iteration
+    echo "Cleaning up ports before next iteration..."
+    sudo fuser -k 16789/tcp 2>/dev/null || true
+    sudo fuser -k 26789/tcp 2>/dev/null || true
+    sudo fuser -k 8000/tcp 2>/dev/null || true
+    sleep 3
 done
 
 # Sanitize the testcases

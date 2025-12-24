@@ -195,6 +195,14 @@ sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
 for i in 1 2; do
+  # Reset database state before each iteration for consistent IDs
+  if [[ $i -gt 1 ]]; then
+    section "Reset MongoDB state for iteration $i"
+    docker exec mongoDb mongosh --quiet --eval "db.students.drop()" 2>/dev/null || true
+    echo "Database collection dropped for clean iteration"
+    endsec
+  fi
+
   section "Record iteration $i"
   app_name="nodeApp_${i}"
 
@@ -234,6 +242,14 @@ for i in 1 2; do
 
   endsec
   echo "Recorded test case and mocks for iteration ${i}"
+
+  # Cleanup: ensure ports are released before next iteration
+  echo "Cleaning up ports before next iteration..."
+  sudo fuser -k 16789/tcp 2>/dev/null || true
+  sudo fuser -k 26789/tcp 2>/dev/null || true
+  sudo fuser -k 8000/tcp 2>/dev/null || true
+  # Give time for ports to be fully released
+  sleep 3
 done
 
 

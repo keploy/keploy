@@ -197,8 +197,24 @@ fi
 endsec
 
 for i in 1 2; do
+  # Reset database state before each iteration for consistent IDs
+  if [[ $i -gt 1 ]]; then
+    section "Reset MySQL state for iteration $i"
+    docker exec mysql-container mysql -uroot -ppassword -e "TRUNCATE TABLE uss.url_shortener;" 2>/dev/null || true
+    echo "Database table truncated for clean iteration"
+    endsec
+  fi
+  
   run_record_iteration "$i"
   echo "Recorded test case and mocks for iteration $i"
+
+  # Cleanup: ensure ports are released before next iteration
+  echo "Cleaning up ports before next iteration..."
+  sudo fuser -k 16789/tcp 2>/dev/null || true
+  sudo fuser -k 26789/tcp 2>/dev/null || true
+  sudo fuser -k 9090/tcp 2>/dev/null || true
+  # Give time for ports to be fully released
+  sleep 3
 done
 
 section "Shutdown MySQL before test mode"

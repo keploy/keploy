@@ -196,6 +196,14 @@ endsec
 sudo rm -rf keploy/
 
 for i in 1 2; do
+  # Reset database state before each iteration for consistent IDs
+  if [[ $i -gt 1 ]]; then
+    section "Reset Postgres state for iteration $i"
+    docker exec mypostgres psql -U petclinic -d petclinic -c "TRUNCATE TABLE types CASCADE;" 2>/dev/null || true
+    echo "Database table truncated for clean iteration"
+    endsec
+  fi
+
   section "Record iteration $i"
 
   # Build app (captured to log)
@@ -237,6 +245,14 @@ for i in 1 2; do
 
   endsec
   echo "Recorded test case and mocks for iteration ${i}"
+
+  # Cleanup: ensure ports are released before next iteration
+  echo "Cleaning up ports before next iteration..."
+  sudo fuser -k 16789/tcp 2>/dev/null || true
+  sudo fuser -k 26789/tcp 2>/dev/null || true
+  sudo fuser -k 9966/tcp 2>/dev/null || true
+  # Give time for ports to be fully released
+  sleep 3
 done
 
 section "Shutdown Postgres before test mode"
