@@ -664,23 +664,15 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 }
 
 func IP4StrToUint32(ipStr string) (uint32, error) {
-	// Split the IP address into its four octets.
-	octets := strings.Split(ipStr, ".")
-	if len(octets) != 4 {
-		return 0, fmt.Errorf("invalid IPv4 address format")
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return 0, fmt.Errorf("invalid IP address")
 	}
-
-	// Parse each octet as an integer and shift it to its correct position in the uint32.
-	var ip uint32
-	for i, octet := range octets {
-		octetInt, err := strconv.ParseUint(octet, 10, 8)
-		if err != nil {
-			return 0, fmt.Errorf("invalid octet %q in IP address: %v", octet, err)
-		}
-		ip |= uint32(octetInt) << (8 * uint(3-i))
+	ip = ip.To4()
+	if ip == nil {
+		return 0, fmt.Errorf("not an IPv4 address")
 	}
-
-	return ip, nil
+	return binary.BigEndian.Uint32(ip), nil
 }
 
 func IP6StrToUint32(ipStr string) ([4]uint32, error) {

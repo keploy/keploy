@@ -170,7 +170,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		logger.Debug("Detected HTTP/2 connection")
 
 		// Get the actual destination for gRPC on Windows
-		finalAppAddr := pm.getActualDestination(clientConn, newAppAddr, logger)
+		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {

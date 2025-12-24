@@ -872,15 +872,19 @@ func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) erro
 func isProcessRunning(pid int) (bool, error) {
 	// On Windows use tasklist to check PID presence because signalling with 0 fails.
 	if runtime.GOOS == "windows" {
-		out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH").Output()
+		// Use exit code instead of parsing output to avoid locale-dependent string matching.
+		// tasklist returns exit code 0 if process found, non-zero (usually 1) if not found.
+		cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")
+		err := cmd.Run()
 		if err != nil {
+			// Non-zero exit code means process not found
+			if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() != 0 {
+				return false, nil
+			}
+			// Other errors (like command not found) are treated as errors
 			return false, err
 		}
-		s := strings.TrimSpace(string(out))
-		// When no matching task, tasklist prints a message containing "No tasks are running"
-		if s == "" || strings.Contains(s, "No tasks are running which match the specified criteria") || strings.Contains(s, "INFO: No tasks are running") {
-			return false, nil
-		}
+		// Exit code 0 means process was found
 		return true, nil
 	}
 

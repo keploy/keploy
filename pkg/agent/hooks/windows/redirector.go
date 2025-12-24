@@ -34,8 +34,6 @@ import (
 // StartRedirector initializes and starts the Windows redirector with configuration
 // Returns error if already running or startup fails
 func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy, dnsPort uint32, dllPath string, mode uint32) error {
-	fmt.Println("Start redirector from the go side", clientPID, agentPID, proxyPort, incomingProxy, dnsPort, mode, dllPath)
-
 	var cDllPath *C.char
 	if dllPath == "" {
 		cDllPath = nil

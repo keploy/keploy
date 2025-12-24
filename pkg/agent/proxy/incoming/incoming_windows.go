@@ -13,7 +13,7 @@ import (
 )
 
 // getActualDestination gets the real destination for Windows connections using hooks
-func (pm *IngressProxyManager) getActualDestination(clientConn net.Conn, fallbackAddr string, logger *zap.Logger) string {
+func (pm *IngressProxyManager) getActualDestination(ctx context.Context, clientConn net.Conn, fallbackAddr string, logger *zap.Logger) string {
 	// Extract source port from client connection
 	clientAddr := clientConn.RemoteAddr().String()
 	_, srcPortStr, err := net.SplitHostPort(clientAddr)
@@ -34,7 +34,6 @@ func (pm *IngressProxyManager) getActualDestination(clientConn net.Conn, fallbac
 	srcPort := uint16(srcPort64)
 
 	// Get Windows destination info from hooks
-	ctx := context.Background() // Use background context for this operation
 	networkAddr, err := pm.hooks.Get(ctx, srcPort)
 	if err == nil && networkAddr != nil {
 		// Convert IP to string and build new address
