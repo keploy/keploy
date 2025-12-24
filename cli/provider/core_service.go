@@ -52,7 +52,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return recordSvc, nil
 	case "test", "mock":
 		return replaySvc, nil
-	case "templatize", "config", "update", "login", "export", "import", "sanitize", "normalize":
+	case "templatize", "config", "update", "login", "export", "import", "sanitize", "normalize", "validate":
 		return toolsSvc, nil
 	case "contract":
 		return contractSvc, nil
