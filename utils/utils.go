@@ -1291,7 +1291,10 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 
 	var firstErr error
 
-	isFullStringMatch := re.MatchString(input) && re.FindString(input) == input
+	// Check if the entire input string is a single template placeholder.
+	// This is more efficient than using MatchString and FindString separately.
+	matchIndexes := re.FindStringIndex(input)
+	isExactPlaceholderMatch := matchIndexes != nil && matchIndexes[0] == 0 && matchIndexes[1] == len(input)
 
 	result := re.ReplaceAllStringFunc(input, func(match string) string {
 		// Only parse and execute the matched placeholder, not the entire string.
@@ -1311,7 +1314,7 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 			return match
 		}
 
-		if isFullStringMatch {
+		if isExactPlaceholderMatch {
 			return output.String()
 		}
 
@@ -1319,7 +1322,7 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 		// escaping control characters like newlines, quotes, and backslashes.
 		// This prevents errors such as `invalid character '\n' in string literal`
 		// when we later json.Unmarshal the rendered testcase.
-		return jsonEscapeString(output.String())
+		return jsonEscapeString(logger, output.String())
 	})
 
 	return result, firstErr
@@ -1329,12 +1332,23 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 // embedding directly inside a JSON string literal. It escapes characters
 // that must not appear unescaped in JSON strings (newlines, quotes, etc.)
 // but does not add surrounding quotes.
-func jsonEscapeString(s string) string {
+func jsonEscapeString(logger *zap.Logger, s string) string {
 	if s == "" {
 		return ""
 	}
 	b, err := json.Marshal(s)
-	if err != nil || len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+	// json.Marshal on a string should rarely fail, but if it does, log it
+	// and return the original string to avoid breaking the flow.
+	if err != nil {
+		LogError(logger, err, "failed to marshal string for JSON escaping, returning original unescaped string", zap.String("string", s))
+		return s
+	}
+
+	// The result of marshaling a string is a JSON string literal, which includes
+	// surrounding quotes. We need to strip them.
+	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		// This case is highly unlikely if json.Marshal succeeded without error.
+		LogError(logger, fmt.Errorf("json.Marshal returned unexpected format: %s", string(b)), "unexpected output from json.Marshal for a string", zap.String("string", s))
 		return s
 	}
 	// Strip the surrounding quotes added by json.Marshal.
