@@ -55,6 +55,7 @@ type UnitTestGenerator struct {
 	testCaseFailed   int
 	noCoverageTest   int
 	flakiness        bool
+        parser           *CodeParser
 }
 
 var discardedTestsFilename = "discardedTests.txt"
@@ -554,78 +555,14 @@ func (g *UnitTestGenerator) setCursor(ctx context.Context) error {
 }
 
 func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
-	indentation := -1
-	allowedAttempts := 3
-	counterAttempts := 0
-	for indentation == -1 && counterAttempts < allowedAttempts {
-		prompt, err := g.promptBuilder.BuildPrompt("indentation", "")
-		if err != nil {
-			return 0, fmt.Errorf("error building prompt: %w", err)
-		}
-
-		aiRequest := AIRequest{
-			MaxTokens: 4096,
-			Prompt:    *prompt,
-			SessionID: g.ai.SessionID,
-		}
-		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
-		if err != nil {
-			utils.LogError(g.logger, err, "Error calling AI model")
-			return 0, err
-		}
-		testsDetails, err := unmarshalYamlTestHeaders(response)
-		if err != nil {
-			utils.LogError(g.logger, err, "Error unmarshalling test headers")
-			return 0, err
-		}
-
-		indentation, err = convertToInt(testsDetails.Indentation)
-		if err != nil {
-			return 0, fmt.Errorf("error converting test_headers_indentation to int: %w", err)
-		}
-		counterAttempts++
-	}
-	if indentation == -1 {
-		return 0, fmt.Errorf("failed to analyze the test headers indentation")
-	}
-	return indentation, nil
+	// Use parser-based indentation detection instead of AI calls
+	testContent, _ := readFile(g.testPath); indent, _ := g.parser.GetIndentation(testContent, Language(g.lang))
+	return indent, nil
 }
 
 func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
-	line := -1
-	allowedAttempts := 3
-	counterAttempts := 0
-	for line == -1 && counterAttempts < allowedAttempts {
-		prompt, err := g.promptBuilder.BuildPrompt("insert_line", "")
-		if err != nil {
-			return 0, fmt.Errorf("error building prompt: %w", err)
-		}
-
-		aiRequest := AIRequest{
-			MaxTokens: 4096,
-			Prompt:    *prompt,
-			SessionID: g.ai.SessionID,
-		}
-		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
-		if err != nil {
-			utils.LogError(g.logger, err, "Error calling AI model")
-			return 0, err
-		}
-		testsDetails, err := unmarshalYamlTestLine(response)
-		if err != nil {
-			utils.LogError(g.logger, err, "Error unmarshalling test line")
-			return 0, err
-		}
-
-		line, err = convertToInt(testsDetails.Line)
-		if err != nil {
-			return 0, fmt.Errorf("error converting relevant_line_number_to_insert_after to int: %w", err)
-		}
-		counterAttempts++
-	}
-	if line == -1 {
-		return 0, fmt.Errorf("failed to analyze the relevant line number to insert new tests")
-	}
+	// Use parser-based insertion point detection instead of AI calls
+	testContent, _ := readFile(g.testPath); line, _ := g.parser.FindInsertionPoint(testContent, Language(g.lang))
 	return line, nil
 }
 

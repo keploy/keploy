@@ -2,7 +2,7 @@ module go.keploy.io/server/v3
 
 go 1.24.4
 
-toolchain go1.24.6
+toolchain go1.24.11
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
