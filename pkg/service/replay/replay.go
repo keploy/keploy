@@ -1537,7 +1537,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	}
 	failedTCsBySetIDSnapshot := make(map[string][]string, len(failedTCsBySetID))
 	for key, val := range failedTCsBySetID {
-		failedTCsBySetIDSnapshot[key] = val
+		failedTCsBySetIDSnapshot[key] = append([]string(nil), val...)
 	}
 	r.stateMu.Unlock()
 
