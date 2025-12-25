@@ -754,7 +754,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
 		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
-			utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
+			// Process already finished is expected during graceful shutdown, not an error
+			if stopErr.Error() != "os: process already finished" {
+				utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
+			}
 		}
 		return nil
 	})

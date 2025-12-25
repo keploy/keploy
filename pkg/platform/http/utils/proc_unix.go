@@ -51,7 +51,12 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 		// Graceful
 		err = cmd.Process.Signal(syscall.SIGTERM)
 		if err != nil {
-			logger.Error("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
+			// Process already finished is expected during graceful shutdown, not an error
+			if err.Error() == "os: process already finished" {
+				logger.Debug("process already finished during graceful shutdown", zap.Int("pid", pid))
+				return nil
+			}
+			logger.Warn("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
 		}
 		time.Sleep(3 * time.Second)
 		// Force

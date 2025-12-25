@@ -101,11 +101,6 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
-sudo "$RECORD_BIN" agent \
- > keploy_agent_record.log 2>&1 &
-AGENT_PID=$!
-echo "Keploy Agent PID: $AGENT_PID"
-
 for i in 1 2; do
   section "Record iteration $i"
   app_name="nodeApp_${i}"
