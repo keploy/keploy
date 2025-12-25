@@ -31,6 +31,10 @@ type MockCorrelationManager struct {
 	logger *zap.Logger
 	// Router for mock routing strategy
 	router MockRouter
+	// Map of test execution ID to sync.Once for Done channel
+	doneOnce map[string]*sync.Once
+	// Map of test execution ID to sync.Once for MockChannel
+	mockChOnce map[string]*sync.Once
 }
 
 // MockRouter interface for routing mocks to appropriate tests
@@ -57,6 +61,8 @@ func NewMockCorrelationManager(ctx context.Context, globalMockCh chan *models.Mo
 		ctx:              ctx,
 		logger:           logger,
 		router:           &ActiveTestRouter{},
+		doneOnce:         make(map[string]*sync.Once),
+		mockChOnce:       make(map[string]*sync.Once),
 	}
 
 	return mcm
@@ -119,6 +125,9 @@ func (mcm *MockCorrelationManager) RegisterTest(testCtx TestContext) {
 
 	mcm.testMockChannels[testCtx.TestID] = mockCh
 	mcm.activeTests[testCtx.TestID] = testCtx
+	// sync.Once ensures channels are closed exactly once
+	mcm.doneOnce[testCtx.TestID] = &sync.Once{}
+	mcm.mockChOnce[testCtx.TestID] = &sync.Once{}
 
 	mcm.logger.Debug("Test registered for mock correlation",
 		zap.String("testID", testCtx.TestID))
@@ -129,21 +138,36 @@ func (mcm *MockCorrelationManager) UnregisterTest(testID string) {
 	mcm.mutex.Lock()
 	defer mcm.mutex.Unlock()
 
-	if testCtx, exists := mcm.activeTests[testID]; exists {
-		// Signal that test is done
-		close(testCtx.Done)
+	testCtx, testExists := mcm.activeTests[testID]
+	doneOnce, doneExists := mcm.doneOnce[testID]
+	mockChOnce, mockChOnceExists := mcm.mockChOnce[testID]
+	mockCh, mockChExists := mcm.testMockChannels[testID]
 
-		// Close mock channel
-		if mockCh, chExists := mcm.testMockChannels[testID]; chExists {
-			close(mockCh)
-			delete(mcm.testMockChannels, testID)
-		}
-
-		delete(mcm.activeTests, testID)
-
-		mcm.logger.Debug("Test unregistered from mock correlation",
-			zap.String("testID", testID))
+	if !testExists {
+		return
 	}
+
+	// sync.Once ensures channels are closed exactly once
+	if doneExists {
+		doneOnce.Do(func() {
+			close(testCtx.Done)
+		})
+	}
+
+	if mockChOnceExists && mockChExists {
+		mockChOnce.Do(func() {
+			close(mockCh)
+		})
+	}
+
+	// Clean up maps after closing channels
+	delete(mcm.testMockChannels, testID)
+	delete(mcm.activeTests, testID)
+	delete(mcm.doneOnce, testID)
+	delete(mcm.mockChOnce, testID)
+
+	mcm.logger.Debug("Test unregistered from mock correlation",
+		zap.String("testID", testID))
 }
 
 // GetTestMocks returns the mock channel for a specific test
@@ -180,15 +204,29 @@ func (mcm *MockCorrelationManager) closeAllChannels() {
 	defer mcm.mutex.Unlock()
 
 	for testID, testCtx := range mcm.activeTests {
-		close(testCtx.Done)
-		if mockCh, exists := mcm.testMockChannels[testID]; exists {
-			close(mockCh)
+		doneOnce, doneExists := mcm.doneOnce[testID]
+		mockChOnce, mockChOnceExists := mcm.mockChOnce[testID]
+		mockCh, mockChExists := mcm.testMockChannels[testID]
+
+		// sync.Once ensures channels are closed exactly once
+		if doneExists {
+			doneOnce.Do(func() {
+				close(testCtx.Done)
+			})
+		}
+
+		if mockChOnceExists && mockChExists {
+			mockChOnce.Do(func() {
+				close(mockCh)
+			})
 		}
 	}
 
-	// Clear maps
+	// Clear maps after closing all channels
 	mcm.testMockChannels = make(map[string]chan *models.Mock)
 	mcm.activeTests = make(map[string]TestContext)
+	mcm.doneOnce = make(map[string]*sync.Once)
+	mcm.mockChOnce = make(map[string]*sync.Once)
 }
 
 // SetRouter allows changing the routing strategy
