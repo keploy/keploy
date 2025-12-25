@@ -213,12 +213,18 @@ func (mcm *MockCorrelationManager) closeAllChannels() {
 			doneOnce.Do(func() {
 				close(testCtx.Done)
 			})
+		} else {
+			mcm.logger.Warn("Missing sync.Once for Done channel",
+				zap.String("testID", testID))
 		}
 
 		if mockChOnceExists && mockChExists {
 			mockChOnce.Do(func() {
 				close(mockCh)
 			})
+		} else if mockChExists && !mockChOnceExists {
+			mcm.logger.Warn("Missing sync.Once for mock channel",
+				zap.String("testID", testID))
 		}
 	}
 

@@ -17,7 +17,6 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition(t *testing.T) {
 
 	for i := 0; i < iterations; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		logger := zap.NewNop()
 		globalMockCh := make(chan *models.Mock, 1000)
@@ -33,6 +32,7 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition(t *testing.T) {
 		}
 
 		if count := mcm.GetActiveTestCount(); count != len(testIDs) {
+			cancel()
 			t.Fatalf("Expected %d active tests, got %d", len(testIDs), count)
 		}
 
@@ -73,36 +73,11 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition(t *testing.T) {
 		}()
 
 		wg.Wait()
+		cancel()
 
 		if (i+1)%100 == 0 {
 			t.Logf("Completed %d/%d iterations", i+1, iterations)
 		}
-	}
-}
-
-// TestMockCorrelationManager_DoubleCloseRaceCondition_Exposed demonstrates
-// that closing a channel twice causes a panic.
-func TestMockCorrelationManager_DoubleCloseRaceCondition_Exposed(t *testing.T) {
-	doneCh := make(chan struct{})
-	mockCh := make(chan *models.Mock, 100)
-
-	close(doneCh)
-	close(mockCh)
-
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-				t.Logf("Double-close panic: %v", r)
-			}
-		}()
-		close(doneCh)
-		close(mockCh)
-	}()
-
-	if !panicked {
-		t.Fatal("Expected panic from double-close, but none occurred")
 	}
 }
 
@@ -141,7 +116,6 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition_MultipleTests(t *testin
 
 	for i := 0; i < iterations; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		logger := zap.NewNop()
 		globalMockCh := make(chan *models.Mock, 1000)
@@ -159,6 +133,7 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition_MultipleTests(t *testin
 		}
 
 		if count := mcm.GetActiveTestCount(); count != numTests {
+			cancel()
 			t.Fatalf("Expected %d active tests, got %d", numTests, count)
 		}
 
@@ -190,6 +165,7 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition_MultipleTests(t *testin
 		}()
 
 		wg.Wait()
+		cancel()
 
 		if (i+1)%10 == 0 {
 			t.Logf("Completed %d/%d iterations", i+1, iterations)
@@ -209,7 +185,6 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition_Stress(t *testing.T) {
 
 	for i := 0; i < iterations; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		logger := zap.NewNop()
 		globalMockCh := make(chan *models.Mock, 1000)
@@ -243,6 +218,7 @@ func TestMockCorrelationManager_DoubleCloseRaceCondition_Stress(t *testing.T) {
 		}
 
 		wg.Wait()
+		cancel()
 
 		if (i+1)%20 == 0 {
 			t.Logf("Completed %d/%d iterations", i+1, iterations)
