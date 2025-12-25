@@ -50,6 +50,20 @@ var (
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
 
+// isFirstRun returns the firstRun flag in a thread-safe manner
+func isFirstRun() bool {
+	completeTestReportMu.RLock()
+	defer completeTestReportMu.RUnlock()
+	return firstRun
+}
+
+// setFirstRun sets the firstRun flag in a thread-safe manner
+func setFirstRun(value bool) {
+	completeTestReportMu.Lock()
+	defer completeTestReportMu.Unlock()
+	firstRun = value
+}
+
 const UNKNOWN_TEST = "UNKNOWN_TEST"
 
 var HookImpl TestHooks
@@ -258,7 +272,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
-	firstRun = true
+	setFirstRun(true)
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -364,7 +378,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 				break
 			}
 			failedTcIDs := getFailedTCs(tcResults)
+			completeTestReportMu.Lock()
 			failedTCsBySetID[testSet] = failedTcIDs
+			completeTestReportMu.Unlock()
 
 			// checking for flakiness when --must-pass flag is not set
 			// else if --must-pass is set, delete the failed testcases and rerun
@@ -745,12 +761,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
 		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
-		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, firstRun)
+		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, isFirstRun())
 		if err != nil {
 			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
 		}
-		firstRun = false
+		setFirstRun(false)
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
@@ -824,13 +840,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		if firstRun {
+		if isFirstRun() {
 			err = HookImpl.BeforeTestRun(ctx, testRunID)
 			if err != nil {
 				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 			}
-			firstRun = false
+			setFirstRun(false)
 		}
 		isMappingEnabled := !r.config.DisableMapping
 
@@ -1533,6 +1549,10 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	for key, val := range completeTestReport {
 		reportSnapshot[key] = val
 	}
+	failedTCsBySetIDSnapshot := make(map[string][]string, len(failedTCsBySetID))
+	for key, val := range failedTCsBySetID {
+		failedTCsBySetIDSnapshot[key] = append([]string(nil), val...)
+	}
 	completeTestReportMu.RUnlock()
 
 	if totalTestsSnapshot > 0 {
@@ -1612,7 +1632,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 			if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
 				failedCasesStr := "-"
-				if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+				if failedCases, ok := failedTCsBySetIDSnapshot[testSuiteName]; ok && len(failedCases) > 0 {
 					failedCasesStr = strings.Join(failedCases, ", ")
 				}
 				format.WriteString("\t%s")
