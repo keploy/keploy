@@ -32,11 +32,9 @@
   </a>
 </p>
 
-
 [Keploy](https://keploy.io) is a **developer‑centric API and integration testing tool** that auto‑generates **tests and data‑mocks** faster than unit tests.  
 
 It records API calls, database queries, and streaming events — then replays them as tests. Under the hood, Keploy **uses eBPF to capture traffic at the network layer,** but for you it’s completely **code‑less** and **language‑agnostic**.
-
 
 <img align="center" src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="100%" alt="Convert API calls to API tests test cases and Data Mocks using AI"/>
 
@@ -87,7 +85,6 @@ This helps expand API Schema, Statement, and Branch Coverage.
 
 <img src="https://keploy-devrel.s3.us-west-2.amazonaws.com/ai+test+case+generation+that+works.png" width="100%" alt="ai test gen for api statement schema and branch coverage"/>
 
-
 ### Other Capabilities
 
 - 🌐 **CI/CD Integration:** Run tests with mocks anywhere you like—locally on the CLI, in your CI pipeline (Jenkins, Github Actions..) , or even across a Kubernetes cluster. [Read more](https://keploy.io/docs/running-keploy/api-testing-cicd/)
@@ -104,6 +101,16 @@ This helps expand API Schema, Statement, and Branch Coverage.
 ## Quick Start
 
 ### 1. Install Keploy Agent
+
+### ⚠️ Linux (Ubuntu/Debian) – Docker Compose Note
+
+On Ubuntu/Debian systems, installing Docker using the default `docker.io`
+package may not include Docker Compose v2. This can cause
+Keploy Docker Compose–based samples to fail.
+
+To avoid this issue, install Docker Engine and Docker Compose
+from Docker’s official repository so that the `docker compose`
+command works correctly.
 
 ```bash
 curl --silent -O -L https://keploy.io/install.sh && source install.sh
