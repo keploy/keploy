@@ -299,7 +299,14 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 // sendHTTPErrorResponse sends an HTTP error response to the client when destination dial fails
 // after reading an HTTP request. This prevents the client from hanging waiting for a response.
 func (p *Proxy) sendHTTPErrorResponse(srcConn net.Conn, initialBuf []byte, logger *zap.Logger, statusCode int, statusText string) {
+	// Double-check that this is actually an HTTP request before sending HTTP response.
+	// This is a safety check to prevent protocol violations with non-HTTP clients.
 	if !util.IsHTTPReq(initialBuf) {
+		previewLen := len(initialBuf)
+		if previewLen > 50 {
+			previewLen = 50
+		}
+		logger.Debug("skipping HTTP error response - not an HTTP request", zap.String("initialBufferPreview", string(initialBuf[:previewLen])))
 		return
 	}
 	
@@ -592,8 +599,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				// Send HTTP error response if we've already read an HTTP request
-				p.sendHTTPErrorResponse(srcConn, initialBuf, logger, 500, "Internal Server Error")
+				// Note: We don't send HTTP error response here because TLS connections
+				// could be any protocol (HTTPS, database, SSH, etc.), not just HTTP.
+				// Sending HTTP response to non-HTTP clients would cause protocol violations.
 				return err
 			}
 		}
@@ -606,8 +614,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				// Send HTTP error response if we've already read an HTTP request
-				p.sendHTTPErrorResponse(srcConn, initialBuf, logger, 500, "Internal Server Error")
+				// Only send HTTP error response if we've confirmed this is an HTTP connection.
+				// We've already filtered out database ports and TLS connections, but we still
+				// need to verify the protocol is HTTP before sending HTTP-specific responses.
+				if util.IsHTTPReq(initialBuf) {
+					p.sendHTTPErrorResponse(srcConn, initialBuf, logger, 500, "Internal Server Error")
+				}
 				return err
 			}
 		}
