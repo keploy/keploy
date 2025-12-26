@@ -11,7 +11,21 @@ Contributors are expected to adhere to the [Code of Conduct](CODE_OF_CONDUCT.md)
 ## Prerequisites for the contributors
 
 Contributors should have knowledge of git, go, and markdown for most projects since the project work heavily depends on them.
-We encourage Contributors to set up Keploy for local development and play around with the code and tests to get more comfortable with the project. 
+We encourage Contributors to set up Keploy for local development and play around with the code and tests to get more comfortable with the project.
+
+### Docker Installation (Linux)
+
+> ⚠️ **Important for Ubuntu/Debian users**: Many Keploy sample projects use `docker compose` (Docker Compose v2). If you installed Docker via distribution packages (`docker.io`), Docker Compose v2 may be missing or incompatible, causing sample projects to fail.
+>
+> **Recommended**: Install Docker from [Docker's official repository](https://docs.docker.com/engine/install/ubuntu/) instead of using `apt install docker.io`. The official installation includes the Docker Compose plugin.
+>
+> To verify your setup:
+>
+> ```bash
+> docker compose version
+> ```
+>
+> If this command fails, follow the [official Docker installation guide](https://docs.docker.com/engine/install/) to reinstall Docker with the Compose plugin.
 
 Sections
 
@@ -85,7 +99,6 @@ git clone https://github.com/<GITHUB_USERNAME>/keploy.git
 
 3. Go into the directory containing the project and edit the changes.
 
-
 When we merge your PR, a new build automatically occurs and your changes publish to [https://keploy.io](https://github.com/keploy/keploy).
 
 ## <a name="contributing-keploy">Keploy Contribution Flow</a>
@@ -95,27 +108,29 @@ Practices for Production Environments](https://peter.bourgon.org/go-in-productio
 
 There are many ways in which you can contribute to Keploy.
 
-###  <a name="keploy-server">Keploy Server</a>
+### <a name="keploy-server">Keploy Server</a>
 
 #### Report a Bug
+
 Report all issues through GitHub Issues using the [Report a Bug](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=bug_report.md&title=) template.
 To help resolve your issue as quickly as possible, read the template and provide all the requested information.
 
 #### Feature request
+
 We welcome all feature requests, whether it's to add new functionality to an existing extension or to offer an idea for a brand new extension.
 File your feature request through GitHub Issues using the [Feature Request](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) template.
 
 #### Close a Bug
+
 We welcome contributions that help make keploy bug free & improve the experience of our users. You can also find issues tagged [Good First Issues](https://github.com/keploy/keploy/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
-###  <a name="keploy-docs">Keploy Documentation</a>
+### <a name="keploy-docs">Keploy Documentation</a>
 
 The Keploy documentation site uses Docusaurus 2, which is a static website generator, you can make changes locally without previewing them in the browser.
 
-In the process of shipping features quickly, we may forget to keep our docs up to date. You can help by suggesting improvements to our documentation using the [Documentation Improvement](https://github.com/keploy/docs/issues) template. 
+In the process of shipping features quickly, we may forget to keep our docs up to date. You can help by suggesting improvements to our documentation using the [Documentation Improvement](https://github.com/keploy/docs/issues) template.
 
 Please refer to [Keploy Docs Contributing Guide](https://github.com/keploy/docs/blob/main/CONTRIBUTING.md#-how-to-set-up-the-docs-website-locally) for setting up your development environment and the follow [Keploy Style Guide](https://github.com/keploy/docs/blob/main/STYLE.md).
-
 
 # Contact
 
