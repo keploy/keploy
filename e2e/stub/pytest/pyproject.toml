@@ -1,0 +1,23 @@
+[project]
+name = "keploy-stub-e2e-pytest"
+version = "1.0.0"
+description = "Pytest E2E tests for Keploy stub record/replay"
+requires-python = ">=3.9"
+dependencies = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
+    "flask>=3.0.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest-cov>=4.1.0",
+    "pytest-html>=4.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
