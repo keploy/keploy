@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var TeleGlobalMap sync.Map
+var TeleGlobalMap = &sync.Map{}
 
 type ServiceProvider struct {
 	logger *zap.Logger
