@@ -130,6 +130,42 @@ func GetPayloadLength(src []byte) (length uint32) {
 	return length
 }
 
+// IsMySQLHandshake checks if a buffer contains a MySQL handshake packet.
+// MySQL server sends the first packet (handshake), so this detects MySQL protocol.
+// MySQL packet structure (consistent across all versions):
+// - First 3 bytes: payload length (little-endian, max 16MB-1)
+// - 4th byte: sequence ID (0 for initial handshake)
+// - First byte of payload: ProtocolVersion (10/0x0a for MySQL 4.1+, which includes 5.6+)
+func IsMySQLHandshake(buffer []byte) bool {
+	// Need at least 5 bytes: 4-byte header + 1 byte protocol version
+	if len(buffer) < 5 {
+		return false
+	}
+
+	// Check MySQL packet header structure
+	payloadLength := uint32(buffer[0]) | uint32(buffer[1])<<8 | uint32(buffer[2])<<16
+	sequenceID := buffer[3]
+
+	// MySQL packet length should be reasonable (max 16MB-1 = 0xFFFFFF)
+	// And should be non-zero for a handshake
+	if payloadLength > 0xFFFFFF || payloadLength == 0 {
+		return false
+	}
+
+	// First packet from server should have sequence ID 0
+	if sequenceID != 0 {
+		return false
+	}
+
+	// Check protocol version in payload
+	protocolVersion := buffer[4]
+
+	// MySQL 5.6+ uses protocol version 10 (0x0a)
+	// Also accept version 9 for older compatibility (MySQL 4.0.x)
+	// Protocol version should be in valid MySQL range
+	return protocolVersion == 9 || protocolVersion == 10
+}
+
 func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 	if len(b) == 0 {
 		return 0, true, 0
