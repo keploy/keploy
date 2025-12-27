@@ -18,7 +18,6 @@ templatize:
 port: 0
 proxyPort: 16789
 dnsPort: 26789
-databasePorts: [3306, 4000]
 debug: false
 disableANSI: false
 disableTele: false
@@ -90,7 +89,6 @@ keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 inDocker: false
 cmdType: "native"
-databasePorts: [3306, 4000]
 `
 
 var config = &Config{}

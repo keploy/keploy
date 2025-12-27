@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -65,16 +66,9 @@ type Proxy struct {
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
-	DatabasePorts     []uint32 // ports to treat as MySQL-compatible databases
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
-	// Default database ports if not configured
-	databasePorts := opts.DatabasePorts
-	if len(databasePorts) == 0 {
-		databasePorts = []uint32{3306, 4000} // MySQL default port and TiDB default port
-	}
-
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort, // default: 16789
@@ -88,7 +82,6 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 		MockManagers:      sync.Map{},
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough: opts.Record.GlobalPassthrough,
-		DatabasePorts:     databasePorts,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 	}
 }
@@ -436,28 +429,63 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
-	//checking for the destination port of MySQL-compatible databases (configurable via databasePorts)
-	// Default ports: MySQL (3306) and TiDB (4000)
-	isDatabasePort := false
-	for _, dbPort := range p.DatabasePorts {
-		if destInfo.Port == dbPort {
-			isDatabasePort = true
-			break
+	// Protocol-based MySQL detection: Connect to destination early and check if server sends MySQL handshake
+	// MySQL server sends the first packet (handshake), so we read from destination to detect it
+	isMySQL := false
+	var mysqlDetectionBuffer []byte
+	var mysqlDetectionConn net.Conn
+
+	if rule.Mode != models.MODE_TEST {
+		// Connect to destination server early for protocol detection
+		mysqlDetectionConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+			return err
+		}
+
+		// Set a short timeout for MySQL detection (MySQL server should send handshake immediately)
+		mysqlDetectionConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+		// Read MySQL packet header (4 bytes) + at least 1 byte of payload for protocol version
+		detectionBuffer := make([]byte, 5)
+		n, err := mysqlDetectionConn.Read(detectionBuffer)
+		if err == nil && n >= 5 {
+			// Check if it's a MySQL handshake packet
+			if mysqlUtils.IsMySQLHandshake(detectionBuffer) {
+				isMySQL = true
+				mysqlDetectionBuffer = detectionBuffer[:n]
+				p.logger.Debug("Detected MySQL protocol from server handshake", zap.String("destination", dstAddr))
+			}
+		}
+
+		// Reset read deadline
+		mysqlDetectionConn.SetReadDeadline(time.Time{})
+
+		if isMySQL {
+			// Use the connection we already established
+			dstConn = mysqlDetectionConn
+			// Replay the detection buffer we read
+			if len(mysqlDetectionBuffer) > 0 {
+				dstConn = &util.Conn{
+					Conn:   dstConn,
+					Reader: io.MultiReader(bytes.NewReader(mysqlDetectionBuffer), dstConn),
+					Logger: p.logger,
+				}
+			}
+		} else {
+			// Not MySQL, close the detection connection and let normal flow handle connection
+			mysqlDetectionConn.Close()
 		}
 	}
-	if isDatabasePort {
+
+	if isMySQL {
+		// Handle MySQL flow
+		dstCfg := &models.ConditionalDstCfg{
+			Port: uint(destInfo.Port),
+		}
+		rule.DstCfg = dstCfg
+
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-
-			dstCfg := &models.ConditionalDstCfg{
-				Port: uint(destInfo.Port),
-			}
-			rule.DstCfg = dstCfg
-
 			// Record the outgoing message into a mock
 			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {

@@ -13,7 +13,6 @@ type MockDownload struct {
 }
 
 type Config struct {
-	DatabasePorts []uint32 `json:"databasePorts" yaml:"databasePorts" mapstructure:"databasePorts"`
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
