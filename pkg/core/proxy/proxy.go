@@ -433,6 +433,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
 			}
+			// For database connections, don't close connections in defer
+			// Let the error group manage them - they'll be closed when the goroutine finishes
+			// This allows post-handshake operations (loadServerVariables, etc.) to complete
+			srcConn = nil
+			dstConn = nil
 			return nil
 		}
 
