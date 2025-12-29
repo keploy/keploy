@@ -216,3 +216,4 @@ jobs:
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
+
