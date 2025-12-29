@@ -358,8 +358,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
 	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
+	
+	// Track if this is a database connection to avoid premature context cancellation
+	isDatabaseConnection := false
+	
 	defer func() {
-		parserCtxCancel()
+		// For database connections, don't cancel context immediately
+		// Let the goroutine continue handling queries until connection closes naturally
+		if !isDatabaseConnection {
+			parserCtxCancel()
+		}
 
 		if srcConn != nil {
 			err := srcConn.Close()
@@ -383,9 +391,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		}
 
+		// For database connections, wait for goroutine to finish naturally
+		// For other connections, wait normally
 		err = parserErrGrp.Wait()
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
+		}
+		
+		// Cancel context after goroutine finishes for database connections
+		if isDatabaseConnection {
+			parserCtxCancel()
 		}
 	}()
 
@@ -416,6 +431,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	if isDatabasePort {
 		if rule.Mode != models.MODE_TEST {
+			isDatabaseConnection = true // Mark as database connection
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
