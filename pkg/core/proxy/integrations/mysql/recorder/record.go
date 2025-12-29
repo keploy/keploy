@@ -30,6 +30,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	)
 
 	errCh := make(chan error, 1)
+	handshakeDone := make(chan struct{}, 1) // Signal when handshake completes
 
 	//get the error group from the context
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -84,6 +85,9 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
 		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
+		// Signal that handshake is complete - connection is established
+		handshakeDone <- struct{}{}
+
 		// handle the client-server interaction (command phase)
 		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx)
 		if err != nil {
@@ -96,10 +100,17 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		return nil
 	})
 
+	// Wait for handshake to complete before returning
+	// This ensures connection is established and connection pool can reuse it
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-handshakeDone:
+		// Handshake completed successfully, return immediately
+		// Query handling continues in background via error group
+		return nil
 	case err := <-errCh:
+		// If error occurs during handshake, return it
 		if err == io.EOF {
 			return nil
 		}
