@@ -118,6 +118,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			}
 			if seen && pass {
 				passThrough = true
+				logger.Info("Returning from passThrough filter with AND match type", zap.String("request_url", req.URL.String()))
 				return passThrough
 			}
 
@@ -127,6 +128,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			for _, c := range conds {
 				if c.eligible && c.match {
 					passThrough = true
+					logger.Info("Returning from passThrough filter with OR match type", zap.String("request_url", req.URL.String()))
 					return passThrough
 				}
 			}
@@ -194,9 +196,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 
 	if isFiltered(logger, req, opts) {
-		logger.Debug("The request is a filtered request")
+		logger.Info("The request is a filtered request", zap.Any("metadata", utils.GetReqMeta(req)))
 		return
 	}
+	logger.Info("Capturing HTTP test case", zap.Any("metadata", utils.GetReqMeta(req)))
 	var formData []models.FormData
 	if contentType := req.Header.Get("Content-Type"); strings.HasPrefix(contentType, "multipart/form-data") {
 		parts := strings.Split(contentType, ";")
@@ -221,6 +224,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			return
 		}
 	}
+
+	logger.Info("Inserting test case into channel", zap.Any("metadata", utils.GetReqMeta(req)))
 
 	testCase := &models.TestCase{
 		Version: models.GetVersion(),
