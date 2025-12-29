@@ -9,6 +9,10 @@ inputs:
     description: 'Whether to enable Go module caching (default: true).'
     required: false
     default: true
+  integration-ref:
+    description: 'The git ref (branch, tag, or commit) of the integrations repo.'
+    required: true
+    default: 'main'
 
 runs:
   using: composite
@@ -19,6 +23,12 @@ runs:
         go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
+    - name: Add GitHub to known hosts
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
@@ -26,6 +36,8 @@ runs:
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
+      env:
+        INTEGRATION_REF: ${{ inputs.integration-ref }}
       run: |
         set -euo pipefail
         git config --global url."git@github.com:".insteadOf "https://github.com/"
