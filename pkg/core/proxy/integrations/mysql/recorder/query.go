@@ -281,30 +281,38 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
 
-		// Read the EOF packet for column definition
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-		if err != nil {
-			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for column definition")
+		// Check if CLIENT_DEPRECATE_EOF capability is set
+		// If set, EOF packets are deprecated and server won't send them (MySQL 5.7.5+)
+		if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+			logger.Debug("EOF packet is not deprecated, reading EOF after columns")
+
+			// Read the EOF packet for column definition
+			eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			if err != nil {
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read EOF packet for column definition")
+				}
+				return nil, err
 			}
-			return nil, err
+
+			// Write the EOF packet for column definition to the client
+			_, err = clientConn.Write(eofData)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
+				return nil, err
+			}
+
+			// Validate the EOF packet for column definition
+			if !mysqlUtils.IsEOFPacket(eofData) {
+				return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling prepared statement response", eofData)
+			}
+
+			responseOk.EOFAfterColumnDefs = eofData
+			logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
+		} else {
+			logger.Debug("CLIENT_DEPRECATE_EOF is set, EOF packet after columns is deprecated and not sent by server")
+			responseOk.EOFAfterColumnDefs = nil
 		}
-
-		// Write the EOF packet for column definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
-			return nil, err
-		}
-
-		// Validate the EOF packet for column definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling prepared statement response", eofData)
-		}
-
-		responseOk.EOFAfterColumnDefs = eofData
-
-		logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
 	}
 
 	//set the lastOp to COM_STMT_PREPARE_OK
