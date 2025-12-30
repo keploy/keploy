@@ -488,7 +488,6 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	return &rendered, nil
 }
 
-
 // DetectNoiseFieldsInResp inspects a rendered HTTP response and returns a map
 // of noise fields that should be marked on the testcase so matchers ignore
 // them during comparison. It uses current templated values from utils and library-based detection.
