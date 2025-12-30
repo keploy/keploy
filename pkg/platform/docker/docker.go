@@ -16,7 +16,6 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 
-	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/volume"
 )
@@ -154,7 +153,7 @@ func (idc *Impl) StopAndRemoveDockerContainer() error {
 		}
 	}
 
-	removeOptions := types.ContainerRemoveOptions{
+	removeOptions := dockerContainerPkg.RemoveOptions{
 		RemoveVolumes: true,
 		Force:         true,
 	}
@@ -175,7 +174,7 @@ func (idc *Impl) NetworkExists(networkName string) (bool, error) {
 	defer cancel()
 
 	// Retrieve all networks.
-	networks, err := idc.NetworkList(ctx, types.NetworkListOptions{})
+	networks, err := idc.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		return false, fmt.Errorf("error retrieving networks: %v", err)
 	}
@@ -195,7 +194,7 @@ func (idc *Impl) CreateNetwork(networkName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
-	_, err := idc.NetworkCreate(ctx, networkName, types.NetworkCreate{
+	_, err := idc.NetworkCreate(ctx, networkName, network.CreateOptions{
 		Driver: "bridge",
 	})
 
@@ -598,7 +597,7 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 		// These are orphaned containers from previous runs that are blocking volume recreation.
 		containerFilters := filters.NewArgs()
 		containerFilters.Add("volume", volumeName)
-		containers, err := idc.ContainerList(ctx, types.ContainerListOptions{
+		containers, err := idc.ContainerList(ctx, dockerContainerPkg.ListOptions{
 			All:     true,
 			Filters: containerFilters,
 		})
@@ -624,7 +623,7 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 					zap.String("status", container.State),
 					zap.String("image", container.Image))
 
-				removeErr := idc.ContainerRemove(ctx, container.ID, types.ContainerRemoveOptions{
+				removeErr := idc.ContainerRemove(ctx, container.ID, dockerContainerPkg.RemoveOptions{
 					Force:         true,  // Force removal even if running
 					RemoveVolumes: false, // Don't remove volumes yet, we'll do that explicitly
 				})
