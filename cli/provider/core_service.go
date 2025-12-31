@@ -21,6 +21,7 @@ import (
 	testdb "go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/pkg/service/contract"
+	"go.keploy.io/server/v3/pkg/service/mockreplay"
 	"go.keploy.io/server/v3/pkg/service/orchestrator"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/replay"
@@ -52,6 +53,9 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return recordSvc, nil
 	case "test", "mock":
 		return replaySvc, nil
+	case "mock-test":
+		mockReplaySvc := mockreplay.New(logger, commonServices.YamlMockDb, commonServices.YamlTestDB, tel, commonServices.Instrumentation, cfg)
+		return mockReplaySvc, nil
 	case "templatize", "config", "update", "login", "export", "import", "sanitize", "normalize":
 		return toolsSvc, nil
 	case "contract":

@@ -282,8 +282,29 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 
 		if err != nil {
+			// Log the error type for debugging
+			a.logger.Debug("Application error details", zap.String("errorType", fmt.Sprintf("%T", err)), zap.Error(err))
+
+			// Check if it's an ExitError and extract the exit code
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode := exitErr.ExitCode()
+				a.logger.Debug("Application exited", zap.Int("exitCode", exitCode), zap.Error(err))
+
+				// Exit code 0 means successful completion (e.g., tests passed)
+				if exitCode == 0 {
+					a.logger.Info("Application completed successfully with exit code 0")
+					return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+				}
+				// Non-zero exit code is an actual error
+				a.logger.Warn("Application exited with non-zero code", zap.Int("exitCode", exitCode))
+				return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
+			}
+			// Other types of errors (not ExitError)
+			a.logger.Warn("Application error (not ExitError)", zap.Error(err))
 			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
 		}
+		// No error means successful completion
+		a.logger.Info("Application completed successfully (no error)")
 		return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
 	}
 }

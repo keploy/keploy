@@ -580,10 +580,8 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		defer utils.Recover(a.logger)
 		defer close(appErrCh)
 		appErr := app.Run(runAppCtx)
-		if appErr.Err != nil {
-			utils.LogError(a.logger, appErr.Err, "error while running the app")
-			appErrCh <- appErr
-		}
+		// Always send the result - let the receiver decide what to do with it
+		appErrCh <- appErr
 		return nil
 	})
 
@@ -591,6 +589,13 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	case <-runAppCtx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	case appErr := <-appErrCh:
+		// ErrAppStopped with nil error means successful completion (e.g., tests passed)
+		if appErr.AppErrorType == models.ErrAppStopped && appErr.Err == nil {
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+		}
+		if appErr.Err != nil {
+			utils.LogError(a.logger, appErr.Err, "error while running the app")
+		}
 		return appErr
 	}
 }

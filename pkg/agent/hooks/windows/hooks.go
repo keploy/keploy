@@ -91,6 +91,10 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		return err
 	}
 
+	// IMPORTANT: Cleanup any stale WinDivert from previous crash BEFORE starting a new one
+	// This prevents the new redirector from being immediately stopped
+	h.cleanupStalePIDFile()
+
 	clientPID := uint32(setupOpts.ClientNSPID)
 	agentPID := uint32(os.Getpid())
 
@@ -109,6 +113,14 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err
+	}
+
+	// Initialize watchdog for crash recovery
+	// This creates a PID file and registers console handlers
+	// NOTE: Stale cleanup is already done above, so initWatchdog only creates PID file and registers handlers
+	if err := h.initWatchdog(); err != nil {
+		h.logger.Warn("failed to initialize watchdog", zap.Error(err))
+		// Non-fatal: continue even if watchdog fails to initialize
 	}
 
 	return nil
@@ -148,6 +160,9 @@ func (h *Hooks) ensureWinDivertAssets() (string, error) {
 }
 
 func (h *Hooks) unLoad(_ context.Context) {
+	// Stop watchdog and remove PID file (graceful shutdown)
+	h.stopWatchdog()
+
 	err := StopRedirector()
 	if err != nil {
 		h.logger.Error("failed to stop redirector", zap.Error(err))

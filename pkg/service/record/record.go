@@ -228,9 +228,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			if reRecordCfg.TestSet == "" {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 				if err != nil {
-					if ctx.Err() == context.Canceled {
-						continue
-					}
 					insertTestErrChan <- err
 				} else {
 					testCount++
@@ -260,9 +257,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
-				if ctx.Err() == context.Canceled {
-					continue
-				}
 				insertMockErrChan <- err
 			} else {
 				mockCountMap[mock.GetKind()]++
@@ -366,18 +360,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 		for {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
 			case tc, ok := <-ch:
 				if !ok {
 					return nil
 				}
-				// forward but remain cancelable
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case incomingChan <- tc:
-				}
+				// forward the test case
+				incomingChan <- tc
 			}
 		}
 	})
@@ -407,18 +395,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 		for {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
 			case m, ok := <-ch:
 				if !ok {
 					return nil
 				}
-				select {
-				case <-ctx.Done():
-					outgoingChan <- m
-					return ctx.Err()
-				case outgoingChan <- m:
-				}
+				// forward the mock
+				outgoingChan <- m
 			}
 		}
 	})

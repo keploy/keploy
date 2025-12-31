@@ -27,7 +27,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 	}
-	
+
 	var releaseOnce sync.Once
 	releaseLock := func() {
 		if pm.synchronous {
@@ -76,12 +76,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			chunked = true
 
 		} else if pm.synchronous {
-
 			mgr := syncMock.Get()
 			if !mgr.GetFirstReqSeen() {
 				mgr.SetFirstRequestSignaled()
 			}
-
 			// we will close connection in case of keep alive (to allow multiple clients to make connections)
 			// if we don't close a connection in pm.synchronous mode, the next request from other client will be blocked
 			req.Close = true
@@ -149,10 +147,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		go func() {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			
 			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous)
-
-
 		}()
 
 		if pm.synchronous {

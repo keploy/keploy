@@ -1459,7 +1459,39 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return nil, nil, err
 	}
+
+	// If specific mocks are selected, filter by name
+	if len(r.config.Test.SelectedMocks) > 0 {
+		filtered = r.filterMocksByName(filtered, r.config.Test.SelectedMocks)
+		unfiltered = r.filterMocksByName(unfiltered, r.config.Test.SelectedMocks)
+		r.logger.Info("Filtered mocks by selected names",
+			zap.Strings("selectedMocks", r.config.Test.SelectedMocks),
+			zap.Int("filteredCount", len(filtered)),
+			zap.Int("unfilteredCount", len(unfiltered)))
+	}
+
 	return filtered, unfiltered, err
+}
+
+// filterMocksByName filters mocks to only include those whose names match the selected list
+func (r *Replayer) filterMocksByName(mocks []*models.Mock, selectedNames []string) []*models.Mock {
+	if len(selectedNames) == 0 || len(mocks) == 0 {
+		return mocks
+	}
+
+	// Create a set of selected names for O(1) lookup
+	selectedSet := make(map[string]bool)
+	for _, name := range selectedNames {
+		selectedSet[name] = true
+	}
+
+	result := make([]*models.Mock, 0)
+	for _, mock := range mocks {
+		if selectedSet[mock.Name] {
+			result = append(result, mock)
+		}
+	}
+	return result
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks

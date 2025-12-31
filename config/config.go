@@ -122,6 +122,7 @@ type Normalize struct {
 
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	SelectedMocks       []string            `json:"selectedMocks" yaml:"selectedMocks" mapstructure:"selectedMocks"` // specific mock names to use during replay
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	Delay               uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	Host                string              `json:"host" yaml:"host" mapstructure:"host"`

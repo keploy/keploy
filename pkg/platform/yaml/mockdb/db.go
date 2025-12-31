@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -119,7 +120,9 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
+	// Use simple sequential naming
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
+
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
@@ -150,6 +153,133 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	}
 	return nil
 }
+
+// generateContextualName generates a contextual name for a mock based on its type and content
+func (ys *MockYaml) generateContextualName(mock *models.Mock) string {
+	// Build name parts based on mock kind
+	parts := []string{}
+
+	switch mock.Kind {
+	case models.HTTP:
+		parts = append(parts, "http")
+		if mock.Spec.HTTPReq != nil {
+			method := mock.Spec.HTTPReq.Method
+			if method != "" {
+				parts = append(parts, strings.ToLower(string(method)))
+			}
+			// Extract resource from URL
+			if mock.Spec.HTTPReq.URL != "" {
+				resource := extractResourceFromURL(mock.Spec.HTTPReq.URL)
+				if resource != "" {
+					parts = append(parts, resource)
+				}
+			}
+		}
+	case models.Postgres:
+		parts = append(parts, "postgres")
+		if mock.Spec.Metadata != nil {
+			if op, ok := mock.Spec.Metadata["operation"]; ok {
+				parts = append(parts, strings.ToLower(fmt.Sprint(op)))
+			}
+		}
+	case models.MySQL:
+		parts = append(parts, "mysql")
+		if mock.Spec.Metadata != nil {
+			if op, ok := mock.Spec.Metadata["operation"]; ok {
+				parts = append(parts, strings.ToLower(fmt.Sprint(op)))
+			}
+		}
+	case models.Mongo:
+		parts = append(parts, "mongo")
+		if mock.Spec.Metadata != nil {
+			if col, ok := mock.Spec.Metadata["collection"]; ok {
+				parts = append(parts, sanitizeNamePart(fmt.Sprint(col)))
+			}
+		}
+	case models.REDIS:
+		parts = append(parts, "redis")
+		if mock.Spec.Metadata != nil {
+			if cmd, ok := mock.Spec.Metadata["command"]; ok {
+				parts = append(parts, strings.ToLower(fmt.Sprint(cmd)))
+			}
+		}
+	case models.GENERIC:
+		parts = append(parts, "generic")
+	case models.GRPC_EXPORT:
+		parts = append(parts, "grpc")
+	default:
+		return "" // Fall back to sequential naming
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	// Add sequential ID for uniqueness
+	parts = append(parts, fmt.Sprintf("%d", ys.getNextID()))
+
+	return strings.Join(parts, "-")
+}
+
+// extractResourceFromURL extracts the main resource name from a URL path
+func extractResourceFromURL(urlPath string) string {
+	// Remove query parameters
+	if idx := strings.Index(urlPath, "?"); idx != -1 {
+		urlPath = urlPath[:idx]
+	}
+
+	// Split path segments
+	segments := strings.Split(strings.Trim(urlPath, "/"), "/")
+
+	// Find the last non-ID segment
+	for i := len(segments) - 1; i >= 0; i-- {
+		seg := segments[i]
+		if seg != "" && !isIDSegment(seg) && !isVersionSegment(seg) {
+			return sanitizeNamePart(seg)
+		}
+	}
+
+	return ""
+}
+
+// isIDSegment checks if a segment looks like an ID
+func isIDSegment(segment string) bool {
+	// UUID pattern
+	if len(segment) == 36 && strings.Count(segment, "-") == 4 {
+		return true
+	}
+	// Numeric ID
+	for _, c := range segment {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(segment) > 0 && len(segment) <= 20
+}
+
+// isVersionSegment checks if a segment is an API version
+func isVersionSegment(segment string) bool {
+	if len(segment) < 2 {
+		return false
+	}
+	lower := strings.ToLower(segment)
+	return lower[0] == 'v' && lower[1] >= '0' && lower[1] <= '9'
+}
+
+// sanitizeNamePart converts a string to a valid name part
+func sanitizeNamePart(name string) string {
+	name = strings.ToLower(name)
+	result := strings.Builder{}
+	for _, c := range name {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			result.WriteRune(c)
+		} else if c == '-' || c == '_' || c == ' ' {
+			result.WriteRune('-')
+		}
+	}
+	return strings.Trim(result.String(), "-")
+}
+
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
