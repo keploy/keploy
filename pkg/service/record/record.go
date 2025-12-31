@@ -44,7 +44,8 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
-	r.logger.Info("🔴 Starting Keploy recording... Please wait.")
+	mode := r.recordMode()
+	mode.logStart(r)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -112,7 +113,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
-		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
+		mode.emitTelemetry(r, newTestSetID, testCount, mockCountMap)
 	}()
 
 	defer close(appErrChan)
@@ -196,10 +197,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 	}
 
-	r.logger.Info("🟢 Keploy agent is ready to record test cases and mocks.")
+	mode.logAgentReady(r)
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(reqCtx)
+	frames, err := r.GetTestAndMockChans(reqCtx, mode.includeIncoming())
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -209,7 +210,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.logger.Info("🟢 Keploy is now recording test cases and mocks for you application...")
+	mode.logRecordingActive(r)
 
 	if r.config.CommandType == string(utils.DockerCompose) {
 
@@ -222,23 +223,14 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
-	errGrp.Go(func() error {
-		for testCase := range frames.Incoming {
-			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
-			if reRecordCfg.TestSet == "" {
-				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-				if err != nil {
-					insertTestErrChan <- err
-				} else {
-					testCount++
-					r.telemetry.RecordedTestAndMocks()
-				}
-			} else {
-				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
+	if mode.includeIncoming() {
+		errGrp.Go(func() error {
+			for testCase := range frames.Incoming {
+				mode.recordTestCase(ctx, r, testCase, newTestSetID, reRecordCfg, insertTestErrChan, &testCount)
 			}
-		}
-		return nil
-	})
+			return nil
+		})
+	}
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
@@ -333,42 +325,45 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
+func (r *Recorder) GetTestAndMockChans(ctx context.Context, includeIncoming bool) (FrameChan, error) {
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
 	}
 
 	// Create channels to receive incoming and outgoing data
-	incomingChan := make(chan *models.TestCase)
+	var incomingChan chan *models.TestCase
+	if includeIncoming {
+		incomingChan = make(chan *models.TestCase)
+	}
 	outgoingChan := make(chan *models.Mock)
-	errChan := make(chan error, 2)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
-	g.Go(func() error {
-		defer close(incomingChan)
+	if includeIncoming {
+		g.Go(func() error {
+			defer close(incomingChan)
 
-		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
-		if err != nil {
-			errChan <- err
-			return fmt.Errorf("failed to get incoming test cases: %w", err)
-		}
-
-		for {
-			select {
-			case tc, ok := <-ch:
-				if !ok {
-					return nil
-				}
-				// forward the test case
-				incomingChan <- tc
+			ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+			if err != nil {
+				return fmt.Errorf("failed to get incoming test cases: %w", err)
 			}
-		}
-	})
+
+			for {
+				select {
+				case tc, ok := <-ch:
+					if !ok {
+						return nil
+					}
+					// forward the test case
+					incomingChan <- tc
+				}
+			}
+		})
+	}
 
 	// OUTGOING
 	g.Go(func() error {
