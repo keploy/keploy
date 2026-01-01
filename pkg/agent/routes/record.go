@@ -140,6 +140,9 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
+
+	a.logger.Info("🟢 Received request to handle incoming test cases")
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -171,6 +174,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
+	a.logger.Info("🟢 Streaming incoming test cases to client")
+
 	// TODO: make a uniform implementation for both test and mock streaming channels
 	// Keep the connection alive and stream data
 	for t := range tc {
@@ -189,6 +194,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
+
+	a.logger.Info("🟢 Received request to handle outgoing mocks...")
+
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -215,6 +223,8 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		a.logger.Error("failed to get outgoing", zap.Error(err))
 		return
 	}
+
+	a.logger.Info("🟢 Streaming outgoing mocks to client...")
 
 	enc := gob.NewEncoder(w)
 

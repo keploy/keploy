@@ -119,6 +119,7 @@ jobs:
         $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
         if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
+    
     - name: Pull Docker image
       shell: powershell
       run: |

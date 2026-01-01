@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext) error {
+func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
@@ -60,7 +60,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			// handle no response commands like COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA, etc
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
-				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now())
+				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
 				// reset the requests and responses
 				requests = []mysql.Request{}
 				responses = []mysql.Response{}
@@ -83,7 +83,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			})
 
 			// record the mock
-			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp, resTimestamp)
+			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp, resTimestamp, opts)
 
 			// reset the requests and responses
 			requests = []mysql.Request{}
