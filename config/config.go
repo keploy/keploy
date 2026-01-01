@@ -72,10 +72,10 @@ type UtGen struct {
 	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
 	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
 	AdditionalPrompt   string  `json:"additionalPrompt" yaml:"additionalPrompt" mapstructure:"additionalPrompt"`
-	FunctionUnderTest  string  `json:"functionUnderTest" yaml:"-" mapstructure:"functionUnderTest"`
-	Flakiness          bool    `json:"flakiness" yaml:"flakiness" mapstructure:"flakiness"`
-	Temperature        float32 `json:"temperature" yaml:"temperature" mapstructure:"temperature"`
-	ReasoningEffort    string  `json:"reasoningEffort" yaml:"reasoningEffort" mapstructure:"reasoningEffort"`
+	FunctionUnderTest  string   `json:"functionUnderTest" yaml:"-" mapstructure:"functionUnderTest"`
+	Flakiness          bool     `json:"flakiness" yaml:"flakiness" mapstructure:"flakiness"`
+	Temperature        *float32 `json:"temperature" yaml:"temperature" mapstructure:"temperature"`
+	ReasoningEffort    string   `json:"reasoningEffort" yaml:"reasoningEffort" mapstructure:"reasoningEffort"`
 }
 type Templatize struct {
 	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`

@@ -28,7 +28,7 @@ type AIClient struct {
 	Logger            *zap.Logger
 	SessionID         string
 	FunctionUnderTest string
-	Temperature       float32
+	Temperature       *float32
 	ReasoningEffort   ReasoningType
 }
 
@@ -43,7 +43,7 @@ type CompletionParams struct {
 	MaxTokens           int           `json:"max_tokens,omitempty"`
 	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
 	Stream              *bool         `json:"stream,omitempty"`
-	Temperature         float32       `json:"temperature,omitempty"`
+	Temperature         *float32      `json:"temperature,omitempty"`
 	ReasoningEffort     ReasoningType `json:"reasoning_effort,omitempty"`
 }
 
@@ -212,8 +212,8 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 		}
 	}
 
-	// Apply temperature from config if not already set in completionParams
-	if completionParams.Temperature == 0 && ai.Temperature != 0 {
+	// Apply temperature from config if set and not already set in completionParams
+	if completionParams.Temperature == nil && ai.Temperature != nil {
 		completionParams.Temperature = ai.Temperature
 	}
 

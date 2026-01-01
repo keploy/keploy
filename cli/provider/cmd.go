@@ -1153,6 +1153,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, nil, "API_KEY is not set")
 			return errors.New("API_KEY is not set")
 		}
+		// Validate temperature range (0.0-2.0)
+		if c.cfg.Gen.Temperature != nil {
+			temp := *c.cfg.Gen.Temperature
+			if temp < 0.0 || temp > 2.0 {
+				errMsg := "temperature must be between 0.0 and 2.0"
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+		}
+		// Validate reasoning effort values
+		if c.cfg.Gen.ReasoningEffort != "" {
+			validEfforts := map[string]bool{"low": true, "medium": true, "high": true}
+			if !validEfforts[c.cfg.Gen.ReasoningEffort] {
+				errMsg := "reasoning-effort must be one of: low, medium, high"
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+		}
 		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
 			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
 			return errors.New("sourceFilePath and testFilePath misconfigured")
