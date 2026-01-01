@@ -230,6 +230,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
 		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
 		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
+		cmd.Flags().Float32("temperature", 0.0, "Temperature parameter for the AI model (0.0-2.0). Lower values are more deterministic, higher values more creative.")
+		cmd.Flags().String("reasoning-effort", "", "Reasoning effort for the AI model (low, medium, high). Controls the depth of reasoning.")
 		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"
@@ -392,6 +394,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"model":                 "model",
 		"llmApiVersion":         "llm-api-version",
 		"configPath":            "config-path",
+		"temperature":           "temperature",
+		"reasoningEffort":       "reasoning-effort",
 		"path":                  "path",
 		"port":                  "port",
 		"grpcPort":              "grpc-port",

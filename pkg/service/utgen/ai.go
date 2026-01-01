@@ -28,6 +28,8 @@ type AIClient struct {
 	Logger            *zap.Logger
 	SessionID         string
 	FunctionUnderTest string
+	Temperature       float32
+	ReasoningEffort   ReasoningType
 }
 
 type Prompt struct {
@@ -143,6 +145,8 @@ func NewAIClient(genConfig config.UtGen, apiKey, apiServerURL string, auth servi
 		Auth:              auth,
 		SessionID:         sessionID,
 		FunctionUnderTest: genConfig.FunctionUnderTest,
+		Temperature:       genConfig.Temperature,
+		ReasoningEffort:   ReasoningType(genConfig.ReasoningEffort),
 	}
 }
 
@@ -206,6 +210,16 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 		if ai.Model != "" {
 			completionParams.Model = ai.Model
 		}
+	}
+
+	// Apply temperature from config if not already set in completionParams
+	if completionParams.Temperature == 0 && ai.Temperature != 0 {
+		completionParams.Temperature = ai.Temperature
+	}
+
+	// Apply reasoning effort from config if not already set in completionParams
+	if completionParams.ReasoningEffort == "" && ai.ReasoningEffort != "" {
+		completionParams.ReasoningEffort = ai.ReasoningEffort
 	}
 
 	if len(completionParams.Messages) == 0 {
