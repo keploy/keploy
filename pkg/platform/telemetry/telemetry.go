@@ -15,15 +15,15 @@ import (
 type field string
 
 const (
-    passedTests    field = "passed_tests"
-    failedTests    field = "failed_tests"
-    testSet        field = "test_set"
-    testSets       field = "test_sets"
-    runStatus      field = "run_status"
-    utilizedMocks  field = "utilized_mocks"
-    tests          field = "tests"
-    mocks          field = "mocks"
-    mock           field = "mock"
+	passedTests   field = "passed_tests"
+	failedTests   field = "failed_tests"
+	testSet       field = "test_set"
+	testSets      field = "test_sets"
+	runStatus     field = "run_status"
+	utilizedMocks field = "utilized_mocks"
+	tests         field = "tests"
+	mocks         field = "mocks"
+	mock          field = "mock"
 )
 
 var teleURL = "https://telemetry.keploy.io/analytics"
