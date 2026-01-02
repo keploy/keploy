@@ -277,9 +277,10 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 	return nil
 }
 
-// Handled chunked responses when transfer-encoding is given.
+// Handles chunked responses when transfer-encoding is given.
 func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn) error {
 	isEOF := false
+ReadLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -295,7 +296,7 @@ func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientCon
 				h.Logger.Debug("received EOF", zap.Error(err))
 				if len(resp) == 0 {
 					h.Logger.Debug("exiting loop as response is complete")
-					break
+					break ReadLoop
 				}
 			}
 
@@ -313,7 +314,7 @@ func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientCon
 			//In some cases need to write the response to the client
 			// where there is some response before getting the true EOF
 			if isEOF {
-				break
+				break ReadLoop
 			}
 
 			if string(resp) == "0\r\n\r\n" {
@@ -321,6 +322,7 @@ func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientCon
 			}
 		}
 	}
+	return nil
 }
 
 // Handled chunked responses when content-length is given.
