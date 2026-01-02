@@ -17,7 +17,7 @@ const (
 	// contextTimeout is the context deadline for the chunkedResponse call.
 	contextTimeout = 2 * time.Second
 	// maxAcceptableReads is the threshold for detecting excessive EOF reads.
-	// ReadBytes in util.go retries up to 5 times, so we allow some margin.
+	// ReadBytes in util.go returns EOF after 5 consecutive empty reads, so we allow some margin.
 	maxAcceptableReads = 10
 )
 
@@ -31,7 +31,7 @@ type mockConn struct {
 func (m *mockConn) Read(b []byte) (n int, err error) {
 	m.readCount++
 	// NOTE: This mock is intentionally simplified. In production, util.ReadBytes
-	// retries up to 5 times on EOF (with ~100ms sleep between each) before returning.
+	// returns EOF after 5 consecutive empty reads (with 100ms sleep between each).
 	// Here we return EOF immediately to keep tests fast and deterministic.
 	//
 	// First read returns data if we have any.
@@ -87,10 +87,9 @@ func TestChunkedResponseExitsOnEOF(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != nil && err != context.DeadlineExceeded {
-			t.Logf("chunkedResponse returned error (expected): %v", err)
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
 		}
-		t.Logf("chunkedResponse completed successfully in time")
 	case <-time.After(testTimeout):
 		t.Fatal("chunkedResponse did not exit in time - the break statement is not exiting the for loop!")
 	}
@@ -119,7 +118,10 @@ func TestChunkedResponseEmptyBody(t *testing.T) {
 	}()
 
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
 		// Verify we didn't do excessive reads (indicates loop not exiting properly)
 		if destConn.readCount > maxAcceptableReads {
 			t.Errorf("Too many reads from destConn: %d (expected <= %d). "+
