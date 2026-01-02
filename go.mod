@@ -23,14 +23,14 @@ require (
 	github.com/spf13/cobra v1.9.1
 	go.mongodb.org/mongo-driver v1.17.6
 	go.uber.org/zap v1.27.0
-	golang.org/x/crypto v0.39.0 // indirect
-	golang.org/x/sys v0.33.0
+	golang.org/x/crypto v0.41.0 // indirect
+	golang.org/x/sys v0.35.0
 	google.golang.org/protobuf v1.36.5
 )
 
 require (
 	github.com/containerd/log v0.1.0 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/getkin/kin-openapi v0.126.0
 	github.com/go-errors/errors v1.4.2 // indirect
@@ -38,7 +38,7 @@ require (
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
 	github.com/google/certificate-transparency-go v1.2.1 // indirect
-	github.com/google/gnostic-models v0.6.9 // indirect
+	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
 	github.com/invopop/yaml v0.3.1
 	github.com/josharian/intern v1.0.0 // indirect
@@ -58,7 +58,7 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
-	k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff // indirect
+	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
 

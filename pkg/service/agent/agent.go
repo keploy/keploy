@@ -92,6 +92,10 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
 }
 
+func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+	return a.Hooks.Record(ctx, opts)
+}
+
 func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) {
 	tc := a.IncomingProxy.Start(ctx, opts)
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")

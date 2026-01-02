@@ -494,3 +494,8 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 
 	return result, nil
 }
+
+// Not needed for linux but implementing to satisfy the interface
+func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+	return nil, nil
+}
