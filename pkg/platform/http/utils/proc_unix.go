@@ -4,6 +4,7 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -12,17 +13,52 @@ import (
 	"go.uber.org/zap"
 )
 
+// EnsureSudoAccess checks if we need sudo and pre-authenticates if necessary.
+// This should be called before NewAgentCommand to ensure sudo credentials are cached.
+// Returns nil if running as root or if sudo auth succeeded, error otherwise.
+func EnsureSudoAccess(logger *zap.Logger) error {
+	// Already root, no sudo needed
+	if os.Geteuid() == 0 {
+		return nil
+	}
+
+	// Check if sudo credentials are already cached (non-interactive check)
+	checkCmd := exec.Command("sudo", "-n", "true")
+	if err := checkCmd.Run(); err == nil {
+		// Credentials already cached
+		return nil
+	}
+
+	// Need to prompt for password - ensure we have a terminal
+	logger.Info("Root privileges required. Please enter your password.")
+
+	// Use sudo -v to validate/cache credentials with proper terminal handling
+	authCmd := exec.Command("sudo", "-v")
+	authCmd.Stdin = os.Stdin
+	authCmd.Stdout = os.Stdout
+	authCmd.Stderr = os.Stderr
+
+	if err := authCmd.Run(); err != nil {
+		return fmt.Errorf("failed to obtain sudo privileges: %w. Please run with 'sudo' or ensure you have sudo access", err)
+	}
+
+	logger.Info("Sudo credentials cached successfully")
+	return nil
+}
+
 // NewAgentCommand returns a command that runs elevated on Unix.
 // - If already root, we run the binary directly.
-// - Otherwise we prefix with "sudo".
+// - Otherwise we prefix with "sudo -n" (non-interactive, using cached credentials).
+// - Call EnsureSudoAccess() before this to ensure credentials are cached.
 // - We put the process in its own group so we can signal the whole group.
 func NewAgentCommand(bin string, args []string) *exec.Cmd {
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
 		cmd = exec.Command(bin, args...)
 	} else {
-		// sudo <bin> <args...>
-		all := append([]string{bin}, args...)
+		// sudo -n (non-interactive) <bin> <args...>
+		// -n flag uses cached credentials without prompting
+		all := append([]string{"-n", bin}, args...)
 		cmd = exec.Command("sudo", all...)
 	}
 

@@ -10,6 +10,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// EnsureSudoAccess on Windows is a no-op. If admin rights are needed,
+// the parent process should be run as Administrator.
+func EnsureSudoAccess(logger *zap.Logger) error {
+	return nil
+}
+
 // NewAgentCommand on Windows returns a plain command (no sudo).
 // If the agent needs admin, run the parent process with Administrator rights.
 func NewAgentCommand(bin string, args []string) *exec.Cmd {

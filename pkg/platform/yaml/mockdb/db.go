@@ -349,3 +349,37 @@ func (ys *MockYaml) GetCurrMockID() int64 {
 func (ys *MockYaml) ResetCounterID() {
 	atomic.StoreInt64(&ys.idCounter, -1)
 }
+
+// GetAllMockSetIDs returns all mock set IDs (directory names) that contain mock files.
+func (ys *MockYaml) GetAllMockSetIDs(ctx context.Context) ([]string, error) {
+	var mockSetIDs []string
+
+	// List all directories in the mock path
+	entries, err := os.ReadDir(ys.MockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return mockSetIDs, nil
+		}
+		utils.LogError(ys.Logger, err, "failed to read mock directory", zap.String("path", ys.MockPath))
+		return nil, err
+	}
+
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		// Check if this directory contains a mocks.yaml file
+		mockFilePath := filepath.Join(ys.MockPath, entry.Name(), mockFileName+".yaml")
+		if _, err := os.Stat(mockFilePath); err == nil {
+			mockSetIDs = append(mockSetIDs, entry.Name())
+		}
+	}
+
+	return mockSetIDs, nil
+}

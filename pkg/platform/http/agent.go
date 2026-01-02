@@ -647,6 +647,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		return fmt.Errorf("failed to get errorgroup from the context")
 	}
 
+	// Ensure we have sudo access before proceeding (prompts for password if needed)
+	if err := agentUtils.EnsureSudoAccess(a.logger); err != nil {
+		return fmt.Errorf("sudo access required: %w", err)
+	}
+
 	// Open the log file (truncate to start fresh)
 	filepath := "keploy_agent.log"
 	logFile, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o644)

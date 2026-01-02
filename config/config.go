@@ -36,6 +36,7 @@ type Config struct {
 	Gen                   UtGen               `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
+	MockCmd               MockCmd             `json:"mockCmd" yaml:"mockCmd" mapstructure:"mockCmd"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
@@ -100,6 +101,14 @@ type ReRecord struct {
 	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
 	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
 }
+
+// MockCmd holds configuration for the mock record/replay commands
+type MockCmd struct {
+	MockSetID         string        `json:"mockSetId" yaml:"mockSetId" mapstructure:"mockSetId"`
+	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+}
+
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
 	Tests    []string `json:"tests" yaml:"tests" mapstructure:"tests"`

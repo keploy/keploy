@@ -33,6 +33,12 @@ type MockFilterParams struct {
 	MockMapping        []string             `json:"mockMapping,omitempty"`
 	UseMappingBased    bool                 `json:"useMappingBased"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// MatchSequence enables sequence-based mock matching
+	MatchSequence bool `json:"matchSequence,omitempty"`
+	// MatchSchema enables schema-based mock matching for HTTP requests
+	MatchSchema bool `json:"matchSchema,omitempty"`
+	// BestEffort enables best-effort matching when exact match is not found
+	BestEffort bool `json:"bestEffort,omitempty"`
 }
 
 type UpdateMockParamsReq struct {

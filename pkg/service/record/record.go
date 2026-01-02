@@ -176,7 +176,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
-			if (runAppError.AppErrorType == models.ErrCtxCanceled || runAppError == models.AppError{}) {
+			if runAppError.AppErrorType == models.ErrCtxCanceled {
+				return nil
+			}
+			// App exited normally (no error) - trigger graceful shutdown
+			if runAppError == (models.AppError{}) {
+				r.logger.Info("Application completed successfully")
+				_ = utils.Stop(r.logger, "Application completed successfully")
 				return nil
 			}
 			appErrChan <- runAppError
@@ -276,6 +282,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
+				return nil
+			}
+			// App exited normally (no error) - trigger graceful shutdown
+			if runAppError == (models.AppError{}) {
+				r.logger.Info("Application completed successfully")
+				_ = utils.Stop(r.logger, "Application completed successfully")
 				return nil
 			}
 			appErrChan <- runAppError

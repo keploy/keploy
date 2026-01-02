@@ -62,4 +62,8 @@ testdata
 # Ignore the debug_bin
 __debug_bin*
 keploy
+keploy-bin
 extraparsers.go
+
+# node modules
+node_modules/

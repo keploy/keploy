@@ -237,7 +237,26 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 
-	case "record", "test", "rerecord":
+	case "record", "test", "rerecord", "replay":
+		// Check if this is a mock subcommand (parent is "mock")
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" && (cmd.Name() == "record" || cmd.Name() == "replay") {
+			cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated mocks are stored")
+			cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+			cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+			cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to run the application")
+			cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker/docker-compose)")
+			cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
+			cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+			cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
+			cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+			cmd.Flags().Bool("global-passthrough", c.cfg.MockCmd.GlobalPassthrough, "Allow all outgoing calls to pass through if no mock found")
+			cmd.Flags().String("mock-set", c.cfg.MockCmd.MockSetID, "Name/ID of the mock set to record to or replay from")
+			if cmd.Name() == "record" {
+				cmd.Flags().Duration("record-timer", c.cfg.MockCmd.RecordTimer, "Time duration for recording (e.g., \"5s\", \"1m\")")
+			}
+			return nil
+		}
+
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
@@ -950,7 +969,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		config.SetByPassPorts(c.cfg, bypassPorts)
 
-		if cmd.Name() == "record" {
+		// Only process metadata for the main record command, not mock record
+		isMockSubcommand := cmd.Parent() != nil && cmd.Parent().Name() == "mock"
+		if cmd.Name() == "record" && !isMockSubcommand {
 			metadata, err := cmd.Flags().GetString("metadata")
 			if err != nil {
 				errMsg := "failed to get the metadata flag"
@@ -1237,6 +1258,74 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil // Or return an error
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+	}
+
+	// Handle mock record/replay commands - check if parent is "mock"
+	if cmd.Parent() != nil && cmd.Parent().Name() == "mock" && (cmd.Name() == "record" || cmd.Name() == "replay") {
+		// Validate and set the path
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		absPath, err := utils.GetAbsPath(path)
+		if err != nil {
+			utils.LogError(c.logger, err, "error while getting absolute path")
+			return errors.New("failed to get the absolute path")
+		}
+		c.cfg.Path = absPath + "/keploy"
+
+		// Validate command is provided
+		if c.cfg.Command == "" {
+			utils.LogError(c.logger, nil, "missing required -c flag or command in config file")
+			c.logger.Info(`Example usage: keploy mock record -c "pytest"`)
+			return errors.New("command is required for mock record/replay")
+		}
+
+		// Set the command type
+		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" {
+			return errors.New("non docker command not supported for os : " + runtime.GOOS)
+		}
+
+		// Get mock set ID
+		mockSetID, err := cmd.Flags().GetString("mock-set")
+		if err != nil {
+			errMsg := "failed to get the mock-set"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.MockCmd.MockSetID = mockSetID
+
+		// Get global passthrough
+		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
+		if err != nil {
+			errMsg := "failed to read the global passthrough flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.MockCmd.GlobalPassthrough = globalPassthrough
+
+		// Get bypass ports
+		bypassPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
+		if err != nil {
+			errMsg := "failed to read the ports of outgoing calls to be ignored"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetByPassPorts(c.cfg, bypassPorts)
+
+		// Get record timer for mock record command
+		if cmd.Name() == "record" {
+			recordTimer, err := cmd.Flags().GetDuration("record-timer")
+			if err != nil {
+				errMsg := "failed to get the record-timer"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.MockCmd.RecordTimer = recordTimer
+		}
 	}
 
 	return nil
