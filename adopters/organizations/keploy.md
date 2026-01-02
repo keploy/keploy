@@ -15,6 +15,8 @@ In our CI pipeline, we automatically:
 - Stabilize tests
 - Enforce coverage on new code
 
+This flow runs the API server with its **real runtime dependencies (MongoDB)** to validate behavior under production-like conditions.
+
 All of this runs **inside GitHub Actions on every Pull Request**.
 
 ---
@@ -37,6 +39,34 @@ The API server is built as a binary inside CI and tested in a **realistic enviro
 - Previously recorded test sets (`atg-flow`)
 
 This ensures we are testing **real system behavior**, not mocked logic.
+
+---
+
+## Dependencies Used in This Flow
+
+This replay & re-record pipeline runs the API server with its **actual runtime dependencies**, not mocks.
+
+### Primary Dependency
+
+- **MongoDB**
+  - Acts as the primary data store for the API server
+  - Runs as a Docker service inside CI
+  - Reset and restored to ensure consistent test results
+
+### Why MongoDB Matters Here
+
+- API behavior is tightly coupled with database state
+- Many API responses depend on:
+  - Stored documents
+  - Generated identifiers
+  - Business rules enforced at the database layer
+- Replaying and re-recording API traffic without MongoDB would not reflect real behavior
+
+Using MongoDB ensures:
+
+- Accurate request → database → response validation
+- Deterministic test replays
+- Reliable re-recording when APIs change
 
 ---
 
@@ -121,15 +151,15 @@ We use Keploy **directly inside our CI pipeline**.
 
 ### How It Runs in CI
 
-1. CI builds the API server from the PR
-2. MongoDB starts in a clean state
-3. Keploy replays existing API test cases
+1. CI builds the API server from the PR  
+2. MongoDB starts in a clean state as a Docker service  
+3. Keploy replays existing API test cases  
 4. On failure:
-   - Database is reset
+   - MongoDB state is reset
    - APIs are re-recorded
-   - Tests are stabilized and verified
-5. Updated test cases are committed back to the PR
-6. Coverage is enforced before merge
+   - Tests are stabilized and verified  
+5. Updated test cases are committed back to the PR  
+6. Coverage is enforced before merge  
 
 This ensures **every PR**:
 
