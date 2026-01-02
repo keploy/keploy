@@ -116,11 +116,12 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					}}
 					p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.String("proxy Ip", p.IP4))
 				case dns.TypeAAAA:
-					answers = []dns.RR{&dns.AAAA{
-						Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-						AAAA: net.ParseIP(p.IP6),
-					}}
-					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
+					// Do not return a fallback AAAA record (::1) when resolution fails.
+					// Returning ::1 causes "connection refused" errors on macOS Docker
+					// because clients prefer IPv6 and attempt to connect to the loopback
+					// address which may not route correctly. Instead, skip the AAAA answer
+					// so clients fall back to using the A record (IPv4).
+					p.logger.Debug("skipping AAAA fallback to avoid IPv6 loopback issues on macOS Docker")
 				case dns.TypeSRV:
 					// Special handling for MongoDB SRV queries
 					if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
