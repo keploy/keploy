@@ -689,48 +689,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var isMappingEnabled bool
 
 	if r.instrument && cmdType == utils.DockerCompose {
-		if !serveTest {
-			runTestSetErrGrp.Go(func() error {
-				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
-					AppCommand: conf.AppCommand,
-				})
-				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
-					return nil
-				}
-				appErrChan <- appErr
-				return nil
-			})
-		}
-
-		// Checking for errors in the mocking and application
-		runTestSetErrGrp.Go(func() error {
-			defer utils.Recover(r.logger)
-			select {
-			case err := <-appErrChan:
-				switch err.AppErrorType {
-				case models.ErrCommandError:
-					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
-				case models.ErrUnExpected:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrAppStopped:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrCtxCanceled:
-					return nil
-				case models.ErrInternal:
-					testSetStatusByErrChan = models.TestSetStatusInternalErr
-				default:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				}
-				utils.LogError(r.logger, err, "application failed to run")
-			case <-runTestSetCtx.Done():
-				testSetStatusByErrChan = models.TestSetStatusUserAbort
-			}
-			exitLoopChan <- true
-			runTestSetCtxCancel()
-			return nil
-		})
-
+		// First, wait for the agent to be ready before starting the app
+		// This ensures MockOutgoing can be called before the app tries to connect to databases
 		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -754,6 +714,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
+		// Call MockOutgoing BEFORE starting the application
+		// This ensures MongoPassword and other mocking config is available when the app starts
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -798,6 +760,49 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+
+		// NOW start the application AFTER mocking is configured
+		if !serveTest {
+			runTestSetErrGrp.Go(func() error {
+				defer utils.Recover(r.logger)
+				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
+					AppCommand: conf.AppCommand,
+				})
+				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
+					return nil
+				}
+				appErrChan <- appErr
+				return nil
+			})
+		}
+
+		// Checking for errors in the mocking and application
+		runTestSetErrGrp.Go(func() error {
+			defer utils.Recover(r.logger)
+			select {
+			case err := <-appErrChan:
+				switch err.AppErrorType {
+				case models.ErrCommandError:
+					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
+				case models.ErrUnExpected:
+					testSetStatusByErrChan = models.TestSetStatusAppHalted
+				case models.ErrAppStopped:
+					testSetStatusByErrChan = models.TestSetStatusAppHalted
+				case models.ErrCtxCanceled:
+					return nil
+				case models.ErrInternal:
+					testSetStatusByErrChan = models.TestSetStatusInternalErr
+				default:
+					testSetStatusByErrChan = models.TestSetStatusAppHalted
+				}
+				utils.LogError(r.logger, err, "application failed to run")
+			case <-runTestSetCtx.Done():
+				testSetStatusByErrChan = models.TestSetStatusUserAbort
+			}
+			exitLoopChan <- true
+			runTestSetCtxCancel()
+			return nil
+		})
 
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 		if err != nil {
