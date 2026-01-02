@@ -21,7 +21,7 @@ const (
 	maxAcceptableReads = 10
 )
 
-// mockConn is a mock net.Conn that simulates a connection returning EOF.
+// mockConn is a mock net.Conn that returns test data on first read, then EOF on subsequent reads.
 type mockConn struct {
 	readCount    int
 	data         []byte

@@ -277,7 +277,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 	return nil
 }
 
-// Handled chunked responses when transfer-encoding is given.
+// Handles chunked responses when transfer-encoding is given.
 func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn) error {
 	isEOF := false
 ReadLoop:
