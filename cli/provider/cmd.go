@@ -251,6 +251,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
 			cmd.Flags().Bool("global-passthrough", c.cfg.MockCmd.GlobalPassthrough, "Allow all outgoing calls to pass through if no mock found")
 			cmd.Flags().String("mock-set", c.cfg.MockCmd.MockSetID, "Name/ID of the mock set to record to or replay from")
+			cmd.Flags().StringSlice("exclude-paths", c.cfg.MockCmd.ExcludePaths, "URL path prefixes to exclude from recording (e.g., '/_next,/static')")
 			if cmd.Name() == "record" {
 				cmd.Flags().Duration("record-timer", c.cfg.MockCmd.RecordTimer, "Time duration for recording (e.g., \"5s\", \"1m\")")
 			}
@@ -1326,6 +1327,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.MockCmd.RecordTimer = recordTimer
 		}
+
+		// Get exclude paths
+		excludePaths, err := cmd.Flags().GetStringSlice("exclude-paths")
+		if err != nil {
+			errMsg := "failed to get the exclude-paths"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.MockCmd.ExcludePaths = excludePaths
 	}
 
 	return nil

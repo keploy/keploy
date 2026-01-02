@@ -162,8 +162,16 @@ func (m *MockService) Record(ctx context.Context) error {
 		return nil
 	})
 
+	// Convert exclude paths to bypass rules
+	var bypassRules []models.BypassRule
+	for _, path := range m.config.MockCmd.ExcludePaths {
+		bypassRules = append(bypassRules, models.BypassRule{Path: path})
+	}
+
 	// Get the outgoing channel for mocks (this connects to the streaming endpoint)
-	outgoing, err := m.instrumentation.GetOutgoing(ctx, models.OutgoingOptions{})
+	outgoing, err := m.instrumentation.GetOutgoing(ctx, models.OutgoingOptions{
+		Rules: bypassRules,
+	})
 	if err != nil {
 		stopReason = "failed to get outgoing mocks channel"
 		utils.LogError(m.logger, err, stopReason)
@@ -357,9 +365,16 @@ func (m *MockService) Replay(ctx context.Context) error {
 
 	m.logger.Info("🟢 Keploy agent is ready for mock replay.")
 
+	// Convert exclude paths to bypass rules
+	var bypassRules []models.BypassRule
+	for _, path := range m.config.MockCmd.ExcludePaths {
+		bypassRules = append(bypassRules, models.BypassRule{Path: path})
+	}
+
 	// Setup mock matching FIRST (creates the MockManager)
 	err = m.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
 		Mocking: true, // Enable mocking so responses are served from recorded mocks
+		Rules:   bypassRules,
 	})
 	if err != nil {
 		stopReason = "failed to setup mock matching"

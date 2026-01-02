@@ -107,6 +107,7 @@ type MockCmd struct {
 	MockSetID         string        `json:"mockSetId" yaml:"mockSetId" mapstructure:"mockSetId"`
 	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	ExcludePaths      []string      `json:"excludePaths" yaml:"excludePaths" mapstructure:"excludePaths"`
 }
 
 type Contract struct {
