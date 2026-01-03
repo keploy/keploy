@@ -533,41 +533,8 @@ func (conn *Tracker) handleHTTP1Data(event SocketDataEvent) {
 		conn.resp = append(conn.resp, event.Msg[:msgLength]...)
 		conn.respSize += uint64(event.MsgSize)
 
-		// Check if this is a 100 Continue response
-		// 100 Continue responses should not trigger request/response boundary detection
-		is100Continue := false
-		if len(conn.resp) >= 17 { // "HTTP/1.1 100 \r\n\r\n" is 17 bytes
-			respStr := string(conn.resp[:min(len(conn.resp), 256)])
-			if strings.Contains(respStr, "HTTP/1.1 100") || strings.Contains(respStr, "HTTP/1.0 100") {
-				is100Continue = true
-				conn.logger.Debug("Detected 100 Continue response, skipping request boundary detection")
-			}
-		}
-
 		//Handling multiple request on same conn to support conn:keep-alive
-		// Skip boundary detection for 100 Continue responses
-		if !is100Continue && (conn.firstRequest || conn.lastChunkWasReq) {
-			conn.userReqSizes = append(conn.userReqSizes, conn.reqSize)
-			conn.reqSize = 0
-
-			conn.userReqs = append(conn.userReqs, conn.req)
-			conn.req = []byte{}
-
-			conn.lastChunkWasReq = false
-			conn.lastChunkWasResp = true
-
-			conn.kernelReqSizes = append(conn.kernelReqSizes, uint64(event.ValidateReadBytes))
-			conn.firstRequest = false
-		} else if is100Continue {
-			// For 100 Continue, clear the response buffer after handling it
-			// but don't treat it as a boundary
-			conn.logger.Debug("Clearing 100 Continue response from buffer")
-			conn.resp = []byte{}
-			conn.respSize = 0
-		} else if !is100Continue && len(conn.req) > 0 {
-			// Final response arrived (not 100 Continue) and we have an unsaved request
-			// This happens when 100 Continue was skipped earlier
-			conn.logger.Debug("Saving unsaved request after final response arrived")
+		if conn.firstRequest || conn.lastChunkWasReq {
 			conn.userReqSizes = append(conn.userReqSizes, conn.reqSize)
 			conn.reqSize = 0
 
