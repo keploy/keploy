@@ -110,6 +110,88 @@ func TestMatch_StatusCodeSelection(t *testing.T) {
 		}
 	})
 
-	// I will enforce pass/fail after applying the fix.
-	// For now, I just want to run it to see it compiles and runs.
+	// 1. No matching status code
+	t.Run("No Matching Status Code", func(t *testing.T) {
+		path := "/user"
+		method := "GET"
+		mockDoc := createOpenAPI(path, method, "200")
+		testDoc := createOpenAPI(path, method, "404")
+
+		_, pass, err := Match(mockDoc, testDoc, "test-set-1", "mock-set-1", logger, models.IdentifyMode)
+		if err != nil {
+			t.Fatalf("Match failed with error: %v", err)
+		}
+		if pass {
+			t.Errorf("Expected Match to fail for different status codes, but it passed")
+		}
+	})
+
+	// 2. Mock has multiple status codes, but none match
+	t.Run("Multiple Mock Status Codes - None Match", func(t *testing.T) {
+		path := "/user"
+		method := "GET"
+		mockDoc := createOpenAPI(path, method, "200")
+		addResponse(&mockDoc, path, method, "201")
+		testDoc := createOpenAPI(path, method, "404")
+
+		_, pass, err := Match(mockDoc, testDoc, "test-set-1", "mock-set-1", logger, models.IdentifyMode)
+		if err != nil {
+			t.Fatalf("Match failed with error: %v", err)
+		}
+		if pass {
+			t.Errorf("Expected Match to fail when no status code matches, but it passed")
+		}
+	})
+
+	// 3. Empty responses in mock or test
+	t.Run("Empty Responses In Mock", func(t *testing.T) {
+		path := "/user"
+		method := "GET"
+		mockDoc := createOpenAPI(path, method, "200")
+		// Manually clear responses
+		mockDoc.Paths[path].Get.Responses = make(map[string]models.ResponseItem)
+		testDoc := createOpenAPI(path, method, "200")
+
+		_, pass, err := Match(mockDoc, testDoc, "test-set-1", "mock-set-1", logger, models.IdentifyMode)
+		if err != nil {
+			t.Fatalf("Match failed with error: %v", err)
+		}
+		if pass {
+			t.Errorf("Expected Match to fail (or handle gracefully) with empty mock responses, but it passed")
+		}
+	})
+
+	t.Run("Empty Responses In Test", func(t *testing.T) {
+		path := "/user"
+		method := "GET"
+		mockDoc := createOpenAPI(path, method, "200")
+		testDoc := createOpenAPI(path, method, "200")
+		// Manually clear responses
+		testDoc.Paths[path].Get.Responses = make(map[string]models.ResponseItem)
+
+		_, pass, err := Match(mockDoc, testDoc, "test-set-1", "mock-set-1", logger, models.IdentifyMode)
+		if err != nil {
+			t.Fatalf("Match failed with error: %v", err)
+		}
+		// If test has no responses, we currently expect failure or low score because we can't match anything.
+		if pass {
+			t.Errorf("Expected Match to fail with empty test responses, but it passed")
+		}
+	})
+
+	// 4. Testing with CompareMode
+	t.Run("CompareMode - Matching Status Code", func(t *testing.T) {
+		path := "/user"
+		method := "GET"
+		mockDoc := createOpenAPI(path, method, "200")
+		testDoc := createOpenAPI(path, method, "200")
+
+		_, pass, err := Match(mockDoc, testDoc, "test-set-1", "mock-set-1", logger, models.CompareMode)
+		if err != nil {
+			t.Fatalf("Match failed with error: %v", err)
+		}
+		if !pass {
+			t.Errorf("Expected Match to pass in CompareMode with matching status code")
+		}
+	})
 }
