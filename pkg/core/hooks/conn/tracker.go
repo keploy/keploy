@@ -564,6 +564,21 @@ func (conn *Tracker) handleHTTP1Data(event SocketDataEvent) {
 			conn.logger.Debug("Clearing 100 Continue response from buffer")
 			conn.resp = []byte{}
 			conn.respSize = 0
+		} else if !is100Continue && len(conn.req) > 0 {
+			// Final response arrived (not 100 Continue) and we have an unsaved request
+			// This happens when 100 Continue was skipped earlier
+			conn.logger.Debug("Saving unsaved request after final response arrived")
+			conn.userReqSizes = append(conn.userReqSizes, conn.reqSize)
+			conn.reqSize = 0
+
+			conn.userReqs = append(conn.userReqs, conn.req)
+			conn.req = []byte{}
+
+			conn.lastChunkWasReq = false
+			conn.lastChunkWasResp = true
+
+			conn.kernelReqSizes = append(conn.kernelReqSizes, uint64(event.ValidateReadBytes))
+			conn.firstRequest = false
 		}
 
 	case IngressTraffic:
