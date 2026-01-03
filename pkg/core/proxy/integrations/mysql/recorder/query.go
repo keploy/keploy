@@ -204,48 +204,62 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 			responseOk.ParamDefs = append(responseOk.ParamDefs, column)
 		}
 
-		logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
+	logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
 
-		// Read the EOF packet for parameter definition
-		// Note: Some MySQL/TiDB servers skip EOF between params and columns when both are present
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-		if err != nil {
-			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
-			}
-			return nil, err
-		}
-
-		// Write the packet to the client (whether it's EOF or column definition)
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write packet after parameter definition to the client")
-			return nil, err
-		}
-
-		// Check if it's an EOF packet or column definition
-		// Some MySQL/TiDB servers skip EOF between params and columns when both are present
-		if mysqlUtils.IsEOFPacket(eofData) {
-			responseOk.EOFAfterParamDefs = eofData
-			logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
-		} else if responseOk.NumColumns > 0 {
-			// It's a column definition packet, not EOF - this is valid for some MySQL/TiDB versions
-			// We need to decode it and add it to ColumnDefs, then continue reading columns
-			logger.Debug("No EOF packet between params and columns, received column definition directly")
-			
-			// Decode the column definition packet
-			column, _, err := rowscols.DecodeColumn(ctx, logger, eofData)
+	// Read the EOF packet for parameter definition
+	// Note: Some MySQL/TiDB servers skip EOF between params and columns when both are present
+	// Also note: When CLIENT_DEPRECATE_EOF is set and NumColumns == 0, there's no EOF after params
+	if responseOk.NumParams > 0 {
+		// Only read EOF after params if:
+		// 1. CLIENT_DEPRECATE_EOF is NOT set, OR
+		// 2. NumColumns > 0 (there will be columns after params, so we need to read something)
+		shouldReadEOFAfterParams := (decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0) || (responseOk.NumColumns > 0)
+		
+		if shouldReadEOFAfterParams {
+			eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decode column definition packet: %w", err)
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
+				}
+				return nil, err
 			}
-			
-			responseOk.ColumnDefs = append(responseOk.ColumnDefs, column)
-			// Set EOFAfterParamDefs to nil to indicate it wasn't sent
-			responseOk.EOFAfterParamDefs = nil
+
+			// Write the packet to the client (whether it's EOF or column definition)
+			_, err = clientConn.Write(eofData)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write packet after parameter definition to the client")
+				return nil, err
+			}
+
+			// Check if it's an EOF packet or column definition
+			// Some MySQL/TiDB servers skip EOF between params and columns when both are present
+			if mysqlUtils.IsEOFPacket(eofData) {
+				responseOk.EOFAfterParamDefs = eofData
+				logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
+			} else if responseOk.NumColumns > 0 {
+				// It's a column definition packet, not EOF - this is valid for some MySQL/TiDB versions
+				// We need to decode it and add it to ColumnDefs, then continue reading columns
+				logger.Debug("No EOF packet between params and columns, received column definition directly")
+				
+				// Decode the column definition packet
+				column, _, err := rowscols.DecodeColumn(ctx, logger, eofData)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode column definition packet: %w", err)
+				}
+				
+				responseOk.ColumnDefs = append(responseOk.ColumnDefs, column)
+				// Set EOFAfterParamDefs to nil to indicate it wasn't sent
+				responseOk.EOFAfterParamDefs = nil
+			} else {
+				// Not EOF and no columns expected - this is an error
+				return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
+			}
 		} else {
-			// Not EOF and no columns expected - this is an error
-			return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
+			// CLIENT_DEPRECATE_EOF is set and NumColumns == 0, so no EOF packet after params
+			logger.Debug("CLIENT_DEPRECATE_EOF is set and NumColumns == 0, EOF packet after params is deprecated and not sent by server")
+			responseOk.EOFAfterParamDefs = nil
 		}
+	}
 	}
 
 	//See if there are any columns
