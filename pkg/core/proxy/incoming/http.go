@@ -212,9 +212,6 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			}
 		}
 
-		var req *http.Request
-		var reqData []byte
-
 		if hasExpectContinue {
 			// Parse the complete request (headers + body) from headerBuf
 			req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(headerBuf)))
