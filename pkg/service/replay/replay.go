@@ -1554,16 +1554,10 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
 
-		// Calculate total test execution time by subtracting the application delay
-		// The delay is added for each test set, so we need to subtract it for each test set in the report.
-		appDelay := time.Duration(r.config.Test.Delay) * time.Second
-		totalDelay := appDelay * time.Duration(len(reportSnapshot))
-		testExecutionTime := totalTestTimeTakenSnapshot - totalDelay
-		// Ensure we don't display negative time if something weird happens
-		if testExecutionTime < 0 {
-			testExecutionTime = 0
-		}
-		totalTestTimeTakenStr := timeWithUnits(testExecutionTime)
+		// Use the total measured test execution time as-is for reporting.
+		// Subtracting a fixed delay per test set can be inaccurate when some test sets
+		// are ignored or have no tests to run and therefore never incur the delay.
+		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTakenSnapshot)
 
 		if totalTestIgnoredSnapshot > 0 {
 			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal test execution time: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestIgnoredSnapshot, totalTestTimeTakenStr); err != nil {
