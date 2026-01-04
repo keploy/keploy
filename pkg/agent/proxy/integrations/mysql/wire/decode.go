@@ -147,6 +147,8 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		if !ok {
 			return parsedPacket, fmt.Errorf("server Greetings not found")
 		}
+		// ensure we have the server caps for later use
+		decodeCtx.ServerCaps = sg.CapabilityFlags
 	}
 
 	logger.Debug("payload info", zap.Any("last operation", lastOp), zap.Any("payload type", payloadType))
@@ -164,6 +166,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		case *mysql.HandshakeResponse41Packet:
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+			decodeCtx.ClientCaps = pkt.CapabilityFlags
 
 			pktType = mysql.HandshakeResponse41
 			lastOp = payloadType
@@ -283,6 +286,9 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		}
 		// Store the server greetings to use it later
 		decodeCtx.ServerGreetings.Store(clientConn, pkt)
+		// Store the server capabilities to use it later
+		decodeCtx.ServerCaps = pkt.CapabilityFlags
+
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.HandshakeV10), clientConn, mysql.HandshakeV10, decodeCtx)
 
 		logger.Debug("HandshakeV10 decoded", zap.Any("parsed packet", parsedPacket))
