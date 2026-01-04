@@ -109,7 +109,4 @@ func TestMatch_StatusCodeSelection(t *testing.T) {
 			t.Errorf("Expected Match to pass for matching status code 400, but it failed")
 		}
 	})
-
-	// I will enforce pass/fail after applying the fix.
-	// For now, I just want to run it to see it compiles and runs.
 }
