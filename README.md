@@ -8,7 +8,7 @@
   </a>
 </p>
 
-<h3 align="center"><b>⚡️ API tests faster than unit tests, from user traffic ⚡️</b></h3>
+<h3 align="center"><b>⚡️ API tests faster than unit tests, generated from real user traffic ⚡️</b></h3>
 <p align="center">🌟 The must-have tool for developers in the AI-Gen era for 90% test coverage 🌟</p>
 
 
