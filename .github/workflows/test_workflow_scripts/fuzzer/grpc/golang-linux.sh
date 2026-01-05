@@ -11,6 +11,15 @@ set -Eeuo pipefail
 
 MODE=${1:-incoming}
 
+# TODO: remove it after v3 latest release 
+BIG_PAYLOAD=${2:-false}
+
+BIG_PAYLOAD_FLAG=""
+if [ "$BIG_PAYLOAD" = "true" ]; then
+  echo "🚀 Big payload mode enabled."
+  BIG_PAYLOAD_FLAG="--bigPayload"
+fi
+
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
   echo "📌 Setting up Keploy API Key..."
@@ -123,9 +132,9 @@ if [ "$MODE" = "incoming" ]; then
 
   # Start server with keploy in record mode
   if [[ "$RECORD_SRC" == "latest" ]]; then
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" --bigPayload 2>&1 | tee record_incoming.txt &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
   else
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
   fi
  
  sleep 10
@@ -152,10 +161,12 @@ if [ "$MODE" = "incoming" ]; then
 
  echo "Stopping keploy record and server"
 
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
-echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
+
+
+  REC_PID=$(pgrep keploy | sort -n | head -1)
+  echo "$REC_PID Keploy PID"
+  echo "Killing keploy"
+  sudo kill -INT "$REC_PID" 2>/dev/null || true
 
  sleep 5
 
@@ -242,12 +253,11 @@ elif [ "$MODE" = "outgoing" ]; then
 
  sleep 10
 
-
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
-echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
-
+ echo "using the new commnad to stop keploy"
+ REC_PID=$(pgrep keploy | sort -n | head -1)
+ echo "$REC_PID Keploy PID"
+ echo "Killing keploy"
+ sudo kill -INT "$REC_PID" 2>/dev/null || true
  sleep 5
 
  echo "Ensuring fuzzer client is stopped..."

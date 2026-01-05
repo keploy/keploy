@@ -28,6 +28,8 @@ type DecodeContext struct {
 
 	//runtime stmt-id → query mapping set when COM_STMT_PREP matches
 	StmtIDToQuery map[uint32]string
+	// Statement ID counter for generating unique statement IDs during replay
+	NextStmtID uint32
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000

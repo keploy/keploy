@@ -234,13 +234,14 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 		}
 
 		// Search through services using the existing Compose structure
-		networks, ports, found := idc.findContainerInServices(compose, containerName)
+		networks, ports, service, found := idc.findContainerInServices(compose, containerName)
 		if found {
 			return &ComposeServiceInfo{
-				ComposePath: composePath,
-				Networks:    networks,
-				Ports:       ports,
-				Compose:     compose,
+				ComposePath:    composePath,
+				Networks:       networks,
+				Ports:          ports,
+				Compose:        compose,
+				AppServiceName: service,
 			}, nil
 		}
 	}
@@ -250,9 +251,9 @@ func (idc *Impl) FindContainerInComposeFiles(composePaths []string, containerNam
 
 // findContainerInServices searches for a container within the services of a compose file
 // This reuses the same iteration pattern as existing functions like SetPidContainer
-func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, bool) {
+func (idc *Impl) findContainerInServices(compose *Compose, containerName string) ([]string, []string, string, bool) {
 	if compose.Services.Content == nil {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 
 	// Use the same iteration pattern as existing compose functions (services are key-value pairs)
@@ -279,11 +280,11 @@ func (idc *Impl) findContainerInServices(compose *Compose, containerName string)
 		if containerNameMatch || serviceName == containerName {
 			networks := idc.extractServiceNetworks(serviceContentNode, serviceName)
 			ports := idc.extractServicePorts(serviceContentNode)
-			return networks, ports, true
+			return networks, ports, serviceName, true
 		}
 	}
 
-	return nil, nil, false
+	return nil, nil, "", false
 }
 
 // extractServiceNetworks extracts network names from a service's network configuration
@@ -526,9 +527,37 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Debug {
 		command = append(command, "--debug")
 	}
+	if idc.conf.Record.Synchronous {
+		command = append(command, "--sync")
+	}
 	if opts.EnableTesting {
 		command = append(command, "--enable-testing")
 	}
+	if opts.ConfigPath != "" && opts.ConfigPath != "." {
+		command = append(command, "--config-path", opts.ConfigPath)
+	}
+	if len(opts.ExtraArgs) > 0 {
+		command = append(command, opts.ExtraArgs...)
+	}
+
+	if opts.GlobalPassthrough {
+		command = append(command, "--global-passthrough")
+	}
+
+	if opts.BuildDelay > 0 {
+		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+	}
+
+	if len(opts.PassThroughPorts) > 0 {
+		portStrings := make([]string, len(opts.PassThroughPorts))
+		for i, port := range opts.PassThroughPorts {
+			portStrings[i] = strconv.Itoa(int(port))
+		}
+		// Join them with a comma and add as a single argument
+		command = append(command, "--pass-through-ports", strings.Join(portStrings, ","))
+	}
+
+	idc.logger.Debug("Generating agent service with command", zap.Strings("command", command))
 
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
@@ -579,19 +608,42 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 
 	// Add networks if specified
-	if len(opts.AppNetworks) > 0 {
-		networksNode := &yaml.Node{
-			Kind: yaml.SequenceNode,
+	if len(opts.NetworkAliases) > 0 {
+		networksMapNode := &yaml.Node{Kind: yaml.MappingNode}
+
+		for netName, aliases := range opts.NetworkAliases {
+			// Create the aliases list
+			aliasListNode := &yaml.Node{Kind: yaml.SequenceNode}
+			for _, alias := range aliases {
+				aliasListNode.Content = append(aliasListNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: alias})
+			}
+
+			// Create the config for this network
+			netConfigNode := &yaml.Node{
+				Kind: yaml.MappingNode,
+				Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "aliases"},
+					aliasListNode,
+				},
+			}
+
+			// Add to map: networkName -> config
+			networksMapNode.Content = append(networksMapNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: netName},
+				netConfigNode,
+			)
 		}
-		for _, appNetwork := range opts.AppNetworks {
-			networksNode.Content = append(networksNode.Content, &yaml.Node{
-				Kind: yaml.ScalarNode, Value: appNetwork,
-			})
-		}
+
 		serviceNode.Content = append(serviceNode.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "networks"},
-			networksNode,
+			networksMapNode,
 		)
+	} else if len(opts.AppNetworks) > 0 {
+		networksNode := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, appNetwork := range opts.AppNetworks {
+			networksNode.Content = append(networksNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: appNetwork})
+		}
+		serviceNode.Content = append(serviceNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "networks"}, networksNode)
 	}
 
 	// Add volumes
@@ -661,17 +713,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	return serviceNode, nil
 }
 
-// convertPathToUnixStyleForCompose converts Windows paths to Unix style for Docker Compose
-func convertPathToUnixStyleForCompose(path string) string {
-	// Replace backslashes with forward slashes
-	unixPath := strings.ReplaceAll(path, "\\", "/")
-	// Remove 'C:' and similar drive letters
-	if len(unixPath) > 1 && unixPath[1] == ':' {
-		unixPath = unixPath[2:]
-	}
-	return unixPath
-}
-
 // AddKeployAgentToCompose adds the keploy-agent service to an existing Docker Compose file
 // This is a convenience function that shows how to use GenerateKeployAgentService
 func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOptions) error {
@@ -696,11 +737,57 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 	return nil
 }
 
+// Helper: findServiceNodeAndName finds the YAML node and the Service Key (name)
+func (idc *Impl) findServiceNodeAndName(compose *Compose, appIdentifier string) (*yaml.Node, string, error) {
+	if compose.Services.Content == nil {
+		return nil, "", fmt.Errorf("no services found")
+	}
+
+	for i := 0; i < len(compose.Services.Content); i += 2 {
+		serviceNameNode := compose.Services.Content[i]
+		serviceContentNode := compose.Services.Content[i+1]
+		serviceName := serviceNameNode.Value
+
+		// Check 1: Does the Service Key match?
+		if serviceName == appIdentifier {
+			return serviceContentNode, serviceName, nil
+		}
+
+		// Check 2: Does the container_name match?
+		for j := 0; j < len(serviceContentNode.Content)-1; j += 2 {
+			if serviceContentNode.Content[j].Value == "container_name" {
+				if serviceContentNode.Content[j+1].Value == appIdentifier {
+					return serviceContentNode, serviceName, nil
+				}
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("service not found")
+}
+
 // ModifyComposeForAgent modifies an existing Docker Compose file to integrate with Keploy agent
 // It adds the keploy-agent service and modifies the specified app container to depend on it
 func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOptions, appContainerName string) error {
+
+	targetServiceNode, serviceName, err := idc.findServiceNodeAndName(compose, appContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to find target service '%s': %w", appContainerName, err)
+	}
+
+	existingNetworks := idc.extractServiceNetworks(targetServiceNode, serviceName)
+	if len(existingNetworks) == 0 {
+		existingNetworks = []string{"default"}
+	}
+
+	if opts.NetworkAliases == nil {
+		opts.NetworkAliases = make(map[string][]string)
+	}
+
+	for _, net := range existingNetworks {
+		opts.NetworkAliases[net] = []string{serviceName}
+	}
 	// First, add the keploy-agent service
-	err := idc.AddKeployAgentToCompose(compose, opts)
+	err = idc.AddKeployAgentToCompose(compose, opts)
 	if err != nil {
 		return fmt.Errorf("failed to add keploy-agent service: %w", err)
 	}

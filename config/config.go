@@ -9,6 +9,10 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+type MockDownload struct {
+	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
+}
+
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
@@ -48,6 +52,7 @@ type Config struct {
 	Version               string              `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
+	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
 }
 
 type Agent struct {
@@ -79,6 +84,7 @@ type Record struct {
 	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 

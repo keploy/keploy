@@ -23,7 +23,7 @@ type Agent struct {
 	svc    agent.Service
 }
 
-func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
+func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	a := &Agent{
 		logger: logger,
 		svc:    agent,
@@ -39,7 +39,98 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
+		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
+		r.Post("/hooks/after-simulate", a.HandleAfterSimulate)
+		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
+		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
+		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
 	})
+}
+
+type DefaultRoutes struct{}
+
+type RouteHook interface {
+	New(r chi.Router, agent agent.Service, logger *zap.Logger)
+}
+
+var (
+	ActiveHooks RouteHook = &DefaultRoutes{}
+)
+
+func RegisterHooks(h RouteHook) {
+	ActiveHooks = h
+}
+
+func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
+	var req models.BeforeTestRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.BeforeTestRun(r.Context(), req.TestRunID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Request) {
+	var req models.BeforeTestSetCompose
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestRunID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
+	var req models.AfterTestRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.AfterTestRun(r.Context(), req.TestRunID, req.TestSetIDs, req.Coverage); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
+	var req models.BeforeSimulateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
+		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
+	var req models.AfterSimulateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.AfterSimulate(r.Context(), req.TestSetID, req.TestCaseName); err != nil {
+		a.logger.Error("failed to execute after simulate hook", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +140,9 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
+
+	a.logger.Info("🟢 Received request to handle incoming test cases")
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -80,6 +174,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
+	a.logger.Info("🟢 Streaming incoming test cases to client")
+
 	// TODO: make a uniform implementation for both test and mock streaming channels
 	// Keep the connection alive and stream data
 	for t := range tc {
@@ -98,6 +194,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
+
+	a.logger.Info("🟢 Received request to handle outgoing mocks...")
+
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -124,6 +223,8 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		a.logger.Error("failed to get outgoing", zap.Error(err))
 		return
 	}
+
+	a.logger.Info("🟢 Streaming outgoing mocks to client...")
 
 	enc := gob.NewEncoder(w)
 

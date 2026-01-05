@@ -43,22 +43,65 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 }
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
+
 	switch tc.Kind {
 	case models.HTTP:
-		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
-		return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
 
+		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
+			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		}
+
+		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
+
+		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
+			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+		}
+
+		return resp, err
 	case models.GRPC_EXPORT:
+
+		if err := h.instrumentation.BeforeSimulate(ctx, &tc.GrpcReq.Timestamp, testSetID, tc.Name); err != nil {
+			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		}
+
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
-		return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
+		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
+
+		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
+			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+		}
+
+		return resp, err
 
 	default:
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
+
 }
 
 func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
+
+	if err := h.instrumentation.BeforeTestRun(ctx, testRunID); err != nil {
+		h.logger.Error("failed to call BeforeTestRun hook", zap.Error(err))
+	}
+
+	return nil
+}
+
+func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error {
+	h.logger.Debug("BeforeTestSetCompose hook executed", zap.String("testRunID", testRunID))
+
+	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, firstRun); err != nil {
+		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
+	}
+
+	return nil
+}
+
+func (h *Hooks) BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error {
+	h.logger.Debug("BeforeTestResult called")
 	return nil
 }
 
@@ -198,8 +241,12 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	return nil
 }
 
-func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
+func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
+
+	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
+		h.logger.Error("failed to call AfterTestRun hook", zap.Error(err))
+	}
 	return nil
 }
 

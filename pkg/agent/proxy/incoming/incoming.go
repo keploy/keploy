@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
 
 	"go.keploy.io/server/v3/pkg/agent"
@@ -19,23 +20,23 @@ import (
 )
 
 type proxyStop func() error
-
 type IngressProxyManager struct {
-	mu     sync.Mutex
-	active map[uint16]proxyStop
-	logger *zap.Logger
-	// deps         models.ProxyDependencies // Use the new dependency struct
+	mu           sync.Mutex
+	active       map[uint16]proxyStop
+	logger       *zap.Logger
 	hooks        agent.Hooks
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
+	synchronous  bool
 }
 
-func New(logger *zap.Logger, h agent.Hooks) *IngressProxyManager {
+func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
 	pm := &IngressProxyManager{
-		logger: logger,
-		hooks:  h,
-		tcChan: make(chan *models.TestCase, 100),
-		active: make(map[uint16]proxyStop),
+		logger:      logger,
+		hooks:       h,
+		tcChan:      make(chan *models.TestCase, 100),
+		active:      make(map[uint16]proxyStop),
+		synchronous: cfg.Agent.Synchronous,
 	}
 	return pm
 }
@@ -79,7 +80,6 @@ func (pm *IngressProxyManager) StopAll() {
 }
 
 func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
-
 	eventChan, err := pm.hooks.WatchBindEvents(ctx)
 	if err != nil {
 		pm.logger.Error("Failed to start watching for ingress events", zap.Error(err))
@@ -121,6 +121,7 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		sem := make(chan struct{}, 1)
 		for {
 			select {
 			case <-ctx.Done():
@@ -140,7 +141,10 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-			go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
+
+			go func(cc net.Conn) {
+				handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts, pm.synchronous, sem)
+			}(clientConn)
 		}
 	}()
 	return func() error {
@@ -153,7 +157,7 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions) {
+func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions, synchronous bool, sem chan struct{}) {
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
@@ -176,7 +180,7 @@ func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr strin
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
-		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, opts)
+		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, opts, synchronous, sem)
 	}
 }
 
