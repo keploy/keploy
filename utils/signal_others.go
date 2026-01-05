@@ -48,6 +48,11 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// Check if the command is docker-compose related and output is a TTY
 	cmdType := FindDockerCmd(userCmd)
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	stdoutWriter := os.Stdout
+	stderrWriter := os.Stderr
+	if IsMCPStdio() {
+		stdoutWriter = os.Stderr
+	}
 
 	if cmdType == DockerCompose && isTTY {
 		// Create log file for docker-compose output in OS-specific temp directory
@@ -74,8 +79,8 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 			logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
 		}
 		// Set the output of the command to stdout/stderr
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stdout = stdoutWriter
+		cmd.Stderr = stderrWriter
 	}
 
 	logger.Info("Starting Application :", zap.String("executing_cli", cmd.String()))

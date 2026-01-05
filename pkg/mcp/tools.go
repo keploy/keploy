@@ -3,23 +3,39 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
+// ListMocksInput defines the input parameters for the list mocks tool.
+type ListMocksInput struct {
+	// Path is the optional path to search for mocks (default: ./keploy).
+	Path string `json:"path" jsonschema:"Path to search for mock files (default: ./keploy)"`
+}
+
+// ListMocksOutput defines the output of the list mocks tool.
+type ListMocksOutput struct {
+	// Success indicates whether the operation was successful.
+	Success bool `json:"success"`
+	// MockSets is the list of available mock set names/IDs.
+	MockSets []string `json:"mockSets"`
+	// Count is the number of mock sets found.
+	Count int `json:"count"`
+	// Path is the path where mocks were searched.
+	Path string `json:"path"`
+	// Message is a human-readable status message.
+	Message string `json:"message"`
+}
+
 // MockRecordInput defines the input parameters for the mock record tool.
 type MockRecordInput struct {
-	// Command is the application command to run (e.g., "go run main.go", "npm start").
-	Command string `json:"command" jsonschema:"required,description=Application command to run (e.g. 'go run main.go' or 'npm start')"`
+	// Command is the command to run (e.g., "go run main.go", "npm start", "./my-app").
+	Command string `json:"command" jsonschema:"Command to run (e.g. 'go run main.go', 'go test', 'npm run test', 'npm start', './my-app', or any other command)."`
 	// Path is the path to store mock files (default: ./keploy).
-	Path string `json:"path" jsonschema:"description=Path to store mock files (default: ./keploy)"`
-	// Duration is the recording duration (e.g., "60s", "5m").
-	Duration string `json:"duration" jsonschema:"description=Recording duration (e.g. '60s' or '5m'). Default: 60s"`
-	// SkipConfirmation skips the user confirmation step if true.
-	SkipConfirmation bool `json:"skipConfirmation" jsonschema:"description=Skip user confirmation of command (default: false). Set to true if user has already confirmed the command."`
+	Path string `json:"path" jsonschema:"Path to store mock files (default: ./keploy)"`
 }
 
 // MockRecordOutput defines the output of the mock record tool.
@@ -34,16 +50,24 @@ type MockRecordOutput struct {
 	Protocols []string `json:"protocols"`
 	// Message is a human-readable status message.
 	Message string `json:"message"`
+	// Configuration shows the configuration that was used.
+	Configuration *RecordConfiguration `json:"configuration,omitempty"`
+}
+
+// RecordConfiguration shows the configuration used for recording.
+type RecordConfiguration struct {
+	Command string `json:"command"`
+	Path    string `json:"path"`
 }
 
 // MockReplayInput defines the input parameters for the mock replay tool.
 type MockReplayInput struct {
-	// Command is the application command to run.
-	Command string `json:"command" jsonschema:"required,description=Application command to run"`
-	// MockFilePath is the path to the mock file or directory to replay.
-	MockFilePath string `json:"mockFilePath" jsonschema:"required,description=Path to mock file or directory to replay"`
+	// Command is the command to run with mocks.
+	Command string `json:"command" jsonschema:"Command to run with mocks (e.g. 'go test -v', 'npm test', 'go run main.go', or any other command)."`
+	// MockName is the name of the mock set to replay.
+	MockName string `json:"mockName" jsonschema:"Name of the mock set to replay. Use keploy_list_mocks to see available mocks. If not provided, the latest mock set will be used."`
 	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches.
-	FallBackOnMiss bool `json:"fallBackOnMiss" jsonschema:"description=Whether to fall back to real calls when no mock matches (default: false)"`
+	FallBackOnMiss bool `json:"fallBackOnMiss" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
 }
 
 // MockReplayOutput defines the output of the mock replay tool.
@@ -58,6 +82,67 @@ type MockReplayOutput struct {
 	AppExitCode int `json:"appExitCode"`
 	// Message is a human-readable status message.
 	Message string `json:"message"`
+	// Configuration shows the configuration that was used.
+	Configuration *ReplayConfiguration `json:"configuration,omitempty"`
+}
+
+// ReplayConfiguration shows the configuration used for replay.
+type ReplayConfiguration struct {
+	Command        string `json:"command"`
+	MockName       string `json:"mockName"`
+	FallBackOnMiss bool   `json:"fallBackOnMiss"`
+}
+
+// handleListMocks handles the keploy_list_mocks tool invocation.
+func (s *Server) handleListMocks(ctx context.Context, req *sdkmcp.CallToolRequest, in ListMocksInput) (*sdkmcp.CallToolResult, ListMocksOutput, error) {
+	s.logger.Info("List mocks tool invoked", zap.String("path", in.Path))
+
+	// Check if mock replayer is available (it has access to mockDB)
+	if s.mockReplayer == nil {
+		return nil, ListMocksOutput{
+			Success: false,
+			Message: "Mock replayer service is not available. Cannot list mocks.",
+		}, nil
+	}
+
+	path := strings.TrimSpace(in.Path)
+	if path == "" {
+		path = "./keploy"
+	}
+
+	// Get available mock sets
+	mockSets, err := s.mockReplayer.ListMockSets(ctx)
+	if err != nil {
+		s.logger.Error("Failed to list mock sets", zap.Error(err))
+		return nil, ListMocksOutput{
+			Success: false,
+			Path:    path,
+			Message: fmt.Sprintf("Failed to list mock sets: %s", err.Error()),
+		}, nil
+	}
+
+	if len(mockSets) == 0 {
+		return nil, ListMocksOutput{
+			Success:  true,
+			MockSets: []string{},
+			Count:    0,
+			Path:     path,
+			Message:  "No mock sets found. Use keploy_mock_record to create mocks first.",
+		}, nil
+	}
+
+	message := fmt.Sprintf("Found %d mock set(s). The latest is '%s'.", len(mockSets), mockSets[0])
+	if len(mockSets) > 1 {
+		message += " You can specify any of these with the mockName parameter in keploy_mock_test."
+	}
+
+	return nil, ListMocksOutput{
+		Success:  true,
+		MockSets: mockSets,
+		Count:    len(mockSets),
+		Path:     path,
+		Message:  message,
+	}, nil
 }
 
 // handleMockRecord handles the keploy_mock_record tool invocation.
@@ -65,66 +150,56 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	s.logger.Info("Mock record tool invoked",
 		zap.String("command", in.Command),
 		zap.String("path", in.Path),
-		zap.String("duration", in.Duration),
-		zap.Bool("skipConfirmation", in.SkipConfirmation),
 	)
 
 	// Validate input
-	if in.Command == "" {
+	command := strings.TrimSpace(in.Command)
+	if command == "" {
 		return nil, MockRecordOutput{
 			Success: false,
-			Message: "Command is required",
+			Message: "Error: 'command' is required. Please provide a command to run (e.g., 'go run main.go', 'npm start', './my-app').",
 		}, nil
 	}
 
-	// Ask for user confirmation unless skipped
-	if !in.SkipConfirmation {
-		confirmed, err := s.confirmMockRecordCommand(ctx, in.Command, in.Path, in.Duration)
-		if err != nil {
-			s.logger.Warn("Failed to get user confirmation, proceeding anyway",
-				zap.Error(err),
-			)
-			// Continue with recording if elicitation fails (client may not support it)
-		} else if !confirmed {
-			return nil, MockRecordOutput{
-				Success: false,
-				Message: "User declined to proceed with the command. Please provide the correct command and try again.",
-			}, nil
-		}
+	// Parse and validate configuration
+	path := strings.TrimSpace(in.Path)
+	if path == "" {
+		path = "./keploy"
 	}
 
-	// Parse duration
-	duration := 60 * time.Second
-	if in.Duration != "" {
-		parsed, err := time.ParseDuration(in.Duration)
-		if err != nil {
-			return nil, MockRecordOutput{
-				Success: false,
-				Message: fmt.Sprintf("Invalid duration format: %s", err.Error()),
-			}, nil
-		}
-		duration = parsed
+	config := &RecordConfiguration{
+		Command: command,
+		Path:    path,
 	}
 
 	// Check if mock recorder is available
 	if s.mockRecorder == nil {
 		return nil, MockRecordOutput{
-			Success: false,
-			Message: "Mock recorder service is not available",
+			Success:       false,
+			Protocols:     []string{}, // Must be non-nil for JSON schema validation
+			Configuration: config,
+			Message:       "Error: Mock recorder service is not available.",
 		}, nil
 	}
 
+	// Show configuration and execute
+	s.logger.Info("Starting mock recording with configuration",
+		zap.String("command", command),
+		zap.String("path", path),
+	)
+
 	// Execute recording
 	result, err := s.mockRecorder.Record(ctx, models.RecordOptions{
-		Command:  in.Command,
-		Path:     in.Path,
-		Duration: duration,
+		Command: command,
+		Path:    path,
 	})
 	if err != nil {
 		s.logger.Error("Mock recording failed", zap.Error(err))
 		return nil, MockRecordOutput{
-			Success: false,
-			Message: fmt.Sprintf("Recording failed: %s", err.Error()),
+			Success:       false,
+			Protocols:     []string{}, // Must be non-nil for JSON schema validation
+			Configuration: config,
+			Message:       fmt.Sprintf("Recording failed: %s", err.Error()),
 		}, nil
 	}
 
@@ -140,18 +215,25 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	// Rename mock file with contextual name
 	newPath := s.renameMockFile(result.MockFilePath, contextualName)
 
+	// Ensure protocols is never nil for JSON schema validation (must be array, not null)
+	protocols := []string{}
+	if result.Metadata != nil && result.Metadata.Protocols != nil {
+		protocols = result.Metadata.Protocols
+	}
+
 	s.logger.Info("Mock recording completed successfully",
 		zap.String("mockFilePath", newPath),
 		zap.Int("mockCount", result.MockCount),
-		zap.Strings("protocols", result.Metadata.Protocols),
+		zap.Strings("protocols", protocols),
 	)
 
 	return nil, MockRecordOutput{
-		Success:      true,
-		MockFilePath: newPath,
-		MockCount:    result.MockCount,
-		Protocols:    result.Metadata.Protocols,
-		Message:      fmt.Sprintf("Successfully recorded %d mocks to %s", result.MockCount, newPath),
+		Success:       true,
+		MockFilePath:  newPath,
+		MockCount:     result.MockCount,
+		Protocols:     protocols,
+		Configuration: config,
+		Message:       fmt.Sprintf("Successfully recorded %d mock(s) to '%s'. Detected protocols: %v", result.MockCount, newPath, protocols),
 	}, nil
 }
 
@@ -159,21 +241,16 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolRequest, in MockReplayInput) (*sdkmcp.CallToolResult, MockReplayOutput, error) {
 	s.logger.Info("Mock replay tool invoked",
 		zap.String("command", in.Command),
-		zap.String("mockFilePath", in.MockFilePath),
+		zap.String("mockName", in.MockName),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
 	// Validate input
-	if in.Command == "" {
+	command := strings.TrimSpace(in.Command)
+	if command == "" {
 		return nil, MockReplayOutput{
 			Success: false,
-			Message: "Command is required",
-		}, nil
-	}
-	if in.MockFilePath == "" {
-		return nil, MockReplayOutput{
-			Success: false,
-			Message: "MockFilePath is required",
+			Message: "Error: 'command' is required. Please provide the test command to run (e.g., 'go test -v', 'npm test').",
 		}, nil
 	}
 
@@ -181,30 +258,77 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	if s.mockReplayer == nil {
 		return nil, MockReplayOutput{
 			Success: false,
-			Message: "Mock replayer service is not available",
+			Message: "Error: Mock replayer service is not available.",
 		}, nil
 	}
 
+	mockName := strings.TrimSpace(in.MockName)
+
+	// If no mock name provided, get the latest
+	if mockName == "" {
+		mockSets, err := s.mockReplayer.ListMockSets(ctx)
+		if err != nil {
+			return nil, MockReplayOutput{
+				Success: false,
+				Message: fmt.Sprintf("Failed to get available mock sets: %s. Please specify mockName explicitly.", err.Error()),
+			}, nil
+		}
+		if len(mockSets) == 0 {
+			return nil, MockReplayOutput{
+				Success: false,
+				Message: "No mock sets found. Use keploy_mock_record to create mocks first.",
+			}, nil
+		}
+		mockName = mockSets[0]
+		s.logger.Info("Using latest mock set", zap.String("mockName", mockName))
+	}
+
+	config := &ReplayConfiguration{
+		Command:        command,
+		MockName:       mockName,
+		FallBackOnMiss: in.FallBackOnMiss,
+	}
+
+	s.logger.Info("Starting mock replay with configuration",
+		zap.String("command", command),
+		zap.String("mockName", mockName),
+		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
+	)
+
 	// Execute replay
 	result, err := s.mockReplayer.Replay(ctx, models.ReplayOptions{
-		Command:        in.Command,
-		MockFilePath:   in.MockFilePath,
+		Command:        command,
+		MockName:       mockName,
 		FallBackOnMiss: in.FallBackOnMiss,
 	})
 	if err != nil {
 		s.logger.Error("Mock replay failed", zap.Error(err))
 		return nil, MockReplayOutput{
-			Success: false,
-			Message: fmt.Sprintf("Replay failed: %s", err.Error()),
+			Success:       false,
+			Configuration: config,
+			Message:       fmt.Sprintf("Replay failed: %s", err.Error()),
 		}, nil
 	}
 
-	message := fmt.Sprintf("Replayed %d mocks", result.MocksReplayed)
+	// Build result message
+	var messageParts []string
+	messageParts = append(messageParts, fmt.Sprintf("Replayed %d mock(s)", result.MocksReplayed))
+
 	if result.MocksMissed > 0 {
-		message += fmt.Sprintf(", %d mocks missed", result.MocksMissed)
+		messageParts = append(messageParts, fmt.Sprintf("%d mock(s) missed", result.MocksMissed))
 	}
+
 	if result.AppExitCode != 0 {
-		message += fmt.Sprintf(", app exited with code %d", result.AppExitCode)
+		messageParts = append(messageParts, fmt.Sprintf("app exited with code %d", result.AppExitCode))
+	} else {
+		messageParts = append(messageParts, "app exited successfully")
+	}
+
+	message := strings.Join(messageParts, ", ")
+	if result.Success {
+		message = "Test passed! " + message
+	} else {
+		message = "Test completed with issues. " + message
 	}
 
 	s.logger.Info("Mock replay completed",
@@ -219,66 +343,7 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		MocksReplayed: result.MocksReplayed,
 		MocksMissed:   result.MocksMissed,
 		AppExitCode:   result.AppExitCode,
+		Configuration: config,
 		Message:       message,
 	}, nil
-}
-
-// confirmMockRecordCommand asks the user to confirm the command before executing mock recording.
-// Returns true if confirmed, false if declined, or error if elicitation fails.
-func (s *Server) confirmMockRecordCommand(ctx context.Context, command, path, duration string) (bool, error) {
-	session := s.getActiveSession()
-	if session == nil {
-		return true, fmt.Errorf("no active session for elicitation")
-	}
-
-	// Check if client supports elicitation
-	initParams := session.InitializeParams()
-	if initParams == nil || initParams.Capabilities == nil || initParams.Capabilities.Elicitation == nil {
-		s.logger.Debug("Client doesn't support elicitation, skipping confirmation")
-		return true, nil
-	}
-
-	// Build confirmation message
-	pathDisplay := path
-	if pathDisplay == "" {
-		pathDisplay = "./keploy (default)"
-	}
-	durationDisplay := duration
-	if durationDisplay == "" {
-		durationDisplay = "60s (default)"
-	}
-
-	message := fmt.Sprintf(
-		"I'm about to record outgoing calls (HTTP APIs, databases, etc.) from your application.\n\n"+
-			"**Command:** `%s`\n"+
-			"**Mock storage path:** `%s`\n"+
-			"**Recording duration:** `%s`\n\n"+
-			"This will:\n"+
-			"1. Start your application with the above command\n"+
-			"2. Intercept all outgoing calls (HTTP, gRPC, databases, etc.)\n"+
-			"3. Save them as mocks for later testing\n\n"+
-			"Is this the correct command to run your application?",
-		command, pathDisplay, durationDisplay,
-	)
-
-	// Use elicitation to ask user for confirmation
-	result, err := session.Elicit(ctx, &sdkmcp.ElicitParams{
-		Message: message,
-	})
-	if err != nil {
-		return false, fmt.Errorf("elicitation failed: %w", err)
-	}
-
-	// Check if user confirmed
-	if result.Action == "accept" {
-		s.logger.Info("User confirmed mock record command", zap.String("command", command))
-		return true, nil
-	}
-
-	// User declined or cancelled
-	s.logger.Info("User declined mock record command",
-		zap.String("command", command),
-		zap.String("action", result.Action),
-	)
-	return false, nil
 }

@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func LogExample(example string) string {
@@ -155,6 +156,8 @@ type CmdConfigurator struct {
 	cfg    *config.Config
 }
 
+const MCPStdioAnnotationKey = "keploy.io/mcp-stdio"
+
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
 		logger: logger,
@@ -162,10 +165,25 @@ func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigura
 	}
 }
 
+func isMCPStdioCommand(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Annotations != nil && cmd.Annotations[MCPStdioAnnotationKey] == "true" {
+		return true
+	}
+	parent := cmd.Parent()
+	return cmd.Name() == "serve" && parent != nil && parent.Name() == "mcp"
+}
+
 func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
-	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if isMCPStdioCommand(cmd) {
+			_, _ = fmt.Fprintln(os.Stderr, "error:", err)
+			return err
+		}
 		PrintLogo(os.Stdout, true)
 		color.Red(fmt.Sprintf("❌ error: %v", err))
 		fmt.Println()
@@ -340,7 +358,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 
 	case "serve":
-		if cmd.Parent() != nil && cmd.Parent().Name() == "mcp" {
+		if isMCPStdioCommand(cmd) {
 			return nil
 		}
 
@@ -466,6 +484,12 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	if isMCPStdioCommand(cmd) {
+		utils.SetMCPStdio(true)
+		if err := c.configureMCPLogger(zapcore.InfoLevel); err != nil {
+			return err
+		}
+	}
 	err := isCompatible(c.logger)
 	if err != nil {
 		return err
@@ -509,6 +533,16 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 			return err
 		}
 	}
+	return nil
+}
+
+func (c *CmdConfigurator) configureMCPLogger(level zapcore.Level) error {
+	logger, err := log.NewStderrLogger(level)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "failed to initialize stderr logger:", err)
+		return err
+	}
+	*c.logger = *logger
 	return nil
 }
 
@@ -604,15 +638,29 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
-	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-	PrintLogo(os.Stdout, disableAnsi)
-	if c.cfg.Debug {
-		logger, err := log.ChangeLogLevel(zap.DebugLevel)
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to change log level"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+	isMCP := isMCPStdioCommand(cmd)
+	if isMCP {
+		utils.SetMCPStdio(true)
+		c.cfg.DisableANSI = true
+		models.IsAnsiDisabled = true
+		level := zapcore.InfoLevel
+		if c.cfg.Debug {
+			level = zapcore.DebugLevel
+		}
+		if err := c.configureMCPLogger(level); err != nil {
+			return err
+		}
+	} else {
+		disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
+		PrintLogo(os.Stdout, disableAnsi)
+		if c.cfg.Debug {
+			logger, err := log.ChangeLogLevel(zap.DebugLevel)
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to change log level"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 	}
 
@@ -629,17 +677,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing
-		logger, err := log.AddMode(cmd.Name())
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to add mode to logger"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		if !isMCP {
+			logger, err := log.AddMode(cmd.Name())
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to add mode to logger"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 		c.cfg.DisableTele = true
 	}
 
-	if c.cfg.DisableANSI {
+	if c.cfg.DisableANSI && !isMCP {
 		logger, err := log.ChangeColorEncoding()
 		models.IsAnsiDisabled = true
 		*c.logger = *logger

@@ -6,6 +6,7 @@ Complete reference documentation for the Keploy MCP server tools.
 
 - [Protocol Overview](#protocol-overview)
 - [Tools](#tools)
+  - [keploy_list_mocks](#keploy_list_mocks)
   - [keploy_mock_record](#keploy_mock_record)
   - [keploy_mock_test](#keploy_mock_test)
 - [Error Handling](#error-handling)
@@ -47,6 +48,130 @@ The Keploy MCP server uses **stdio transport**:
 
 ## Tools
 
+### keploy_list_mocks
+
+Lists all available mock sets in your workspace.
+
+#### Description
+
+```
+List available mock sets in the Keploy directory. This helps you discover what 
+mocks have been recorded and can be used with keploy_mock_test. Returns mock 
+sets sorted by recency (latest first).
+```
+
+#### Input Schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path to search for mock files (default: ./keploy)"
+    }
+  },
+  "required": []
+}
+```
+
+#### Input Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | No | `./keploy` | Directory to search for mock sets |
+
+#### Output Schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "description": "Whether listing was successful"
+    },
+    "mockSets": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of available mock set names (sorted by recency)"
+    },
+    "count": {
+      "type": "integer",
+      "description": "Number of mock sets found"
+    },
+    "path": {
+      "type": "string",
+      "description": "Path where mocks were searched"
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable status message"
+    }
+  }
+}
+```
+
+#### Output Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | boolean | `true` if listing completed successfully |
+| `mockSets` | string[] | Names of available mock sets (latest first) |
+| `count` | integer | Total number of mock sets found |
+| `path` | string | Directory that was searched |
+| `message` | string | Human-readable summary |
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "keploy_list_mocks",
+    "arguments": {}
+  }
+}
+```
+
+#### Example Response (Success)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"success\":true,\"mockSets\":[\"order-service-stripe-postgres\",\"user-service-http\",\"payment-api\"],\"count\":3,\"path\":\"./keploy\",\"message\":\"Found 3 mock set(s). The latest is 'order-service-stripe-postgres'.\"}"
+      }
+    ]
+  }
+}
+```
+
+#### Example Response (No Mocks)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"success\":true,\"mockSets\":[],\"count\":0,\"path\":\"./keploy\",\"message\":\"No mock sets found. Use keploy_mock_record to create mocks first.\"}"
+      }
+    ]
+  }
+}
+```
+
+---
+
 ### keploy_mock_record
 
 Records outgoing calls from your application, capturing HTTP APIs, database queries, and other external dependencies.
@@ -72,10 +197,6 @@ application command, creating mock files that can be replayed during testing.
     "path": {
       "type": "string",
       "description": "Path to store mock files (default: ./keploy)"
-    },
-    "duration": {
-      "type": "string",
-      "description": "Recording duration (e.g. '60s' or '5m'). Default: 60s"
     }
   },
   "required": ["command"]
@@ -88,15 +209,6 @@ application command, creating mock files that can be replayed during testing.
 |-----------|------|----------|---------|-------------|
 | `command` | string | **Yes** | - | Application command to execute |
 | `path` | string | No | `./keploy` | Directory to store mock files |
-| `duration` | string | No | `60s` | Recording duration (Go duration format) |
-
-#### Duration Format
-
-Duration uses Go's duration format:
-- `30s` - 30 seconds
-- `5m` - 5 minutes
-- `1h` - 1 hour
-- `1m30s` - 1 minute 30 seconds
 
 #### Output Schema
 
@@ -124,6 +236,14 @@ Duration uses Go's duration format:
     "message": {
       "type": "string",
       "description": "Human-readable status message"
+    },
+    "configuration": {
+      "type": "object",
+      "description": "Configuration that was used for recording",
+      "properties": {
+        "command": { "type": "string" },
+        "path": { "type": "string" }
+      }
     }
   }
 }
@@ -138,6 +258,7 @@ Duration uses Go's duration format:
 | `mockCount` | integer | Total number of mocks captured |
 | `protocols` | string[] | Detected protocols (HTTP, Postgres, etc.) |
 | `message` | string | Human-readable summary |
+| `configuration` | object | Configuration used for recording |
 
 #### Example Request
 
@@ -150,8 +271,7 @@ Duration uses Go's duration format:
     "name": "keploy_mock_record",
     "arguments": {
       "command": "npm start",
-      "path": "./keploy/api-tests",
-      "duration": "2m"
+      "path": "./keploy/api-tests"
     }
   }
 }
@@ -230,18 +350,18 @@ external dependencies.
   "properties": {
     "command": {
       "type": "string",
-      "description": "Application command to run"
+      "description": "Test command to run (e.g. 'go test -v' or 'npm test')"
     },
-    "mockFilePath": {
+    "mockName": {
       "type": "string",
-      "description": "Path to mock file or directory to replay"
+      "description": "Name of the mock set to replay. Use keploy_list_mocks to see available mocks. If not provided, the latest mock set will be used."
     },
     "fallBackOnMiss": {
       "type": "boolean",
       "description": "Whether to fall back to real calls when no mock matches (default: false)"
     }
   },
-  "required": ["command", "mockFilePath"]
+  "required": ["command"]
 }
 ```
 
@@ -250,14 +370,13 @@ external dependencies.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `command` | string | **Yes** | - | Application/test command to execute |
-| `mockFilePath` | string | **Yes** | - | Path to mock file or directory |
+| `mockName` | string | No | (latest) | Name of mock set to replay (use `keploy_list_mocks` to discover) |
 | `fallBackOnMiss` | boolean | No | `false` | Allow real calls on mock miss |
 
-#### Mock File Path
+#### Mock Name Discovery
 
-The `mockFilePath` can be:
-- **File path**: `./keploy/user-service/mocks.yaml`
-- **Directory path**: `./keploy/user-service` (looks for `mocks.yaml` inside)
+If `mockName` is not provided, the latest recorded mock set is used automatically.
+Use `keploy_list_mocks` to discover available mock sets and their names.
 
 #### Output Schema
 
@@ -284,6 +403,15 @@ The `mockFilePath` can be:
     "message": {
       "type": "string",
       "description": "Human-readable status message"
+    },
+    "configuration": {
+      "type": "object",
+      "description": "Configuration that was used for replay",
+      "properties": {
+        "command": { "type": "string" },
+        "mockName": { "type": "string" },
+        "fallBackOnMiss": { "type": "boolean" }
+      }
     }
   }
 }
@@ -298,6 +426,7 @@ The `mockFilePath` can be:
 | `mocksMissed` | integer | Number of calls without matching mock |
 | `appExitCode` | integer | Application process exit code |
 | `message` | string | Human-readable summary |
+| `configuration` | object | Configuration used for replay |
 
 #### Success Criteria
 
@@ -316,8 +445,24 @@ The `mockFilePath` can be:
     "name": "keploy_mock_test",
     "arguments": {
       "command": "go test ./...",
-      "mockFilePath": "./keploy/user-service-stripe",
+      "mockName": "user-service-stripe",
       "fallBackOnMiss": false
+    }
+  }
+}
+```
+
+#### Example Request (Auto-select Latest Mock)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "keploy_mock_test",
+    "arguments": {
+      "command": "npm test"
     }
   }
 }
@@ -394,11 +539,11 @@ Tool errors are returned in the output with `success: false`:
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `Command is required` | Missing command parameter | Provide `command` argument |
-| `MockFilePath is required` | Missing mock path | Provide `mockFilePath` argument |
-| `Invalid duration format` | Malformed duration | Use Go format: `60s`, `5m` |
 | `Mock recorder service is not available` | Agent not initialized | Check Keploy installation |
+| `Mock replayer service is not available` | Agent not initialized | Check Keploy installation |
 | `Failed to setup agent: permission denied` | Need elevated permissions | Run with sudo |
-| `Failed to load mocks from file` | Mock file not found | Check file path |
+| `Failed to load mocks` | Mock file/set not found | Use `keploy_list_mocks` to check available mocks |
+| `No mock sets found` | No recordings exist | Run `keploy_mock_record` first |
 
 ### Protocol Errors
 
@@ -425,6 +570,20 @@ MCP protocol errors use standard JSON-RPC error codes:
 {
   "tools": [
     {
+      "name": "keploy_list_mocks",
+      "description": "List available mock sets in the Keploy directory. This helps you discover what mocks have been recorded and can be used with keploy_mock_test. Returns mock sets sorted by recency (latest first).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to search for mock files (default: ./keploy)"
+          }
+        },
+        "required": []
+      }
+    },
+    {
       "name": "keploy_mock_record",
       "description": "Record outgoing calls (HTTP APIs, databases, message queues, etc.) from your application. This captures all external dependencies while running your application command, creating mock files that can be replayed during testing.",
       "inputSchema": {
@@ -437,10 +596,6 @@ MCP protocol errors use standard JSON-RPC error codes:
           "path": {
             "type": "string",
             "description": "Path to store mock files (default: ./keploy)"
-          },
-          "duration": {
-            "type": "string",
-            "description": "Recording duration (e.g. '60s' or '5m'). Default: 60s"
           }
         },
         "required": ["command"]
@@ -454,18 +609,18 @@ MCP protocol errors use standard JSON-RPC error codes:
         "properties": {
           "command": {
             "type": "string",
-            "description": "Application command to run"
+            "description": "Test command to run (e.g. 'go test -v' or 'npm test')"
           },
-          "mockFilePath": {
+          "mockName": {
             "type": "string",
-            "description": "Path to mock file or directory to replay"
+            "description": "Name of the mock set to replay. Use keploy_list_mocks to see available mocks. If not provided, the latest mock set will be used."
           },
           "fallBackOnMiss": {
             "type": "boolean",
             "description": "Whether to fall back to real calls when no mock matches (default: false)"
           }
         },
-        "required": ["command", "mockFilePath"]
+        "required": ["command"]
       }
     }
   ]
@@ -532,6 +687,11 @@ MCP protocol errors use standard JSON-RPC error codes:
   "result": {
     "tools": [
       {
+        "name": "keploy_list_mocks",
+        "description": "List available mock sets...",
+        "inputSchema": { ... }
+      },
+      {
         "name": "keploy_mock_record",
         "description": "Record outgoing calls...",
         "inputSchema": { ... }
@@ -557,8 +717,7 @@ MCP protocol errors use standard JSON-RPC error codes:
   "params": {
     "name": "keploy_mock_record",
     "arguments": {
-      "command": "go run main.go",
-      "duration": "30s"
+      "command": "go run main.go"
     }
   }
 }

@@ -11,6 +11,10 @@ This package implements an MCP (Model Context Protocol) server that exposes Kepl
 - [User Flow](#user-flow)
 - [Backend Flow](#backend-flow)
 - [API Reference](#api-reference)
+  - [keploy_list_mocks](#tool-keploy_list_mocks)
+  - [keploy_mock_record](#tool-keploy_mock_record)
+  - [keploy_mock_test](#tool-keploy_mock_test)
+  - [Error Handling](#error-handling)
 - [Configuration](#configuration)
 - [Examples](#examples)
 
@@ -20,9 +24,10 @@ This package implements an MCP (Model Context Protocol) server that exposes Kepl
 
 The Keploy MCP Server enables AI coding assistants (like GitHub Copilot, Claude, Cursor) to interact with Keploy's mocking capabilities through the Model Context Protocol. This allows developers to:
 
-1. **Record mocks** - Capture outgoing calls (HTTP, databases, gRPC, etc.) while running an application
-2. **Replay mocks** - Test applications in isolation by replaying recorded mocks
-3. **Smart naming** - Use LLM callbacks to generate contextual names for mock files
+1. **List mocks** - View all available recorded mock sets
+2. **Record mocks** - Capture outgoing calls (HTTP, databases, gRPC, etc.) while running an application
+3. **Replay mocks** - Test applications in isolation by replaying recorded mocks
+4. **Smart naming** - Use LLM callbacks to generate contextual names for mock files
 
 ### Key Features
 
@@ -30,6 +35,7 @@ The Keploy MCP Server enables AI coding assistants (like GitHub Copilot, Claude,
 - **Stdio Transport**: Compatible with VS Code, Claude Desktop, and other MCP clients
 - **LLM-Powered Naming**: Contextual file naming with deterministic fallback
 - **Zero Configuration**: Works out of the box with default settings
+- **Auto-Discovery**: Automatically uses the latest mock set if not specified
 
 ---
 
@@ -46,13 +52,13 @@ The Keploy MCP Server enables AI coding assistants (like GitHub Copilot, Claude,
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           Keploy MCP Server                                  │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
-│  │ keploy_mock_     │  │ keploy_mock_     │  │   LLM Callback           │  │
-│  │ record           │  │ test             │  │   (CreateMessage API)    │  │
-│  └────────┬─────────┘  └────────┬─────────┘  └──────────────────────────┘  │
-└───────────┼─────────────────────┼───────────────────────────────────────────┘
-            │                     │
-            ▼                     ▼
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │ keploy_list_ │  │ keploy_mock_ │  │ keploy_mock_ │  │ LLM Callback   │  │
+│  │ mocks        │  │ record       │  │ test         │  │ (CreateMessage)│  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └────────────────┘  │
+└─────────┼─────────────────┼─────────────────┼───────────────────────────────┘
+          │                 │                 │
+          ▼                 ▼                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         Keploy Core Services                                 │
 │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
@@ -85,6 +91,7 @@ The Keploy MCP Server enables AI coding assistants (like GitHub Copilot, Claude,
 | Component | Responsibility |
 |-----------|----------------|
 | **MCP Server** | JSON-RPC communication, tool registration, session management |
+| **keploy_list_mocks** | List available mock sets from the keploy directory |
 | **mockrecord Service** | Recording logic, metadata extraction, mock file generation |
 | **mockreplay Service** | Mock loading, replay orchestration, result reporting |
 | **models** | Shared types: `RecordOptions`, `ReplayOptions`, `MockMetadata`, etc. |
@@ -202,7 +209,7 @@ cli/
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                               pkg/models                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  RecordOptions {Command, Path, ProxyPort, DNSPort, Duration}               │
+│  RecordOptions {Command, Path, ProxyPort, DNSPort}                        │
 │  RecordResult {MockFilePath, Metadata, MockCount, Mocks}                   │
 │  MockMetadata {Protocols, Endpoints, ServiceName, Timestamp}               │
 │  EndpointInfo {Protocol, Host, Path, Method}                               │
@@ -371,7 +378,23 @@ AI: Successfully recorded 5 mocks:
     Mock file saved to: ./keploy/user-service-stripe-postgres/mocks.yaml
 ```
 
-### 3. Replaying Mocks (Testing)
+### 3. Listing Available Mocks
+
+Ask your AI assistant to show available mock sets:
+
+```
+User: "What mocks do I have recorded?"
+
+AI: [Calls keploy_list_mocks]
+
+AI: Found 2 mock sets:
+    1. user-service-stripe-postgres (latest)
+    2. order-api-redis
+    
+    You can use any of these with keploy_mock_test.
+```
+
+### 4. Replaying Mocks (Testing)
 
 Ask your AI assistant to test with recorded mocks:
 
@@ -379,7 +402,8 @@ Ask your AI assistant to test with recorded mocks:
 User: "Test my service using the recorded mocks"
 
 AI: I'll replay the recorded mocks while running your application.
-    [Calls keploy_mock_test with mockFilePath="./keploy/user-service-stripe-postgres"]
+    [Calls keploy_mock_test with command="go test ./..."]
+    (Automatically uses the latest mock set: user-service-stripe-postgres)
 
 AI: Test completed successfully:
     - 5/5 mocks replayed
@@ -387,7 +411,17 @@ AI: Test completed successfully:
     - Application exited with code 0
 ```
 
-### 4. Iterative Development Flow
+Or specify a particular mock set:
+
+```
+User: "Test using the order-api-redis mocks"
+
+AI: [Calls keploy_mock_test with mockName="order-api-redis"]
+
+AI: Test passed! Replayed 3 mock(s), app exited successfully.
+```
+
+### 5. Iterative Development Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -420,10 +454,9 @@ AI: Test completed successfully:
 
 ```
 1. MCP Server receives CallTool(keploy_mock_record)
-   └── Input: {command: "go run main.go", path: "./keploy", duration: "60s"}
+   └── Input: {command: "go run main.go", path: "./keploy"}
 
 2. Parse and validate input
-   └── Duration parsed to time.Duration
 
 3. Create mockrecord.Service.Record()
    ├── Setup agent (eBPF hooks)
@@ -506,6 +539,45 @@ AI: Test completed successfully:
 
 ## API Reference
 
+### Tool: keploy_list_mocks
+
+Lists all available mock sets that have been recorded.
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | No | Path to search for mock files (default: `./keploy`) |
+
+**Output:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | boolean | Whether the operation succeeded |
+| `mockSets` | string[] | List of available mock set names |
+| `count` | integer | Number of mock sets found |
+| `path` | string | Path where mocks were searched |
+| `message` | string | Human-readable status message |
+
+**Example:**
+```json
+// Input
+{
+  "path": "./keploy"
+}
+
+// Output
+{
+  "success": true,
+  "mockSets": ["user-service-stripe-postgres", "order-api-redis"],
+  "count": 2,
+  "path": "./keploy",
+  "message": "Found 2 mock set(s). The latest is 'user-service-stripe-postgres'."
+}
+```
+
+---
+
 ### Tool: keploy_mock_record
 
 Records outgoing calls from your application.
@@ -514,9 +586,8 @@ Records outgoing calls from your application.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `command` | string | Yes | Application command to run (e.g., `go run main.go`) |
+| `command` | string | **Yes** | Application command to run (e.g., `go run main.go`, `npm start`) |
 | `path` | string | No | Path to store mock files (default: `./keploy`) |
-| `duration` | string | No | Recording duration (e.g., `60s`, `5m`). Default: `60s` |
 
 **Output:**
 
@@ -525,16 +596,16 @@ Records outgoing calls from your application.
 | `success` | boolean | Whether recording succeeded |
 | `mockFilePath` | string | Path to the generated mock file |
 | `mockCount` | integer | Number of mocks recorded |
-| `protocols` | string[] | List of protocols detected |
+| `protocols` | string[] | List of protocols detected (HTTP, Postgres, Redis, etc.) |
 | `message` | string | Human-readable status message |
+| `configuration` | object | Configuration used for recording |
 
 **Example:**
 ```json
 // Input
 {
   "command": "npm start",
-  "path": "./keploy",
-  "duration": "2m"
+  "path": "./keploy"
 }
 
 // Output
@@ -543,21 +614,27 @@ Records outgoing calls from your application.
   "mockFilePath": "./keploy/order-service-postgres-redis/mocks.yaml",
   "mockCount": 12,
   "protocols": ["HTTP", "Postgres", "Redis"],
-  "message": "Recorded 12 mocks (HTTP, Postgres, Redis)"
+  "message": "Successfully recorded 12 mock(s) to './keploy/order-service-postgres-redis'. Detected protocols: [HTTP Postgres Redis]",
+  "configuration": {
+    "command": "npm start",
+    "path": "./keploy"
+  }
 }
 ```
 
+---
+
 ### Tool: keploy_mock_test
 
-Replays recorded mocks while running your application.
+Replays recorded mocks while running your application tests.
 
 **Input Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `command` | string | Yes | Application command to run |
-| `mockFilePath` | string | Yes | Path to mock file or directory |
-| `fallBackOnMiss` | boolean | No | Fall back to real calls on miss (default: `false`) |
+| `command` | string | **Yes** | Test command to run (e.g., `go test -v`, `npm test`) |
+| `mockName` | string | No | Name of the mock set to replay. Use `keploy_list_mocks` to see available mocks. If not provided, the latest mock set will be used. |
+| `fallBackOnMiss` | boolean | No | Fall back to real calls when no mock matches (default: `false`) |
 
 **Output:**
 
@@ -568,13 +645,14 @@ Replays recorded mocks while running your application.
 | `mocksMissed` | integer | Number of unmatched calls |
 | `appExitCode` | integer | Application exit code |
 | `message` | string | Human-readable status message |
+| `configuration` | object | Configuration used for replay |
 
 **Example:**
 ```json
 // Input
 {
   "command": "go test ./...",
-  "mockFilePath": "./keploy/user-service-stripe",
+  "mockName": "user-service-stripe",
   "fallBackOnMiss": false
 }
 
@@ -584,7 +662,38 @@ Replays recorded mocks while running your application.
   "mocksReplayed": 8,
   "mocksMissed": 0,
   "appExitCode": 0,
-  "message": "Replayed 8 mocks"
+  "message": "Test passed! Replayed 8 mock(s), app exited successfully",
+  "configuration": {
+    "command": "go test ./...",
+    "mockName": "user-service-stripe",
+    "fallBackOnMiss": false
+  }
+}
+```
+
+---
+
+### Error Handling
+
+All tools return structured error responses with helpful messages:
+
+```json
+// Missing required parameter
+{
+  "success": false,
+  "message": "Error: 'command' is required. Please provide the application command to run (e.g., 'go run main.go', 'npm start')."
+}
+
+// No mocks found
+{
+  "success": false,
+  "message": "No mock sets found. Use keploy_mock_record to create mocks first."
+}
+
+// Service unavailable
+{
+  "success": false,
+  "message": "Error: Mock recorder service is not available."
 }
 ```
 
@@ -621,10 +730,8 @@ User: Record the external calls from my Express API
 
 AI: [Calls keploy_mock_record]
     Command: npm start
-    Duration: 60s
 
 AI: Recording started. Please make some API requests to your service...
-    [After 60s or user stops]
 
 AI: Recorded 15 mocks:
     - 10 HTTP calls (api.openai.com, stripe.com)
@@ -633,14 +740,29 @@ AI: Recorded 15 mocks:
     Mock file: ./keploy/express-api-openai-mongo/mocks.yaml
 ```
 
-### Example 2: Testing with Mocks
+### Example 2: Listing and Selecting Mocks
+
+```
+User: What mock sets do I have?
+
+AI: [Calls keploy_list_mocks]
+
+AI: Found 3 mock sets:
+    1. express-api-openai-mongo (latest)
+    2. user-service-stripe
+    3. payment-api-postgres
+    
+    Use keploy_mock_test with any of these names.
+```
+
+### Example 3: Testing with Mocks
 
 ```
 User: Run my tests with the recorded mocks
 
 AI: [Calls keploy_mock_test]
     Command: npm test
-    MockFilePath: ./keploy/express-api-openai-mongo
+    (Using latest mock set: express-api-openai-mongo)
 
 AI: Test Results:
     ✓ All 15 mocks replayed successfully
@@ -649,7 +771,17 @@ AI: Test Results:
     Your tests ran in complete isolation from external services!
 ```
 
-### Example 3: Debugging Mock Misses
+### Example 4: Testing with Specific Mock Set
+
+```
+User: Test using the payment-api-postgres mocks
+
+AI: [Calls keploy_mock_test with mockName="payment-api-postgres"]
+
+AI: Test passed! Replayed 8 mock(s), app exited successfully.
+```
+
+### Example 5: Debugging Mock Misses
 
 ```
 User: Test with mocks, show any misses

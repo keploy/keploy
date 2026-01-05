@@ -59,7 +59,11 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	}
 
 	// Set the output of the command
-	cmd.Stdout = os.Stdout
+	stdoutWriter := os.Stdout
+	if IsMCPStdio() {
+		stdoutWriter = os.Stderr
+	}
+	cmd.Stdout = stdoutWriter
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))

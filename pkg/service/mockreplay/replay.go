@@ -34,6 +34,19 @@ func New(logger *zap.Logger, cfg *config.Config, runtime Runtime) Service {
 	}
 }
 
+// ListMockSets returns a list of available mock set names/IDs.
+func (r *replayer) ListMockSets(ctx context.Context) ([]string, error) {
+	if r.runtime == nil {
+		return nil, errors.New("replay runtime is not configured")
+	}
+	mockDB := r.runtime.MockDB()
+	if mockDB == nil {
+		return nil, errors.New("mock database is not configured")
+	}
+
+	return mockDB.GetAllMockSetIDs(ctx)
+}
+
 // Replay loads mocks and replays them while running the provided command.
 func (r *replayer) Replay(ctx context.Context, opts models.ReplayOptions) (*models.ReplayResult, error) {
 	if r.runtime == nil {

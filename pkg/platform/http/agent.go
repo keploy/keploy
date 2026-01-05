@@ -970,7 +970,11 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return nil
 	}
 
-	cmd.Stdout = os.Stdout
+	stdoutWriter := os.Stdout
+	if utils.IsMCPStdio() {
+		stdoutWriter = os.Stderr
+	}
+	cmd.Stdout = stdoutWriter
 	cmd.Stderr = os.Stderr
 
 	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))

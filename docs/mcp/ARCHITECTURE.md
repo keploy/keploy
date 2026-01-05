@@ -39,12 +39,12 @@ The Keploy MCP server bridges AI coding assistants with Keploy's mocking capabil
 │                           │MCP LAYER│                                        │
 │  ┌───────────────────────────────┴─────────────────────────────────────┐   │
 │  │                        Keploy MCP Server                             │   │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐  │   │
-│  │  │ Tool Handler:   │  │ Tool Handler:   │  │ LLM Callback:       │  │   │
-│  │  │ keploy_mock_    │  │ keploy_mock_    │  │ generateContextual  │  │   │
-│  │  │ record          │  │ test            │  │ Name()              │  │   │
-│  │  └────────┬────────┘  └────────┬────────┘  └──────────┬──────────┘  │   │
-│  └───────────┼────────────────────┼─────────────────────┼──────────────┘   │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌───────────────┐  │   │
+│  │  │ Tool:       │ │ Tool:       │ │ Tool:       │ │ LLM Callback: │  │   │
+│  │  │ keploy_     │ │ keploy_mock │ │ keploy_mock │ │ generateCon-  │  │   │
+│  │  │ list_mocks  │ │ _record     │ │ _test       │ │ textualName() │  │   │
+│  │  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └───────┬───────┘  │   │
+│  └─────────┼───────────────┼───────────────┼────────────────┼──────────┘   │
 └──────────────┼────────────────────┼─────────────────────┼───────────────────┘
                │                    │                     │
 ┌──────────────┼────────────────────┼─────────────────────┼───────────────────┐
@@ -101,8 +101,15 @@ The Keploy MCP server bridges AI coding assistants with Keploy's mocking capabil
 | Component | File | Purpose |
 |-----------|------|---------|
 | Server | `server.go` | Lifecycle management, transport setup |
-| Tool Handlers | `tools.go` | Input parsing, output formatting |
+| Tool Handlers | `tools.go` | Input parsing, output formatting for all 3 tools |
 | Naming | `naming.go` | LLM callback, fallback naming |
+
+**Tools Provided:**
+| Tool | Purpose |
+|------|--------|
+| `keploy_list_mocks` | List available mock sets in the workspace |
+| `keploy_mock_record` | Record outgoing calls as mocks |
+| `keploy_mock_test` | Replay mocks during test execution |
 
 #### 2. Mock Recording Service (`pkg/service/mockrecord`)
 
@@ -150,7 +157,7 @@ The Keploy MCP server bridges AI coding assistants with Keploy's mocking capabil
 #### Recording Flow
 
 ```
-1. AI Assistant sends CallTool(keploy_mock_record, {command, path, duration})
+1. AI Assistant sends CallTool(keploy_mock_record, {command, path?})
                     │
                     ▼
 2. MCP Server parses input → MockRecordInput struct
@@ -176,10 +183,28 @@ The Keploy MCP server bridges AI coding assistants with Keploy's mocking capabil
 6. MCP Server returns CallToolResult to AI Assistant
 ```
 
+#### List Mocks Flow
+
+```
+1. AI Assistant sends CallTool(keploy_list_mocks, {path?})
+                    │
+                    ▼
+2. MCP Server parses input → ListMocksInput struct
+                    │
+                    ▼
+3. MCP Server calls mockReplayer.ListMockSets(ctx)
+                    │
+                    ▼
+4. Returns list of available mock set names (sorted by recency)
+                    │
+                    ▼
+5. MCP Server returns CallToolResult with MockSets array to AI Assistant
+```
+
 #### Replay Flow
 
 ```
-1. AI Assistant sends CallTool(keploy_mock_test, {command, mockFilePath})
+1. AI Assistant sends CallTool(keploy_mock_test, {command, mockName?, fallBackOnMiss?})
                     │
                     ▼
 2. MCP Server parses input → MockReplayInput struct
@@ -226,8 +251,12 @@ go.keploy.io/server/v3/
 │   │   │   └── getActiveSession()
 │   │   │
 │   │   ├── tools.go              # Tool handlers
+│   │   │   ├── ListMocksInput/Output
 │   │   │   ├── MockRecordInput/Output
 │   │   │   ├── MockReplayInput/Output
+│   │   │   ├── RecordConfiguration
+│   │   │   ├── ReplayConfiguration
+│   │   │   ├── handleListMocks()
 │   │   │   ├── handleMockRecord()
 │   │   │   └── handleMockReplay()
 │   │   │
@@ -310,6 +339,7 @@ go.keploy.io/server/v3/
 │  │ + Run(ctx context.Context) error                                  │ │
 │  │ - registerTools()                                                 │ │
 │  │ - getActiveSession() *sdkmcp.ServerSession                        │ │
+│  │ - handleListMocks(ctx, req, in) (*Result, Output, error)          │ │
 │  │ - handleMockRecord(ctx, req, in) (*Result, Output, error)         │ │
 │  │ - handleMockReplay(ctx, req, in) (*Result, Output, error)         │ │
 │  │ - generateContextualName(ctx, meta) (string, error)               │ │
@@ -331,18 +361,33 @@ go.keploy.io/server/v3/
 │  ├────────────────────────┤  ├────────────────────────┤               │
 │  │ + Command: string      │  │ + Success: bool        │               │
 │  │ + Path: string         │  │ + MockFilePath: string │               │
-│  │ + Duration: string     │  │ + MockCount: int       │               │
+
 │  └────────────────────────┘  │ + Protocols: []string  │               │
 │                              │ + Message: string      │               │
-│  ┌────────────────────────┐  └────────────────────────┘               │
-│  │ MockReplayInput        │  ┌────────────────────────┐               │
-│  ├────────────────────────┤  │ MockReplayOutput       │               │
-│  │ + Command: string      │  ├────────────────────────┤               │
-│  │ + MockFilePath: string │  │ + Success: bool        │               │
-│  │ + FallBackOnMiss: bool │  │ + MocksReplayed: int   │               │
-│  └────────────────────────┘  │ + MocksMissed: int     │               │
+│  ┌────────────────────────┐  │ + Configuration: *Rec  │               │
+│  │ ListMocksInput         │  │   ordConfiguration    │               │
+│  ├────────────────────────┤  └────────────────────────┘               │
+│  │ + Path: string         │                                           │
+│  └────────────────────────┘  ┌────────────────────────┐               │
+│                              │ ListMocksOutput        │               │
+│  ┌────────────────────────┐  ├────────────────────────┤               │
+│  │ MockReplayInput        │  │ + Success: bool        │               │
+│  ├────────────────────────┤  │ + MockSets: []string   │               │
+│  │ + Command: string      │  │ + Count: int           │               │
+│  │ + MockName: string     │  │ + Path: string         │               │
+│  │ + FallBackOnMiss: bool │  │ + Message: string      │               │
+│  └────────────────────────┘  └────────────────────────┘               │
+│                                                                       │
+│                              ┌────────────────────────┐               │
+│                              │ MockReplayOutput       │               │
+│                              ├────────────────────────┤               │
+│                              │ + Success: bool        │               │
+│                              │ + MocksReplayed: int   │               │
+│                              │ + MocksMissed: int     │               │
 │                              │ + AppExitCode: int     │               │
 │                              │ + Message: string      │               │
+│                              │ + Configuration: *Rep  │               │
+│                              │   layConfiguration    │               │
 │                              └────────────────────────┘               │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -386,6 +431,7 @@ go.keploy.io/server/v3/
 │  │ <<interface>> Service                                              │ │
 │  ├───────────────────────────────────────────────────────────────────┤ │
 │  │ + Replay(ctx, opts ReplayOptions) (*ReplayResult, error)          │ │
+│  │ + ListMockSets(ctx) ([]string, error)                             │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                               △                                         │
 │                               │ implements                              │
