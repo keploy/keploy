@@ -48,19 +48,7 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
 		logger.Warn("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
-		// Graceful
-		err = cmd.Process.Signal(syscall.SIGTERM)
-		if err != nil {
-			// Process already finished is expected during graceful shutdown, not an error
-			if err.Error() == "os: process already finished" {
-				logger.Debug("process already finished during graceful shutdown", zap.Int("pid", pid))
-				return nil
-			}
-			logger.Warn("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
-		}
-		time.Sleep(3 * time.Second)
-		// Force
-		return cmd.Process.Kill()
+		return stopProcessDirect(cmd, logger)
 	}
 
 	// Graceful: SIGTERM group
@@ -68,5 +56,60 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 		logger.Warn("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
 	}
 
+	// Wait for process to exit gracefully with timeout
+	timeout := 5 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		// Check if process still exists (signal 0 test)
+		if err := syscall.Kill(pid, 0); err != nil {
+			// Process is gone (signal 0 test failed)
+			logger.Debug("process exited gracefully", zap.Int("pid", pid))
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond) // Poll every 100ms
+	}
+
+	// Timeout reached, force kill
+	logger.Warn("process did not exit gracefully, forcing kill", zap.Int("pgid", pgid))
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		logger.Error("failed to send SIGKILL to process group", zap.Int("pgid", pgid), zap.Error(err))
+		return err
+	}
+
 	return nil
+}
+
+// stopProcessDirect handles termination of a single process (not a group)
+func stopProcessDirect(cmd *exec.Cmd, logger *zap.Logger) error {
+	pid := cmd.Process.Pid
+
+	// Graceful: SIGTERM
+	err := cmd.Process.Signal(syscall.SIGTERM)
+	if err != nil {
+		// Process already finished is expected during graceful shutdown, not an error
+		if err.Error() == "os: process already finished" {
+			logger.Debug("process already finished during graceful shutdown", zap.Int("pid", pid))
+			return nil
+		}
+		logger.Warn("failed to send SIGTERM to process", zap.Int("pid", pid), zap.Error(err))
+	}
+
+	// Wait for process to exit gracefully with timeout
+	timeout := 5 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		// Check if process still exists
+		if err := syscall.Kill(pid, 0); err != nil {
+			// Process is gone
+			logger.Debug("process exited gracefully", zap.Int("pid", pid))
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond) // Poll every 100ms
+	}
+
+	// Timeout reached, force kill
+	logger.Warn("process did not exit gracefully, forcing kill", zap.Int("pid", pid))
+	return cmd.Process.Kill()
 }
