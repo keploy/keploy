@@ -580,10 +580,8 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		defer utils.Recover(a.logger)
 		defer close(appErrCh)
 		appErr := app.Run(runAppCtx)
-		if appErr.Err != nil {
-			utils.LogError(a.logger, appErr.Err, "error while running the app")
-			appErrCh <- appErr
-		}
+		// Always send the result - let the receiver decide what to do with it
+		appErrCh <- appErr
 		return nil
 	})
 
@@ -591,6 +589,13 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	case <-runAppCtx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	case appErr := <-appErrCh:
+		// ErrAppStopped with nil error means successful completion (e.g., tests passed)
+		if appErr.AppErrorType == models.ErrAppStopped && appErr.Err == nil {
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+		}
+		if appErr.Err != nil {
+			utils.LogError(a.logger, appErr.Err, "error while running the app")
+		}
 		return appErr
 	}
 }
@@ -630,10 +635,10 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	}
 
 	// Monitor agent process and cancel client context if agent stops using errgroup
-	grp.Go(func() error {
-		a.monitorAgent(ctx, agentCtx)
-		return nil
-	})
+	// grp.Go(func() error {
+	// 	a.monitorAgent(ctx, agentCtx)
+	// 	return nil
+	// })
 
 	return nil
 }
@@ -753,11 +758,29 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
-			// Process already finished is expected during graceful shutdown, not an error
-			if stopErr.Error() != "os: process already finished" {
-				utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
+
+		// First, try to gracefully shutdown the agent by calling its shutdown endpoint.
+		// This allows the agent to run cleanup routines (like h.unLoad on Windows)
+		// before the process exits.
+		a.logger.Info("Sending graceful shutdown request to agent")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		shutdownReq, err := http.NewRequestWithContext(shutdownCtx, "POST", fmt.Sprintf("%s/shutdown", a.conf.Agent.AgentURI), nil)
+		if err == nil {
+			resp, err := a.client.Do(shutdownReq)
+			if err != nil {
+				a.logger.Warn("Failed to send shutdown request to agent, will force stop", zap.Error(err))
+			} else {
+				resp.Body.Close()
+				a.logger.Info("Shutdown request sent to agent, waiting for graceful exit")
+				// Give the agent some time to cleanup before force killing
+				time.Sleep(2 * time.Second)
 			}
+		}
+
+		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
+			utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
 		}
 		return nil
 	})
@@ -787,21 +810,21 @@ func (a *AgentClient) stopAgent() {
 }
 
 // monitorAgent monitors the agent process and handles cleanup
-func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.Context) {
-	select {
-	case <-clientCtx.Done():
-		// Client context cancelled, stop the agent
-		a.logger.Info("Client context cancelled, stopping agent")
-		a.stopAgent()
-	case <-agentCtx.Done():
-		// Agent context cancelled or agent stopped
-		if errors.Is(agentCtx.Err(), context.Canceled) {
-			a.logger.Info("Agent was stopped intentionally")
-		} else {
-			a.logger.Warn("Agent stopped unexpectedly, client operations may be affected")
-		}
-	}
-}
+// func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.Context) {
+// 	select {
+// 	case <-clientCtx.Done():
+// 		// Client context cancelled, stop the agent
+// 		a.logger.Info("Client context cancelled, stopping agent")
+// 		a.stopAgent()
+// 	case <-agentCtx.Done():
+// 		// Agent context cancelled or agent stopped
+// 		if errors.Is(agentCtx.Err(), context.Canceled) {
+// 			a.logger.Info("Agent was stopped intentionally")
+// 		} else {
+// 			a.logger.Warn("Agent stopped unexpectedly, client operations may be affected")
+// 		}
+// 	}
+// }
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
