@@ -3,20 +3,25 @@ package mockreplay
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	mockdb "go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	yamldoc "go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
-// replayer implements the Service interface for replaying recorded mocks.
 type replayer struct {
 	logger *zap.Logger
 	cfg    *config.Config
@@ -24,8 +29,11 @@ type replayer struct {
 	mockDB MockDB
 }
 
-// New creates a new mockreplay Service.
+// New creates a new mock replay service.
 func New(logger *zap.Logger, cfg *config.Config, agent AgentService, mockDB MockDB) Service {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &replayer{
 		logger: logger,
 		cfg:    cfg,
@@ -34,169 +42,236 @@ func New(logger *zap.Logger, cfg *config.Config, agent AgentService, mockDB Mock
 	}
 }
 
-// Replay runs the app command with mocks from the specified file.
+// Replay loads mocks and replays them while running the provided command.
 func (r *replayer) Replay(ctx context.Context, opts models.ReplayOptions) (*models.ReplayResult, error) {
-	r.logger.Info("Starting mock replay",
-		zap.String("command", opts.Command),
-		zap.String("mockFilePath", opts.MockFilePath),
-	)
-
-	// Apply defaults
-	if opts.Timeout == 0 {
-		opts.Timeout = 5 * time.Minute
+	if r.agent == nil {
+		return nil, errors.New("agent service is not configured")
 	}
 
-	// Create context with timeout
-	replayCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	if strings.TrimSpace(opts.Command) == "" {
+		return nil, errors.New("command is required")
+	}
+	if strings.TrimSpace(opts.MockFilePath) == "" {
+		return nil, errors.New("mock file path is required")
+	}
+
+	mockPath, err := resolveMockFilePath(opts.MockFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var mocks []*models.Mock
+	if r.mockDB != nil {
+		mocks, err = r.mockDB.LoadMocks(ctx, mockPath)
+	} else {
+		mocks, err = r.loadMocksFromFile(mockPath)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	r.prepareAgentConfig(opts)
+
+	replayCtx := ctx
+	cancel := func() {}
+	if opts.Timeout > 0 {
+		replayCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
+	} else {
+		replayCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
-	// Load mocks from file
-	mocks, err := r.loadMocksFromFile(opts.MockFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load mocks from file: %w", err)
-	}
-
-	r.logger.Info("Loaded mocks from file",
-		zap.String("mockFilePath", opts.MockFilePath),
-		zap.Int("mockCount", len(mocks)),
-	)
-
-	if len(mocks) == 0 {
-		r.logger.Warn("No mocks found in file", zap.String("mockFilePath", opts.MockFilePath))
-	}
-
-	// Setup agent
 	startCh := make(chan int, 1)
-	if err := r.agent.Setup(replayCtx, startCh); err != nil {
-		return nil, fmt.Errorf("failed to setup agent: %w", err)
-	}
+	setupErrCh := make(chan error, 1)
+	go func() {
+		setupErrCh <- r.agent.Setup(replayCtx, startCh)
+	}()
 
-	// Set mocks for replay
-	if err := r.agent.SetMocks(replayCtx, mocks, nil); err != nil {
-		return nil, fmt.Errorf("failed to set mocks: %w", err)
-	}
-
-	// Enable mock mode for outgoing calls
-	outgoingOpts := models.OutgoingOptions{
-		Rules:          r.cfg.BypassRules,
-		MongoPassword:  r.cfg.Test.MongoPassword,
-		SQLDelay:       time.Duration(r.cfg.Test.Delay) * time.Second,
-		FallBackOnMiss: opts.FallBackOnMiss,
-	}
-
-	if err := r.agent.MockOutgoing(replayCtx, outgoingOpts); err != nil {
-		return nil, fmt.Errorf("failed to enable mock outgoing: %w", err)
-	}
-
-	// Signal agent is ready
-	startCh <- 1
-
-	// Run the application command
-	output, exitCode, cmdErr := r.runCommand(replayCtx, opts.Command)
-
-	// Get consumed mocks
-	consumedMocks, err := r.agent.GetConsumedMocks(replayCtx)
-	if err != nil {
-		r.logger.Warn("Failed to get consumed mocks", zap.Error(err))
-	}
-
-	// Calculate replay statistics
-	mocksReplayed := 0
-	for _, m := range consumedMocks {
-		if m.Usage == models.Updated {
-			mocksReplayed++
+	select {
+	case <-startCh:
+	case err := <-setupErrCh:
+		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, errors.New("agent setup stopped before it was ready")
 		}
+		return nil, err
+	case <-replayCtx.Done():
+		return nil, replayCtx.Err()
 	}
+
+	if err := r.agent.MockOutgoing(replayCtx, r.outgoingOptions(opts)); err != nil {
+		return nil, err
+	}
+	if err := r.agent.SetMocks(replayCtx, mocks, nil); err != nil {
+		return nil, err
+	}
+
+	output, exitCode, cmdErr := runCommand(replayCtx, opts.Command)
+	if cmdErr != nil {
+		return nil, cmdErr
+	}
+
+	consumed, err := r.agent.GetConsumedMocks(context.WithoutCancel(ctx))
+	if err != nil {
+		return nil, err
+	}
+
+	cancel()
+	if err := <-setupErrCh; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		r.logger.Warn("agent setup stopped with error", zap.Error(err))
+	}
+
+	mocksReplayed := len(consumed)
 	mocksMissed := len(mocks) - mocksReplayed
+	if mocksMissed < 0 {
+		mocksMissed = 0
+	}
 
-	success := cmdErr == nil && mocksMissed == 0
-
-	r.logger.Info("Mock replay completed",
-		zap.Bool("success", success),
-		zap.Int("mocksReplayed", mocksReplayed),
-		zap.Int("mocksMissed", mocksMissed),
-		zap.Int("exitCode", exitCode),
-	)
-
+	success := exitCode == 0 && mocksMissed == 0
 	return &models.ReplayResult{
 		Success:       success,
 		MocksReplayed: mocksReplayed,
 		MocksMissed:   mocksMissed,
 		AppExitCode:   exitCode,
 		Output:        output,
-		ConsumedMocks: consumedMocks,
+		ConsumedMocks: consumed,
 	}, nil
 }
 
-// loadMocksFromFile loads mocks from a YAML file.
-func (r *replayer) loadMocksFromFile(filePath string) ([]*models.Mock, error) {
-	// Handle both direct file path and directory path
-	var mockFile string
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat path: %w", err)
+func (r *replayer) prepareAgentConfig(opts models.ReplayOptions) {
+	if r.cfg == nil {
+		return
 	}
 
-	if info.IsDir() {
-		// If it's a directory, look for mocks.yaml inside
-		mockFile = filepath.Join(filePath, "mocks.yaml")
-	} else {
-		mockFile = filePath
+	r.cfg.Agent.Mode = models.MODE_TEST
+
+	if opts.ProxyPort != 0 {
+		r.cfg.Agent.ProxyPort = opts.ProxyPort
+	} else if r.cfg.Agent.ProxyPort == 0 {
+		r.cfg.Agent.ProxyPort = r.cfg.ProxyPort
 	}
 
-	data, err := os.ReadFile(mockFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read mock file: %w", err)
+	if opts.DNSPort != 0 {
+		r.cfg.Agent.DnsPort = opts.DNSPort
+	} else if r.cfg.Agent.DnsPort == 0 {
+		r.cfg.Agent.DnsPort = r.cfg.DNSPort
 	}
 
-	var mocks []*models.Mock
+	if r.cfg.Agent.ProxyPort == 0 {
+		r.cfg.Agent.ProxyPort = 16789
+	}
+	if r.cfg.Agent.DnsPort == 0 {
+		r.cfg.Agent.DnsPort = 26789
+	}
+	// if r.cfg.Agent.ClientNSPID == 0 {
+	// 	r.cfg.Agent.ClientNSPID = uint32(utils.GetCurrentProcessGroupID())
+	// }
 
-	// Parse YAML (may contain multiple documents)
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	for {
-		var mock models.Mock
-		if err := decoder.Decode(&mock); err != nil {
-			if err.Error() == "EOF" {
-				break
-			}
-			// Try to continue parsing
-			r.logger.Warn("Failed to decode mock entry", zap.Error(err))
-			continue
+	if len(r.cfg.Agent.PassThroughPorts) == 0 && len(r.cfg.BypassRules) > 0 {
+		r.cfg.Agent.PassThroughPorts = config.GetByPassPorts(r.cfg)
+	}
+
+	if !r.cfg.Agent.IsDocker {
+		if utils.IsDockerCmd(utils.FindDockerCmd(opts.Command)) {
+			r.cfg.Agent.IsDocker = true
 		}
-		mocks = append(mocks, &mock)
 	}
-
-	return mocks, nil
 }
 
-// runCommand executes the application command and returns output, exit code, and error.
-func (r *replayer) runCommand(ctx context.Context, command string) (string, int, error) {
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-
-	var outputBuf bytes.Buffer
-	cmd.Stdout = &outputBuf
-	cmd.Stderr = &outputBuf
-
-	err := cmd.Start()
-	if err != nil {
-		return "", -1, fmt.Errorf("failed to start command: %w", err)
+func (r *replayer) outgoingOptions(opts models.ReplayOptions) models.OutgoingOptions {
+	base := models.OutgoingOptions{
+		FallBackOnMiss: opts.FallBackOnMiss,
+		Mocking:        true,
 	}
 
-	waitErr := cmd.Wait()
-	output := outputBuf.String()
+	if r.cfg == nil {
+		return base
+	}
 
-	exitCode := 0
-	if waitErr != nil {
-		// Try to extract exit code
-		if exitErr, ok := waitErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else if ctx.Err() != nil {
-			// Context cancelled/timeout
-			return output, -1, ctx.Err()
-		} else {
-			exitCode = 1
+	delay := time.Duration(r.cfg.Test.Delay) * time.Second
+	base.Rules = r.cfg.BypassRules
+	base.MongoPassword = r.cfg.Test.MongoPassword
+	base.SQLDelay = delay
+	return base
+}
+
+func (r *replayer) loadMocksFromFile(filePath string) ([]*models.Mock, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	dec := yamlLib.NewDecoder(bytes.NewReader(data))
+	var docs []*yamldoc.NetworkTrafficDoc
+	for {
+		var doc *yamldoc.NetworkTrafficDoc
+		if err := dec.Decode(&doc); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+		if doc != nil {
+			docs = append(docs, doc)
 		}
 	}
 
-	return strings.TrimSpace(output), exitCode, waitErr
+	if len(docs) == 0 {
+		return []*models.Mock{}, nil
+	}
+
+	return mockdb.DecodeMocks(docs, r.logger)
+}
+
+func resolveMockFilePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("mock file path is required")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		candidate := filepath.Join(path, "mocks.yaml")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+		candidate = filepath.Join(path, "mocks.yml")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+		return "", fmt.Errorf("mocks.yaml not found in %s", path)
+	}
+	return path, nil
+}
+
+func runCommand(ctx context.Context, command string) (string, int, error) {
+	cmd := buildCommand(ctx, command)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	if err := cmd.Start(); err != nil {
+		return "", -1, err
+	}
+
+	err := cmd.Wait()
+	outStr := output.String()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return outStr, -1, ctxErr
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return outStr, exitErr.ExitCode(), nil
+		}
+		return outStr, -1, err
+	}
+	return outStr, 0, nil
+}
+
+func buildCommand(ctx context.Context, command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/C", command)
+	}
+	return exec.CommandContext(ctx, "sh", "-c", command)
 }

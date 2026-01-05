@@ -24,6 +24,10 @@ type RecordResult struct {
 	Metadata *MockMetadata
 	// MockCount is the number of mocks recorded.
 	MockCount int
+	// AppExitCode is the application exit code.
+	AppExitCode int
+	// Output is the application stdout/stderr combined.
+	Output string
 	// Mocks contains the recorded mock objects.
 	Mocks []*Mock
 }

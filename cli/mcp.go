@@ -8,6 +8,7 @@ import (
 	keploymcp "go.keploy.io/server/v3/pkg/mcp"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
+	recordSvc "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/mockrecord"
 	"go.keploy.io/server/v3/pkg/service/mockreplay"
 	"go.keploy.io/server/v3/utils"
@@ -81,7 +82,18 @@ Example VS Code configuration:
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			logger.Info("Initializing Keploy MCP server")
 
-			// Get agent service for mock operations
+			recSvc, err := serviceFactory.GetService(ctx, "record")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get record service")
+				return err
+			}
+
+			recordService, ok := recSvc.(recordSvc.Service)
+			if !ok {
+				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
+				return nil
+			}
+
 			agentSvc, err := serviceFactory.GetService(ctx, "agent")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get agent service")
@@ -95,8 +107,7 @@ Example VS Code configuration:
 			}
 
 			// Create mock record and replay services
-			// Note: mockDB can be nil for now as the agent handles storage
-			recorder := mockrecord.New(logger, cfg, &agentAdapter{agent: agentService}, nil)
+			recorder := mockrecord.New(logger, cfg, recordService)
 			replayer := mockreplay.New(logger, cfg, &replayAgentAdapter{agent: agentService}, nil)
 
 			// Create and start MCP server
@@ -118,23 +129,6 @@ Example VS Code configuration:
 	}
 
 	return cmd
-}
-
-// agentAdapter adapts the agent.Service to mockrecord.AgentService interface.
-type agentAdapter struct {
-	agent agent.Service
-}
-
-func (a *agentAdapter) Setup(ctx context.Context, startCh chan int) error {
-	return a.agent.Setup(ctx, startCh)
-}
-
-func (a *agentAdapter) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	return a.agent.GetOutgoing(ctx, opts)
-}
-
-func (a *agentAdapter) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	return a.agent.StoreMocks(ctx, filtered, unFiltered)
 }
 
 // replayAgentAdapter adapts the agent.Service to mockreplay.AgentService interface.

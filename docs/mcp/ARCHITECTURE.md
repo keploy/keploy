@@ -213,7 +213,7 @@ go.keploy.io/server/v3/
 │   └── mcp.go                    # CLI entry point
 │       ├── MCP()                 # Parent command
 │       ├── MCPServe()            # serve subcommand
-│       ├── agentAdapter          # Agent → mockrecord.AgentService
+│       ├── recordService         # record.Service for mockrecord
 │       └── replayAgentAdapter    # Agent → mockreplay.AgentService
 │
 ├── pkg/
@@ -241,14 +241,12 @@ go.keploy.io/server/v3/
 │   │   ├── mockrecord/
 │   │   │   ├── service.go        # Interfaces
 │   │   │   │   ├── Service interface
-│   │   │   │   ├── AgentService interface
-│   │   │   │   └── MockDB interface
+│   │   │   │   └── RecordService interface
 │   │   │   │
 │   │   │   ├── record.go         # Implementation
 │   │   │   │   ├── recorder struct
 │   │   │   │   ├── New()
-│   │   │   │   ├── Record()
-│   │   │   │   └── runCommand()
+│   │   │   │   └── Record()
 │   │   │   │
 │   │   │   └── metadata.go       # Metadata extraction
 │   │   │       ├── ExtractMetadata()
@@ -365,16 +363,13 @@ go.keploy.io/server/v3/
 │  ├───────────────────────────────────────────────────────────────────┤ │
 │  │ - logger: *zap.Logger                                             │ │
 │  │ - cfg: *config.Config                                             │ │
-│  │ - agent: AgentService                                             │ │
-│  │ - mockDB: MockDB                                                  │ │
+│  │ - record: RecordService                                           │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │ <<interface>> AgentService                                         │ │
+│  │ <<interface>> RecordService                                        │ │
 │  ├───────────────────────────────────────────────────────────────────┤ │
-│  │ + Setup(ctx, startCh chan int) error                              │ │
-│  │ + GetOutgoing(ctx, opts OutgoingOptions) (<-chan *Mock, error)    │ │
-│  │ + StoreMocks(ctx, filtered, unFiltered []*Mock) error             │ │
+│  │ + RecordMocks(ctx, opts RecordOptions) (*RecordResult, error)     │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -650,15 +645,15 @@ go.keploy.io/server/v3/
 - Fallback is predictable and debuggable
 - No blocking on LLM failures
 
-### 4. Interface-Based Agent Abstraction
+### 4. Interface-Based Recording Abstraction
 
-**Decision**: Define separate `AgentService` interfaces for record/replay.
+**Decision**: Use a `RecordService` abstraction for mockrecord and `AgentService` for mockreplay.
 
 **Rationale**:
 - Different operations needed (GetOutgoing vs SetMocks)
 - Enables testing with mock implementations
 - Decouples services from agent implementation
-- Adapter pattern for existing agent.Service
+- Adapter pattern for existing agent.Service (replay)
 
 ### 5. Stdio Transport Only
 

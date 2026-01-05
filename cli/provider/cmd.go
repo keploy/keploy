@@ -246,6 +246,28 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
 			return nil
 		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+			if cmd.Name() == "record" {
+				pathDefault := c.cfg.Path
+				if pathDefault == "" {
+					pathDefault = "./keploy"
+				}
+				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+				cmd.Flags().StringP("path", "p", pathDefault, "Path to store mock files")
+				cmd.Flags().Duration("duration", 60*time.Second, "Recording duration (e.g., \"60s\")")
+				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
+				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				return nil
+			}
+			if cmd.Name() == "test" {
+				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+				cmd.Flags().String("mock-path", "", "Path to mock file or directory to replay")
+				cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during replay")
+				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
+				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				return nil
+			}
+		}
 
 		cmd.Flags().Bool("sync", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
@@ -309,6 +331,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+
+	case "serve":
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mcp" {
+			return nil
+		}
 
 	default:
 		return errors.New("unknown command name")
@@ -378,6 +405,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"removeUnusedMocks":     "remove-unused-mocks",
 		"goCoverage":            "go-coverage",
 		"fallBackOnMiss":        "fallBack-on-miss",
+		"mockPath":              "mock-path",
+		"mockFilePath":          "mock-path",
 		"basePath":              "base-path",
 		"updateTemplate":        "update-template",
 		"mocking":               "mocking",
@@ -868,6 +897,47 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
+		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+			if c.cfg.Command == "" {
+				return c.noCommandError()
+			}
+
+			if cmd.Name() == "record" {
+				if c.cfg.Path == "" {
+					c.cfg.Path = "./keploy"
+				}
+
+				duration, err := cmd.Flags().GetDuration("duration")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get duration flag")
+					return errors.New("failed to get duration flag")
+				}
+				if duration == 0 {
+					duration = 60 * time.Second
+				}
+				c.cfg.Record.RecordTimer = duration
+				return nil
+			}
+
+			if cmd.Name() == "test" {
+				mockPath, err := cmd.Flags().GetString("mock-path")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get mock-path flag")
+					return errors.New("failed to get mock-path flag")
+				}
+				if mockPath == "" {
+					return errors.New("missing required --mock-path flag")
+				}
+				if info, statErr := os.Stat(mockPath); statErr == nil {
+					if info.IsDir() {
+						c.cfg.Path = mockPath
+					} else {
+						c.cfg.Path = filepath.Dir(mockPath)
+					}
+				}
+				return nil
+			}
 		}
 
 		// set the command type

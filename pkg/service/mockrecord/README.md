@@ -21,8 +21,8 @@ The `mockrecord` service captures all external dependencies (HTTP APIs, database
 │         │                  │                       │               │
 │         ▼                  ▼                       ▼               │
 │  ┌─────────────────────────────────────────────────────────────┐  │
-│  │                     AgentService                             │  │
-│  │         (eBPF-based network interception)                   │  │
+│  │                    RecordService                            │  │
+│  │   (record pipeline + eBPF-based interception)               │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -32,7 +32,7 @@ The `mockrecord` service captures all external dependencies (HTTP APIs, database
 
 | File | Purpose |
 |------|---------|
-| `service.go` | Interface definitions (`Service`, `AgentService`, `MockDB`) |
+| `service.go` | Interface definitions (`Service`, `RecordService`) |
 | `record.go` | Recording implementation |
 | `metadata.go` | Metadata extraction for contextual naming |
 
@@ -41,11 +41,13 @@ The `mockrecord` service captures all external dependencies (HTTP APIs, database
 ```go
 import (
     "go.keploy.io/server/v3/pkg/service/mockrecord"
+    recordSvc "go.keploy.io/server/v3/pkg/service/record"
     "go.keploy.io/server/v3/pkg/models"
 )
 
 // Create service
-recorder := mockrecord.New(logger, cfg, agentService, mockDB)
+var recordService recordSvc.Service = recordSvc.New(logger, testDB, mockDB, telemetry, instrumentation, testSetConf, cfg)
+recorder := mockrecord.New(logger, cfg, recordService)
 
 // Record outgoing calls
 result, err := recorder.Record(ctx, models.RecordOptions{
@@ -67,16 +69,6 @@ fmt.Printf("File: %s\n", result.MockFilePath)
 ```go
 type Service interface {
     Record(ctx context.Context, opts models.RecordOptions) (*models.RecordResult, error)
-}
-```
-
-### AgentService
-
-```go
-type AgentService interface {
-    Setup(ctx context.Context, startCh chan int) error
-    GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
-    StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 }
 ```
 

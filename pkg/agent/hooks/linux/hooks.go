@@ -306,43 +306,25 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
-	if err := h.socket.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the socket")
+	closeLink := func(name string, l link.Link) {
+		if l == nil {
+			return
+		}
+		if err := l.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the "+name)
+		}
 	}
 
-	if err := h.udpp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the udpp4")
-	}
-
-	if err := h.connect4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect4")
-	}
-
-	if err := h.gp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp4")
-	}
-
-	if err := h.tcpv4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4")
-	}
-
-	if err := h.tcpv4Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
-	}
-
-	if err := h.connect6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect6")
-	}
-	if err := h.gp6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp6")
-	}
-
-	if err := h.tcpv6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6")
-	}
-	if err := h.tcpv6Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
-	}
+	closeLink("socket", h.socket)
+	closeLink("udpp4", h.udpp4)
+	closeLink("connect4", h.connect4)
+	closeLink("gp4", h.gp4)
+	closeLink("tcpv4", h.tcpv4)
+	closeLink("tcpv4Ret", h.tcpv4Ret)
+	closeLink("connect6", h.connect6)
+	closeLink("gp6", h.gp6)
+	closeLink("tcpv6", h.tcpv6)
+	closeLink("tcpv6Ret", h.tcpv6Ret)
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()

@@ -199,6 +199,27 @@ func (s *Server) sanitizeFilename(name string) string {
 func (s *Server) renameMockFile(oldPath, newName string) string {
 	dir := filepath.Dir(oldPath)
 	ext := filepath.Ext(oldPath)
+	base := filepath.Base(oldPath)
+
+	if base == "mocks.yaml" || base == "mocks.yml" {
+		parentDir := filepath.Dir(dir)
+		newDir := filepath.Join(parentDir, newName)
+
+		if err := os.Rename(dir, newDir); err != nil {
+			s.logger.Warn("Failed to rename mock directory for mocks.yaml",
+				zap.String("oldPath", dir),
+				zap.String("newPath", newDir),
+				zap.Error(err),
+			)
+			return oldPath
+		}
+
+		s.logger.Info("Renamed mock directory",
+			zap.String("oldPath", dir),
+			zap.String("newPath", newDir),
+		)
+		return filepath.Join(newDir, base)
+	}
 
 	// Handle directory case (mock directory instead of file)
 	if ext == "" {

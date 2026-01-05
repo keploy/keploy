@@ -2,244 +2,164 @@ package mockrecord
 
 import (
 	"net/url"
+	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// ExtractMetadata extracts metadata from recorded mocks for contextual naming.
+// ExtractMetadata analyzes recorded mocks and returns metadata for contextual naming.
 func ExtractMetadata(mocks []*models.Mock, command string) *models.MockMetadata {
 	meta := &models.MockMetadata{
-		Protocols:   make([]string, 0),
-		Endpoints:   make([]models.EndpointInfo, 0),
-		ServiceName: extractServiceName(command),
+		ServiceName: inferServiceName(command),
 		Timestamp:   time.Now(),
 	}
 
-	protocolSet := make(map[string]bool)
+	protocols := make([]string, 0, 4)
+	seenProtocols := make(map[string]bool)
+	seenEndpoints := make(map[string]bool)
+
+	addProtocol := func(name string) {
+		if name == "" || seenProtocols[name] {
+			return
+		}
+		seenProtocols[name] = true
+		protocols = append(protocols, name)
+	}
+
+	addEndpoint := func(ep models.EndpointInfo) {
+		key := strings.Join([]string{ep.Protocol, ep.Host, ep.Path, ep.Method}, "|")
+		if key == "|||" || seenEndpoints[key] {
+			return
+		}
+		seenEndpoints[key] = true
+		meta.Endpoints = append(meta.Endpoints, ep)
+	}
 
 	for _, mock := range mocks {
 		if mock == nil {
 			continue
 		}
 
-		// Extract protocol
-		protocol := string(mock.Kind)
-		if !protocolSet[protocol] {
-			protocolSet[protocol] = true
-			meta.Protocols = append(meta.Protocols, protocol)
-		}
-
-		// Extract endpoint info based on kind
 		switch mock.Kind {
 		case models.HTTP:
+			addProtocol("HTTP")
 			if mock.Spec.HTTPReq != nil {
-				host, path := extractHostAndPath(mock.Spec.HTTPReq.URL)
-				meta.Endpoints = append(meta.Endpoints, models.EndpointInfo{
+				parsed, err := url.Parse(mock.Spec.HTTPReq.URL)
+				host := ""
+				path := ""
+				if err == nil {
+					host = parsed.Hostname()
+					if host == "" {
+						host = parsed.Host
+					}
+					path = parsed.Path
+				}
+				addEndpoint(models.EndpointInfo{
 					Protocol: "HTTP",
 					Host:     host,
 					Path:     path,
 					Method:   string(mock.Spec.HTTPReq.Method),
 				})
 			}
-
-		case models.Postgres:
-			host := ""
-			if mock.Spec.Metadata != nil {
-				host = mock.Spec.Metadata["host"]
-			}
-			meta.Endpoints = append(meta.Endpoints, models.EndpointInfo{
-				Protocol: "Postgres",
-				Host:     host,
-				Method:   "QUERY",
-			})
-
-		case models.MySQL:
-			host := ""
-			if mock.Spec.Metadata != nil {
-				host = mock.Spec.Metadata["host"]
-			}
-			meta.Endpoints = append(meta.Endpoints, models.EndpointInfo{
-				Protocol: "MySQL",
-				Host:     host,
-				Method:   "QUERY",
-			})
-
-		case models.REDIS:
-			host := ""
-			if mock.Spec.Metadata != nil {
-				host = mock.Spec.Metadata["host"]
-			}
-			meta.Endpoints = append(meta.Endpoints, models.EndpointInfo{
-				Protocol: "Redis",
-				Host:     host,
-				Method:   "COMMAND",
-			})
-
 		case models.GRPC_EXPORT:
+			addProtocol("gRPC")
 			if mock.Spec.GRPCReq != nil {
-				// Extract method from :path pseudo header
+				pseudo := mock.Spec.GRPCReq.Headers.PseudoHeaders
+				path := pseudo[":path"]
 				method := ""
-				if mock.Spec.GRPCReq.Headers.PseudoHeaders != nil {
-					method = mock.Spec.GRPCReq.Headers.PseudoHeaders[":path"]
+				if path != "" {
+					parts := strings.Split(path, "/")
+					method = parts[len(parts)-1]
 				}
-				meta.Endpoints = append(meta.Endpoints, models.EndpointInfo{
+				addEndpoint(models.EndpointInfo{
 					Protocol: "gRPC",
-					Path:     method,
-					Method:   "RPC",
+					Host:     pseudo[":authority"],
+					Path:     path,
+					Method:   method,
 				})
 			}
-
+		case models.Postgres:
+			addProtocol("Postgres")
+		case models.MySQL:
+			addProtocol("MySQL")
+		case models.REDIS:
+			addProtocol("Redis")
 		case models.Mongo:
-			host := ""
-			if mock.Spec.Metadata != nil {
-				host = mock.Spec.Metadata["host"]
-			}
-			meta.Endpoints = append(meta.Endpoints, models.EndpointInfo{
-				Protocol: "Mongo",
-				Host:     host,
-				Method:   "QUERY",
-			})
-
+			addProtocol("MongoDB")
 		case models.GENERIC:
-			meta.Endpoints = append(meta.Endpoints, models.EndpointInfo{
-				Protocol: "Generic",
-				Method:   "CALL",
-			})
+			addProtocol("Generic")
+		default:
+			addProtocol(string(mock.Kind))
 		}
 	}
 
+	meta.Protocols = protocols
 	return meta
 }
 
-// extractServiceName extracts a service name from the command.
-func extractServiceName(command string) string {
-	// Parse command to extract service name
-	// e.g., "go run ./user-service" -> "user-service"
-	// e.g., "npm start" -> "npm-app"
-	// e.g., "./bin/api-server" -> "api-server"
-	// e.g., "python app.py" -> "app"
-	// e.g., "java -jar myservice.jar" -> "myservice"
+func inferServiceName(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "app"
+	}
 
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return "app"
 	}
 
-	// Try to find a meaningful name from the end of the command
-	for i := len(parts) - 1; i >= 0; i-- {
-		part := parts[i]
-
-		// Skip flags
-		if strings.HasPrefix(part, "-") {
-			continue
-		}
-
-		// Skip common commands
-		lowerPart := strings.ToLower(part)
-		if lowerPart == "go" || lowerPart == "run" || lowerPart == "python" ||
-			lowerPart == "node" || lowerPart == "npm" || lowerPart == "java" ||
-			lowerPart == "start" || lowerPart == "sh" || lowerPart == "-c" {
-			continue
-		}
-
-		// Extract base name
-		base := filepath.Base(part)
-
-		// Remove common extensions
-		base = strings.TrimSuffix(base, ".go")
-		base = strings.TrimSuffix(base, ".py")
-		base = strings.TrimSuffix(base, ".js")
-		base = strings.TrimSuffix(base, ".jar")
-		base = strings.TrimSuffix(base, ".exe")
-
-		// Remove leading ./ or ./
-		base = strings.TrimPrefix(base, "./")
-		base = strings.TrimPrefix(base, ".")
-
-		if base != "" && base != "." && base != "main" {
-			return sanitizeForFilename(base)
+	if parts[0] == "sudo" {
+		parts = parts[1:]
+		for len(parts) > 0 && strings.HasPrefix(parts[0], "-") {
+			parts = parts[1:]
 		}
 	}
-
-	// Fallback: use first non-flag argument
-	for _, part := range parts {
-		if !strings.HasPrefix(part, "-") {
-			base := filepath.Base(part)
-			if base != "" && base != "." {
-				return sanitizeForFilename(base)
-			}
+	if len(parts) > 0 && parts[0] == "env" {
+		parts = parts[1:]
+		for len(parts) > 0 && strings.Contains(parts[0], "=") {
+			parts = parts[1:]
 		}
 	}
-
-	return "app"
-}
-
-// extractHostAndPath extracts host and path from a URL string.
-func extractHostAndPath(urlStr string) (host, path string) {
-	if urlStr == "" {
-		return "", ""
-	}
-
-	// Try to parse as URL
-	parsed, err := url.Parse(urlStr)
-	if err == nil && parsed.Host != "" {
-		return parsed.Host, parsed.Path
-	}
-
-	// If URL parsing fails, try to extract from the string directly
-	// Handle cases like "http://localhost:8080/api/users"
-	if strings.Contains(urlStr, "://") {
-		parts := strings.SplitN(urlStr, "://", 2)
-		if len(parts) == 2 {
-			remainder := parts[1]
-			slashIdx := strings.Index(remainder, "/")
-			if slashIdx >= 0 {
-				return remainder[:slashIdx], remainder[slashIdx:]
-			}
-			return remainder, "/"
-		}
-	}
-
-	// Handle relative paths
-	if strings.HasPrefix(urlStr, "/") {
-		return "", urlStr
-	}
-
-	return "", urlStr
-}
-
-// sanitizeForFilename sanitizes a string for use in a filename.
-func sanitizeForFilename(name string) string {
-	// Convert to lowercase
-	name = strings.ToLower(name)
-
-	// Replace spaces and underscores with hyphens
-	name = strings.ReplaceAll(name, " ", "-")
-	name = strings.ReplaceAll(name, "_", "-")
-
-	// Remove invalid characters (keep only alphanumeric and hyphens)
-	reg := regexp.MustCompile(`[^a-z0-9-]`)
-	name = reg.ReplaceAllString(name, "")
-
-	// Replace multiple consecutive hyphens with single hyphen
-	reg = regexp.MustCompile(`-+`)
-	name = reg.ReplaceAllString(name, "-")
-
-	// Trim leading and trailing hyphens
-	name = strings.Trim(name, "-")
-
-	// Enforce maximum length
-	if len(name) > 50 {
-		name = name[:50]
-	}
-
-	if name == "" {
+	if len(parts) == 0 {
 		return "app"
 	}
 
+	switch parts[0] {
+	case "go":
+		if len(parts) > 2 && parts[1] == "run" {
+			return cleanServiceName(parts[2])
+		}
+	case "java":
+		for i := 0; i+1 < len(parts); i++ {
+			if parts[i] == "-jar" {
+				return cleanServiceName(parts[i+1])
+			}
+		}
+	case "node", "python", "python3":
+		if len(parts) > 1 {
+			return cleanServiceName(parts[1])
+		}
+	case "npm", "yarn", "pnpm":
+		if cwd, err := os.Getwd(); err == nil {
+			return filepath.Base(cwd)
+		}
+	}
+
+	return cleanServiceName(parts[0])
+}
+
+func cleanServiceName(raw string) string {
+	name := strings.TrimSpace(strings.Trim(raw, "\"'"))
+	if name == "" {
+		return "app"
+	}
+	name = filepath.Base(name)
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+	if name == "" {
+		return "app"
+	}
 	return name
 }

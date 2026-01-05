@@ -30,7 +30,7 @@ require (
 
 require (
 	github.com/containerd/log v0.1.0 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/getkin/kin-openapi v0.126.0
 	github.com/go-errors/errors v1.4.2 // indirect
@@ -85,10 +85,10 @@ require (
 	github.com/zmap/zcrypto v0.0.0-20210511125630-18f1e0152cfc // indirect
 	github.com/zmap/zlint/v3 v3.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/mod v0.25.0 // indirect
-	golang.org/x/net v0.41.0
-	golang.org/x/text v0.26.0
-	golang.org/x/tools v0.34.0 // indirect
+	golang.org/x/mod v0.27.0 // indirect
+	golang.org/x/net v0.43.0
+	golang.org/x/text v0.28.0
+	golang.org/x/tools v0.36.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 )
 
@@ -114,8 +114,8 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/zricethezav/gitleaks/v8 v8.28.0
-	golang.org/x/sync v0.15.0
-	golang.org/x/term v0.32.0
+	golang.org/x/sync v0.16.0
+	golang.org/x/term v0.34.0
 	google.golang.org/grpc v1.71.0
 	gopkg.in/yaml.v2 v2.4.0
 	helm.sh/helm/v3 v3.18.3
@@ -182,6 +182,7 @@ require (
 	go.opentelemetry.io/otel v1.35.0 // indirect
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
 	go.opentelemetry.io/otel/trace v1.35.0 // indirect
+	go.yaml.in/yaml/v3 v3.0.3 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
