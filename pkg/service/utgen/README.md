@@ -17,6 +17,9 @@ Any pull requests targeting this package will likely **not be reviewed or merged
 If you’re interested in contributing to Keploy:
 - Explore other **actively maintained packages**
 - Check open issues labeled **`good first issue`** or **`help wanted`**
+
+  👉 https://github.com/keploy/keploy/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22Good%20First%20Issue%22
+
 - Join discussions and help improve current and future Keploy components
 
 ### Questions?
