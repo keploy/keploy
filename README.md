@@ -135,6 +135,60 @@ keploy test -c "CMD_TO_RUN_APP" --delay 10
 ### - 📘 [Installation](https://keploy.io/docs/server/installation/)
 ### - 🏁 [QuickStarts](https://keploy.io/docs/quickstart/quickstart-filter/)
 
+---
+
+## 🛠️ Quick Start (For Contributors)
+
+### 🧬 Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+- **Go 1.18+** - Required for building Keploy from source
+- **Docker** (optional) - For containerized testing environments
+- **Git** - For cloning the repository
+
+### 📦 Install & Run Keploy
+
+Follow these steps to build and run Keploy from source:
+
+#### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/keploy/keploy.git
+cd keploy
+```
+
+#### Step 2: Build Keploy
+
+```bash
+make build
+```
+
+This will compile Keploy and create the executable binary in the current directory.
+
+#### Step 3: Run Keploy
+
+Start recording test cases with your application:
+
+```bash
+./keploy record -c "your-app-command"
+```
+
+**Example:**
+
+```bash
+# For a Python application
+./keploy record -c "python main.py"
+
+# For a Node.js application
+./keploy record -c "npm start"
+
+# For a Go application
+./keploy record -c "./your-binary"
+```
+
+> 💡 **Tip:** Replace `your-app-command` with the actual command you use to run your application. Keploy will automatically capture API calls, database queries, and other network interactions.
+
 
 ---
 
