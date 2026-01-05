@@ -17,6 +17,7 @@ Sections
 
 - <a name="contributing"> General Contribution Flow</a>
   - <a name="#commit-signing">Developer Certificate of Origin</a>
+  - <a name="#cla-signing">Contributor License Agreement</a>
 - <a name="contributing-keploy">Keploy Contribution Flow</a>
   - <a name="keploy-server">Keploy Server</a>
   - <a name="keploy-docs">Keploy Documentation</a>
@@ -56,6 +57,53 @@ _~/.gitconfig_
   cm = commit -s -m
   commit = commit -s
 ```
+
+## <a name="cla-signing">Signing the Contributor License Agreement (CLA)</a>
+
+Before your pull request can be merged, you must sign the Contributor License Agreement (CLA). The CLA ensures that Keploy has the necessary rights to use, modify, and distribute your contributions.
+
+### How to Sign the CLA
+
+1. **After opening a Pull Request**, the CLA Assistant bot will automatically comment on your PR with instructions.
+
+2. **Sign the CLA** by commenting on your Pull Request with the exact phrase:
+   ```
+   I have read the CLA Document and I hereby sign the CLA
+   ```
+
+3. **Verify your email address**: Ensure that the email address used in your git commits matches the email address associated with your GitHub account. This is important because:
+   - The CLA check verifies that the email in your commits matches the one used to sign the CLA
+   - If they don't match, the CLA check will fail
+
+### Troubleshooting CLA Issues
+
+**If the CLA check fails:**
+
+- **Email mismatch**: Make sure your git commit email matches your GitHub account email. You can check your git email with:
+  ```bash
+  git config user.email
+  ```
+  
+  To update your git email for future commits:
+  ```bash
+  git config user.email "your-email@example.com"
+  ```
+  
+  If you need to update existing commits, you can amend them:
+  ```bash
+  git commit --amend --author="Your Name <your-email@example.com>"
+  git push --force-with-lease
+  ```
+
+- **CLA not signed**: Make sure you've commented the exact phrase on your PR. The bot is case-sensitive.
+
+- **Recheck the CLA**: After fixing any issues, comment `recheck` on your PR to trigger the CLA check again.
+
+### Important Notes
+
+- You only need to sign the CLA once per GitHub account
+- The CLA applies to all future contributions from your account
+- If you're contributing on behalf of an organization, make sure you have the authority to sign the CLA
 
 # How to contribute ?
 
