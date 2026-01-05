@@ -176,6 +176,12 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 		if err != nil {
 			return "", fmt.Errorf("error making request: %v", err)
 		}
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
+			}
+		}()
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		var aiResponse AIResponse
@@ -187,12 +193,6 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, aiResponse.Error)
 		}
-		defer func() {
-			err := resp.Body.Close()
-			if err != nil {
-				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
-			}
-		}()
 
 		return aiResponse.FinalContent, nil
 	} else if ai.APIBase != "" {
