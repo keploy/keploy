@@ -72,6 +72,8 @@ type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
+	GetMocks(ctx context.Context, testSetID string) ([]*models.Mock, error)
+	GetAllMockSetIDs(ctx context.Context) ([]string, error)
 }
 
 type ReportDB interface {

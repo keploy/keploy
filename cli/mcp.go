@@ -6,9 +6,6 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
 	keploymcp "go.keploy.io/server/v3/pkg/mcp"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/service/agent"
-	recordSvc "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/mockrecord"
 	"go.keploy.io/server/v3/pkg/service/mockreplay"
 	"go.keploy.io/server/v3/utils"
@@ -82,33 +79,33 @@ Example VS Code configuration:
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			logger.Info("Initializing Keploy MCP server")
 
-			recSvc, err := serviceFactory.GetService(ctx, "record")
+			recordSvc, err := serviceFactory.GetService(ctx, "record")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get record service")
 				return err
 			}
 
-			recordService, ok := recSvc.(recordSvc.Service)
+			runner, ok := recordSvc.(mockrecord.RecordRunner)
 			if !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
+				utils.LogError(logger, nil, "service doesn't satisfy record runner interface")
 				return nil
 			}
 
-			agentSvc, err := serviceFactory.GetService(ctx, "agent")
+			replaySvc, err := serviceFactory.GetService(ctx, "test")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get agent service")
+				utils.LogError(logger, err, "failed to get replay service")
 				return err
 			}
 
-			agentService, ok := agentSvc.(agent.Service)
+			replayRuntime, ok := replaySvc.(mockreplay.Runtime)
 			if !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
+				utils.LogError(logger, nil, "service doesn't satisfy replay runtime interface")
 				return nil
 			}
 
 			// Create mock record and replay services
-			recorder := mockrecord.New(logger, cfg, recordService)
-			replayer := mockreplay.New(logger, cfg, &replayAgentAdapter{agent: agentService}, nil)
+			recorder := mockrecord.New(logger, cfg, runner, nil)
+			replayer := mockreplay.New(logger, cfg, replayRuntime)
 
 			// Create and start MCP server
 			server := keploymcp.NewServer(&keploymcp.ServerOptions{
@@ -129,25 +126,4 @@ Example VS Code configuration:
 	}
 
 	return cmd
-}
-
-// replayAgentAdapter adapts the agent.Service to mockreplay.AgentService interface.
-type replayAgentAdapter struct {
-	agent agent.Service
-}
-
-func (a *replayAgentAdapter) Setup(ctx context.Context, startCh chan int) error {
-	return a.agent.Setup(ctx, startCh)
-}
-
-func (a *replayAgentAdapter) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
-	return a.agent.MockOutgoing(ctx, opts)
-}
-
-func (a *replayAgentAdapter) SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	return a.agent.SetMocks(ctx, filtered, unFiltered)
-}
-
-func (a *replayAgentAdapter) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
-	return a.agent.GetConsumedMocks(ctx)
 }

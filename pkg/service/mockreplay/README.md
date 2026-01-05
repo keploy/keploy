@@ -13,16 +13,16 @@ The `mockreplay` service loads recorded mocks and intercepts outgoing calls duri
 │                         mockreplay Service                          │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  ┌─────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│  │  Service    │    │  replayer    │    │  loadMocksFromFile() │  │
-│  │ (interface) │───>│(implementation)──>│  (YAML parser)       │  │
-│  └─────────────┘    └──────────────┘    └──────────────────────┘  │
+│  ┌─────────────┐    ┌──────────────┐    ┌────────────────────────┐  │
+│  │  Service    │    │  replayer    │    │ mockdb.GetMocks()      │  │
+│  │ (interface) │───>│(implementation)──>│  (YAML parser)         │  │
+│  └─────────────┘    └──────────────┘    └────────────────────────┘  │
 │         │                  │                                       │
 │         │                  │                                       │
 │         ▼                  ▼                                       │
 │  ┌─────────────────────────────────────────────────────────────┐  │
-│  │                     AgentService                             │  │
-│  │     (eBPF-based interception + mock matching)               │  │
+│  │                     replay.Runtime                           │  │
+│  │        (shared config + instrumentation)                    │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -32,8 +32,9 @@ The `mockreplay` service loads recorded mocks and intercepts outgoing calls duri
 
 | File | Purpose |
 |------|---------|
-| `service.go` | Interface definitions (`Service`, `AgentService`, `MockDB`) |
-| `replay.go` | Replay implementation and mock loading |
+| `service.go` | Interface definitions (`Service`, `Runtime`) |
+| `replay.go` | Service wrapper and entrypoint |
+| `mock_replay.go` | Mock replay flow and helpers |
 
 ## Usage
 
@@ -44,12 +45,12 @@ import (
 )
 
 // Create service
-replayer := mockreplay.New(logger, cfg, agentService, mockDB)
+replayer := mockreplay.New(logger, cfg, replayRuntime)
 
 // Replay mocks during testing
 result, err := replayer.Replay(ctx, models.ReplayOptions{
     Command:        "go test ./...",
-    MockFilePath:   "./keploy/user-service-postgres/mocks.yaml",
+    MockName:       "mock-123",
     FallBackOnMiss: false,
 })
 
@@ -71,14 +72,14 @@ type Service interface {
 }
 ```
 
-### AgentService
+### Runtime
 
 ```go
-type AgentService interface {
-    Setup(ctx context.Context, startCh chan int) error
-    MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
-    SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
-    GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+type Runtime interface {
+    Logger() *zap.Logger
+    Config() *config.Config
+    Instrumentation() replay.Instrumentation
+    MockDB() replay.MockDB
 }
 ```
 
@@ -89,10 +90,10 @@ type AgentService interface {
 │                         Replay Flow                                  │
 └─────────────────────────────────────────────────────────────────────┘
 
-1. Load mocks from YAML file
-   └── Support both file path and directory path
+1. Load mocks from the mock DB by mock name
+   └── Defaults to the latest mock set if name is omitted
    
-2. Setup agent (eBPF hooks)
+2. Setup instrumentation (shared replay runtime)
    
 3. Set mocks in agent for matching
    └── Agent stores mocks for request matching

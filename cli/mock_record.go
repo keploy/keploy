@@ -8,8 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/service/agent"
-	recordSvc "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/pkg/service/mockrecord"
 	"go.keploy.io/server/v3/pkg/service/mockreplay"
 	"go.keploy.io/server/v3/utils"
@@ -25,23 +23,23 @@ func MockRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, ser
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			recSvc, err := serviceFactory.GetService(ctx, "record")
+			recordSvc, err := serviceFactory.GetService(ctx, "record")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get record service")
 				return nil
 			}
 
-			recordService, ok := recSvc.(recordSvc.Service)
+			runner, ok := recordSvc.(mockrecord.RecordRunner)
 			if !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
+				utils.LogError(logger, nil, "service doesn't satisfy record runner interface")
 				return nil
 			}
 
-			recorder := mockrecord.New(logger, cfg, recordService)
+			recorder := mockrecord.New(logger, cfg, runner, nil)
 			result, err := recorder.Record(ctx, models.RecordOptions{
-				Command:  cfg.Command,
-				Path:     cfg.Path,
-				Duration: cfg.Record.RecordTimer,
+				Command:   cfg.Command,
+				Path:      cfg.Path,
+				Duration:  cfg.Record.RecordTimer,
 				ProxyPort: cfg.ProxyPort,
 				DNSPort:   cfg.DNSPort,
 			})
@@ -76,33 +74,33 @@ func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, servi
 	var cmd = &cobra.Command{
 		Use:     "test",
 		Short:   "replay recorded mocks during testing",
-		Example: `keploy mock test -c "go test ./..." --mock-path ./keploy/user-service`,
+		Example: `keploy mock test -c "go test ./..." --mock-name mock-123`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			mockPath, err := cmd.Flags().GetString("mock-path")
+			mockName, err := cmd.Flags().GetString("mock-name")
 			if err != nil {
-				utils.LogError(logger, err, "failed to read mock-path flag")
+				utils.LogError(logger, err, "failed to read mock-name flag")
 				return nil
 			}
 
-			agentSvc, err := serviceFactory.GetService(ctx, "agent")
+			replaySvc, err := serviceFactory.GetService(ctx, "test")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get agent service")
+				utils.LogError(logger, err, "failed to get replay service")
 				return nil
 			}
 
-			agentService, ok := agentSvc.(agent.Service)
+			runtime, ok := replaySvc.(mockreplay.Runtime)
 			if !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
+				utils.LogError(logger, nil, "service doesn't satisfy replay runtime interface")
 				return nil
 			}
 
-			replayer := mockreplay.New(logger, cfg, &replayAgentAdapter{agent: agentService}, nil)
+			replayer := mockreplay.New(logger, cfg, runtime)
 			result, err := replayer.Replay(ctx, models.ReplayOptions{
 				Command:        cfg.Command,
-				MockFilePath:   mockPath,
+				MockName:       mockName,
 				FallBackOnMiss: cfg.Test.FallBackOnMiss,
 				ProxyPort:      cfg.ProxyPort,
 				DNSPort:        cfg.DNSPort,

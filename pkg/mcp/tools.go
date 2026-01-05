@@ -18,6 +18,8 @@ type MockRecordInput struct {
 	Path string `json:"path" jsonschema:"description=Path to store mock files (default: ./keploy)"`
 	// Duration is the recording duration (e.g., "60s", "5m").
 	Duration string `json:"duration" jsonschema:"description=Recording duration (e.g. '60s' or '5m'). Default: 60s"`
+	// SkipConfirmation skips the user confirmation step if true.
+	SkipConfirmation bool `json:"skipConfirmation" jsonschema:"description=Skip user confirmation of command (default: false). Set to true if user has already confirmed the command."`
 }
 
 // MockRecordOutput defines the output of the mock record tool.
@@ -64,6 +66,7 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		zap.String("command", in.Command),
 		zap.String("path", in.Path),
 		zap.String("duration", in.Duration),
+		zap.Bool("skipConfirmation", in.SkipConfirmation),
 	)
 
 	// Validate input
@@ -72,6 +75,22 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 			Success: false,
 			Message: "Command is required",
 		}, nil
+	}
+
+	// Ask for user confirmation unless skipped
+	if !in.SkipConfirmation {
+		confirmed, err := s.confirmMockRecordCommand(ctx, in.Command, in.Path, in.Duration)
+		if err != nil {
+			s.logger.Warn("Failed to get user confirmation, proceeding anyway",
+				zap.Error(err),
+			)
+			// Continue with recording if elicitation fails (client may not support it)
+		} else if !confirmed {
+			return nil, MockRecordOutput{
+				Success: false,
+				Message: "User declined to proceed with the command. Please provide the correct command and try again.",
+			}, nil
+		}
 	}
 
 	// Parse duration
@@ -202,4 +221,64 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		AppExitCode:   result.AppExitCode,
 		Message:       message,
 	}, nil
+}
+
+// confirmMockRecordCommand asks the user to confirm the command before executing mock recording.
+// Returns true if confirmed, false if declined, or error if elicitation fails.
+func (s *Server) confirmMockRecordCommand(ctx context.Context, command, path, duration string) (bool, error) {
+	session := s.getActiveSession()
+	if session == nil {
+		return true, fmt.Errorf("no active session for elicitation")
+	}
+
+	// Check if client supports elicitation
+	initParams := session.InitializeParams()
+	if initParams == nil || initParams.Capabilities == nil || initParams.Capabilities.Elicitation == nil {
+		s.logger.Debug("Client doesn't support elicitation, skipping confirmation")
+		return true, nil
+	}
+
+	// Build confirmation message
+	pathDisplay := path
+	if pathDisplay == "" {
+		pathDisplay = "./keploy (default)"
+	}
+	durationDisplay := duration
+	if durationDisplay == "" {
+		durationDisplay = "60s (default)"
+	}
+
+	message := fmt.Sprintf(
+		"I'm about to record outgoing calls (HTTP APIs, databases, etc.) from your application.\n\n"+
+			"**Command:** `%s`\n"+
+			"**Mock storage path:** `%s`\n"+
+			"**Recording duration:** `%s`\n\n"+
+			"This will:\n"+
+			"1. Start your application with the above command\n"+
+			"2. Intercept all outgoing calls (HTTP, gRPC, databases, etc.)\n"+
+			"3. Save them as mocks for later testing\n\n"+
+			"Is this the correct command to run your application?",
+		command, pathDisplay, durationDisplay,
+	)
+
+	// Use elicitation to ask user for confirmation
+	result, err := session.Elicit(ctx, &sdkmcp.ElicitParams{
+		Message: message,
+	})
+	if err != nil {
+		return false, fmt.Errorf("elicitation failed: %w", err)
+	}
+
+	// Check if user confirmed
+	if result.Action == "accept" {
+		s.logger.Info("User confirmed mock record command", zap.String("command", command))
+		return true, nil
+	}
+
+	// User declined or cancelled
+	s.logger.Info("User declined mock record command",
+		zap.String("command", command),
+		zap.String("action", result.Action),
+	)
+	return false, nil
 }

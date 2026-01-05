@@ -164,7 +164,8 @@ cli/
 │  ├─────────────────────────────────────────────────────────────────────┤   │
 │  │ - logger: *zap.Logger                                               │   │
 │  │ - cfg: *config.Config                                               │   │
-│  │ - record: RecordService                                             │   │
+│  │ - runner: RecordRunner                                             │   │
+│  │ - mockDB: MockDB                                                    │   │
 │  ├─────────────────────────────────────────────────────────────────────┤   │
 │  │ + Record(ctx, opts) (*RecordResult, error)                          │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
@@ -189,12 +190,12 @@ cli/
 │  ├─────────────────────────────────────────────────────────────────────┤   │
 │  │ - logger: *zap.Logger                                               │   │
 │  │ - cfg: *config.Config                                               │   │
-│  │ - agent: AgentService                                               │   │
-│  │ - mockDB: MockDB                                                    │   │
+│  │ - runtime: Runtime                                                │   │
 │  ├─────────────────────────────────────────────────────────────────────┤   │
 │  │ + Replay(ctx, opts) (*ReplayResult, error)                          │   │
-│  │ - loadMocksFromFile(filePath) ([]*Mock, error)                      │   │
-│  │ - runCommand(ctx, command) (output, exitCode, error)                │   │
+│  │ - mockReplay(ctx, opts) (*ReplayResult, error)                      │   │
+│  │ - prepareMockReplayConfig(opts) (string, string, func(), error)     │   │
+│  │ - runMockReplay(ctx, cmd, type, mocks, opts) (*ReplayResult, error) │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -283,7 +284,7 @@ cli/
      │               │ Replay(opts)  │               │               │
      │               │──────────────>│               │               │
      │               │               │               │               │
-     │               │               │loadMocksFromFile()            │
+     │               │               │loadMocksFromPath()            │
      │               │               │───────┐       │               │
      │               │               │       │       │               │
      │               │               │<──────┘       │               │
@@ -297,7 +298,7 @@ cli/
      │               │               │ MockOutgoing()│               │
      │               │               │──────────────>│               │
      │               │               │               │               │
-     │               │               │ runCommand()  │               │
+     │               │               │     Run()     │               │
      │               │               │─────────────────────────────>│
      │               │               │               │               │
      │               │               │               │ App makes     │

@@ -213,8 +213,8 @@ go.keploy.io/server/v3/
 │   └── mcp.go                    # CLI entry point
 │       ├── MCP()                 # Parent command
 │       ├── MCPServe()            # serve subcommand
-│       ├── recordService         # record.Service for mockrecord
-│       └── replayAgentAdapter    # Agent → mockreplay.AgentService
+│       ├── recordRunner          # record.Service → mockrecord.RecordRunner
+│       └── replayRuntime         # replay.Service → mockreplay.Runtime
 │
 ├── pkg/
 │   ├── mcp/
@@ -241,7 +241,8 @@ go.keploy.io/server/v3/
 │   │   ├── mockrecord/
 │   │   │   ├── service.go        # Interfaces
 │   │   │   │   ├── Service interface
-│   │   │   │   └── RecordService interface
+│   │   │   │   ├── RecordRunner interface
+│   │   │   │   └── MockDB interface
 │   │   │   │
 │   │   │   ├── record.go         # Implementation
 │   │   │   │   ├── recorder struct
@@ -256,15 +257,17 @@ go.keploy.io/server/v3/
 │   │   └── mockreplay/
 │   │       ├── service.go        # Interfaces
 │   │       │   ├── Service interface
-│   │       │   ├── AgentService interface
-│   │       │   └── MockDB interface
+│   │       │   └── Runtime interface
 │   │       │
-│   │       └── replay.go         # Implementation
-│   │           ├── replayer struct
-│   │           ├── New()
-│   │           ├── Replay()
-│   │           ├── loadMocksFromFile()
-│   │           └── runCommand()
+│   │       ├── replay.go         # Service wrapper
+│   │       │   ├── replayer struct
+│   │       │   ├── New()
+│   │       │   └── Replay()
+│   │       │
+│   │       └── mock_replay.go    # Mock replay flow
+│   │           ├── mockReplay()
+│   │           ├── prepareMockReplayConfig()
+│   │           └── runMockReplay()
 │   │
 │   └── models/
 │       ├── mockrecord.go         # Recording types
@@ -363,13 +366,14 @@ go.keploy.io/server/v3/
 │  ├───────────────────────────────────────────────────────────────────┤ │
 │  │ - logger: *zap.Logger                                             │ │
 │  │ - cfg: *config.Config                                             │ │
-│  │ - record: RecordService                                           │ │
+│  │ - runner: RecordRunner                                            │ │
+│  │ - mockDB: MockDB                                                  │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │ <<interface>> RecordService                                        │ │
+│  │ <<interface>> RecordRunner                                         │ │
 │  ├───────────────────────────────────────────────────────────────────┤ │
-│  │ + RecordMocks(ctx, opts RecordOptions) (*RecordResult, error)     │ │
+│  │ + StartWithOptions(ctx, reRecordCfg, opts) (*StartResult, error)  │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -390,17 +394,15 @@ go.keploy.io/server/v3/
 │  ├───────────────────────────────────────────────────────────────────┤ │
 │  │ - logger: *zap.Logger                                             │ │
 │  │ - cfg: *config.Config                                             │ │
-│  │ - agent: AgentService                                             │ │
-│  │ - mockDB: MockDB                                                  │ │
+│  │ - runtime: Runtime                                                │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │ <<interface>> AgentService                                         │ │
+│  │ <<interface>> Runtime                                            │ │
 │  ├───────────────────────────────────────────────────────────────────┤ │
-│  │ + Setup(ctx, startCh chan int) error                              │ │
-│  │ + MockOutgoing(ctx, opts OutgoingOptions) error                   │ │
-│  │ + SetMocks(ctx, filtered, unFiltered []*Mock) error               │ │
-│  │ + GetConsumedMocks(ctx) ([]MockState, error)                      │ │
+│  │ + Logger() *zap.Logger                                           │ │
+│  │ + Config() *config.Config                                        │ │
+│  │ + Instrumentation() replay.Instrumentation                       │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -485,7 +487,7 @@ go.keploy.io/server/v3/
      │             │ Replay()    │             │             │
      │             │────────────>│             │             │
      │             │             │             │             │
-     │             │             │loadMocksFromFile()       │
+     │             │             │loadMocksFromPath()       │
      │             │             │───────┐     │             │
      │             │             │       │     │             │
      │             │             │<──────┘     │             │
@@ -499,7 +501,7 @@ go.keploy.io/server/v3/
      │             │             │MockOutgoing │             │
      │             │             │────────────>│             │
      │             │             │             │             │
-     │             │             │ exec.Command│             │
+     │             │             │     Run()   │             │
      │             │             │─────────────────────────>│
      │             │             │             │             │
      │             │             │             │ outgoing    │
@@ -645,15 +647,15 @@ go.keploy.io/server/v3/
 - Fallback is predictable and debuggable
 - No blocking on LLM failures
 
-### 4. Interface-Based Recording Abstraction
+### 4. Interface-Based Agent Abstraction
 
-**Decision**: Use a `RecordService` abstraction for mockrecord and `AgentService` for mockreplay.
+**Decision**: Use `RecordRunner` for mockrecord and `Runtime` for mockreplay.
 
 **Rationale**:
 - Different operations needed (GetOutgoing vs SetMocks)
 - Enables testing with mock implementations
 - Decouples services from agent implementation
-- Adapter pattern for existing agent.Service (replay)
+- Adapter pattern for existing agent.Service
 
 ### 5. Stdio Transport Only
 

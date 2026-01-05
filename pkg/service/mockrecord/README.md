@@ -21,8 +21,8 @@ The `mockrecord` service captures all external dependencies (HTTP APIs, database
 │         │                  │                       │               │
 │         ▼                  ▼                       ▼               │
 │  ┌─────────────────────────────────────────────────────────────┐  │
-│  │                    RecordService                            │  │
-│  │   (record pipeline + eBPF-based interception)               │  │
+│  │                     record.Service                           │  │
+│  │          (shared record flow, incoming disabled)            │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -32,7 +32,7 @@ The `mockrecord` service captures all external dependencies (HTTP APIs, database
 
 | File | Purpose |
 |------|---------|
-| `service.go` | Interface definitions (`Service`, `RecordService`) |
+| `service.go` | Interface definitions (`Service`, `RecordRunner`) |
 | `record.go` | Recording implementation |
 | `metadata.go` | Metadata extraction for contextual naming |
 
@@ -41,13 +41,11 @@ The `mockrecord` service captures all external dependencies (HTTP APIs, database
 ```go
 import (
     "go.keploy.io/server/v3/pkg/service/mockrecord"
-    recordSvc "go.keploy.io/server/v3/pkg/service/record"
     "go.keploy.io/server/v3/pkg/models"
 )
 
 // Create service
-var recordService recordSvc.Service = recordSvc.New(logger, testDB, mockDB, telemetry, instrumentation, testSetConf, cfg)
-recorder := mockrecord.New(logger, cfg, recordService)
+recorder := mockrecord.New(logger, cfg, recordRunner, mockDB)
 
 // Record outgoing calls
 result, err := recorder.Record(ctx, models.RecordOptions{
@@ -108,7 +106,7 @@ This metadata is used for:
    - Command completion, OR
    - Duration timeout, OR
    - Context cancellation
-6. Store mocks via agent
+6. Persist mocks to YAML
 7. Extract metadata
 8. Return RecordResult
 ```

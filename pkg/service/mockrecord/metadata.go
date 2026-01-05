@@ -10,94 +10,105 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+type metadataCollector struct {
+	meta          *models.MockMetadata
+	seenProtocols map[string]bool
+	seenEndpoints map[string]bool
+}
+
 // ExtractMetadata analyzes recorded mocks and returns metadata for contextual naming.
 func ExtractMetadata(mocks []*models.Mock, command string) *models.MockMetadata {
-	meta := &models.MockMetadata{
-		ServiceName: inferServiceName(command),
-		Timestamp:   time.Now(),
-	}
-
-	protocols := make([]string, 0, 4)
-	seenProtocols := make(map[string]bool)
-	seenEndpoints := make(map[string]bool)
-
-	addProtocol := func(name string) {
-		if name == "" || seenProtocols[name] {
-			return
-		}
-		seenProtocols[name] = true
-		protocols = append(protocols, name)
-	}
-
-	addEndpoint := func(ep models.EndpointInfo) {
-		key := strings.Join([]string{ep.Protocol, ep.Host, ep.Path, ep.Method}, "|")
-		if key == "|||" || seenEndpoints[key] {
-			return
-		}
-		seenEndpoints[key] = true
-		meta.Endpoints = append(meta.Endpoints, ep)
-	}
-
+	collector := newMetadataCollector(command)
 	for _, mock := range mocks {
-		if mock == nil {
-			continue
-		}
+		collector.addMock(mock)
+	}
+	return collector.meta
+}
 
-		switch mock.Kind {
-		case models.HTTP:
-			addProtocol("HTTP")
-			if mock.Spec.HTTPReq != nil {
-				parsed, err := url.Parse(mock.Spec.HTTPReq.URL)
-				host := ""
-				path := ""
-				if err == nil {
-					host = parsed.Hostname()
-					if host == "" {
-						host = parsed.Host
-					}
-					path = parsed.Path
-				}
-				addEndpoint(models.EndpointInfo{
-					Protocol: "HTTP",
-					Host:     host,
-					Path:     path,
-					Method:   string(mock.Spec.HTTPReq.Method),
-				})
-			}
-		case models.GRPC_EXPORT:
-			addProtocol("gRPC")
-			if mock.Spec.GRPCReq != nil {
-				pseudo := mock.Spec.GRPCReq.Headers.PseudoHeaders
-				path := pseudo[":path"]
-				method := ""
-				if path != "" {
-					parts := strings.Split(path, "/")
-					method = parts[len(parts)-1]
-				}
-				addEndpoint(models.EndpointInfo{
-					Protocol: "gRPC",
-					Host:     pseudo[":authority"],
-					Path:     path,
-					Method:   method,
-				})
-			}
-		case models.Postgres:
-			addProtocol("Postgres")
-		case models.MySQL:
-			addProtocol("MySQL")
-		case models.REDIS:
-			addProtocol("Redis")
-		case models.Mongo:
-			addProtocol("MongoDB")
-		case models.GENERIC:
-			addProtocol("Generic")
-		default:
-			addProtocol(string(mock.Kind))
-		}
+func newMetadataCollector(command string) *metadataCollector {
+	return &metadataCollector{
+		meta: &models.MockMetadata{
+			ServiceName: inferServiceName(command),
+			Timestamp:   time.Now(),
+		},
+		seenProtocols: make(map[string]bool),
+		seenEndpoints: make(map[string]bool),
+	}
+}
+
+func (c *metadataCollector) addProtocol(name string) {
+	if name == "" || c.seenProtocols[name] {
+		return
+	}
+	c.seenProtocols[name] = true
+	c.meta.Protocols = append(c.meta.Protocols, name)
+}
+
+func (c *metadataCollector) addEndpoint(ep models.EndpointInfo) {
+	key := strings.Join([]string{ep.Protocol, ep.Host, ep.Path, ep.Method}, "|")
+	if key == "|||" || c.seenEndpoints[key] {
+		return
+	}
+	c.seenEndpoints[key] = true
+	c.meta.Endpoints = append(c.meta.Endpoints, ep)
+}
+
+func (c *metadataCollector) addMock(mock *models.Mock) {
+	if mock == nil {
+		return
 	}
 
-	meta.Protocols = protocols
-	return meta
+	switch mock.Kind {
+	case models.HTTP:
+		c.addProtocol("HTTP")
+		if mock.Spec.HTTPReq != nil {
+			parsed, err := url.Parse(mock.Spec.HTTPReq.URL)
+			host := ""
+			path := ""
+			if err == nil {
+				host = parsed.Hostname()
+				if host == "" {
+					host = parsed.Host
+				}
+				path = parsed.Path
+			}
+			c.addEndpoint(models.EndpointInfo{
+				Protocol: "HTTP",
+				Host:     host,
+				Path:     path,
+				Method:   string(mock.Spec.HTTPReq.Method),
+			})
+		}
+	case models.GRPC_EXPORT:
+		c.addProtocol("gRPC")
+		if mock.Spec.GRPCReq != nil {
+			pseudo := mock.Spec.GRPCReq.Headers.PseudoHeaders
+			path := pseudo[":path"]
+			method := ""
+			if path != "" {
+				parts := strings.Split(path, "/")
+				method = parts[len(parts)-1]
+			}
+			c.addEndpoint(models.EndpointInfo{
+				Protocol: "gRPC",
+				Host:     pseudo[":authority"],
+				Path:     path,
+				Method:   method,
+			})
+		}
+	case models.Postgres:
+		c.addProtocol("Postgres")
+	case models.MySQL:
+		c.addProtocol("MySQL")
+	case models.REDIS:
+		c.addProtocol("Redis")
+	case models.Mongo:
+		c.addProtocol("MongoDB")
+	case models.GENERIC:
+		c.addProtocol("Generic")
+	default:
+		c.addProtocol(string(mock.Kind))
+	}
 }
 
 func inferServiceName(command string) string {

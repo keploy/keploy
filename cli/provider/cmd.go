@@ -257,14 +257,21 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 				cmd.Flags().Duration("duration", 60*time.Second, "Recording duration (e.g., \"60s\")")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 				return nil
 			}
 			if cmd.Name() == "test" {
 				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-				cmd.Flags().String("mock-path", "", "Path to mock file or directory to replay")
+				pathDefault := c.cfg.Path
+				if pathDefault == "" {
+					pathDefault = "./keploy"
+				}
+				cmd.Flags().StringP("path", "p", pathDefault, "Path to mock files")
+				cmd.Flags().String("mock-name", "", "Name of mock set to replay (defaults to latest)")
 				cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during replay")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 				return nil
 			}
 		}
@@ -405,8 +412,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"removeUnusedMocks":     "remove-unused-mocks",
 		"goCoverage":            "go-coverage",
 		"fallBackOnMiss":        "fallBack-on-miss",
-		"mockPath":              "mock-path",
-		"mockFilePath":          "mock-path",
+		"mockName":              "mock-name",
 		"basePath":              "base-path",
 		"updateTemplate":        "update-template",
 		"mocking":               "mocking",
@@ -921,21 +927,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			if cmd.Name() == "test" {
-				mockPath, err := cmd.Flags().GetString("mock-path")
+				path, err := cmd.Flags().GetString("path")
 				if err != nil {
-					utils.LogError(c.logger, err, "failed to get mock-path flag")
-					return errors.New("failed to get mock-path flag")
+					utils.LogError(c.logger, err, "failed to get path flag")
+					return errors.New("failed to get path flag")
 				}
-				if mockPath == "" {
-					return errors.New("missing required --mock-path flag")
+				if path == "" {
+					path = c.cfg.Path
 				}
-				if info, statErr := os.Stat(mockPath); statErr == nil {
-					if info.IsDir() {
-						c.cfg.Path = mockPath
-					} else {
-						c.cfg.Path = filepath.Dir(mockPath)
-					}
+				if path == "" {
+					path = "./keploy"
 				}
+				c.cfg.Path = path
 				return nil
 			}
 		}

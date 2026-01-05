@@ -232,7 +232,9 @@ You: "How can I use these mocks in CI?"
 AI: You can use Keploy directly in CI without the MCP server:
 
     # In your CI workflow
-    keploy mock test -c "npm test" --mockPath ./keploy/payment-feature-stripe
+    keploy mock test -c "npm test" --mock-name payment-feature-stripe
+
+    # If you omit --mock-name, Keploy replays the latest mock set in ./keploy
     
     Or keep using the MCP server locally for interactive development,
     and use CLI commands in CI.
