@@ -13,6 +13,28 @@ Contributors are expected to adhere to the [Code of Conduct](CODE_OF_CONDUCT.md)
 Contributors should have knowledge of git, go, and markdown for most projects since the project work heavily depends on them.
 We encourage Contributors to set up Keploy for local development and play around with the code and tests to get more comfortable with the project. 
 
+## Setting Up Pre-commit Hooks (Recommended)
+
+Keploy uses pre-commit hooks to ensure code quality before commits. The hooks run commitizen (for commit message format) and golangci-lint (for Go linting).
+
+1. Install pre-commit:
+
+```sh
+pip install pre-commit
+```
+
+<br/>
+
+2. Install the git hooks:
+
+```sh
+pre-commit install
+```
+
+<br/>
+
+The hooks will run automatically on `git commit`. To run manually on all files, use `pre-commit run --all-files`.
+
 Sections
 
 - <a name="contributing"> General Contribution Flow</a>
