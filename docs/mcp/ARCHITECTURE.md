@@ -93,6 +93,7 @@ The Keploy MCP server bridges AI coding assistants with Keploy's mocking capabil
 
 **Responsibilities:**
 - Handle MCP protocol communication (JSON-RPC over stdio)
+- Keep stdout reserved for JSON-RPC output and route logs to stderr
 - Register and dispatch tool calls
 - Manage client sessions
 - Coordinate LLM callbacks for naming
@@ -186,13 +187,13 @@ The Keploy MCP server bridges AI coding assistants with Keploy's mocking capabil
 #### List Mocks Flow
 
 ```
-1. AI Assistant sends CallTool(keploy_list_mocks, {path?})
+1. AI Assistant sends CallTool(keploy_list_mocks, {path?}) (path is optional and informational)
                     │
                     ▼
 2. MCP Server parses input → ListMocksInput struct
                     │
                     ▼
-3. MCP Server calls mockReplayer.ListMockSets(ctx)
+3. MCP Server calls mockReplayer.ListMockSets(ctx) using the configured mock directory
                     │
                     ▼
 4. Returns list of available mock set names (sorted by recency)
@@ -354,6 +355,7 @@ go.keploy.io/server/v3/
 │  │ + Logger: *zap.Logger                                             │ │
 │  │ + MockRecorder: mockrecord.Service                                │ │
 │  │ + MockReplayer: mockreplay.Service                                │ │
+│  │ + Stdout: io.Writer                                               │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 │  ┌────────────────────────┐  ┌────────────────────────┐               │

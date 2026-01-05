@@ -123,7 +123,7 @@ The Keploy MCP server provides three tools:
 **Parameters**:
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `path` | string | No | `./keploy` | Path to search for mock files |
+| `path` | string | No | `./keploy` | Path hint for mock discovery (informational; listing uses the configured mock directory) |
 
 **Output**:
 ```json
@@ -132,9 +132,11 @@ The Keploy MCP server provides three tools:
   "mockSets": ["my-app-http-stripe", "payment-feature-postgres"],
   "count": 2,
   "path": "./keploy",
-  "message": "Found 2 mock set(s). The latest is 'my-app-http-stripe'."
+  "message": "Found 2 mock set(s). The latest is 'my-app-http-stripe'. You can specify any of these with the mockName parameter in keploy_mock_test."
 }
 ```
+
+Note: The server lists mock sets from the configured mock directory. The `path` value is echoed back for context.
 
 ### 2. `keploy_mock_record`
 
@@ -144,8 +146,9 @@ The Keploy MCP server provides three tools:
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `command` | string | **Yes** | - | Application command (e.g., `go run main.go`, `npm start`) |
-| `path` | string | No | `./keploy` | Path to store mock files |
-| `duration` | string | No | `60s` | Recording duration (e.g., `60s`, `5m`, `2h`) |
+| `path` | string | No | `./keploy` | Base path for mock storage (defaults to configured Keploy path or `./keploy`) |
+
+Note: The MCP tool does not accept a duration parameter. If `record.recordTimer` is set in the Keploy config, it will be used; otherwise recording ends when the command exits.
 
 **Output**:
 ```json
@@ -153,13 +156,12 @@ The Keploy MCP server provides three tools:
   "success": true,
   "mockFilePath": "./keploy/my-app-http-stripe/mocks.yaml",
   "mockCount": 12,
-  "protocols": ["HTTP", "PostgreSQL"],
+  "protocols": ["HTTP", "Postgres"],
   "configuration": {
     "command": "npm start",
-    "path": "./keploy",
-    "duration": "60s"
+    "path": "./keploy"
   },
-  "message": "Successfully recorded 12 mock(s) to './keploy/my-app-http-stripe/mocks.yaml'."
+  "message": "Successfully recorded 12 mock(s) to './keploy/my-app-http-stripe/mocks.yaml'. Detected protocols: [HTTP Postgres]"
 }
 ```
 
@@ -239,7 +241,8 @@ The AI will:
 |--------|-------------|---------|
 | Custom command | "Record mocks while running `<command>`" | "Record mocks while running `python app.py`" |
 | Custom path | "Save mocks to `<path>`" | "Save mocks to `./tests/mocks`" |
-| Duration | "Record for `<time>`" | "Record for 2 minutes" |
+
+Note: Recording duration is controlled by `record.recordTimer` in the Keploy config. The MCP tool does not accept a duration parameter.
 
 ### During Recording
 
@@ -262,7 +265,6 @@ Mock file saved to: ./keploy/order-service-stripe-postgres/mocks.yaml
 Configuration used:
   Command: npm start
   Path: ./keploy
-  Duration: 60s
 ```
 
 ---
@@ -285,7 +287,7 @@ Ask your AI assistant:
 
 or
 
-> "Run `npm test` with mocks from `./keploy/order-service`"
+> "Run `npm test` with mocks named `order-service`"
 
 The AI will:
 1. List available mocks (if no specific mock specified)
@@ -356,8 +358,7 @@ AI: Recorded 5 Stripe API calls. Mock file saved to:
     
     Configuration used:
     - Command: npm run dev
-    - Duration: 60s
-    - Detected: HTTP protocol
+    - Path: ./keploy
 
 You: "Now run my tests with those mocks"
 
@@ -404,7 +405,7 @@ AI: You can use Keploy directly in CI without the MCP server:
     # In your CI workflow
     keploy mock test -c "npm test" --mock-name payment-feature-stripe
 
-    # If you omit --mock-name, Keploy replays the latest mock set in ./keploy
+    # If you omit --mock-name, Keploy replays the latest mock set in the configured mock directory (default: ./keploy)
     
     Or keep using the MCP server locally for interactive development,
     and use CLI commands in CI.
@@ -450,8 +451,8 @@ AI: Recorded 15 mocks:
     
     Configuration:
     - Command: python manage.py test
-    - Duration: 120s
-    - Protocols: PostgreSQL, HTTP
+    - Path: ./keploy
+    - Protocols: Postgres, HTTP
     
     Your tests can now run without needing a real database!
 ```
@@ -488,13 +489,12 @@ Bad:
 > "Record mocks"
 
 Good:
-> "Record HTTP calls to Stripe API while running `npm run test:payments` for 2 minutes"
+> "Record HTTP calls to Stripe API while running `npm run test:payments`"
 
 ### 5. Review Tool Output
 
 The MCP tools return detailed configuration information. Review it to ensure:
 - Correct command was used
-- Expected duration
 - Right mock set selected
 
 ### 6. Keep Mocks in Version Control
@@ -525,8 +525,8 @@ git commit -m "Add payment feature mocks"
 **Solutions**:
 - Verify your app makes outgoing calls during the recording period
 - Ensure you're running on Linux (or WSL)
-- Check if the duration is sufficient
-- Try: "Record for 5 minutes" instead of default 60 seconds
+- Ensure your command runs long enough to exercise the external calls
+- Consider setting `record.recordTimer` in the Keploy config for longer sessions
 
 ### "Mock replayer service is not available"
 
@@ -534,7 +534,7 @@ git commit -m "Add payment feature mocks"
 
 **Solution**:
 - Ensure you have mocks recorded first
-- Check the ./keploy directory exists
+- Check the configured mock directory exists (default: ./keploy)
 - Try re-recording mocks
 
 ### "No mock sets found"
@@ -543,7 +543,7 @@ git commit -m "Add payment feature mocks"
 
 **Solution**:
 - Use `keploy_mock_record` to create mocks first
-- Check the path parameter is correct
+- Check the configured Keploy mock path
 - Ensure recording completed successfully
 
 ### "Mock mismatch during replay"
@@ -582,8 +582,7 @@ The MCP tools always return the configuration used, even on error. This helps de
   "success": false,
   "configuration": {
     "command": "npm start",
-    "path": "./keploy",
-    "duration": "60s"
+    "path": "./keploy"
   },
   "message": "Recording failed: permission denied"
 }
@@ -624,7 +623,7 @@ The MCP tools always return the configuration used, even on error. This helps de
 
 ### Q: What's the default recording duration?
 
-**A**: 60 seconds. You can change it with: "Record for 5 minutes"
+**A**: The MCP tool does not set a timer. If `record.recordTimer` is configured, recording stops when it expires; otherwise recording ends when the command exits.
 
 ### Q: What if my mock name has spaces?
 

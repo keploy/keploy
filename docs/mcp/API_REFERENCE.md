@@ -25,7 +25,9 @@ The Keploy MCP server uses **stdio transport**:
 
 ### Protocol Version
 
-- MCP Protocol: `2024-11-05`
+- MCP Protocol: `2025-06-18` (negotiated)
+- Supported: `2025-06-18`, `2025-03-26`, `2024-11-05`
+- Default when the client omits `protocolVersion`: `2025-03-26`
 - JSON-RPC: `2.0`
 
 ### Server Capabilities
@@ -33,6 +35,7 @@ The Keploy MCP server uses **stdio transport**:
 ```json
 {
   "capabilities": {
+    "logging": {},
     "tools": {
       "listChanged": true
     }
@@ -68,7 +71,7 @@ sets sorted by recency (latest first).
   "properties": {
     "path": {
       "type": "string",
-      "description": "Path to search for mock files (default: ./keploy)"
+      "description": "Path hint for mock discovery (default: ./keploy). Listing uses the configured mock directory; this value is echoed back."
     }
   },
   "required": []
@@ -79,7 +82,9 @@ sets sorted by recency (latest first).
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `path` | string | No | `./keploy` | Directory to search for mock sets |
+| `path` | string | No | `./keploy` | Path hint for mock discovery (informational; listing uses the configured mock directory) |
+
+Note: The server lists mock sets from the configured mock directory. The `path` argument is accepted for compatibility and echoed back in the response.
 
 #### Output Schema
 
@@ -102,7 +107,7 @@ sets sorted by recency (latest first).
     },
     "path": {
       "type": "string",
-      "description": "Path where mocks were searched"
+      "description": "Requested path (or default) echoed back for context"
     },
     "message": {
       "type": "string",
@@ -119,7 +124,7 @@ sets sorted by recency (latest first).
 | `success` | boolean | `true` if listing completed successfully |
 | `mockSets` | string[] | Names of available mock sets (latest first) |
 | `count` | integer | Total number of mock sets found |
-| `path` | string | Directory that was searched |
+| `path` | string | Requested path (or default) echoed back for context |
 | `message` | string | Human-readable summary |
 
 #### Example Request
@@ -146,7 +151,7 @@ sets sorted by recency (latest first).
     "content": [
       {
         "type": "text",
-        "text": "{\"success\":true,\"mockSets\":[\"order-service-stripe-postgres\",\"user-service-http\",\"payment-api\"],\"count\":3,\"path\":\"./keploy\",\"message\":\"Found 3 mock set(s). The latest is 'order-service-stripe-postgres'.\"}"
+        "text": "{\"success\":true,\"mockSets\":[\"order-service-stripe-postgres\",\"user-service-http\",\"payment-api\"],\"count\":3,\"path\":\"./keploy\",\"message\":\"Found 3 mock set(s). The latest is 'order-service-stripe-postgres'. You can specify any of these with the mockName parameter in keploy_mock_test.\"}"
       }
     ]
   }
@@ -196,7 +201,7 @@ application command, creating mock files that can be replayed during testing.
     },
     "path": {
       "type": "string",
-      "description": "Path to store mock files (default: ./keploy)"
+      "description": "Base path for mock storage (defaults to configured Keploy path or ./keploy)"
     }
   },
   "required": ["command"]
@@ -208,7 +213,9 @@ application command, creating mock files that can be replayed during testing.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `command` | string | **Yes** | - | Application command to execute |
-| `path` | string | No | `./keploy` | Directory to store mock files |
+| `path` | string | No | `./keploy` | Base path for mock storage (defaults to configured Keploy path or `./keploy`) |
+
+Note: The MCP tool does not accept a duration parameter. If `record.recordTimer` is set in the Keploy config, it will be used; otherwise recording ends when the command exits.
 
 #### Output Schema
 
@@ -287,7 +294,7 @@ application command, creating mock files that can be replayed during testing.
     "content": [
       {
         "type": "text",
-        "text": "{\"success\":true,\"mockFilePath\":\"./keploy/api-tests/order-service-stripe-postgres/mocks.yaml\",\"mockCount\":12,\"protocols\":[\"HTTP\",\"Postgres\"],\"message\":\"Recorded 12 mocks (HTTP, Postgres)\"}"
+        "text": "{\"success\":true,\"mockFilePath\":\"./keploy/api-tests/order-service-stripe-postgres/mocks.yaml\",\"mockCount\":12,\"protocols\":[\"HTTP\",\"Postgres\"],\"configuration\":{\"command\":\"npm start\",\"path\":\"./keploy/api-tests\"},\"message\":\"Successfully recorded 12 mock(s) to './keploy/api-tests/order-service-stripe-postgres/mocks.yaml'. Detected protocols: [HTTP Postgres]\"}"
       }
     ]
   }
@@ -304,7 +311,7 @@ application command, creating mock files that can be replayed during testing.
     "content": [
       {
         "type": "text",
-        "text": "{\"success\":true,\"mockFilePath\":\"./keploy/mock-1704153600/mocks.yaml\",\"mockCount\":0,\"protocols\":[],\"message\":\"Recording completed but no mocks were captured\"}"
+        "text": "{\"success\":true,\"mockFilePath\":\"./keploy/mock-1704153600/mocks.yaml\",\"mockCount\":0,\"protocols\":[],\"configuration\":{\"command\":\"npm start\",\"path\":\"./keploy\"},\"message\":\"Successfully recorded 0 mock(s) to './keploy/mock-1704153600/mocks.yaml'. Detected protocols: []\"}"
       }
     ]
   }
@@ -321,7 +328,7 @@ application command, creating mock files that can be replayed during testing.
     "content": [
       {
         "type": "text",
-        "text": "{\"success\":false,\"mockFilePath\":\"\",\"mockCount\":0,\"protocols\":null,\"message\":\"Recording failed: failed to setup agent: permission denied\"}"
+        "text": "{\"success\":false,\"mockFilePath\":\"\",\"mockCount\":0,\"protocols\":[],\"configuration\":{\"command\":\"npm start\",\"path\":\"./keploy\"},\"message\":\"Recording failed: failed to setup agent: permission denied\"}"
       }
     ]
   }
@@ -478,7 +485,7 @@ Use `keploy_list_mocks` to discover available mock sets and their names.
     "content": [
       {
         "type": "text",
-        "text": "{\"success\":true,\"mocksReplayed\":8,\"mocksMissed\":0,\"appExitCode\":0,\"message\":\"Replayed 8 mocks\"}"
+        "text": "{\"success\":true,\"mocksReplayed\":8,\"mocksMissed\":0,\"appExitCode\":0,\"configuration\":{\"command\":\"go test ./...\",\"mockName\":\"user-service-stripe\",\"fallBackOnMiss\":false},\"message\":\"Test passed! Replayed 8 mock(s), app exited successfully\"}"
       }
     ]
   }
@@ -495,7 +502,7 @@ Use `keploy_list_mocks` to discover available mock sets and their names.
     "content": [
       {
         "type": "text",
-        "text": "{\"success\":false,\"mocksReplayed\":6,\"mocksMissed\":2,\"appExitCode\":0,\"message\":\"Replayed 6 mocks, 2 mocks missed\"}"
+        "text": "{\"success\":false,\"mocksReplayed\":6,\"mocksMissed\":2,\"appExitCode\":0,\"configuration\":{\"command\":\"go test ./...\",\"mockName\":\"user-service-stripe\",\"fallBackOnMiss\":false},\"message\":\"Test completed with issues. Replayed 6 mock(s), 2 mock(s) missed, app exited successfully\"}"
       }
     ]
   }
@@ -512,7 +519,7 @@ Use `keploy_list_mocks` to discover available mock sets and their names.
     "content": [
       {
         "type": "text",
-        "text": "{\"success\":false,\"mocksReplayed\":8,\"mocksMissed\":0,\"appExitCode\":1,\"message\":\"Replayed 8 mocks, app exited with code 1\"}"
+        "text": "{\"success\":false,\"mocksReplayed\":8,\"mocksMissed\":0,\"appExitCode\":1,\"configuration\":{\"command\":\"go test ./...\",\"mockName\":\"user-service-stripe\",\"fallBackOnMiss\":false},\"message\":\"Test completed with issues. Replayed 8 mock(s), app exited with code 1\"}"
       }
     ]
   }
@@ -577,7 +584,7 @@ MCP protocol errors use standard JSON-RPC error codes:
         "properties": {
           "path": {
             "type": "string",
-            "description": "Path to search for mock files (default: ./keploy)"
+            "description": "Path hint for mock discovery (default: ./keploy). Listing uses the configured mock directory; this value is echoed back."
           }
         },
         "required": []
@@ -595,7 +602,7 @@ MCP protocol errors use standard JSON-RPC error codes:
           },
           "path": {
             "type": "string",
-            "description": "Path to store mock files (default: ./keploy)"
+            "description": "Base path for mock storage (defaults to configured Keploy path or ./keploy)"
           }
         },
         "required": ["command"]
@@ -640,7 +647,7 @@ MCP protocol errors use standard JSON-RPC error codes:
   "id": 0,
   "method": "initialize",
   "params": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-06-18",
     "capabilities": {},
     "clientInfo": {
       "name": "vscode-copilot",
@@ -656,9 +663,12 @@ MCP protocol errors use standard JSON-RPC error codes:
   "jsonrpc": "2.0",
   "id": 0,
   "result": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-06-18",
     "capabilities": {
-      "tools": {}
+      "logging": {},
+      "tools": {
+        "listChanged": true
+      }
     },
     "serverInfo": {
       "name": "keploy-mock",
