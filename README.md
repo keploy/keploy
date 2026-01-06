@@ -11,7 +11,6 @@
 <h3 align="center"><b>⚡️ API tests faster than unit tests, from user traffic ⚡️</b></h3>
 <p align="center">🌟 The must-have tool for developers in the AI-Gen era for 90% test coverage 🌟</p>
 
-
 ---
 
 <p align="center">
@@ -32,11 +31,9 @@
   </a>
 </p>
 
-
-[Keploy](https://keploy.io) is a **developer‑centric API and integration testing tool** that auto‑generates **tests and data‑mocks** faster than unit tests.  
+[Keploy](https://keploy.io) is a **developer‑centric API and integration testing tool** that auto‑generates **tests and data‑mocks** faster than unit tests.
 
 It records API calls, database queries, and streaming events — then replays them as tests. Under the hood, Keploy **uses eBPF to capture traffic at the network layer,** but for you it’s completely **code‑less** and **language‑agnostic**.
-
 
 <img align="center" src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="100%" alt="Convert API calls to API tests test cases and Data Mocks using AI"/>
 
@@ -48,10 +45,11 @@ It records API calls, database queries, and streaming events — then replays th
 
 ## 🎯 No code changes
 
-Just run your app with `keploy record`. Real API + integration flows are automatically captured as tests and mocks. *(Keploy uses eBPF under the hood to capture traffic, so you **don’t need** to add any SDKs or modify code.)* 
+Just run your app with `keploy record`. Real API + integration flows are automatically captured as tests and mocks. _(Keploy uses eBPF under the hood to capture traffic, so you **don’t need** to add any SDKs or modify code.)_
 
 ## 📹 Record and Replay complex Flows
-Keploy can record and replay complex, distributed API flows as mocks and stubs.  It's like having a very light-weight time machine for your tests—saving you tons of time!
+
+Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a very light-weight time machine for your tests—saving you tons of time!
 
 👉 [Read the docs on record-replay](https://keploy.io/docs/keploy-explained/introduction/)
 
@@ -59,7 +57,7 @@ Keploy can record and replay complex, distributed API flows as mocks and stubs. 
 
 ## 🐇 Complete Infra‑Virtualization (beyond HTTP mocks)
 
-Unlike tools that only mock HTTP endpoints, Keploy records **databases** (Postgres, MySQL, MongoDB), **streaming/queues** (Kafka, RabbitMQ), external APIs, and more. 
+Unlike tools that only mock HTTP endpoints, Keploy records **databases** (Postgres, MySQL, MongoDB), **streaming/queues** (Kafka, RabbitMQ), external APIs, and more.
 
 It replays them deterministically so you can run tests without re‑provisioning infra.
 
@@ -69,9 +67,9 @@ It replays them deterministically so you can run tests without re‑provisioning
 
 ## 🧪 Combined Test Coverage
 
-If you’re a **developer**, you probably care about *statement* and *branch* coverage — Keploy calculates that for you. 
+If you’re a **developer**, you probably care about _statement_ and _branch_ coverage — Keploy calculates that for you.
 
-If you’re a **QA**, you focus more on *API schema* and *business use‑case coverage* — Keploy calculates that too. This way coverage isn’t subjective anymore. 
+If you’re a **QA**, you focus more on _API schema_ and _business use‑case coverage_ — Keploy calculates that too. This way coverage isn’t subjective anymore.
 
 👉 [Read the docs on coverage](https://keploy.io/docs/server/sdk-installation/go/)
 
@@ -79,14 +77,13 @@ If you’re a **QA**, you focus more on *API schema* and *business use‑case co
 
 ## 🤖 Expand API Coverage using AI
 
-Keploy uses existing recordings, Swagger/OpenAPI Schema to find: boundary values, missing/extra fields, wrong types, out‑of‑order sequences, retries/timeouts. 
+Keploy uses existing recordings, Swagger/OpenAPI Schema to find: boundary values, missing/extra fields, wrong types, out‑of‑order sequences, retries/timeouts.
 
-This helps expand API Schema, Statement, and Branch Coverage. 
+This helps expand API Schema, Statement, and Branch Coverage.
 
 👉 [Read the docs on coverage](https://app.keploy.io/)
 
 <img src="https://keploy-devrel.s3.us-west-2.amazonaws.com/ai+test+case+generation+that+works.png" width="100%" alt="ai test gen for api statement schema and branch coverage"/>
-
 
 ### Other Capabilities
 
@@ -132,17 +129,18 @@ keploy test -c "CMD_TO_RUN_APP" --delay 10
 ```
 
 ## Resources
-### - 📘 [Installation](https://keploy.io/docs/server/installation/)
-### - 🏁 [QuickStarts](https://keploy.io/docs/quickstart/quickstart-filter/)
 
+### - 📘 [Installation](https://keploy.io/docs/server/installation/)
+
+### - 🏁 [QuickStarts](https://keploy.io/docs/quickstart/quickstart-filter/)
 
 ---
 
-
 ## Languages &amp; Frameworks (Any stack)
 
-Because Keploy intercepts at the **network layer (eBPF)**, it works with **any language, framework, or runtime**—no SDK required. 
-> Note: Some of the dependencies are not open-source by nature because their protocols and parsings are not open-sourced. It's not supported in Keploy enterprise. 
+Because Keploy intercepts at the **network layer (eBPF)**, it works with **any language, framework, or runtime**—no SDK required.
+
+> Note: Some of the dependencies are not open-source by nature because their protocols and parsings are not open-sourced. It's not supported in Keploy enterprise.
 
 <p align="center">
 
@@ -178,7 +176,7 @@ Because Keploy intercepts at the **network layer (eBPF)**, it works with **any l
 
 ---
 
-## Questions? 
+## Questions?
 
 ### Book a Live Demo / Enterprise Support
 
@@ -215,3 +213,5 @@ Prefer a calendar invite? Mention your availability in the email—we’ll send 
 Whether you're new or experienced, your input matters. Help us improve Keploy by contributing code, reporting issues, or sharing feedback.
 
 Together, let's build better testing tools for modern applications.
+
+Minor documentation update for issue #3440
