@@ -12,7 +12,7 @@ import (
 )
 
 func init() {
-	Register("gen", GenerateUT)
+	// Register("gen", GenerateUT)
 }
 
 func GenerateUT(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
