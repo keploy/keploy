@@ -6,7 +6,7 @@ toolchain go1.24.6
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
-replace github.com/keploy/integrations => /home/sarthak/projects/integrations
+// replace github.com/keploy/integrations => /home/sarthak/projects/integrations
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -23,7 +23,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/spf13/cobra v1.9.1
-	go.mongodb.org/mongo-driver v1.11.6
+	go.mongodb.org/mongo-driver v1.17.6
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.39.0 // indirect
 	golang.org/x/sys v0.33.0
@@ -109,7 +109,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
-	github.com/keploy/integrations v0.0.0-20251009171234-d034a74b8171
+	github.com/keploy/integrations v0.0.0-20260105134606-e2886b1b9ee1
 	github.com/keploy/jsonDiff v1.0.8
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.10.0
@@ -174,7 +174,7 @@ require (
 	github.com/wasilibs/go-re2 v1.9.0 // indirect
 	github.com/wasilibs/wazero-helpers v0.0.0-20240620070341-3dff1577cd52 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
-	github.com/xdg-go/scram v1.1.1 // indirect
+	github.com/xdg-go/scram v1.1.2 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.60.0 // indirect
