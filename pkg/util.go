@@ -684,9 +684,6 @@ func LooksLikeRandomID(s string) bool {
 		if _, err := ksuid.Parse(s); err == nil {
 			return true
 		}
-		if hasLetter && hasDigit {
-			break
-		}
 	}
 
 	if len(s) == 26 {
