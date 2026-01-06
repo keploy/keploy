@@ -67,6 +67,10 @@ with VS Code, Claude Desktop, and other MCP-compatible AI assistants.
 
 IMPORTANT: The MCP server outputs JSON-RPC messages on stdout and logs on stderr.
 Do not pipe stdout to other commands when using as an MCP server.`,
+		// Set MCP stdio mode early to prevent logo from printing
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			utils.SetMCPStdio(true)
+		},
 	}
 
 	cmd.AddCommand(MCPServe(ctx, logger, cfg, serviceFactory, cmdConfigurator))
