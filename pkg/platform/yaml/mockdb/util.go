@@ -124,7 +124,6 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		requests := []postgres.RequestYaml{}
 		for _, v := range mock.Spec.PostgresRequestsV2 {
 
-
 			req := postgres.RequestYaml{}
 			err := req.Message.Encode(v.PacketBundle)
 			if err != nil {

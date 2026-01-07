@@ -21,7 +21,7 @@ type DecodeContext struct {
 	PluginName         string
 	UseSSL             bool
 	// Capability flags
-	ServerCaps         uint32 // negotiated server caps (from HandshakeV10) 
+	ServerCaps         uint32 // negotiated server caps (from HandshakeV10)
 	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
 	RecordedClientCaps uint32 // caps from the recorded config mock
 	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps

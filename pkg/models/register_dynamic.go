@@ -14,9 +14,9 @@ import "encoding/gob"
 // interface values hold more complex map forms (nested maps or slices of maps).
 // gob ignores duplicates so these are safe.
 func init() {
-    gob.Register(map[string]interface{}{})              // simplest form
-    gob.Register([]map[string]interface{}{})            // slice of maps
-    gob.Register(map[string]map[string]interface{}{})   // nested map used in OpenAPI properties
-    gob.Register([]interface{}{})                       // slice of empty-interface values
-    gob.Register(map[string][]interface{}{})            // map to heterogeneous list (common in JSON specs)
+	gob.Register(map[string]interface{}{})            // simplest form
+	gob.Register([]map[string]interface{}{})          // slice of maps
+	gob.Register(map[string]map[string]interface{}{}) // nested map used in OpenAPI properties
+	gob.Register([]interface{}{})                     // slice of empty-interface values
+	gob.Register(map[string][]interface{}{})          // map to heterogeneous list (common in JSON specs)
 }
