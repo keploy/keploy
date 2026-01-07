@@ -14,6 +14,7 @@ import (
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
@@ -24,6 +25,42 @@ type TestReportVerdict struct {
 	status    bool
 	duration  time.Duration
 	timeTaken string
+}
+
+// ValidateNoiseConfiguration checks for common mistakes in noise configuration
+// and provides helpful warnings for unsupported patterns
+func ValidateNoiseConfiguration(noise config.GlobalNoise, logger *zap.Logger) {
+	if noise == nil || len(noise) == 0 {
+		return
+	}
+
+	bodyNoise, hasBody := noise["body"]
+	if !hasBody || len(bodyNoise) == 0 {
+		return
+	}
+
+	for fieldName := range bodyNoise {
+		// Warn about JSONPath patterns (which are not supported in noise config)
+		if strings.HasPrefix(fieldName, "$") {
+			logger.Warn(
+				"JSONPath syntax is not supported in noise configuration",
+				zap.String("field", fieldName),
+				zap.String("note", "Supported formats: (1) '*' for entire body, (2) exact field names (3) dot-separated paths like 'user.id'"),
+			)
+		}
+
+		// Warn about regex-only patterns that look like they should match multiple fields
+		if fieldName == ".*" || fieldName == "*" || strings.Contains(fieldName, ".*") && !strings.Contains(fieldName, ".") {
+			if fieldName == ".*" {
+				logger.Warn(
+					"Use '*' (not '.*') to ignore the entire response body",
+					zap.String("current", "'.*'"),
+					zap.String("should_be", "'*'"),
+					zap.String("example", `{"*": ["*"]}`),
+				)
+			}
+		}
+	}
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {

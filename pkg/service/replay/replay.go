@@ -107,6 +107,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	r.logger.Info("🟢 Starting Keploy replay...")
 
+	// Validate noise configuration for common mistakes
+	ValidateNoiseConfiguration(r.config.Test.GlobalNoise.Global, r.logger)
+	for testSetID, tsNoise := range r.config.Test.GlobalNoise.Testsets {
+		ValidateNoiseConfiguration(tsNoise, r.logger.With(zap.String("testSet", testSetID)))
+	}
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
 	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
