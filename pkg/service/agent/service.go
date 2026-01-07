@@ -8,7 +8,6 @@ import (
 
 type Service interface {
 	Setup(ctx context.Context, startCh chan int) error
-	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) // Commenting out this for now need to move this and the instrument in the agent setup only
 	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
 	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error

@@ -662,36 +662,3 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		sentry.Flush(time.Second * 2)
 	}
 }
-
-func IP4StrToUint32(ipStr string) (uint32, error) {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return 0, fmt.Errorf("invalid IP address")
-	}
-	ip = ip.To4()
-	if ip == nil {
-		return 0, fmt.Errorf("not an IPv4 address")
-	}
-	return binary.BigEndian.Uint32(ip), nil
-}
-
-func IP6StrToUint32(ipStr string) ([4]uint32, error) {
-	// Parse the IPv6 address string
-	ip := net.ParseIP(ipStr)
-	if ip == nil || ip.To16() == nil {
-		return [4]uint32{}, fmt.Errorf("invalid IPv6 address format")
-	}
-
-	// Convert to a 16-byte representation
-	ip = ip.To16()
-
-	// Prepare the array to hold four uint32 values
-	var result [4]uint32
-
-	// Convert each 4-byte segment to a uint32
-	for i := 0; i < 4; i++ {
-		result[i] = binary.BigEndian.Uint32(ip[i*4 : (i+1)*4])
-	}
-
-	return result, nil
-}
