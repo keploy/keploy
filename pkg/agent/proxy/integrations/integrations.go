@@ -23,6 +23,7 @@ const (
 	POSTGRES_V2 IntegrationType = "postgres_v2"
 	MONGO       IntegrationType = "mongo"
 	REDIS       IntegrationType = "redis"
+	KAFKA       IntegrationType = "kafka"
 )
 
 type Parsers struct {

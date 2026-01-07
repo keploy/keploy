@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models/kafka"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -27,6 +28,7 @@ const (
 	Postgres    Kind = "Postgres"
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
+	Kafka       Kind = "Kafka"
 )
 
 type Mock struct {
@@ -65,6 +67,8 @@ type MockSpec struct {
 	GRPCResp          *GrpcResp         `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
 	MySQLRequests     []mysql.Request   `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
 	MySQLResponses    []mysql.Response  `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	KafkaRequests     []kafka.Request   `json:"KafkaRequests,omitempty" bson:"kafka_requests,omitempty"`
+	KafkaResponses    []kafka.Response  `json:"KafkaResponses,omitempty" bson:"kafka_responses,omitempty"`
 	ReqTimestampMock  time.Time         `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock  time.Time         `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
@@ -152,6 +156,12 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.MySQLResponses = make([]mysql.Response, len(m.Spec.MySQLResponses))
 	copy(c.Spec.MySQLResponses, m.Spec.MySQLResponses)
+
+	c.Spec.KafkaRequests = make([]kafka.Request, len(m.Spec.KafkaRequests))
+	copy(c.Spec.KafkaRequests, m.Spec.KafkaRequests)
+
+	c.Spec.KafkaResponses = make([]kafka.Response, len(m.Spec.KafkaResponses))
+	copy(c.Spec.KafkaResponses, m.Spec.KafkaResponses)
 
 	// 4. Deep copy all pointers by creating a new object and copying the value.
 	if m.Spec.HTTPReq != nil {

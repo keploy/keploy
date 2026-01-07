@@ -536,6 +536,101 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		initialBuf = append(initialBuf, headerBuf...)
 	}
 
+	// Check if the traffic is Kafka
+	// Kafka Wire Protocol: [Size:4][ApiKey:2][ApiVersion:2][CorrelationId:4]...
+	isKafka := false
+	if len(initialBuf) >= 12 { // Need at least header + correlationId
+		size := int32(initialBuf[0])<<24 | int32(initialBuf[1])<<16 |
+			int32(initialBuf[2])<<8 | int32(initialBuf[3])
+
+		if size > 0 && size < 100*1024*1024 {
+			apiKey := int16(initialBuf[4])<<8 | int16(initialBuf[5])
+
+			apiVersion := int16(initialBuf[6])<<8 | int16(initialBuf[7])
+
+			if apiKey >= 0 && apiKey <= 67 && apiVersion >= 0 && apiVersion <= 15 {
+				isKafka = true
+				p.logger.Info("Kafka protocol detected",
+					zap.Int32("size", size),
+					zap.Int16("apiKey", apiKey),
+					zap.Int16("apiVersion", apiVersion))
+			}
+		}
+	}
+
+	if isKafka {
+		// Re-attach initialBuf to srcConn so the Kafka recorder sees the complete first packet
+		srcConn = &util.Conn{
+			Conn:   srcConn,
+			Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+			Logger: p.logger,
+		}
+
+		if rule.Mode != models.MODE_TEST {
+			if isTLS {
+				// get the destinationUrl from the map for the tls connection
+				url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
+				if !ok {
+					utils.LogError(logger, err, "failed to fetch the destination url")
+					return err
+				}
+				//type case the dstUrl to string
+				dstURL, ok := url.(string)
+				if !ok {
+					utils.LogError(logger, err, "failed to type cast the destination url")
+					return err
+				}
+
+				cfg := &tls.Config{
+					InsecureSkipVerify: true,
+					ServerName:         dstURL,
+				}
+
+				addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+				dstConn, err = tls.Dial("tcp", addr, cfg)
+				if err != nil {
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+					return err
+				}
+			} else {
+				dstConn, err = net.Dial("tcp", dstAddr)
+				if err != nil {
+					utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+					return err
+				}
+			}
+
+			// Record the outgoing message into a mock
+			err := p.Integrations[integrations.KAFKA].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to record the outgoing message")
+				return err
+			}
+			return nil
+		}
+
+		// TODO: We have to remove the 0 key maps, since it was meant for appID keys maps for multiple clients-apps.
+		m, ok := p.MockManagers.Load(uint64(0))
+		if !ok {
+			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
+			return err
+		}
+
+		//mock the outgoing message
+		err := p.Integrations[integrations.KAFKA].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
+			utils.LogError(p.logger, err, "failed to mock the outgoing message")
+			// Send specific error type to error channel for external monitoring
+			proxyErr := models.ParserError{
+				ParserErrorType: models.ErrMockNotFound,
+				Err:             err,
+			}
+			p.SendError(proxyErr)
+			return err
+		}
+		return nil
+	}
+
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
