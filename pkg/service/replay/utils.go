@@ -36,7 +36,28 @@ func ValidateNoiseConfiguration(noise config.GlobalNoise, logger *zap.Logger) {
 
 	bodyNoise, hasBody := noise["body"]
 	if !hasBody || len(bodyNoise) == 0 {
-		return
+		// Still allow header logging below
+	} else {
+		// Inform when entire body is configured to be ignored
+		if arr, ok := bodyNoise["*"]; ok {
+			for _, v := range arr {
+				if v == "*" {
+					logger.Info("Noise applied: entire response body will be ignored", zap.String("field", "*"), zap.Strings("patterns", arr))
+					break
+				}
+			}
+		}
+		// Summarize body noise keys/paths (excluding whole-body marker)
+		keys := make([]string, 0, len(bodyNoise))
+		for k := range bodyNoise {
+			if k == "*" {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		if len(keys) > 0 {
+			logger.Info("Noise applied: body fields/paths ignored", zap.Strings("keys", keys))
+		}
 	}
 
 	for fieldName := range bodyNoise {
@@ -58,6 +79,17 @@ func ValidateNoiseConfiguration(noise config.GlobalNoise, logger *zap.Logger) {
 					zap.String("should_be", "'*'"),
 					zap.String("example", `{"*": ["*"]}`),
 				)
+			}
+		}
+
+		// Summarize header noise keys for visibility
+		if headerNoise, ok := noise["header"]; ok {
+			if len(headerNoise) > 0 {
+				hdrs := make([]string, 0, len(headerNoise))
+				for k := range headerNoise {
+					hdrs = append(hdrs, k)
+				}
+				logger.Info("Noise applied: headers ignored", zap.Strings("headers", hdrs))
 			}
 		}
 	}

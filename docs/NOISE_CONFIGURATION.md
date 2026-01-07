@@ -17,16 +17,14 @@ Noise configuration is defined in `keploy.yml` under `test.globalNoise`:
 test:
   globalNoise:
     global:
-      response:
-        body:
-          # Define noise rules here
-        header:
-          # Define header noise rules here
+      body:
+        # Define body noise rules here
+      header:
+        # Define header noise rules here
     test-sets:
       test-set-name:
-        response:
-          body:
-            # Test-set-specific noise rules
+        body:
+          # Test-set-specific noise rules
 ```
 
 ## Usage Patterns
@@ -37,9 +35,8 @@ Validates the response is valid JSON but ignores all field values:
 
 ```yaml
 global:
-  response:
-    body:
-      "*": ["*"]
+  body:
+    "*": ["*"]
 ```
 
 **Use case:** Endpoint returns 50-60 fields with many dynamic values
@@ -57,13 +54,12 @@ Ignores a specific field name at ANY depth in the JSON:
 
 ```yaml
 global:
-  response:
-    body:
-      timestamp: [".*"]
-      id: [".*"]
-      uuid: [".*"]
-      createdAt: [".*"]
-      updatedAt: [".*"]
+  body:
+    timestamp: [".*"]
+    id: [".*"]
+    uuid: [".*"]
+    createdAt: [".*"]
+    updatedAt: [".*"]
 ```
 
 **Use case:** Multiple endpoints return same dynamic fields you want to ignore
@@ -93,11 +89,10 @@ Ignores fields only at specified nested paths:
 
 ```yaml
 global:
-  response:
-    body:
-      "user.id": [".*"]           # Ignore id under user object
-      "data.timestamp": [".*"]     # Ignore timestamp under data object
-      "items[*].status": [".*"]    # Ignore status in array elements
+  body:
+    "user.id": [".*"]           # Ignore id under user object
+    "data.timestamp": [".*"]     # Ignore timestamp under data object
+    "items[*].status": [".*"]    # Ignore status in array elements
 ```
 
 **Use case:** Same field name means different things at different locations
@@ -128,11 +123,10 @@ Use regex patterns to match values:
 
 ```yaml
 global:
-  response:
-    body:
-      requestId: ["^req-[0-9]+$"]  # Match request ID pattern
-      token: ["^Bearer .*"]         # Match bearer tokens
-      email: [".*@example\\.com$"]  # Match emails from domain
+  body:
+    requestId: ["^req-[0-9]+$"]  # Match request ID pattern
+    token: ["^Bearer .*"]         # Match bearer tokens
+    email: [".*@example\\.com$"]  # Match emails from domain
 ```
 
 **Use case:** Validate format of dynamic values without checking exact value
@@ -141,14 +135,13 @@ global:
 
 ## Header Noise Configuration
 
-Same patterns work for request/response headers:
+Same patterns work for request/response headers. Use lowercase header names for best matching:
 
 ```yaml
 global:
-  response:
-    header:
-      "Content-Length": [".*"]      # Ignore content length header
-      "X-Request-ID": [".*"]        # Ignore request ID header
+  header:
+    content-length: [".*"]      # Ignore content length header
+    x-request-id: [".*"]        # Ignore request ID header
 ```
 
 ---
@@ -218,21 +211,18 @@ Override global noise for specific test sets:
 test:
   globalNoise:
     global:
-      response:
-        body:
-          timestamp: [".*"]
-    
+      body:
+        timestamp: [".*"]
+
     test-sets:
       auth-tests:
-        response:
-          body:
-            token: [".*"]           # Additional noise for auth-tests
-            sessionId: [".*"]
-      
+        body:
+          token: [".*"]           # Additional noise for auth-tests
+          sessionId: [".*"]
+
       user-tests:
-        response:
-          body:
-            "*": ["*"]              # Ignore entire body for user-tests
+        body:
+          "*": ["*"]              # Ignore entire body for user-tests
 ```
 
 ---
@@ -243,39 +233,36 @@ test:
 
 ```yaml
 global:
-  response:
-    body:
-      id: [".*"]                    # Ignore product ID
-      createdAt: [".*"]            # Ignore creation timestamp
-      updatedAt: [".*"]            # Ignore last update
-      "inventory.lastRestocked": [".*"]  # Ignore restock time
+  body:
+    id: [".*"]                    # Ignore product ID
+    createdAt: [".*"]            # Ignore creation timestamp
+    updatedAt: [".*"]            # Ignore last update
+    "inventory.lastRestocked": [".*"]  # Ignore restock time
 ```
 
 ### Example 2: User Service with Dynamic Fields
 
 ```yaml
 global:
-  response:
-    body:
-      "*": ["*"]  # Ignore all values, just validate structure
+  body:
+    "*": ["*"]  # Ignore all values, just validate structure
 ```
 
 ### Example 3: Mixed Configuration
 
 ```yaml
 global:
-  response:
-    body:
-      # Validate these fields strictly
-      "user.email": ["^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$"]
-      
-      # Ignore these fields
-      timestamp: [".*"]
-      uuid: [".*"]
-      
-    header:
-      "Content-Length": [".*"]      # Ignore size (may vary)
-      "X-Request-ID": [".*"]        # Ignore request tracking ID
+  body:
+    # Validate these fields strictly
+    "user.email": ["^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$"]
+
+    # Ignore these fields
+    timestamp: [".*"]
+    uuid: [".*"]
+
+  header:
+    content-length: [".*"]      # Ignore size (may vary)
+    x-request-id: [".*"]        # Ignore request tracking ID
 ```
 
 ---
