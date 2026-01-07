@@ -3,7 +3,11 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.keploy.io/server/v3/pkg/models"
@@ -13,7 +17,7 @@ import (
 // ListMocksInput defines the input parameters for the list mocks tool.
 type ListMocksInput struct {
 	// Path is the optional path to search for mocks (default: ./keploy).
-	Path string `json:"path" jsonschema:"Path to search for mock files (default: ./keploy)"`
+	Path string `json:"path,omitempty" jsonschema:"Path to search for mock files (default: ./keploy)"`
 }
 
 // ListMocksOutput defines the output of the list mocks tool.
@@ -35,7 +39,7 @@ type MockRecordInput struct {
 	// Command is the command to run (e.g., "go run main.go", "npm start", "./my-app").
 	Command string `json:"command" jsonschema:"Command to run (e.g. 'go run main.go', 'go test', 'npm run test', 'npm start', './my-app', or any other command)."`
 	// Path is the path to store mock files (default: ./keploy).
-	Path string `json:"path" jsonschema:"Path to store mock files (default: ./keploy)"`
+	Path string `json:"path,omitempty" jsonschema:"Path to store mock files (default: ./keploy)"`
 }
 
 // MockRecordOutput defines the output of the mock record tool.
@@ -64,10 +68,10 @@ type RecordConfiguration struct {
 type MockReplayInput struct {
 	// Command is the command to run with mocks.
 	Command string `json:"command" jsonschema:"Command to run with mocks (e.g. 'go test -v', 'npm test', 'go run main.go', or any other command)."`
-	// MockName is the name of the mock set to replay.
-	MockName string `json:"mockName" jsonschema:"Name of the mock set to replay. Use keploy_list_mocks to see available mocks. If not provided, the latest mock set will be used."`
-	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches.
-	FallBackOnMiss bool `json:"fallBackOnMiss" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
+	// MockName is the name of the mock set to replay (optional, uses latest if not provided).
+	MockName string `json:"mockName,omitempty" jsonschema:"Name of the mock set to replay. Use keploy_list_mocks to see available mocks. If not provided, the latest mock set will be used."`
+	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches (optional, default: false).
+	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
 }
 
 // MockReplayOutput defines the output of the mock replay tool.
@@ -97,23 +101,17 @@ type ReplayConfiguration struct {
 func (s *Server) handleListMocks(ctx context.Context, req *sdkmcp.CallToolRequest, in ListMocksInput) (*sdkmcp.CallToolResult, ListMocksOutput, error) {
 	s.logger.Info("List mocks tool invoked", zap.String("path", in.Path))
 
-	// Check if mock replayer is available (it has access to mockDB)
-	if s.mockReplayer == nil {
-		return nil, ListMocksOutput{
-			Success: false,
-			Message: "Mock replayer service is not available. Cannot list mocks.",
-		}, nil
-	}
-
 	path := strings.TrimSpace(in.Path)
 	if path == "" {
 		path = "./keploy"
 	}
 
-	// Get available mock sets
-	mockSets, err := s.mockReplayer.ListMockSets(ctx)
+	s.logger.Info("Scanning directory for mock sets", zap.String("path", path))
+
+	// Scan the directory directly for mock sets (fixes path mismatch issue)
+	mockSets, err := s.scanMockSets(path)
 	if err != nil {
-		s.logger.Error("Failed to list mock sets", zap.Error(err))
+		s.logger.Error("Failed to scan mock sets", zap.Error(err), zap.String("path", path))
 		return nil, ListMocksOutput{
 			Success: false,
 			Path:    path,
@@ -143,6 +141,61 @@ func (s *Server) handleListMocks(ctx context.Context, req *sdkmcp.CallToolReques
 		Path:     path,
 		Message:  message,
 	}, nil
+}
+
+// scanMockSets scans the directory for mock sets (subdirectories containing mocks.yaml).
+func (s *Server) scanMockSets(basePath string) ([]string, error) {
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.logger.Info("Mock directory does not exist", zap.String("path", basePath))
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	type mockSetInfo struct {
+		name    string
+		modTime time.Time
+	}
+	var mockSets []mockSetInfo
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Skip special directories
+		if name == "reports" || name == "testReports" || name == "schema" {
+			continue
+		}
+
+		// Check if this directory contains a mocks.yaml or mocks.yml file
+		mockPath := filepath.Join(basePath, name, "mocks.yaml")
+		info, err := os.Stat(mockPath)
+		if err != nil {
+			mockPath = filepath.Join(basePath, name, "mocks.yml")
+			info, err = os.Stat(mockPath)
+			if err != nil {
+				continue
+			}
+		}
+
+		mockSets = append(mockSets, mockSetInfo{name: name, modTime: info.ModTime()})
+	}
+
+	// Sort by modification time (most recent first)
+	sort.SliceStable(mockSets, func(i, j int) bool {
+		return mockSets[i].modTime.After(mockSets[j].modTime)
+	})
+
+	out := make([]string, len(mockSets))
+	for i, set := range mockSets {
+		out[i] = set.name
+	}
+
+	s.logger.Info("Found mock sets", zap.String("path", basePath), zap.Int("count", len(out)), zap.Strings("mockSets", out))
+	return out, nil
 }
 
 // handleMockRecord handles the keploy_mock_record tool invocation.

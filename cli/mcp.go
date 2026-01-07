@@ -2,7 +2,11 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
@@ -24,7 +28,8 @@ func init() {
 // 1. All logs MUST go to stderr (stdout is reserved for JSON-RPC messages)
 // 2. NO ANSI color codes (they corrupt JSON-RPC parsing)
 // 3. Use structured JSON format for machine readability
-func newMCPLogger() *zap.Logger {
+// If stderrFile is provided, logs will also be written to the file.
+func newMCPLogger(stderrFile *os.File) *zap.Logger {
 	encoderConfig := zapcore.EncoderConfig{
 		TimeKey:        "ts",
 		LevelKey:       "level",
@@ -40,13 +45,54 @@ func newMCPLogger() *zap.Logger {
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 	}
 
+	// Create writer that goes to both stderr and file (if provided)
+	var writer zapcore.WriteSyncer
+	if stderrFile != nil {
+		writer = zapcore.NewMultiWriteSyncer(
+			zapcore.AddSync(os.Stderr),
+			zapcore.AddSync(stderrFile),
+		)
+	} else {
+		writer = zapcore.AddSync(os.Stderr)
+	}
+
 	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(encoderConfig),
-		zapcore.AddSync(os.Stderr), // stderr only
+		writer,
 		zapcore.InfoLevel,
 	)
 
 	return zap.New(core)
+}
+
+// createMCPLogFiles creates timestamped log files in ./mcp-logs/ for debugging.
+// Saves stdout (JSON-RPC) and stderr (logs) since AI assistants consume these streams.
+func createMCPLogFiles() (*os.File, *os.File, error) {
+	// Create logs directory if it doesn't exist
+	logsDir := filepath.Join(".", "mcp-logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		return nil, nil, err
+	}
+
+	// Create timestamped filenames
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	stdoutPath := filepath.Join(logsDir, "mcp-stdout-"+timestamp+".log")
+	stderrPath := filepath.Join(logsDir, "mcp-stderr-"+timestamp+".log")
+
+	// Create stdout log file
+	stdoutFile, err := os.OpenFile(stdoutPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Create stderr log file
+	stderrFile, err := os.OpenFile(stderrPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		stdoutFile.Close()
+		return nil, nil, err
+	}
+
+	return stdoutFile, stderrFile, nil
 }
 
 // MCP creates the mcp command and its subcommands.
@@ -132,6 +178,28 @@ Example VS Code configuration:
 			// corrupting the JSON-RPC stream.
 			originalStdout := os.Stdout
 
+			// Auto-save stdout/stderr to files for debugging (AI assistants consume these streams)
+			stdoutFile, stderrFile, err := createMCPLogFiles()
+			if err != nil {
+				// Log to stderr since we can't use the logger yet
+				fmt.Fprintf(os.Stderr, `{"level":"warn","msg":"failed to create MCP log files: %v"}`+"\n", err)
+				// Continue without file logging
+				stdoutFile = nil
+				stderrFile = nil
+			}
+			if stdoutFile != nil {
+				defer stdoutFile.Close()
+			}
+			if stderrFile != nil {
+				defer stderrFile.Close()
+			}
+
+			// Create a writer that writes to both original stdout and the log file
+			var mcpStdoutWriter io.Writer = originalStdout
+			if stdoutFile != nil {
+				mcpStdoutWriter = io.MultiWriter(originalStdout, stdoutFile)
+			}
+
 			// Redirect os.Stdout to /dev/null so any code that writes to os.Stdout
 			// (banners, colored logs, etc.) doesn't corrupt the JSON-RPC stream.
 			devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -141,8 +209,8 @@ Example VS Code configuration:
 			defer devNull.Close()
 			os.Stdout = devNull
 
-			// Create MCP-safe logger (stderr only, no ANSI codes)
-			mcpLogger := newMCPLogger()
+			// Create MCP-safe logger (stderr only + file, no ANSI codes)
+			mcpLogger := newMCPLogger(stderrFile)
 
 			mcpLogger.Info("Initializing Keploy MCP server")
 
@@ -180,7 +248,7 @@ Example VS Code configuration:
 				Logger:       mcpLogger,
 				MockRecorder: recorder,
 				MockReplayer: replayer,
-				Stdout:       originalStdout, // Use the original stdout for MCP
+				Stdout:       mcpStdoutWriter, // Use the multi-writer for MCP (original stdout + log file)
 			})
 
 			mcpLogger.Info("Starting Keploy MCP server on stdio transport")
