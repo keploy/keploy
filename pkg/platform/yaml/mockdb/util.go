@@ -798,6 +798,5 @@ func decodePostgresV2Message(logger *zap.Logger, yamlSpec *postgres.Spec) (*mode
 		resps = append(resps, postgres.Response{PacketBundle: bundle})
 	}
 	mockSpec.PostgresResponsesV2 = resps
-	// spew.Dump("mockSpec", mockSpec)
 	return &mockSpec, nil
 }

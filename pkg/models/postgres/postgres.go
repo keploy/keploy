@@ -16,16 +16,11 @@ type Spec struct {
 }
 
 type RequestYaml struct {
-	// Header holds the list of packet IDs for all packets in this request entry.
-	// Header  []string          `json:"header,omitempty" yaml:"header,flow,omitempty"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
 }
 
 type ResponseYaml struct {
-	// Header holds the list of packet IDs for all packets in this response entry.
-
-	// Header  []string          `json:"header,omitempty" yaml:"header,flow,omitempty"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
 }
