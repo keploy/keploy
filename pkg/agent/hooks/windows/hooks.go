@@ -115,7 +115,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
-	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, h.dnsPort, mode, h.debug)
+	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, mode, h.debug)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err
