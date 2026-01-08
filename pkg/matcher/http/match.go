@@ -65,7 +65,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	if headerNoise == nil {
 		headerNoise = map[string][]string{}
 	}
-
+if actualResponse.Header == nil {
+    actualResponse.Header = make(map[string]string)
+}
 	for field, regexArr := range noise {
 		a := strings.Split(field, ".")
 		if len(a) > 1 && a[0] == "body" {
