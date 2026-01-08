@@ -245,12 +245,17 @@ section "Shutting Down Mongo Cluster for Replay"
 docker compose down -v 
 echo "✅ Mongo cluster stopped. Replay will rely on Keploy mocks."
 endsec
+sleep 5
 
 # --- Replay Phase ---
 section "Replaying Tests"
 cd $GO_FUZZERS_PATH
 # The test command must match the record command
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 15 --api-timeout=3000 2>&1 | tee test.txt &
+sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test.txt &
+TEST_PID=$!
+echo "Keploy test process started with PID: $TEST_PID"
+wait $TEST_PID
+check_for_errors "test.txt"
 check_test_report
 endsec
 
