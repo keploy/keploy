@@ -31,7 +31,7 @@ import (
 
 // StartRedirector initializes and starts the Windows redirector with configuration
 // Returns error if already running or startup fails
-func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy, dnsPort uint32, mode uint32) error {
+func StartRedirector(clientPID, agentPID, proxyPort uint32, incomingProxy uint16, dnsPort uint32, mode uint32) error {
 	rc := C.start_redirector(C.uint(clientPID), C.uint(agentPID), C.uint(proxyPort), C.uint(incomingProxy), C.uint(dnsPort), C.uint(mode))
 	if rc == 0 {
 		return fmt.Errorf("start_redirector failed (already running or error)")
