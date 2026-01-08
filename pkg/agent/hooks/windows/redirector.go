@@ -21,7 +21,6 @@ unsigned int start_redirector(unsigned int client_pid, unsigned int agent_pid, u
 unsigned int stop_redirector(void);
 WinDest get_destination(unsigned int src_port);
 unsigned int delete_destination(unsigned int src_port);
-void free_windest(WinDest dest);
 */
 import "C"
 
@@ -53,7 +52,6 @@ func StopRedirector() error {
 // Returns (destination, true) if found, or (empty, false) if not found
 func GetDestination(srcPort uint32) (WinDest, bool) {
 	dest := C.get_destination(C.uint(srcPort))
-	// defer C.free_windest(dest)
 	return WinDest{
 		IPVersion: uint32(dest.ip_version),
 		DestIP4:   uint32(dest.dest_ip4),
