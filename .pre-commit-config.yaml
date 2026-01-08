@@ -5,3 +5,7 @@ repos:
     - commit-msg
   repo: https://github.com/commitizen-tools/commitizen
   rev: v2.21.2
+- repo: https://github.com/golangci/golangci-lint
+  rev: v1.61.0
+  hooks:
+    - id: golangci-lint
