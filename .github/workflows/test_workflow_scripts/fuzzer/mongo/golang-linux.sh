@@ -195,6 +195,8 @@ else
 fi
 cd go-fuzzers/mongo
 echo "Now in directory: $(pwd)"
+# store this path in a variable
+GO_FUZZERS_PATH=$(pwd)
 endsec
 
 # Start the sharded Mongo cluster environment.
@@ -246,6 +248,7 @@ endsec
 
 # --- Replay Phase ---
 section "Replaying Tests"
+cd $GO_FUZZERS_PATH
 # The test command must match the record command
 sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 15 --api-timeout=3000 2>&1 | tee test.txt &
 check_for_errors "test.txt"
