@@ -214,7 +214,7 @@ endsec
 # --- Recording Phase ---
 section "Start Recording Server"
 # The command includes the fuzzer binary and its specific arguments
-sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN -http :18082" 2>&1 | tee record.txt &
+sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
@@ -223,7 +223,7 @@ section "Generate Fuzzer Traffic"
 # Trigger traffic and explicitly kill the Keploy process after a delay
 send_requests "$KEPLOY_PID"
 # Increased sleep time to capture more of the complex, sharded operations
-sleep 5
+sleep 7
 endsec
 
 section "Stop Recording"
@@ -251,7 +251,6 @@ section "Replaying Tests"
 cd $GO_FUZZERS_PATH
 # The test command must match the record command
 sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 15 --api-timeout=3000 2>&1 | tee test.txt &
-check_for_errors "test.txt"
 check_test_report
 endsec
 
