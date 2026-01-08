@@ -3,33 +3,36 @@
 package windows
 
 import (
+	"unsafe"
+
 	"golang.org/x/sys/windows"
 )
 
 // isAdmin checks if the current process has administrator privileges on Windows.
 // This is required for loading the WinDivert driver.
 func isAdmin() bool {
-	var sid *windows.SID
-
-	// Get the SID for the built-in Administrators group
-	err := windows.AllocateAndInitializeSid(
-		&windows.SECURITY_NT_AUTHORITY,
-		2,
-		windows.SECURITY_BUILTIN_DOMAIN_RID,
-		windows.DOMAIN_ALIAS_RID_ADMINS,
-		0, 0, 0, 0, 0, 0,
-		&sid)
+	// Get the current process token
+	var token windows.Token
+	err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token)
 	if err != nil {
 		return false
 	}
-	defer windows.FreeSid(sid)
+	defer token.Close()
 
-	// Check if the current process token is a member of the Administrators group
-	token := windows.Token(0)
-	member, err := token.IsMember(sid)
+	// Check if the token is elevated
+	var elevation uint32
+	var returnLength uint32
+	err = windows.GetTokenInformation(
+		token,
+		windows.TokenElevation,
+		(*byte)(unsafe.Pointer(&elevation)),
+		uint32(unsafe.Sizeof(elevation)),
+		&returnLength,
+	)
 	if err != nil {
 		return false
 	}
 
-	return member
+	// elevation is non-zero if the token is elevated
+	return elevation != 0
 }
