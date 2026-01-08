@@ -274,12 +274,51 @@ jobs:
           chmod +x ./mongo-fuzzer
           echo "path=$(realpath ./mongo-fuzzer)" >> $GITHUB_OUTPUT
 
+      - name: Clone go-fuzzers Repository
+        id: clone_fuzzers
+        env:
+          PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
+        run: |
+          set -e
+          RANDOM_NUM=$RANDOM
+          FOLDER_NAME="go-fuzzers-${RANDOM_NUM}"
+          echo "folder=${FOLDER_NAME}" >> $GITHUB_OUTPUT
+          echo "Cloning into ${FOLDER_NAME}..."
+          if [ -n "${PRO_ACCESS_TOKEN:-}" ]; then
+            git clone https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git "${FOLDER_NAME}"
+          else
+            echo "::warning::PRO_ACCESS_TOKEN not set, attempting clone without auth"
+            git clone https://github.com/keploy/go-fuzzers.git "${FOLDER_NAME}"
+          fi
+
       - name: Run Mongo Fuzzer Test
         env:
           RECORD_KEPLOY_BIN:    ${{ steps.record_keploy.outputs.path }}
           REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}
           MONGO_FUZZER_BIN:     ${{ steps.mongo_fuzzer.outputs.path }}
           PRO_ACCESS_TOKEN:     ${{ secrets.PRO_ACCESS_TOKEN }}
+          FUZZERS_FOLDER:       ${{ steps.clone_fuzzers.outputs.folder }}
         run: |
           chmod +x $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mongo/golang-linux.sh
+          cd "${FUZZERS_FOLDER}/mongo"
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mongo/golang-linux.sh
+
+      - name: Print Keploy Report
+        if: always()
+        env:
+          REPLAY_KEPLOY_BIN:    ${{ steps.replay_keploy.outputs.path }}
+          FUZZERS_FOLDER:       ${{ steps.clone_fuzzers.outputs.folder }}
+        run: |
+          cd "${FUZZERS_FOLDER}/mongo"
+          echo "::group::Keploy Report"
+          sudo -E "$REPLAY_KEPLOY_BIN" report || echo "Failed to generate report"
+          echo "::endgroup::"
+
+      - name: Cleanup Cloned Repository
+        if: always()
+        run: |
+          FUZZERS_FOLDER="${{ steps.clone_fuzzers.outputs.folder }}"
+          if [ -n "${FUZZERS_FOLDER}" ] && [ -d "${FUZZERS_FOLDER}" ]; then
+            echo "Removing ${FUZZERS_FOLDER}..."
+            rm -rf "${FUZZERS_FOLDER}"
+          fi
