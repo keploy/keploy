@@ -71,7 +71,7 @@ type SetupOptions struct {
 	ClientNSPID     uint32
 	Container       string
 	KeployContainer string
-	DockerDelay     uint64
+	DockerDelay     time.Duration
 	Synchronous     bool
 	// Cmd               string
 	AgentURI          string
@@ -86,7 +86,7 @@ type SetupOptions struct {
 	AppPorts          []string
 	AppNetworks       []string
 	NetworkAliases    map[string][]string
-	BuildDelay        uint64
+	BuildDelay        time.Duration
 	PassThroughPorts  []uint
 	ConfigPath        string
 	ExtraArgs         []string
