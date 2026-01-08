@@ -71,9 +71,15 @@ type Replayer struct {
 	isLastTestCase  bool
 }
 
+// NewReplayer initializes and returns a replay service responsible for
+// executing recorded test cases by mocking external dependencies,
+// validating responses, and generating test reports.
+//
+// It wires together all the required dependencies such as test storage,
+// mock management, reporting, telemetry, and configuration needed
+// to run Keploy in replay mode
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 
-	// TODO: add some comment.
 	mock := &mock{
 		cfg:        config,
 		storage:    storage,
