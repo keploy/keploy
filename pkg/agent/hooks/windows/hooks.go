@@ -41,6 +41,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyPort:         cfg.ProxyPort,
 		incomingProxyPort: cfg.IncomingProxyPort,
 		dnsPort:           cfg.DNSPort,
+		debug:             cfg.Debug,
 	}
 }
 
@@ -52,6 +53,7 @@ type Hooks struct {
 	proxyPort         uint32
 	incomingProxyPort uint16
 	dnsPort           uint32
+	debug             bool
 	m                 sync.Mutex
 }
 
@@ -113,7 +115,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
-	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, h.dnsPort, mode)
+	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, h.dnsPort, mode, h.debug)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err
