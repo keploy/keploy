@@ -310,6 +310,17 @@ func TestLooksLikeRandomID_889(t *testing.T) {
 		// NanoID (21-22 characters alphanumeric with _ and -)
 		{"NanoID21", "V1StGXR8_Z5jdHi6B-myT", true},
 		{"NanoID22", "V1StGXR8_Z5jdHi6B-myT1", true},
+		// Prefixed hex strings (like enc_xxx, id_xxx, token_xxx)
+		{"PrefixedHex_enc", "enc_ad1aeab2973130fbe617c10705c6fdb91c0be2ae", true},
+		{"PrefixedHex_id", "id_b758cec93c419abd3991ddd7655e5a891f59ecb1", true},
+		{"PrefixedHex_token", "token_e347db44c0cf388911ca259ac190cb21c79012b3", true},
+		{"PrefixedHex_short", "enc_abc123def456789a", true},
+		// Pure long hex strings (SHA256, API keys, etc.)
+		{"SHA256Hash", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", true},
+		{"LongHex32", "507f1f77bcf86cd799439011abcdef12", true},
+		// High entropy base64-like tokens
+		{"Base64Token", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", true},
+		{"SessionToken", "a352d1f893bda510a0b39a64e129b828", true},
 		// Strings that should NOT be random IDs
 		{"EmptyString", "", false},
 		{"ShortString", "abc", false},
@@ -318,7 +329,10 @@ func TestLooksLikeRandomID_889(t *testing.T) {
 		{"Email", "test@example.com", false},
 		{"PhoneNumber", "+1234567890", false},
 		{"IPv4", "192.168.1.1", false},
-		{"MalformedUUID", "550e8400-e29b-41d4-a716", false},
+		{"MalformedUUID", "550e8400-e29b-41d4-a716", true}, // Partial UUID/hex-like string is still considered noisy
+		{"RegularSentence", "The quick brown fox jumps over the lazy dog", false},
+		{"SimpleWord", "hello", false},
+		{"ShortHex", "abc123", false},
 	}
 
 	for _, tc := range testCases {

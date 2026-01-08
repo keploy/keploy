@@ -661,14 +661,17 @@ func LooksLikeTimestamp(s string) bool {
 }
 
 var (
-	objectIDRe  = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
-	base62IDRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,36}$`)
-	nanoIDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{21,22}$`)
-	snowflakeRe = regexp.MustCompile(`^\d{18,19}$`)
+	objectIDRe    = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
+	base62IDRe    = regexp.MustCompile(`^[A-Za-z0-9_-]{16,36}$`)
+	nanoIDRe      = regexp.MustCompile(`^[A-Za-z0-9_-]{21,22}$`)
+	snowflakeRe   = regexp.MustCompile(`^\d{18,19}$`)
+	prefixedHexRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*_[0-9a-fA-F]{16,}$`)
+	pureHexLongRe = regexp.MustCompile(`^[0-9a-fA-F]{32,}$`)
+	base64TokenRe = regexp.MustCompile(`^[A-Za-z0-9+/=_-]{32,}$`)
 )
 
 // LooksLikeRandomID uses specialized libraries to detect various random ID formats:
-// UUID, KSUID, ULID, NanoID, Snowflake IDs, MongoDB ObjectIDs, and generic high-entropy IDs
+// UUID, KSUID, ULID, NanoID, Snowflake IDs, MongoDB ObjectIDs, prefixed hex strings, and generic high-entropy IDs
 func LooksLikeRandomID(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -697,12 +700,66 @@ func LooksLikeRandomID(s string) bool {
 		return true
 	}
 
-	// Fallback: generic high-entropy IDs
-	if !base62IDRe.MatchString(s) {
-		return false
+	// Detect prefixed hex strings like "enc_abc123...", "id_abc123...", "token_abc123..."
+	if prefixedHexRe.MatchString(s) {
+		return true
+	}
+
+	// Detect long pure hex strings (32+ chars, like SHA256 hashes, API keys)
+	if pureHexLongRe.MatchString(s) {
+		return true
+	}
+
+	// Detect base64-like tokens (common for JWT segments, API tokens, session IDs)
+	// Only if length >= 32 to avoid false positives on short strings
+	if len(s) >= 32 && base64TokenRe.MatchString(s) && looksHighEntropy(s) {
+		return true
+	}
+
+	// Fallback: generic high-entropy IDs (16-36 chars)
+	if base62IDRe.MatchString(s) && looksHighEntropy(s) {
+		return true
 	}
 
 	return false
+}
+
+// looksHighEntropy checks if a string has high character diversity (likely random)
+// Returns true if the string has a good mix of different character types
+func looksHighEntropy(s string) bool {
+	if len(s) < 16 {
+		return false
+	}
+
+	var hasUpper, hasLower, hasDigit bool
+	uniqueChars := make(map[rune]struct{})
+
+	for _, c := range s {
+		uniqueChars[c] = struct{}{}
+		if c >= 'A' && c <= 'Z' {
+			hasUpper = true
+		} else if c >= 'a' && c <= 'z' {
+			hasLower = true
+		} else if c >= '0' && c <= '9' {
+			hasDigit = true
+		}
+	}
+
+	// High entropy: has multiple char types and good uniqueness ratio
+	charTypes := 0
+	if hasUpper {
+		charTypes++
+	}
+	if hasLower {
+		charTypes++
+	}
+	if hasDigit {
+		charTypes++
+	}
+
+	// Require at least 2 character types and reasonable uniqueness
+	uniqueRatio := float64(len(uniqueChars)) / float64(len(s))
+	return charTypes >= 2 && uniqueRatio > 0.3
 }
 
 func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
