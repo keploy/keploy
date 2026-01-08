@@ -142,7 +142,7 @@ send_requests() {
   -d '{
     "mode": "record",
     "seed": 424242,
-    "total_ops": 50,
+    "total_ops": 10000,
     "golden_path": "./golden/full_coverage.json",
     "timeout_sec": 1000,
 
