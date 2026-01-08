@@ -20,7 +20,7 @@ import (
 )
 
 // Record records the MySQL traffic between the client and the server.
-func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, clientClose chan bool, opts models.OutgoingOptions) error {
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 
 	var (
 		requests  []mysql.Request
@@ -95,8 +95,6 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	})
 
 	select {
-	case <-clientClose:
-		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
