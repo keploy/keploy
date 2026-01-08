@@ -162,6 +162,8 @@ func (h *Hooks) unLoad(_ context.Context) {
 	if err != nil {
 		h.logger.Error("failed to stop redirector", zap.Error(err))
 	}
+
+	h.logger.Info("Successfully unloaded Windows hooks")
 }
 
 func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
