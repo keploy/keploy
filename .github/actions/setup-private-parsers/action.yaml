@@ -53,6 +53,7 @@ runs:
 
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
+          _ "github.com/keploy/integrations/pkg/postgres/v2/types"
         )
         EOF
     - name: Add any missing Go modules
