@@ -580,6 +580,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
+		rule.DstCfg = dstCfg
 
 	} else {
 		if rule.Mode != models.MODE_TEST {
@@ -590,6 +591,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		}
 		dstCfg.Addr = dstAddr
+		rule.DstCfg = dstCfg
 	}
 
 	// get the mock manager for the current app
@@ -647,16 +649,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-
-			dstCfg := &models.ConditionalDstCfg{
-				Port: uint(destInfo.Port),
-			}
-			rule.DstCfg = dstCfg
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")
