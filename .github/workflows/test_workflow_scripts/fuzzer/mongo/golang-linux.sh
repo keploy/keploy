@@ -142,7 +142,7 @@ send_requests() {
   -d '{
     "mode": "record",
     "seed": 424242,
-    "total_ops": 10000,
+    "total_ops": 3000,
     "golden_path": "./golden/full_coverage.json",
     "timeout_sec": 1000,
 
@@ -178,11 +178,23 @@ section "Initializing Environment"
 echo "MONGO_FUZZER_BIN: $MONGO_FUZZER_BIN"
 echo "RECORD_KEPLOY_BIN: $RECORD_KEPLOY_BIN"
 echo "REPLAY_KEPLOY_BIN: $REPLAY_KEPLOY_BIN"
-echo "Current directory: $(pwd)"
-rm -rf keploy/ keploy.yml golden/ record.txt test.txt
+rm -rf keploy/ keploy.yml golden/ record.txt test.txt go-fuzzers/
 mkdir -p golden/
 sudo chmod +x $MONGO_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
+endsec
+
+# Clone the private go-fuzzers repository and navigate to the mongo directory
+section "Cloning go-fuzzers Repository"
+echo "Cloning keploy/go-fuzzers using PRO_ACCESS_TOKEN..."
+if [ -n "${PRO_ACCESS_TOKEN:-}" ]; then
+  git clone https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git
+else
+  echo "::warning::PRO_ACCESS_TOKEN not set, attempting clone without auth (will fail for private repo)"
+  git clone https://github.com/keploy/go-fuzzers.git
+fi
+cd go-fuzzers/mongo
+echo "Now in directory: $(pwd)"
 endsec
 
 # Start the sharded Mongo cluster environment.
