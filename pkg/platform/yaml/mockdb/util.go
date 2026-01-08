@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -106,7 +107,6 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 	case models.Postgres:
 		// case models.PostgresV2:
-
 		postgresSpec := models.PostgresSpec{
 			Metadata:          mock.Spec.Metadata,
 			PostgresRequests:  mock.Spec.PostgresRequests,
@@ -118,6 +118,42 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		err := yamlDoc.Spec.Encode(postgresSpec)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the postgres input-output as yaml")
+			return nil, err
+		}
+	case models.PostgresV2:
+		requests := []postgres.RequestYaml{}
+		for _, v := range mock.Spec.PostgresRequestsV2 {
+
+			req := postgres.RequestYaml{}
+			err := req.Message.Encode(v.PacketBundle)
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode postgres request wiremessage into yaml")
+				return nil, err
+			}
+			requests = append(requests, req)
+		}
+		responses := []postgres.ResponseYaml{}
+		for _, v := range mock.Spec.PostgresResponsesV2 {
+			resp := postgres.ResponseYaml{}
+			err := resp.Message.Encode(v.PacketBundle)
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode postgres response wiremessage into yaml")
+				return nil, err
+			}
+			responses = append(responses, resp)
+		}
+
+		sqlSpec := postgres.Spec{
+			Metadata:         mock.Spec.Metadata,
+			Requests:         requests,
+			Response:         responses,
+			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(sqlSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the Postgres input-output as yaml")
 			return nil, err
 		}
 	case models.GRPC_EXPORT:
@@ -272,7 +308,6 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 
 		case models.Postgres:
-			// case models.PostgresV2:
 
 			PostSpec := models.PostgresSpec{}
 			err := m.Spec.Decode(&PostSpec)
@@ -289,6 +324,22 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock:  PostSpec.ReqTimestampMock,
 				ResTimestampMock:  PostSpec.ResTimestampMock,
 			}
+		case models.PostgresV2:
+
+			PostSpec := postgres.Spec{}
+			err := m.Spec.Decode(&PostSpec)
+
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into postgresV2 mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+
+			// Convert YAML-friendly Spec to in-memory MockSpec with decoded PacketBundles
+			mockSpec, err := decodePostgresV2Message(logger, &PostSpec)
+			if err != nil {
+				return nil, err
+			}
+			mock.Spec = *mockSpec
 		case models.MySQL:
 			mySQLSpec := mysql.Spec{}
 			err := m.Spec.Decode(&mySQLSpec)
@@ -710,5 +761,41 @@ func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models
 		responses = append(responses, resp)
 	}
 	mockSpec.MongoResponses = responses
+	return &mockSpec, nil
+}
+
+// decodePostgresV2Message decodes a postgres.Spec (YAML-friendly format) into a models.MockSpec
+// by converting RequestYaml/ResponseYaml into concrete postgres.Request/Response with PacketBundles.
+func decodePostgresV2Message(logger *zap.Logger, yamlSpec *postgres.Spec) (*models.MockSpec, error) {
+	mockSpec := models.MockSpec{
+		Metadata:         yamlSpec.Metadata,
+		Created:          yamlSpec.CreatedAt,
+		ReqTimestampMock: yamlSpec.ReqTimestampMock,
+		ResTimestampMock: yamlSpec.ResTimestampMock,
+	}
+
+	// Decode requests
+	reqs := []postgres.Request{}
+	for _, v := range yamlSpec.Requests {
+		var bundle postgres.PacketBundle
+		if err := v.Message.Decode(&bundle); err != nil {
+			utils.LogError(logger, err, "failed to unmarshal yaml document into postgresV2 request PacketBundle")
+			return nil, err
+		}
+		reqs = append(reqs, postgres.Request{PacketBundle: bundle})
+	}
+	mockSpec.PostgresRequestsV2 = reqs
+
+	// Decode responses
+	resps := []postgres.Response{}
+	for _, v := range yamlSpec.Response {
+		var bundle postgres.PacketBundle
+		if err := v.Message.Decode(&bundle); err != nil {
+			utils.LogError(logger, err, "failed to unmarshal yaml document into postgresV2 response PacketBundle")
+			return nil, err
+		}
+		resps = append(resps, postgres.Response{PacketBundle: bundle})
+	}
+	mockSpec.PostgresResponsesV2 = resps
 	return &mockSpec, nil
 }
