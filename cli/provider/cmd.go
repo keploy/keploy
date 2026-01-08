@@ -251,6 +251,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
@@ -301,6 +302,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
@@ -396,6 +398,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
 		"proxyPort":             "proxy-port",
+		"incomingProxyPort":     "incoming-proxy-port",
 		"dnsPort":               "dns-port",
 		"command":               "command",
 		"cmdType":               "cmd-type",
@@ -1209,6 +1212,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ProxyPort = proxyPort
+
+		incomingProxyPort, err := cmd.Flags().GetUint16("incoming-proxy-port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get incomingProxyPort flag")
+			return nil
+		}
+		c.cfg.Agent.IncomingProxyPort = incomingProxyPort
 
 		dnsPort, err := cmd.Flags().GetUint32("dns-port")
 		if err != nil {

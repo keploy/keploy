@@ -33,24 +33,26 @@ var _ embed.FS
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
-		logger:    logger,
-		sess:      agent.NewSessions(),
-		m:         sync.Mutex{},
-		proxyIP4:  "127.0.0.1",
-		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort: cfg.ProxyPort,
-		dnsPort:   cfg.DNSPort,
+		logger:            logger,
+		sess:              agent.NewSessions(),
+		m:                 sync.Mutex{},
+		proxyIP4:          "127.0.0.1",
+		proxyIP6:          [4]uint32{0000, 0000, 0000, 0001},
+		proxyPort:         cfg.ProxyPort,
+		incomingProxyPort: cfg.IncomingProxyPort,
+		dnsPort:           cfg.DNSPort,
 	}
 }
 
 type Hooks struct {
-	logger    *zap.Logger
-	sess      *agent.Sessions
-	proxyIP4  string
-	proxyIP6  [4]uint32
-	proxyPort uint32
-	dnsPort   uint32
-	m         sync.Mutex
+	logger            *zap.Logger
+	sess              *agent.Sessions
+	proxyIP4          string
+	proxyIP6          [4]uint32
+	proxyPort         uint32
+	incomingProxyPort uint16
+	dnsPort           uint32
+	m                 sync.Mutex
 }
 
 func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Agent) error {
@@ -111,7 +113,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
-	err = StartRedirector(clientPID, agentPID, h.proxyPort, uint32(3000), h.dnsPort, dllPath, mode)
+	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, h.dnsPort, dllPath, mode)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err
@@ -168,7 +170,7 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 	ch := make(chan models.IngressEvent, 1024)
 
 	ch <- models.IngressEvent{
-		OrigAppPort: 3000,
+		OrigAppPort: h.incomingProxyPort,
 		NewAppPort:  0000,
 	}
 

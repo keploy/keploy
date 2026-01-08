@@ -17,6 +17,7 @@ templatize:
   testSets: []
 port: 0
 proxyPort: 16789
+incomingProxyPort: 36789
 dnsPort: 26789
 debug: false
 disableANSI: false
