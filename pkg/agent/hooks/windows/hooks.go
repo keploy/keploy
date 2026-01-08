@@ -92,7 +92,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 	}
 
 	// Ensure the WinDivert artifacts are present in the executable's directory.
-	dllPath, err := h.ensureWinDivertAssets()
+	_, err := h.ensureWinDivertAssets()
 	if err != nil {
 		// Log and return the error so load fails fast if writing assets fails.
 		h.logger.Error("failed to ensure windivert assets", zap.Error(err))
@@ -113,7 +113,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
-	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, h.dnsPort, dllPath, mode)
+	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, h.dnsPort, mode)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err

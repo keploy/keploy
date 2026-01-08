@@ -18,7 +18,6 @@ typedef struct {
 } WinDest;
 
 unsigned int start_redirector(unsigned int client_pid, unsigned int agent_pid, unsigned int proxy_port, unsigned int incoming_proxy, unsigned int dns_proxy_port, unsigned int mode);
-unsigned int start_redirector_with_dll_path(unsigned int client_pid, unsigned int agent_pid, unsigned int proxy_port, unsigned int incoming_proxy, unsigned int dns_proxy_port, unsigned int mode, const char* dll_path);
 unsigned int stop_redirector(void);
 WinDest get_destination(unsigned int src_port);
 unsigned int delete_destination(unsigned int src_port);
@@ -28,22 +27,12 @@ import "C"
 
 import (
 	"fmt"
-	"unsafe"
 )
 
 // StartRedirector initializes and starts the Windows redirector with configuration
 // Returns error if already running or startup fails
-func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy, dnsPort uint32, dllPath string, mode uint32) error {
-	var cDllPath *C.char
-	if dllPath == "" {
-		cDllPath = nil
-	} else {
-		cs := C.CString(dllPath)
-		defer C.free(unsafe.Pointer(cs))
-		cDllPath = cs
-	}
-
-	rc := C.start_redirector_with_dll_path(C.uint(clientPID), C.uint(agentPID), C.uint(proxyPort), C.uint(incomingProxy), C.uint(dnsPort), C.uint(mode), cDllPath)
+func StartRedirector(clientPID, agentPID, proxyPort, incomingProxy, dnsPort uint32, mode uint32) error {
+	rc := C.start_redirector(C.uint(clientPID), C.uint(agentPID), C.uint(proxyPort), C.uint(incomingProxy), C.uint(dnsPort), C.uint(mode))
 	if rc == 0 {
 		return fmt.Errorf("start_redirector failed (already running or error)")
 	}
