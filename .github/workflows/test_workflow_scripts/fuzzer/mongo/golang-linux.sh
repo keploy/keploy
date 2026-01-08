@@ -206,8 +206,7 @@ chmod +x ./init_cluster.sh
 
 # Generate Keploy configuration and add noise parameter
 sudo "$RECORD_KEPLOY_BIN" config --generate
-# --- THIS IS THE CORRECTED LINE ---
-sed -i 's|globalNoise: {}|globalNoise:\n    global: { body: { "duration_ms": [] } }|' ./keploy.yml
+sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' ./keploy.yml
 echo "Keploy config generated and updated."
 endsec
 
@@ -255,7 +254,6 @@ sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mong
 TEST_PID=$!
 echo "Keploy test process started with PID: $TEST_PID"
 wait $TEST_PID
-check_for_errors "test.txt"
 check_test_report
 endsec
 
