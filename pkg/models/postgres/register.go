@@ -2,10 +2,6 @@ package postgres
 
 import (
 	"encoding/gob"
-
-	// Import platform-independent gob registrations for PostgresV2 wire types
-	// This ensures macOS/Windows hosts can decode mocks streamed from Linux containers
-	_ "github.com/keploy/integrations/pkg/postgres/v2/types"
 )
 
 // register.go registers all postgres-related structs used inside interface
