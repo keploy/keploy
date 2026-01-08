@@ -580,8 +580,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
-		rule.DstCfg = dstCfg
-
 	} else {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
@@ -591,9 +589,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		}
 		dstCfg.Addr = dstAddr
-		rule.DstCfg = dstCfg
 	}
 
+	rule.DstCfg = dstCfg
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
