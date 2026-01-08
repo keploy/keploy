@@ -242,7 +242,7 @@ endsec
 # --- Teardown before Replay ---
 section "Shutting Down Mongo Cluster for Replay"
 # Tear down the entire docker compose environment to ensure replay relies on mocks
-docker compose down -v || true
+docker compose down -v 
 echo "✅ Mongo cluster stopped. Replay will rely on Keploy mocks."
 endsec
 
