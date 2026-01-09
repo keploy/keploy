@@ -23,6 +23,7 @@ type Config struct {
 	E2E                   bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
 	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	IncomingProxyPort     uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`

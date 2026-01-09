@@ -144,7 +144,7 @@ Set-Content -Path $configFile -Value $configContent
 
 Remove-KeployDirs -Candidates @(".\keploy")
 
-# --- FIX: Recursively Patch ALL Go files for IPv4 ---
+# Recursively patch all Go files for IPv4
 Write-Host "🔍 Patching all .go files to force 127.0.0.1:27017..."
 Get-ChildItem -Filter "*.go" -Recurse | ForEach-Object {
     $fileContent = Get-Content $_.FullName -Raw
