@@ -48,7 +48,7 @@ const (
 
 func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestDB) *Report {
 	r := &Report{
-		logger:   logger,
+		logger:   logger.Named(models.ReportService),
 		config:   cfg,
 		reportDB: reportDB,
 		testDB:   testDB,

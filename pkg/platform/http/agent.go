@@ -48,9 +48,8 @@ type AgentClient struct {
 // var initStopScript []byte
 
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
-
 	return &AgentClient{
-		logger:       logger,
+		logger:       logger.Named(models.ProxyService),
 		dockerClient: client,
 		client:       http.Client{},
 		conf:         c,
@@ -684,6 +683,14 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if a.conf.Debug {
 		args = append(args, "--debug")
+
+		if len(a.conf.DebugModules.Include) > 0 {
+			args = append(args, "--include", strings.Join(a.conf.DebugModules.Include, ","))
+		}
+
+		if len(a.conf.DebugModules.Exclude) > 0 {
+			args = append(args, "--exclude", strings.Join(a.conf.DebugModules.Exclude, ","))
+		}
 	}
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")

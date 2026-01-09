@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
@@ -32,7 +33,7 @@ func NewServiceProvider(logger *zap.Logger, cfg *config.Config, auth service.Aut
 
 func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
 
-	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
+	tel := telemetry.NewTelemetry(n.logger.Named(models.TelemetryService), telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
 		Version:        utils.Version,
 		GlobalMap:      TeleGlobalMap,
