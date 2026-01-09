@@ -31,6 +31,28 @@ test:
   globalNoise:
     global: {}
     test-sets: {}
+    # globalNoise configuration allows you to ignore specific fields during test replay
+    # Examples:
+    #   # Option 1: Ignore entire response body (validates structure, ignores all values)
+    #   global:
+    #     response:
+    #       body:
+    #         "*": ["*"]
+    #
+    #   # Option 2: Ignore specific fields globally (at any depth)
+    #   global:
+    #     response:
+    #       body:
+    #         timestamp: [".*"]
+    #         id: [".*"]
+    #         createdAt: [".*"]
+    #
+    #   # Option 3: Ignore fields at specific paths
+    #   global:
+    #     response:
+    #       body:
+    #         "user.id": [".*"]
+    #         "data.timestamp": [".*"]
   delay: 5
   host: ""
   port: 0

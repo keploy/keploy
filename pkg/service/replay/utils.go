@@ -14,6 +14,7 @@ import (
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
@@ -24,6 +25,74 @@ type TestReportVerdict struct {
 	status    bool
 	duration  time.Duration
 	timeTaken string
+}
+
+// ValidateNoiseConfiguration checks for common mistakes in noise configuration
+// and provides helpful warnings for unsupported patterns
+func ValidateNoiseConfiguration(noise config.GlobalNoise, logger *zap.Logger) {
+	if noise == nil || len(noise) == 0 {
+		return
+	}
+
+	bodyNoise, hasBody := noise["body"]
+	if !hasBody || len(bodyNoise) == 0 {
+		// Still allow header logging below
+	} else {
+		// Inform when entire body is configured to be ignored
+		if arr, ok := bodyNoise["*"]; ok {
+			for _, v := range arr {
+				if v == "*" {
+					logger.Info("Noise applied: entire response body will be ignored", zap.String("field", "*"), zap.Strings("patterns", arr))
+					break
+				}
+			}
+		}
+		// Summarize body noise keys/paths (excluding whole-body marker)
+		keys := make([]string, 0, len(bodyNoise))
+		for k := range bodyNoise {
+			if k == "*" {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		if len(keys) > 0 {
+			logger.Info("Noise applied: body fields/paths ignored", zap.Strings("keys", keys))
+		}
+	}
+
+	for fieldName := range bodyNoise {
+		// Warn about JSONPath patterns (which are not supported in noise config)
+		if strings.HasPrefix(fieldName, "$") {
+			logger.Warn(
+				"JSONPath syntax is not supported in noise configuration",
+				zap.String("field", fieldName),
+				zap.String("note", "Supported formats: (1) '*' for entire body, (2) exact field names (3) dot-separated paths like 'user.id'"),
+			)
+		}
+
+		// Warn about regex-only patterns that look like they should match multiple fields
+		if fieldName == ".*" || fieldName == "*" || strings.Contains(fieldName, ".*") && !strings.Contains(fieldName, ".") {
+			if fieldName == ".*" {
+				logger.Warn(
+					"Use '*' (not '.*') to ignore the entire response body",
+					zap.String("current", "'.*'"),
+					zap.String("should_be", "'*'"),
+					zap.String("example", `{"*": ["*"]}`),
+				)
+			}
+		}
+
+		// Summarize header noise keys for visibility
+		if headerNoise, ok := noise["header"]; ok {
+			if len(headerNoise) > 0 {
+				hdrs := make([]string, 0, len(headerNoise))
+				for k := range headerNoise {
+					hdrs = append(hdrs, k)
+				}
+				logger.Info("Noise applied: headers ignored", zap.Strings("headers", hdrs))
+			}
+		}
+	}
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
