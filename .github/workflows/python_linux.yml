@@ -77,6 +77,11 @@ jobs:
           - name: django-postgres
             path: django-postgres/django_postgres
             script_dir: django_postgres
+            enable_ssl: true
+          - name: django-postgres
+            path: django-postgres/django_postgres
+            script_dir: django_postgres
+            enable_ssl: false
         config:
           - job: record_latest_replay_build
             record_src: latest
@@ -87,7 +92,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})${{ matrix.app.enable_ssl != null && format(' ssl-{0}', matrix.app.enable_ssl) || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -129,6 +134,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          ENABLE_SSL: ${{ matrix.app.enable_ssl || 'false' }}
         run: |
           cd samples-python/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-linux.sh
