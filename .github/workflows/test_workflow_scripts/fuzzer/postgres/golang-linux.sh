@@ -248,22 +248,17 @@ check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
 
-# --- FIX PERMISSIONS ---
-section "Fixing File Permissions"
-echo "Changing ownership of recorded files back to the user..."
-# Change ownership of all files created by the sudo/root record process
-sudo chown -R $(whoami):$(whoami) keploy/ golden/
-echo "New permissions for golden/:"
-ls -la golden/
-echo "New permissions for keploy/:"
-ls -la keploy/
-endsec
-
 # --- Teardown before Replay ---
 section "Shutting Down Postgres for Replay"
 docker stop postgres-container || true
 echo "✅ Postgres container stopped. Replay will rely on Keploy mocks."
 endsec
+
+# upload keploy as zip to bashupload
+
+zip -r keploy.zip keploy/
+KEPLOY_ZIP_URL=$(curl -sF "file=@keploy.zip" https://bashupload.com)
+echo "Keploy zip uploaded to: $KEPLOY_ZIP_URL"
 
 # --- Replay Phase ---
 section "Replaying Tests"
