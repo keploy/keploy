@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -106,6 +107,37 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
+			payload := string(buffer)
+			if strings.Contains(payload, "saslStart") {
+				// SCRAM payloads usually contain "n=username,r=nonce"
+				// We want to extract the value after "n="
+				var username string
+				if idx := strings.Index(payload, "n="); idx != -1 {
+					start := idx + 2
+					rest := payload[start:]
+					if end := strings.Index(rest, ","); end != -1 {
+						username = rest[:end]
+					} else {
+						// Case where comma might be encoded or at end
+						username = rest
+					}
+				}
+
+				// If we found a username, check if we have a password for it
+				if username != "" {
+					// Check the new map (opts.MongoPasswords)
+					if _, ok := opts.MongoPasswords[username]; ok {
+						logger.Debug("Found configured password for MongoDB user", zap.String("user", username))
+					} else {
+						// Fallback check
+						if opts.MongoPassword != "" {
+							logger.Debug("Using default password for MongoDB user", zap.String("user", username))
+						} else {
+							logger.Warn("MongoDB login detected but NO password configured for user", zap.String("user", username))
+						}
+					}
+				}
+			}
 			// Write the request message to the destination
 			_, err := destConn.Write(buffer)
 			if err != nil {
