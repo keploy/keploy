@@ -310,8 +310,10 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
 
-	if err := h.udpp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the udpp4")
+	if h.udpp4 != nil {
+		if err := h.udpp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udpp4")
+		}
 	}
 
 	if err := h.connect4.Close(); err != nil {
