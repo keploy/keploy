@@ -54,7 +54,8 @@ type Hooks struct {
 	m         sync.Mutex
 
 	// Linux-specific fields
-	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
+	objectsMutex sync.RWMutex // Protects eBPF objects during load/
+	//  operations
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
@@ -309,9 +310,11 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if err := h.socket.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
-
-	if err := h.udpp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the udpp4")
+	
+	if h.udpp4!=nil{
+		if err := h.udpp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udpp4")
+		}
 	}
 
 	if err := h.connect4.Close(); err != nil {
