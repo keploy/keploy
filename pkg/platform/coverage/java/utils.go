@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -147,7 +148,7 @@ func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
 	reportDir := "target/site/keployE2E"
 
 	// Ensure the report directory exists
-	if err := os.MkdirAll(reportDir, 0777); err != nil {
+	if err := os.MkdirAll(reportDir, models.DirPermDefault); err != nil {
 		return fmt.Errorf("failed to create report directory: %w", err)
 	}
 

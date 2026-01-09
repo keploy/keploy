@@ -336,7 +336,7 @@ func (p *Proxy) stopUDPDNSServer() error {
 
 const (
 	nsSwitchConfig = "/etc/nsswitch.conf"
-	nsSwitchPerm   = 0644
+	nsSwitchPerm   = models.FilePermReadWrite
 )
 
 // setting up the dns routing for the linux system
