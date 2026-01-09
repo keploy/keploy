@@ -247,11 +247,11 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
 	delay := o.config.Test.Delay
-	time.Sleep(time.Duration(delay) * time.Second)
+	time.Sleep(delay)
 	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
 	}
-	timeout := time.Duration(120+delay) * time.Second
+	timeout := 120*time.Second + delay
 
 	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Duration("WaitTimeout", timeout), zap.String("CommandType", string(cmdType)))
 

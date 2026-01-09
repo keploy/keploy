@@ -29,7 +29,7 @@ type Config struct {
 	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
 	ContainerName         string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay            uint64              `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	BuildDelay            time.Duration       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test                `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
 	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
@@ -95,7 +95,7 @@ type ReRecord struct {
 	Port          uint32          `json:"port" yaml:"port" mapstructure:"port"`
 	ShowDiff      bool            `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
 	GRPCPort      uint32          `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	APITimeout    uint64          `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	APITimeout    time.Duration   `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	AmendTestSet  bool            `json:"amendTestSet" yaml:"amendTestSet" mapstructure:"amendTestSet"`
 	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
 	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
@@ -123,11 +123,11 @@ type Normalize struct {
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	Delay               uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	Delay               time.Duration       `json:"delay" yaml:"delay" mapstructure:"delay"`
 	Host                string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort            uint32              `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
-	APITimeout          uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
+	APITimeout          time.Duration       `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	SkipCoverage        bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
 	CoverageReportPath  string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering      bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
