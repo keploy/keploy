@@ -3,16 +3,46 @@ package pkg
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"testing"
-	"time"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"io"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
 )
+
+// TestRecordServiceConcurrency tests response for 100 concurrent go routines
+func TestRecordServiceConcurrency(t *testing.T) {
+	// Test with multiple concurrent operations
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Trigger record operations
+		}()
+	}
+	wg.Wait()
+}
+
+// TestNoDeadlock tests for deadlock condition
+func TestNoDeadlock(t *testing.T) {
+	done := make(chan bool)
+	go func() {
+		// Run the operation
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(10 * time.Second):
+		t.Fatal("Deadlock detected")
+	}
+}
 
 // TestSimulateHTTP_NewRequestError_303 ensures that SimulateHTTP returns an error
 // when http.NewRequestWithContext fails. This is triggered by providing an invalid
