@@ -411,6 +411,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	destBufferChannel := make(chan []byte)
 	clientBufferChannel := make(chan []byte)
 	errChannel := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 	passthroughContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -423,16 +425,23 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				utils.LogError(logger, err, "failed to close the destination connection")
 			}
 		}(destConn)
-
+		defer wg.Done()
 		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
 	}()
 
 	go func() {
 		defer Recover(logger, clientConn, nil)
 		defer close(clientBufferChannel)
+
+		defer wg.Done()
 		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
 	}()
 
+	go func() {
+		defer wg.Done()
+		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
+
+	}()
 	for {
 		select {
 		case <-ctx.Done():
