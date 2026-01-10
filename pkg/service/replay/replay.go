@@ -731,7 +731,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		timeout := r.config.Agent.Timeout
+		if timeout == 0 {
+			timeout = 60 * time.Second // default fallback
+		}
+		agentCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
