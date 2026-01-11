@@ -87,9 +87,9 @@ func (tel *Telemetry) TestRun(success int, failure int, testSetsCount int, runSt
 }
 
 // MockTestRun is Telemetry event for the Mocking feature test run
-func (tel *Telemetry) MockTestRun(uMocks int) {
+func (tel *Telemetry) MockTestRun(utilizedMocksCount int) {
 	dataMap := &sync.Map{}
-	dataMap.Store(utilizedMocks, uMocks)
+	dataMap.Store(utilizedMocks, utilizedMocksCount)
 	go tel.SendTelemetry("MockTestRun", dataMap)
 }
 
