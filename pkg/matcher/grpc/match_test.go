@@ -116,7 +116,8 @@ func TestMatch_JSONComparison(t *testing.T) {
 
 			// Ensure result is not nil
 			if result == nil {
-				t.Errorf("Test %q failed: result should not be nil", tt.name)
+				t.Fatalf("Test %q failed: result should not be nil", tt.name)
+				return // Add this return just to be safe and satisfy the linter
 			}
 
 			// Check that body result has the correct data
