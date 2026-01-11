@@ -68,21 +68,21 @@ func (tel *Telemetry) Ping() {
 	}()
 }
 
-func (tel *Telemetry) TestSetRun(success int, failure int, ts string, rs string) {
+func (tel *Telemetry) TestSetRun(success int, failure int, testSetVal string, runStatus string) {
 	dataMap := &sync.Map{}
 	dataMap.Store(passedTests, success)
 	dataMap.Store(failedTests, failure)
-	dataMap.Store(testSet, ts)
-	dataMap.Store(runStatus, rs)
+	dataMap.Store(testSet, testSetVal)
+	dataMap.Store(runStatus, runStatus)
 	go tel.SendTelemetry("TestSetRun", dataMap)
 }
 
-func (tel *Telemetry) TestRun(success int, failure int, ts int, rs string) {
+func (tel *Telemetry) TestRun(success int, failure int, testSetsVal int, runStatus string) {
 	dataMap := &sync.Map{}
 	dataMap.Store(passedTests, success)
 	dataMap.Store(failedTests, failure)
-	dataMap.Store(testSets, ts)
-	dataMap.Store(runStatus, rs)
+	dataMap.Store(testSets, testSetsVal)
+	dataMap.Store(runStatus, runStatus)
 	go tel.SendTelemetry("TestRun", dataMap)
 }
 
@@ -94,9 +94,9 @@ func (tel *Telemetry) MockTestRun(uMocks int) {
 }
 
 // RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
-func (tel *Telemetry) RecordedTestSuite(ts string, totalTests int, mockTotal map[string]int) {
+func (tel *Telemetry) RecordedTestSuite(testSetVal string, totalTests int, mockTotal map[string]int) {
 	dataMap := &sync.Map{}
-	dataMap.Store(testSet, ts)
+	dataMap.Store(testSet, testSetVal)
 	dataMap.Store(tests, totalTests)
 
 	mockMap := &sync.Map{}
