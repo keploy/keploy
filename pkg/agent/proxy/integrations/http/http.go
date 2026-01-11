@@ -59,7 +59,7 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	return isHTTP
 }
 
-func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, clientClose chan bool, opts models.OutgoingOptions) error {
+func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
