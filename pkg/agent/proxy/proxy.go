@@ -345,7 +345,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	rule, ok := p.sessions.Get(uint64(0))
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
-		return err
+		return fmt.Errorf("failed to fetch the session rule")
 	}
 
 	mgr := syncMock.Get()
@@ -444,7 +444,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		m, ok := p.MockManagers.Load(uint64(0))
 		if !ok {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
-			return err
+			return fmt.Errorf("failed to fetch the mock manager")
 		}
 
 		//mock the outgoing message
@@ -493,14 +493,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
 	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the client connection id")
-		return err
+		utils.LogError(p.logger, nil, "failed to fetch the client connection id")
+		return fmt.Errorf("failed to fetch the client connection id")
 	}
 
 	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
 	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
-		return err
+		utils.LogError(p.logger, nil, "failed to fetch the destination connection id")
+		return fmt.Errorf("failed to fetch the destination connection id")
 	}
 
 	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
@@ -553,14 +553,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// get the destinationUrl from the map for the tls connection
 		url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
 		if !ok {
-			utils.LogError(logger, err, "failed to fetch the destination url")
-			return err
+			utils.LogError(logger, nil, "failed to fetch the destination url")
+			return fmt.Errorf("failed to fetch the destination url")
 		}
 		//type case the dstUrl to string
 		dstURL, ok := url.(string)
 		if !ok {
-			utils.LogError(logger, err, "failed to type cast the destination url")
-			return err
+			utils.LogError(logger, nil, "failed to type cast the destination url")
+			return fmt.Errorf("failed to type cast the destination url")
 		}
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
@@ -595,8 +595,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager")
-		return err
+		utils.LogError(logger, nil, "failed to fetch the mock manager")
+		return fmt.Errorf("failed to fetch the mock manager")
 	}
 
 	generic := true
