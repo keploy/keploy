@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -25,6 +26,7 @@ const (
 	REDIS       Kind = "Redis"
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
+	PostgresV2  Kind = "PostgresV2"
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
 )
@@ -49,24 +51,27 @@ func (m *Mock) GetKind() string {
 }
 
 type MockSpec struct {
-	Metadata          map[string]string `json:"Metadata,omitempty" bson:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	GenericRequests   []Payload         `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
-	GenericResponses  []Payload         `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
-	RedisRequests     []Payload         `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
-	RedisResponses    []Payload         `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
-	HTTPReq           *HTTPReq          `json:"Req,omitempty" bson:"http_req,omitempty"`
-	HTTPResp          *HTTPResp         `json:"Res,omitempty" bson:"http_resp,omitempty"`
-	Created           int64             `json:"Created,omitempty" bson:"created,omitempty"`
-	MongoRequests     []MongoRequest    `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
-	MongoResponses    []MongoResponse   `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
-	PostgresRequests  []Backend         `json:"postgresRequests,omitempty" bson:"postgres_requests,omitempty"`
-	PostgresResponses []Frontend        `json:"postgresResponses,omitempty" bson:"postgres_responses,omitempty"`
-	GRPCReq           *GrpcReq          `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
-	GRPCResp          *GrpcResp         `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
-	MySQLRequests     []mysql.Request   `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
-	MySQLResponses    []mysql.Response  `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
-	ReqTimestampMock  time.Time         `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
-	ResTimestampMock  time.Time         `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	Metadata            map[string]string   `json:"Metadata,omitempty" bson:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	GenericRequests     []Payload           `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
+	GenericResponses    []Payload           `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
+	RedisRequests       []Payload           `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
+	RedisResponses      []Payload           `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
+	HTTPReq             *HTTPReq            `json:"Req,omitempty" bson:"http_req,omitempty"`
+	HTTPResp            *HTTPResp           `json:"Res,omitempty" bson:"http_resp,omitempty"`
+	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
+	MongoRequests       []MongoRequest      `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
+	MongoResponses      []MongoResponse     `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
+	PostgresRequests    []Backend           `json:"postgresRequests,omitempty" bson:"postgres_requests,omitempty"`
+	PostgresResponses   []Frontend          `json:"postgresResponses,omitempty" bson:"postgres_responses,omitempty"`
+	PostgresRequestsV2  []postgres.Request  `json:"PostgresRequestsV2,omitempty" bson:"postgres_requests_v2,omitempty"`
+	PostgresResponsesV2 []postgres.Response `json:"PostgresResponsesV2,omitempty" bson:"postgres_responses_v2,omitempty"`
+	// gRPC
+	GRPCReq          *GrpcReq         `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
+	GRPCResp         *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
+	MySQLRequests    []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
+	MySQLResponses   []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	ReqTimestampMock time.Time        `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
+	ResTimestampMock time.Time        `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
