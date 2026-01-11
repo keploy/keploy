@@ -11,12 +11,12 @@ import (
 	"strconv"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/utils"
-
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -59,7 +59,7 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 	return isHTTP
 }
 
-func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, clientClose chan bool, opts models.OutgoingOptions) error {
+func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
@@ -105,7 +105,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return err
 	}
 
-	// Set the host header explicitely because the `http.ReadRequest`` trim the host header
+	// Set the host header explicitly because the `http.ReadRequest`` trim the host header
 	// func ReadRequest(b *bufio.Reader) (*Request, error) {
 	// 	req, err := readRequest(b)
 	// 	if err != nil {
@@ -180,7 +180,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
-	mocks <- &models.Mock{
+	newMock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
 		Kind:    models.HTTP,
@@ -206,5 +206,13 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			ResTimestampMock: mock.ResTimestampMock,
 		},
 	}
+
+	if opts.Synchronous {
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.AddMock(newMock)
+			return nil
+		}
+	}
+	mocks <- newMock
 	return nil
 }

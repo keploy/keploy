@@ -185,7 +185,7 @@ send_requests() {
       "password": "password",
       "dbName": "postgres",
       "seed": 12345,
-      "totalOps": 200,
+      "totalOps": 2000,
       "drop_db_first": true,
       "schema": "fuzz_schema_12345"
     }'
@@ -243,7 +243,7 @@ else
   echo "No Keploy record process found to kill."
 fi
 
-sleep 5
+sleep 10
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
