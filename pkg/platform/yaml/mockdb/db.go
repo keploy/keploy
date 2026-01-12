@@ -2,7 +2,6 @@
 package mockdb
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -57,18 +56,18 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		utils.LogError(ys.Logger, err, "failed to find the mocks yaml file")
 		return err
 	}
-	data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
+	// Use buffered reader instead of loading entire file into memory
+	reader, err := yaml.NewLineBasedMockReader(ctx, ys.Logger, path, mockFileName)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
 		return err
 	}
+	defer reader.Close()
 
-	// decode the mocks read from the yaml file
-	dec := yamlLib.NewDecoder(bytes.NewReader(data))
+	// decode the mocks read from the yaml file using streaming reader
 	var mockYamls []*yaml.NetworkTrafficDoc
 	for {
-		var doc *yaml.NetworkTrafficDoc
-		err := dec.Decode(&doc)
+		doc, err := reader.ReadNextDoc()
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -104,7 +103,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			utils.LogError(ys.Logger, err, "failed to encode the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
 			return err
 		}
-		data, err = yamlLib.Marshal(&mockYaml)
+		data, err := yamlLib.Marshal(&mockYaml)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
 			return err
@@ -165,25 +164,24 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
+		// Use buffered reader for memory-efficient reading of large mock files
+		reader, err := yaml.NewLineBasedMockReader(ctx, ys.Logger, path, mockFileName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
 			return nil, err
 		}
-		if len(data) == 0 {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
-			return nil, fmt.Errorf("failed to get mocks, empty file")
-		}
-		dec := yamlLib.NewDecoder(bytes.NewReader(data))
+		defer reader.Close()
+
+		hasContent := false
 		for {
-			var doc *yaml.NetworkTrafficDoc
-			err := dec.Decode(&doc)
+			doc, err := reader.ReadNextDoc()
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
 				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
 			}
+			hasContent = true
 
 			// Decode each YAML document into models.Mock as it is read.
 			mocks, err := DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
@@ -211,6 +209,11 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 				}
 			}
 		}
+
+		if !hasContent {
+			utils.LogError(ys.Logger, nil, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
+			return nil, fmt.Errorf("failed to get mocks, empty file")
+		}
 	}
 
 	filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime)
@@ -234,15 +237,16 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockName)
+		// Use buffered reader for memory-efficient reading of large mock files
+		reader, err := yaml.NewLineBasedMockReader(ctx, ys.Logger, path, mockName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
 			return nil, err
 		}
-		dec := yamlLib.NewDecoder(bytes.NewReader(data))
+		defer reader.Close()
+
 		for {
-			var doc *yaml.NetworkTrafficDoc
-			err := dec.Decode(&doc)
+			doc, err := reader.ReadNextDoc()
 			if errors.Is(err, io.EOF) {
 				break
 			}

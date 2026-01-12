@@ -283,8 +283,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		})
 	}
 
-	r.logger.Info("🔴 Stopping Keploy recording... Please wait.")
-
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
 		errGrp.Go(func() error {
