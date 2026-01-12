@@ -1425,3 +1425,24 @@ func isValidGRPCIdentifier(name string) bool {
 
 	return true
 }
+
+// GetFullCommandUsed returns the full command that was used to run keploy.
+// It captures os.Args and attempts to detect parent process commands like sudo/env on Linux.
+func GetFullCommandUsed() string {
+	args := os.Args
+
+	// Build the command string with proper quoting for arguments containing spaces
+	var parts []string
+	for _, arg := range args {
+		if strings.Contains(arg, " ") || strings.Contains(arg, "\"") {
+			// Quote the argument if it contains spaces or quotes
+			parts = append(parts, fmt.Sprintf("%q", arg))
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+
+	cmdStr := strings.Join(parts, " ")
+
+	return cmdStr
+}
