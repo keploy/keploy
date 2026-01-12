@@ -44,15 +44,14 @@ runs:
         echo "Fetching private integrations dependency via SSH..."
         GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${{ inputs.integration-ref }}
         
-        echo "Creating extraparsers.go..."
+        echo "Creating extraparsers.go (platform-independent)..."
         mkdir -p pkg/agent/proxy
         cat <<'EOF' > pkg/agent/proxy/extraparsers.go
-        //go:build linux
-
         package proxy
 
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
+        	_ "github.com/keploy/integrations/pkg/postgres/v2/types"
         )
         EOF
     - name: Add any missing Go modules
