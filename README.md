@@ -103,6 +103,10 @@ This helps expand API Schema, Statement, and Branch Coverage.
 
 ## Quick Start
 
+> **Note:** Make sure Docker is installed and running before starting Keploy.
+
+
+
 ### 1. Install Keploy Agent
 
 ```bash
