@@ -143,6 +143,28 @@ func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byt
 	return data, nil
 }
 
+// OpenYAMLFileReader opens a YAML file and returns an io.ReadCloser for streaming.
+func OpenYAMLFileReader(path, name string) (io.ReadCloser, error) {
+	filePath := filepath.Join(path, name+".yaml")
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file for streaming: %w", err)
+	}
+
+	// Check for empty file
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	if stat.Size() == 0 {
+		file.Close()
+		return nil, fmt.Errorf("empty mock yaml file: %s", filePath)
+	}
+
+	return file, nil
+}
+
 func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
