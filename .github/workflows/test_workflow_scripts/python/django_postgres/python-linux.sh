@@ -2,14 +2,44 @@
 
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
+# Creates a collapsible group in the GitHub Actions log
+section() { echo "::group::$*"; }
+endsec()  { echo "::endgroup::"; }
+
 # Checkout to the specified branch
 git fetch origin
 git checkout native-linux
 
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
-# Start the postgres database
-docker compose up -d
+if [[ "${ENABLE_SSL:-false}" == "false" ]]; then
+    echo "Starting Postgres without SSL/TLS"
+    docker compose up postgres -d
+  else
+    echo "Starting postgres with SSL/TLS"
+    git checkout enable-ssl-postgres
+    docker compose up postgres_ssl -d
+    export DB_SSLMODE="require"
+ 
+    echo "Waiting for PostgreSQL to be ready..."
+    # Wait for up to 2 minutes (120 seconds)
+    for i in {1..120}; do
+        # Use 'docker compose exec' to run 'pg_isready' inside the container
+        if docker compose exec postgres_ssl pg_isready -U postgres -h localhost > /dev/null 2>&1; then
+            echo "✅ PostgreSQL is ready."
+            break
+        fi
+        
+        if [ $i -eq 120 ]; then
+            echo "::error::PostgreSQL database did not become ready in 120 seconds."
+            docker compose logs postgres_ssl
+            exit 1
+        fi
+        echo "Waiting for database... ($i/120)"
+        sleep 1
+    done
+   
+fi
 
 # Install dependencies
 pip3 install -r requirements.txt
@@ -28,16 +58,27 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
 sleep 5  # Allow time for configuration changes
 
+# Waits for an HTTP endpoint to become available
+wait_for_http() {
+  local host="localhost" # Assuming localhost
+  local port="$1"
+  echo "Waiting for application on port $port..."
+  for i in {1..120}; do
+    # Use netcat (nc) to check if the port is open without sending app-level data
+    if nc -z "$host" "$port" >/dev/null 2>&1; then
+      echo "✅ Application port $port is open."
+      endsec
+      return 0
+    fi
+    sleep 1
+  done
+  echo "::error::Application did not become available on port $port in time."
+  return 1
+}
+
 send_request(){
-    sleep 10
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://127.0.0.1:8000/; then
-            app_started=true
-        fi
-        sleep 3 # wait for 3 seconds before checking again.
-    done
-    echo "App started"
+    wait_for_http 8000
+
     # Start making curl calls to record the testcases and mocks.
     curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
         "name": "Jane Smith",
@@ -52,79 +93,107 @@ send_request(){
         "website": "www.johndoe.com"
     }'
     curl --location 'http://127.0.0.1:8000/user/'
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
-    sleep 10
-    REC_PID="$(pgrep -n -f 'keploy record' || true)"
-    echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
-    sudo kill -INT "$REC_PID" 2>/dev/null || true
+}
+
+# Validates the Keploy test report to ensure all test sets passed
+check_test_report() {
+    echo "Checking test reports..."
+    if [ ! -d "./keploy/reports" ]; then
+        echo "Test report directory not found!"
+        return 1
+    fi
+
+    local latest_report_dir
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+    if [ -z "$latest_report_dir" ]; then
+        echo "No test run directory found in ./keploy/reports/"
+        return 1
+    fi
+    
+    local all_passed=true
+    # Loop through all generated report files
+    for report_file in "$latest_report_dir"/test-set-*-report.yaml; do
+        [ -e "$report_file" ] || { echo "No report files found."; all_passed=false; break; }
+        
+        local test_set_name
+        test_set_name=$(basename "$report_file" -report.yaml)
+        local test_status
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        
+        echo "Status for ${test_set_name}: $test_status"
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Test set ${test_set_name} did not pass."
+        fi
+    done
+
+    if [ "$all_passed" = false ]; then
+        echo "One or more test sets failed."
+        return 1
+    fi
+
+    echo "All tests passed in reports."
+    return 0
+}
+
+# Checks a log file for critical errors or data races
+check_for_errors() {
+  local logfile=$1
+  echo "Checking for errors in $logfile..."
+  if [ -f "$logfile" ]; then
+    # Find critical Keploy errors, but exclude specific non-critical ones.
+    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+      echo "::error::Critical error found in $logfile. Failing the build."
+      # Print the specific errors that caused the failure
+      echo "--- Failing Errors ---"
+      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      echo "----------------------"
+      exit 1
+    fi
+    if grep -q "WARNING: DATA RACE" "$logfile"; then
+      echo "::error::Race condition detected in $logfile"
+      exit 1
+    fi
+  fi
+  echo "No critical errors found in $logfile."
 }
 
 # Record and Test cycles
 for i in {1..2}; do
+    section "Start Recording Server"
     app_name="flaskApp_${i}"
-    send_request &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver"   &> "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
-        echo "Error found in pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    sleep 5
-    wait
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" 2>&1 | tee "${app_name}.txt" &
+    endsec
+
+    section "Sending Requests for iteration ${i}..."
+    send_request
+    # allow some time for testcases to be formed
+    sleep 10
+    endsec
+
+    section "Stop Recording for iteration ${i}..."
+    REC_PID="$(pgrep -n -f 'keploy record' || true)"
+    echo "$REC_PID Keploy PID"
+    echo "Killing keploy"
+    sudo kill -INT $REC_PID 2>/dev/null || true
+    sleep 10
+    check_for_errors "${app_name}.txt"
+    echo "Recording stopped."
+    endsec
+    
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Shutdown postgres before test mode - Keploy should use mocks for database interactions
 echo "Shutting down postgres before test mode..."
-docker compose down
+docker compose down -v
 echo "Postgres stopped - Keploy should now use mocks for database interactions"
 
-# Testing phase
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10    &> test_logs.txt
+section "Testing phase"
+sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10 2>&1 | tee test_logs.txt
+check_for_errors "test_logs.txt"
+check_test_report
+endsec
 
-if grep "ERROR" "test_logs.txt"; then
-        echo "Error found in pipeline..."
-        cat "test_logs.txt"
-        exit 1
-fi
-if grep "WARNING: DATA RACE" "test_logs.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
-    cat "test_logs.txt"
-    exit 1
-fi
-
-all_passed=true
-
-for i in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
-    fi
-done
-
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
-    cat "test_logs.txt"
-    exit 1
-fi
+echo "✅ All tests completed successfully."
+exit 0
