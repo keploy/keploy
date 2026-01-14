@@ -777,8 +777,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 }
 
 func (a *AgentClient) requestAgentStop() error {
-	if a.conf == nil || a.conf.Agent.AgentURI == "" {
-		return nil
+	if a.conf == nil {
+		return fmt.Errorf("agent config is nil")
+	}
+	if a.conf.Agent.AgentURI == "" {
+		return fmt.Errorf("agent URI is not configured")
 	}
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
