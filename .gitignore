@@ -63,3 +63,6 @@ testdata
 __debug_bin*
 keploy
 extraparsers.go
+
+# Ignore mockery generated files
+*_mock.go
