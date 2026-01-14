@@ -775,14 +775,13 @@ func (a *AgentClient) stopAgent() {
 	}
 
 	if a.agentCmd != nil && a.agentCmd.Process != nil {
-		a.logger.Info("Stopping keploy agent", zap.Int("pid", a.agentCmd.Process.Pid))
-		err := a.agentCmd.Process.Kill()
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to kill keploy agent process")
+		pid := a.agentCmd.Process.Pid
+		a.logger.Info("Stopping keploy agent", zap.Int("pid", pid))
+		if err := agentUtils.StopCommand(a.agentCmd, a.logger); err != nil {
+			utils.LogError(a.logger, err, "failed to stop keploy agent process")
 		} else {
-			a.logger.Info("Keploy agent process killed successfully")
+			a.logger.Info("Keploy agent stop signal sent", zap.Int("pid", pid))
 		}
-		a.agentCmd = nil
 	}
 }
 
