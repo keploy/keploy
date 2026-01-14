@@ -136,16 +136,21 @@ func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) Stop(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte("Agent is stopping\n")); err != nil {
-		a.logger.Error("failed to write response", zap.Error(err))
+	// Stop the agent first
+	if err := utils.Stop(a.logger, "stop requested via agent API"); err != nil {
+		a.logger.Error("failed to stop agent", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, writeErr := w.Write([]byte("Failed to stop agent\n")); writeErr != nil {
+			a.logger.Error("failed to write error response", zap.Error(writeErr))
+		}
+		return
 	}
 
-	go func() {
-		if err := utils.Stop(a.logger, "stop requested via agent API"); err != nil {
-			a.logger.Error("failed to stop agent", zap.Error(err))
-		}
-	}()
+	// Send response after agent has stopped successfully
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Agent stopped successfully\n")); err != nil {
+		a.logger.Error("failed to write response", zap.Error(err))
+	}
 }
 
 func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {

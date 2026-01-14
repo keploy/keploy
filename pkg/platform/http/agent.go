@@ -757,7 +757,16 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 			return nil
 		}
 		if err := a.requestAgentStop(); err != nil {
-			a.logger.Warn("failed to request keploy agent shutdown", zap.Error(err))
+			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			// Fallback: forcefully stop the agent process
+			a.mu.Lock()
+			cmd := a.agentCmd
+			a.mu.Unlock()
+			if cmd != nil {
+				if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
+					a.logger.Error("failed to forcefully stop agent", zap.Error(stopErr))
+				}
+			}
 			return nil
 		}
 		a.logger.Info("Keploy agent shutdown requested", zap.Int("pid", pid))
