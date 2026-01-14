@@ -753,14 +753,43 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
-			// Process already finished is expected during graceful shutdown, not an error
-			if stopErr.Error() != "os: process already finished" {
-				utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
-			}
+		if a.conf.Agent.AgentURI == "" {
+			return nil
 		}
+		if err := a.requestAgentStop(); err != nil {
+			a.logger.Warn("failed to request keploy agent shutdown", zap.Error(err))
+			return nil
+		}
+		a.logger.Info("Keploy agent shutdown requested", zap.Int("pid", pid))
 		return nil
 	})
+
+	return nil
+}
+
+func (a *AgentClient) requestAgentStop() error {
+	if a.conf == nil || a.conf.Agent.AgentURI == "" {
+		return nil
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(stopCtx, http.MethodPost, fmt.Sprintf("%s/stop", a.conf.Agent.AgentURI), nil)
+	if err != nil {
+		return err
+	}
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("agent stop http %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	return nil
 }
@@ -777,11 +806,6 @@ func (a *AgentClient) stopAgent() {
 	if a.agentCmd != nil && a.agentCmd.Process != nil {
 		pid := a.agentCmd.Process.Pid
 		a.logger.Info("Stopping keploy agent", zap.Int("pid", pid))
-		if err := agentUtils.StopCommand(a.agentCmd, a.logger); err != nil {
-			utils.LogError(a.logger, err, "failed to stop keploy agent process")
-		} else {
-			a.logger.Info("Keploy agent stop signal sent", zap.Int("pid", pid))
-		}
 	}
 }
 
