@@ -520,20 +520,45 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	return release, nil
 }
 
-// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
-func FindDockerCmd(cmd string) CmdType {
+// FindContainerCmd checks if the CLI is related to Docker or Podman containers
+// It returns the appropriate CmdType for the detected command
+func FindContainerCmd(cmd string) CmdType {
 	if cmd == "" {
 		return Empty
 	}
 	// Convert command to lowercase for case-insensitive comparison
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
-	// Define patterns for Docker and Docker Compose
+	// Define patterns for Podman (check first as it's more specific)
+	podmanComposePatterns := []string{"podman-compose", "sudo podman-compose", "podman compose", "sudo podman compose"}
+	podmanRunPatterns := []string{"podman run", "sudo podman run", "podman container run", "sudo podman container run"}
+	podmanStartPatterns := []string{"podman start", "sudo podman start", "podman container start", "sudo podman container start"}
+
+	// Define patterns for Docker
 	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run"}
 	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start"}
 	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
 
-	// Check for Docker Compose command patterns and file extensions
+	// Check for Podman Compose command patterns
+	for _, pattern := range podmanComposePatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return PodmanCompose
+		}
+	}
+	// Check for Podman start command patterns
+	for _, pattern := range podmanStartPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return PodmanStart
+		}
+	}
+	// Check for Podman run command patterns
+	for _, pattern := range podmanRunPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return PodmanRun
+		}
+	}
+
+	// Check for Docker Compose command patterns
 	for _, pattern := range dockerComposePatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
 			return DockerCompose
@@ -554,6 +579,12 @@ func FindDockerCmd(cmd string) CmdType {
 	return Native
 }
 
+// FindDockerCmd is deprecated, use FindContainerCmd instead.
+// Kept for backward compatibility.
+func FindDockerCmd(cmd string) CmdType {
+	return FindContainerCmd(cmd)
+}
+
 type CmdType string
 
 // CmdType constants
@@ -561,6 +592,9 @@ const (
 	DockerRun     CmdType = "docker-run"
 	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
+	PodmanRun     CmdType = "podman-run"
+	PodmanStart   CmdType = "podman-start"
+	PodmanCompose CmdType = "podman-compose"
 	Native        CmdType = "native"
 	Empty         CmdType = ""
 )
@@ -1141,6 +1175,54 @@ func getHomeDir() (string, error) {
 
 func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
+}
+
+// IsPodmanCmd returns true if the command type is a Podman command
+func IsPodmanCmd(kind CmdType) bool {
+	return (kind == PodmanRun || kind == PodmanStart || kind == PodmanCompose)
+}
+
+// IsContainerCmd returns true if the command type is either Docker or Podman
+func IsContainerCmd(kind CmdType) bool {
+	return IsDockerCmd(kind) || IsPodmanCmd(kind)
+}
+
+// GetContainerSocket returns the appropriate container runtime socket path
+// based on the command type. For Podman commands, it attempts to find the
+// podman socket in standard locations. For Docker commands or if podman
+// socket is not found, it returns the default docker socket.
+func GetContainerSocket(kind CmdType) string {
+	if IsPodmanCmd(kind) {
+		// Try to find podman socket in standard locations (rootless first)
+		// 1. XDG_RUNTIME_DIR/podman/podman.sock (rootless, most common)
+		if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+			sock := filepath.Join(xdg, "podman", "podman.sock")
+			if _, err := os.Stat(sock); err == nil {
+				return "unix://" + sock
+			}
+		}
+
+		// 2. /run/user/{UID}/podman/podman.sock (rootless fallback)
+		if uid := os.Getuid(); uid != 0 {
+			sock := fmt.Sprintf("/run/user/%d/podman/podman.sock", uid)
+			if _, err := os.Stat(sock); err == nil {
+				return "unix://" + sock
+			}
+		}
+
+		// 3. /var/run/podman/podman.sock (rootful)
+		if _, err := os.Stat("/var/run/podman/podman.sock"); err == nil {
+			return "unix:///var/run/podman/podman.sock"
+		}
+
+		// 4. /run/podman/podman.sock (rootful alternative)
+		if _, err := os.Stat("/run/podman/podman.sock"); err == nil {
+			return "unix:///run/podman/podman.sock"
+		}
+	}
+
+	// Default to Docker socket
+	return "unix:///var/run/docker.sock"
 }
 
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
