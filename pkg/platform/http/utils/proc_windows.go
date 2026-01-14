@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"go.uber.org/zap"
 )
@@ -15,7 +16,12 @@ import (
 // NewAgentCommand on Windows returns a plain command (no sudo).
 // If the agent needs admin, run the parent process with Administrator rights.
 func NewAgentCommand(bin string, args []string) *exec.Cmd {
-	return exec.Command(bin, args...)
+	cmd := exec.Command(bin, args...)
+	// Run in a separate process group so Ctrl+C in the parent console doesn't hit the agent.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+	return cmd
 }
 
 func StartCommand(cmd *exec.Cmd) error {
