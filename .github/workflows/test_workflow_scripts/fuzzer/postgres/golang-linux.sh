@@ -185,7 +185,7 @@ send_requests() {
       "password": "password",
       "dbName": "postgres",
       "seed": 12345,
-      "totalOps": 200,
+      "totalOps": 2000,
       "drop_db_first": true,
       "schema": "fuzz_schema_12345"
     }'
