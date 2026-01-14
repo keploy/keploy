@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    container_name: rust-axum-app
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/postgres
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+  db:
+    image: postgres:15
+    container_name: rust-axum-db
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"

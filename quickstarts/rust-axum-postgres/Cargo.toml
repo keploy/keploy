@@ -1,0 +1,13 @@
+[package]
+name = "rust-axum-postgres"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-postgres = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower = "0.4"
+hyper = "1"
