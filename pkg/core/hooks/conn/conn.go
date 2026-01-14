@@ -33,6 +33,8 @@ type ID struct {
 //	    char msg[MAX_MSG_SIZE];
 //	    s64 validate_rd_bytes
 //	    s64 validate_wr_bytes
+//	    u64 client_id
+//	    u16 server_port
 //	};
 type SocketDataEvent struct {
 	EntryTimestampNano   uint64
@@ -45,6 +47,7 @@ type SocketDataEvent struct {
 	ValidateReadBytes    int64
 	ValidateWrittenBytes int64
 	ClientID             uint64
+	ServerPort           uint16
 }
 
 // SocketOpenEvent is a conversion of the following C-Struct into GO.
@@ -53,12 +56,15 @@ type SocketDataEvent struct {
 //	   uint64_t timestamp_ns;
 //	   struct conn_id_t conn_id;
 //	   struct sockaddr_in* addr;
+//	   u64 client_id;
+//	   u16 server_port;
 //	};.
 type SocketOpenEvent struct {
 	TimestampNano uint64
 	ConnID        ID
 	Addr          SockAddrIn
 	ClientID      uint64
+	ServerPort    uint16
 }
 
 // SocketCloseEvent is a conversion of the following C-Struct into GO.

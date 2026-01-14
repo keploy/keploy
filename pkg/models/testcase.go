@@ -52,6 +52,8 @@ type TestCase struct {
 	Curl        string                        `json:"curl" bson:"curl"`
 	IsLast      bool                          `json:"is_last" bson:"is_last"`
 	Assertions  map[AssertionType]interface{} `json:"assertion" bson:"assertion"`
+	// AppPort is the port on which the application server received this request (for incoming connections)
+	AppPort uint16 `json:"app_port" bson:"app_port"`
 }
 
 func (tc *TestCase) GetKind() string {
