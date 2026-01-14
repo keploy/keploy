@@ -65,7 +65,6 @@ type Hooks struct {
 	socket     link.Link
 	connect4   link.Link
 	gp4        link.Link
-	udpp4      link.Link
 	tcpv4      link.Link
 	tcpv4Ret   link.Link
 	connect6   link.Link
@@ -309,12 +308,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the socket")
-		}
-	}
-
-	if h.udpp4 != nil {
-		if err := h.udpp4.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the udpp4")
 		}
 	}
 
