@@ -44,7 +44,7 @@ keploy test -c "docker compose up" --container-name "rust-axum-app" --delay 10
 
 View reports in Keploy output.  
 Files:
-- [Cargo.toml](file:///c:/Users/syed%20owais/OneDrive/Desktop/keploy/quickstarts/rust-axum-postgres/Cargo.toml)
-- [main.rs](file:///c:/Users/syed%20owais/OneDrive/Desktop/keploy/quickstarts/rust-axum-postgres/src/main.rs)
-- [Dockerfile](file:///c:/Users/syed%20owais/OneDrive/Desktop/keploy/quickstarts/rust-axum-postgres/Dockerfile)
-- [docker-compose.yml](file:///c:/Users/syed%20owais/OneDrive/Desktop/keploy/quickstarts/rust-axum-postgres/docker-compose.yml)
+- [Cargo.toml](./Cargo.toml)
+- [main.rs](./src/main.rs)
+- [Dockerfile](./Dockerfile)
+- [docker-compose.yml](./docker-compose.yml)
