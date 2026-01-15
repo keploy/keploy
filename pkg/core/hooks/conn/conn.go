@@ -34,7 +34,6 @@ type ID struct {
 //	    s64 validate_rd_bytes
 //	    s64 validate_wr_bytes
 //	    u64 client_id
-//	    u16 server_port
 //	};
 type SocketDataEvent struct {
 	EntryTimestampNano   uint64
@@ -47,7 +46,6 @@ type SocketDataEvent struct {
 	ValidateReadBytes    int64
 	ValidateWrittenBytes int64
 	ClientID             uint64
-	ServerPort           uint16
 }
 
 // SocketOpenEvent is a conversion of the following C-Struct into GO.
