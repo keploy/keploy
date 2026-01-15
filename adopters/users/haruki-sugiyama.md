@@ -21,15 +21,11 @@ Backend / SRE-focused engineer using Keploy for real-world API testing in Go-bas
 
 ## Where I use it
 - Local development ([code](https://github.com/GitEngHar/pointservice/blob/master/Makefile))
-- GitHub Actions ([CI](https://github.com/GitEngHar/pointservice/blob/master/.github/workflows/keploy.yaml))
+- GitHub Actions ([code](https://github.com/GitEngHar/pointservice/blob/master/.github/workflows/keploy.yaml))
 
 ## Tech Stack
-- OSS Middlewares
-    - Keploy
-    - AsyncAPI (for event-driven design)
 - Go
 - Java
-- C
 - Typescript
 - REST APIs
 - Kubernetes
