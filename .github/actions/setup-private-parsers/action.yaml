@@ -31,7 +31,7 @@ runs:
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching latest commit hash from v2 branch..."
-        LATEST_COMMIT=$(git ls-remote https://github.com/keploy/integrations.git refs/heads/fix/mongo | awk '{print $1}')
+        LATEST_COMMIT=$(git ls-remote https://github.com/keploy/integrations.git refs/heads/v2 | awk '{print $1}')
         if [ -z "$LATEST_COMMIT" ]; then
           echo "Error: Failed to fetch latest commit hash from v2 branch"
           exit 1
