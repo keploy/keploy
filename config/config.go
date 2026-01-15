@@ -47,6 +47,7 @@ type Config struct {
 	Contract              Contract            `json:"contract" yaml:"contract" mapstructure:"contract"`
 	Agent                 Agent               `json:"agent" yaml:"agent" mapstructure:"agent"`
 	InCi                  bool                `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	DBPort                uint32              `json:"dbPort" yaml:"dbPort" mapstructure:"dbPort"`
 	InstallationID        string              `json:"-" yaml:"-" mapstructure:"-"`
 	ServerPort            uint32              `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
 	Version               string              `json:"-" yaml:"-" mapstructure:"-"`

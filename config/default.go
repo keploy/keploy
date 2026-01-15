@@ -18,6 +18,7 @@ templatize:
 port: 0
 proxyPort: 16789
 dnsPort: 26789
+dbPort: 3306
 debug: false
 disableANSI: false
 disableTele: false

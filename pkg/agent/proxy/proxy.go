@@ -42,6 +42,7 @@ type Proxy struct {
 	IP6     string
 	Port    uint32
 	DNSPort uint32
+	DBPort  uint32
 
 	DestInfo     agent.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -73,6 +74,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		logger:            logger,
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
+		DBPort:            opts.DBPort,  // default: 3306
 		synchronous:       opts.Agent.Synchronous,
 		IP4:               "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
 		IP6:               "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
@@ -418,7 +420,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	if destInfo.Port == p.DBPort {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
