@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -161,7 +162,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 //	return nil
 //}
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, serverPort uint16) {
 
 	var reqBody []byte
 	if req.Body != nil { // Read
@@ -222,6 +223,15 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}
 
+	// Extract port from Host header for logging
+	host, port, _ := net.SplitHostPort(req.Host)
+	if port == "" {
+		port = "80" // default HTTP port if not specified
+	}
+	if host == "" {
+		host = req.Host // fallback if SplitHostPort fails
+	}
+
 	testCase := &models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
@@ -248,9 +258,30 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
-		Noise: map[string][]string{},
+		Noise:   map[string][]string{},
+		AppPort: serverPort,
 		// Mocks: mocks,
 	}
+
+	// Log response source information
+	if serverPort == 0 {
+		logger.Debug("app_port not captured (bind hooks may not be attached or port lookup failed)",
+			zap.String("host", host),
+			zap.String("port", port))
+	} else {
+		logger.Debug("app_port captured successfully",
+			zap.Uint16("app_port", serverPort))
+	}
+
+	logger.Debug("RESPONSE CAPTURED FROM PORT",
+		zap.String("host", host),
+		zap.String("port", port),
+		zap.Uint16("app_port", serverPort),
+		zap.String("full_host", req.Host),
+		zap.String("method", req.Method),
+		zap.String("path", req.URL.Path),
+		zap.Int("status_code", resp.StatusCode),
+		zap.String("test_name", testCase.Name))
 
 	select {
 	case <-ctx.Done():
@@ -304,7 +335,7 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 }
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream) {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, serverPort uint16) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -324,6 +355,16 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		GrpcReq:  *http2Stream.GRPCReq,
 		GrpcResp: *http2Stream.GRPCResp,
 		Noise:    map[string][]string{},
+		AppPort:  serverPort,
+	}
+
+	if serverPort == 0 {
+		logger.Debug("app_port not captured for gRPC test case (bind hooks may not be attached or port lookup failed)",
+			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+	} else {
+		logger.Debug("app_port captured successfully for gRPC test case",
+			zap.Uint16("app_port", serverPort),
+			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
 	}
 
 	select {
@@ -331,6 +372,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	case t <- testCase:
 		logger.Debug("Captured gRPC test case",
-			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]),
+			zap.Uint16("app_port", serverPort))
 	}
 }

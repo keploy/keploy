@@ -12,6 +12,8 @@ type GrpcSpec struct {
 	Assertions       map[AssertionType]interface{} `json:"assertions" yaml:"assertions"`
 	ReqTimestampMock time.Time                     `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
 	ResTimestampMock time.Time                     `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+	// AppPort is the port on which the application server received this request
+	AppPort uint16 `json:"app_port" yaml:"app_port,omitempty"`
 }
 
 type GrpcHeaders struct {
