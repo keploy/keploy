@@ -13,7 +13,9 @@ func (c *Core) GetIncoming(ctx context.Context, id uint64, opts models.IncomingO
 }
 
 func (c *Core) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	m := make(chan *models.Mock, 500)
+	// Increased buffer size to handle high-throughput scenarios (e.g., fuzzing)
+	// where the disk writer may not keep up with rapid mock generation
+	m := make(chan *models.Mock, 1000)
 
 	err := c.Proxy.Record(ctx, id, m, opts)
 	if err != nil {

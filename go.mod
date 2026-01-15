@@ -20,7 +20,6 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/spf13/cobra v1.9.1
-	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/sys v0.37.0
@@ -108,6 +107,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/zricethezav/gitleaks/v8 v8.28.0
+	go.mongodb.org/mongo-driver/v2 v2.4.0
 	golang.org/x/sync v0.17.0
 	golang.org/x/term v0.36.0
 	google.golang.org/grpc v1.71.0
