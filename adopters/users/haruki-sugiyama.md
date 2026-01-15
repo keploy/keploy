@@ -30,6 +30,7 @@ Backend / SRE-focused engineer using Keploy for real-world API testing in Go-bas
 - REST APIs
 - Kubernetes
 - Docker
+- NewRelic
 - Cloud(AWS/Google/Azure)
 - GitHub Actions
 
