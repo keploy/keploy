@@ -5,7 +5,6 @@ package others
 
 import (
 	"context"
-	"errors"
 	"sync"
 
 	"go.keploy.io/server/v3/config"
@@ -44,32 +43,32 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 // Load implements the Load method for non-Linux platforms.
 // Since eBPF is not available on non-Linux platforms, this returns an error.
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
-	h.logger.Error("eBPF hooks are not supported on this platform")
-	return errors.New("eBPF hooks are not supported on non-Linux platforms")
+	h.logger.Warn("eBPF hooks are not supported on this platform. Running in limited mode.")
+	return nil
 }
 
 // Record implements the Record method for non-Linux platforms.
 // Since hooks are not available, this returns an error.
 func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	h.logger.Error("Recording is not supported on this platform")
-	return nil, errors.New("recording is not supported on non-Linux platforms")
+	h.logger.Warn("Recording is not supported on this platform. Returning empty channel.")
+	return make(chan *models.TestCase), nil
 }
 
 // WatchBindEvents implements the WatchBindEvents method for non-Linux platforms.
 // Since eBPF is not available, this returns an error.
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
-	h.logger.Error("Bind event watching is not supported on this platform")
-	return nil, errors.New("bind event watching is not supported on non-Linux platforms")
+	h.logger.Warn("Bind event watching is not supported on this platform. Returning empty channel.")
+	return make(chan models.IngressEvent), nil
 }
 
 // Get implements the DestInfo.Get method for non-Linux platforms.
 func (h *Hooks) Get(ctx context.Context, srcPort uint16) (*agent.NetworkAddress, error) {
-	h.logger.Error("Network address lookup is not supported on this platform")
-	return nil, errors.New("network address lookup is not supported on non-Linux platforms")
+	h.logger.Debug("Network address lookup is not supported on this platform")
+	return nil, nil
 }
 
 // Delete implements the DestInfo.Delete method for non-Linux platforms.
 func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
-	h.logger.Error("Network address deletion is not supported on this platform")
-	return errors.New("network address deletion is not supported on non-Linux platforms")
+	h.logger.Debug("Network address deletion is not supported on this platform")
+	return nil
 }
