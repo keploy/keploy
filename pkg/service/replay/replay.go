@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"time"
@@ -36,13 +37,16 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var firstRun bool
-var completeTestReport = make(map[string]TestReportVerdict)
-var totalTests int
-var totalTestPassed int
-var totalTestFailed int
-var totalTestIgnored int
-var totalTestTimeTaken time.Duration
+var (
+	completeTestReport   = make(map[string]TestReportVerdict)
+	firstRun             bool
+	completeTestReportMu sync.RWMutex
+	totalTests           int
+	totalTestPassed      int
+	totalTestFailed      int
+	totalTestIgnored     int
+	totalTestTimeTaken   time.Duration
+)
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
 
@@ -102,6 +106,8 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 
 func (r *Replayer) Start(ctx context.Context) error {
 
+	r.logger.Info("🟢 Starting Keploy replay...")
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
 	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
@@ -145,12 +151,20 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
+	r.logger.Info("Test Sets to be Replayed", zap.Strings("testSets", testSetIDs))
+
 	if len(testSetIDs) == 0 {
 		recordCmd := models.HighlightGrayString("keploy record")
 		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
 		utils.LogError(r.logger, err, errMsg)
 		return fmt.Errorf("%s", errMsg)
 	}
+
+	completeTestReportMu.Lock()
+	completeTestReport = make(map[string]TestReportVerdict)
+	totalTests, totalTestPassed, totalTestFailed, totalTestIgnored = 0, 0, 0, 0
+	totalTestTimeTaken = 0
+	completeTestReportMu.Unlock()
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
@@ -274,16 +288,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.isLastTestSet = true
 		}
 
-		var (
-			initTotal, initPassed, initFailed, initIgnored int
-			initTimeTaken                                  time.Duration
-		)
-
-		initTotal = totalTests
-		initPassed = totalTestPassed
-		initFailed = totalTestFailed
-		initIgnored = totalTestIgnored
-		initTimeTaken = totalTestTimeTaken
+		completeTestReportMu.RLock()
+		initTotal := totalTests
+		initPassed := totalTestPassed
+		initFailed := totalTestFailed
+		initIgnored := totalTestIgnored
+		initTimeTaken := totalTestTimeTaken
+		completeTestReportMu.RUnlock()
 
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
@@ -299,11 +310,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
 			// gathered from rerunning, instead only metrics from the last rerun would get added to the variables.
+			completeTestReportMu.Lock()
 			totalTests = initTotal
 			totalTestPassed = initPassed
 			totalTestFailed = initFailed
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
+			completeTestReportMu.Unlock()
+
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
 			if err != nil {
@@ -459,7 +473,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
-	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSets), testRunStatus)
+	completeTestReportMu.RLock()
+	passed := totalTestPassed
+	failed := totalTestFailed
+	completeTestReportMu.RUnlock()
+	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus)
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
@@ -622,21 +640,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			timeTaken: timeTaken.String(),
 		}
 
+		completeTestReportMu.Lock()
 		completeTestReport[testSetID] = verdict
 		totalTests += testReport.Total
 		totalTestIgnored += testReport.Ignored
 		totalTestTimeTaken += timeTaken
+		completeTestReportMu.Unlock()
 
 		return models.TestSetStatusIgnored, nil
 	}
 
 	var conf *models.TestSet
-	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
-	if err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "The system cannot find the file specified") {
-			r.logger.Info("test-set config file not found, continuing execution...", zap.String("test-set", testSetID))
-		} else {
-			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+	if r.testSetConf != nil {
+		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
+		if err != nil {
+			if strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "The system cannot find the file specified") {
+				r.logger.Info("test-set config file not found, continuing execution...", zap.String("test-set", testSetID))
+			} else {
+				return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+			}
 		}
 	}
 	if conf == nil {
@@ -674,7 +696,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 					AppCommand: conf.AppCommand,
 				})
-				if appErr.AppErrorType == models.ErrCtxCanceled {
+				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
 					return nil
 				}
 				appErrChan <- appErr
@@ -714,7 +736,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():
@@ -1252,7 +1274,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	err = HookImpl.BeforeTestResult(ctx)
+	timeTaken := time.Since(startTime)
+
+	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
+	if err != nil {
+		if runTestSetCtx.Err() != context.Canceled {
+			utils.LogError(r.logger, err, "failed to get test case results")
+			testSetStatus = models.TestSetStatusInternalErr
+		}
+	}
+
+	err = HookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
 	if err != nil {
 		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
 		utils.LogError(r.logger, err, stopReason)
@@ -1263,16 +1295,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.executeScript(runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
-		}
-	}
-
-	timeTaken := time.Since(startTime)
-
-	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
-	if err != nil {
-		if runTestSetCtx.Err() != context.Canceled {
-			utils.LogError(r.logger, err, "failed to get test case results")
-			testSetStatus = models.TestSetStatusInternalErr
 		}
 	}
 
@@ -1380,12 +1402,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		timeTaken: timeTaken.String(),
 	}
 
+	completeTestReportMu.Lock()
 	completeTestReport[testSetID] = verdict
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
 	totalTestIgnored += testReport.Ignored
 	totalTestTimeTaken += timeTaken
+	completeTestReportMu.Unlock()
 
 	timeTakenStr := timeWithUnits(timeTaken)
 
@@ -1500,9 +1524,21 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
-	if totalTests > 0 {
-		testSuiteNames := make([]string, 0, len(completeTestReport))
-		for testSuiteName := range completeTestReport {
+	completeTestReportMu.RLock()
+	totalTestsSnapshot := totalTests
+	totalTestPassedSnapshot := totalTestPassed
+	totalTestFailedSnapshot := totalTestFailed
+	totalTestIgnoredSnapshot := totalTestIgnored
+	totalTestTimeTakenSnapshot := totalTestTimeTaken
+	reportSnapshot := make(map[string]TestReportVerdict, len(completeTestReport))
+	for key, val := range completeTestReport {
+		reportSnapshot[key] = val
+	}
+	completeTestReportMu.RUnlock()
+
+	if totalTestsSnapshot > 0 {
+		testSuiteNames := make([]string, 0, len(reportSnapshot))
+		for testSuiteName := range reportSnapshot {
 			testSuiteNames = append(testSuiteNames, testSuiteName)
 		}
 		sort.SliceStable(testSuiteNames, func(i, j int) bool {
@@ -1519,26 +1555,26 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
 
-		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTaken)
+		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTakenSnapshot)
 
-		if totalTestIgnored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
+		if totalTestIgnoredSnapshot > 0 {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestIgnoredSnapshot, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
 		}
 
 		header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
-		if totalTestIgnored > 0 {
+		if totalTestIgnoredSnapshot > 0 {
 			header += "\t\tIgnored"
 		}
 		header += "\t\tTime Taken"
-		if totalTestFailed > 0 {
+		if totalTestFailedSnapshot > 0 {
 			header += "\tFailed Testcases"
 		}
 		header += "\t\n"
@@ -1550,7 +1586,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		}
 
 		for _, testSuiteName := range testSuiteNames {
-			report := completeTestReport[testSuiteName]
+			report := reportSnapshot[testSuiteName]
 			if report.status {
 				pp.SetColorScheme(models.GetPassingColorScheme())
 			} else {
@@ -1567,7 +1603,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			format.WriteString("\n\t%s\t\t%s\t\t%s\t\t%s")
 			args = append(args, testSuiteName, report.total, report.passed, report.failed)
 
-			if totalTestIgnored > 0 && !r.config.Test.MustPass {
+			if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
 				format.WriteString("\t\t%s")
 				args = append(args, report.ignored)
 			}
@@ -1575,7 +1611,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			format.WriteString("\t\t%s") // Time Taken
 			args = append(args, testSetTimeTakenStr)
 
-			if totalTestFailed > 0 && !r.config.Test.MustPass {
+			if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
 				failedCasesStr := "-"
 				if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
 					failedCasesStr = strings.Join(failedCases, ", ")

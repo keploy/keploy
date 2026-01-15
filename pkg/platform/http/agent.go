@@ -57,6 +57,9 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 }
 
 func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+
+	a.logger.Info("🔵 Connecting to incoming test cases stream...")
+
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
 	}
@@ -127,10 +130,14 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		}
 	}()
 
+	a.logger.Info("🟢 Successfully connected to incoming test cases stream.")
 	return tcChan, nil
 }
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+
+	a.logger.Info("🔵 Connecting to outgoing mocks stream...")
+
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
 	}
@@ -194,6 +201,8 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		}
 		return nil
 	})
+
+	a.logger.Info("🟢 Successfully connected to outgoing mocks stream.")
 
 	return mockChan, nil
 }
@@ -752,7 +761,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
 		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
-			utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
+			// Process already finished is expected during graceful shutdown, not an error
+			if stopErr.Error() != "os: process already finished" {
+				utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
+			}
 		}
 		return nil
 	})
@@ -870,7 +882,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, a.conf.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, a.logger, a.conf.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():

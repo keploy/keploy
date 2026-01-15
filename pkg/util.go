@@ -801,7 +801,7 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 // AgentHealthTicker continuously monitors the agent health endpoint at specified intervals
 // and signals on the provided channel when the agent becomes available or unavailable.
 // It respects the context timeout and returns when the context is cancelled.
-func AgentHealthTicker(ctx context.Context, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 	defer close(agentReadyCh)
@@ -816,7 +816,7 @@ func AgentHealthTicker(ctx context.Context, agentURI string, agentReadyCh chan<-
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			isHealthy := isAgentHealthy(ctx, client, agentURI)
+			isHealthy := isAgentHealthy(ctx, logger, client, agentURI)
 
 			if isHealthy && !agentStarted {
 				// Agent became healthy
@@ -841,9 +841,13 @@ func AgentHealthTicker(ctx context.Context, agentURI string, agentReadyCh chan<-
 }
 
 // isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
-func isAgentHealthy(ctx context.Context, client *http.Client, agentURI string) bool {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/health", agentURI), nil)
+func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) bool {
+	healthURL := fmt.Sprintf("%s/health", agentURI)
+	logger.Debug("Checking agent health", zap.String("url", healthURL))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
+		logger.Debug("Failed to create health check request", zap.Error(err))
 		return false
 	}
 
@@ -852,6 +856,13 @@ func isAgentHealthy(ctx context.Context, client *http.Client, agentURI string) b
 		return false
 	}
 	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Debug("Failed to read agent health response body", zap.Error(err))
+		return false
+	}
+	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.String("body", string(body)))
 
 	return resp.StatusCode == http.StatusOK
 }

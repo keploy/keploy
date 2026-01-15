@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -49,7 +50,8 @@ type Proxy struct {
 	integrationsPriority []ParserPriority
 	errChannel           chan error
 
-	sessions *agent.Sessions
+	sessions    *agent.Sessions
+	synchronous bool
 
 	connMutex *sync.Mutex
 	ipMutex   *sync.Mutex
@@ -71,8 +73,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		logger:            logger.Named(models.ProxyService),
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
-		IP4:               "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		synchronous:       opts.Agent.Synchronous,
+		IP4:               "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:               "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:           &sync.Mutex{},
 		connMutex:         &sync.Mutex{},
 		DestInfo:          info,
@@ -328,6 +331,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	p.logger.Info("🟢 Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
+
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
 	if err != nil {
@@ -343,6 +348,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	mgr := syncMock.Get()
+	mgr.SetOutputChannel(rule.MC)
 	var dstAddr string
 
 	switch destInfo.Version {
@@ -406,6 +413,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		return nil
 	}
+	if p.synchronous {
+		rule.OutgoingOptions.Synchronous = true
+	}
 
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {
@@ -422,7 +432,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			rule.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
+			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -570,7 +580,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
-
 	} else {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
@@ -582,6 +591,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.Addr = dstAddr
 	}
 
+	rule.DstCfg = dstCfg
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
@@ -618,7 +628,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		matchedLogger.Info("The external dependency is supported. Hence using the parser")
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
+			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
@@ -643,8 +653,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		genericLogger := p.logger.Named("generic")
 		genericLogger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
-			if err != nil {
+			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
