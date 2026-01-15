@@ -149,6 +149,7 @@ type Test struct {
 	ProtoFile           string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
 	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
+	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
 }
 
 type Report struct {
