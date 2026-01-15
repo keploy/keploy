@@ -14,7 +14,6 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -45,7 +44,6 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
-		r.Post("/shutdown", a.HandleShutdown)
 	})
 }
 
@@ -139,25 +137,6 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	render.JSON(w, r, "OK")
-}
-
-// HandleShutdown triggers a graceful shutdown of the agent by cancelling the context.
-// This allows cleanup routines (like h.unLoad on Windows) to run before the process exits.
-func (a *Agent) HandleShutdown(w http.ResponseWriter, r *http.Request) {
-	a.logger.Info("🔴 Received shutdown request, initiating graceful shutdown...")
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	render.JSON(w, r, map[string]string{"status": "shutting down"})
-
-	// Trigger context cancellation in a goroutine to allow the response to be sent first
-	go func() {
-		// Small delay to ensure response is sent
-		time.Sleep(100 * time.Millisecond)
-		a.logger.Info("Executing context cancellation for graceful shutdown")
-		// This will trigger <-ctx.Done() in all goroutines waiting on the context
-		// including the hooks cleanup in h.unLoad
-		utils.ExecCancel()
-	}()
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
