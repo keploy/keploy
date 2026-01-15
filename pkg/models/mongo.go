@@ -2,12 +2,30 @@ package models
 
 import (
 	"encoding/json"
-	"errors"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 	"gopkg.in/yaml.v3"
+)
+
+// MongoDB Wire Protocol OpCodes
+// Reference: https://www.mongodb.com/docs/manual/reference/mongodb-wire-protocol/
+// Legacy opcodes (deprecated in MongoDB 5.0, removed in 5.1): https://www.mongodb.com/docs/manual/legacy-opcodes/
+const (
+	// Current opcodes
+	OpCodeCompressed wiremessage.OpCode = 2012 // OP_COMPRESSED - Wraps other messages using compression
+	OpCodeMsg        wiremessage.OpCode = 2013 // OP_MSG - Extensible message format (MongoDB 3.6+)
+
+	// Legacy opcodes (for backward compatibility with older MongoDB versions)
+	OpCodeReply       wiremessage.OpCode = 1    // OP_REPLY - Reply to a client request
+	OpCodeUpdate      wiremessage.OpCode = 2001 // OP_UPDATE - Update document
+	OpCodeInsert      wiremessage.OpCode = 2002 // OP_INSERT - Insert document
+	OpCodeGetByOID    wiremessage.OpCode = 2003 // OP_GET_BY_OID - Reserved, not used
+	OpCodeQuery       wiremessage.OpCode = 2004 // OP_QUERY - Query a collection
+	OpCodeGetMore     wiremessage.OpCode = 2005 // OP_GET_MORE - Get more data from a query
+	OpCodeDelete      wiremessage.OpCode = 2006 // OP_DELETE - Delete documents
+	OpCodeKillCursors wiremessage.OpCode = 2007 // OP_KILL_CURSORS - Close cursors
 )
 
 type MongoSpec struct {
@@ -52,6 +70,75 @@ type MongoOpReply struct {
 	StartingFrom   int32    `json:"starting_from" yaml:"starting_from" bson:"starting_from"`
 	NumberReturned int32    `json:"number_returned" yaml:"number_returned" bson:"number_returned"`
 	Documents      []string `json:"documents" yaml:"documents" bson:"documents"`
+}
+
+// MongoOpUpdate represents the OP_UPDATE (2001) wire protocol message
+// Deprecated in MongoDB 5.0, removed in MongoDB 5.1
+// Format: Header | ZERO | fullCollectionName | flags | selector | update
+// Reference: https://www.mongodb.com/docs/manual/legacy-opcodes/#op_update
+type MongoOpUpdate struct {
+	FullCollectionName string `json:"fullCollectionName" yaml:"fullCollectionName" bson:"fullCollectionName"`
+	Flags              int32  `json:"flags" yaml:"flags" bson:"flags"` // bit 0: Upsert, bit 1: MultiUpdate
+	Selector           string `json:"selector" yaml:"selector" bson:"selector"`
+	Update             string `json:"update" yaml:"update" bson:"update"`
+}
+
+// MongoOpInsert represents the OP_INSERT (2002) wire protocol message
+// Deprecated in MongoDB 5.0, removed in MongoDB 5.1
+// Format: Header | flags | fullCollectionName | documents
+// Reference: https://www.mongodb.com/docs/manual/legacy-opcodes/#op_insert
+type MongoOpInsert struct {
+	Flags              int32    `json:"flags" yaml:"flags" bson:"flags"` // bit 0: ContinueOnError
+	FullCollectionName string   `json:"fullCollectionName" yaml:"fullCollectionName" bson:"fullCollectionName"`
+	Documents          []string `json:"documents" yaml:"documents" bson:"documents"`
+}
+
+// MongoOpDelete represents the OP_DELETE (2006) wire protocol message
+// Deprecated in MongoDB 5.0, removed in MongoDB 5.1
+// Format: Header | ZERO | fullCollectionName | flags | selector
+// Reference: https://www.mongodb.com/docs/manual/legacy-opcodes/#op_delete
+type MongoOpDelete struct {
+	FullCollectionName string `json:"fullCollectionName" yaml:"fullCollectionName" bson:"fullCollectionName"`
+	Flags              int32  `json:"flags" yaml:"flags" bson:"flags"` // bit 0: SingleRemove
+	Selector           string `json:"selector" yaml:"selector" bson:"selector"`
+}
+
+// MongoOpGetMore represents the OP_GET_MORE (2005) wire protocol message
+// Deprecated in MongoDB 5.0, removed in MongoDB 5.1
+// Format: Header | ZERO | fullCollectionName | numberToReturn | cursorID
+// Reference: https://www.mongodb.com/docs/manual/legacy-opcodes/#op_get_more
+type MongoOpGetMore struct {
+	FullCollectionName string `json:"fullCollectionName" yaml:"fullCollectionName" bson:"fullCollectionName"`
+	NumberToReturn     int32  `json:"numberToReturn" yaml:"numberToReturn" bson:"numberToReturn"`
+	CursorID           int64  `json:"cursorID" yaml:"cursorID" bson:"cursorID"`
+}
+
+// MongoOpKillCursors represents the OP_KILL_CURSORS (2007) wire protocol message
+// Deprecated in MongoDB 5.0, removed in MongoDB 5.1
+// Format: Header | ZERO | numberOfCursorIDs | cursorIDs
+// Reference: https://www.mongodb.com/docs/manual/legacy-opcodes/#op_kill_cursors
+type MongoOpKillCursors struct {
+	NumberOfCursorIDs int32   `json:"numberOfCursorIDs" yaml:"numberOfCursorIDs" bson:"numberOfCursorIDs"`
+	CursorIDs         []int64 `json:"cursorIDs" yaml:"cursorIDs" bson:"cursorIDs"`
+}
+
+// MongoOpCompressed represents the OP_COMPRESSED (2012) wire protocol message
+// Used to wrap other opcodes with compression
+// Format: Header | originalOpcode | uncompressedSize | compressorId | compressedMessage
+// compressorId: 0=noop, 1=snappy, 2=zlib, 3=zstd
+// Reference: https://www.mongodb.com/docs/manual/reference/mongodb-wire-protocol/#op_compressed
+type MongoOpCompressed struct {
+	OriginalOpcode   int32  `json:"originalOpcode" yaml:"originalOpcode" bson:"originalOpcode"`
+	UncompressedSize int32  `json:"uncompressedSize" yaml:"uncompressedSize" bson:"uncompressedSize"`
+	CompressorID     int8   `json:"compressorId" yaml:"compressorId" bson:"compressorId"` // 0=noop, 1=snappy, 2=zlib, 3=zstd
+	CompressedData   []byte `json:"compressedData,omitempty" yaml:"compressedData,omitempty" bson:"compressedData,omitempty"`
+}
+
+// MongoOpUnknown represents an unknown or unsupported wire protocol message
+// This is used as a fallback when the opcode is not recognized
+type MongoOpUnknown struct {
+	Opcode int32  `json:"opcode" yaml:"opcode" bson:"opcode"`
+	Data   []byte `json:"data,omitempty" yaml:"data,omitempty" bson:"data,omitempty"`
 }
 
 type MongoHeader struct {
@@ -100,8 +187,48 @@ func (mr *MongoRequest) UnmarshalBSON(data []byte) error {
 			return err
 		}
 		mr.Message = &msg
+	case OpCodeUpdate:
+		var msg MongoOpUpdate
+		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeInsert:
+		var msg MongoOpInsert
+		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeDelete:
+		var msg MongoOpDelete
+		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeGetMore:
+		var msg MongoOpGetMore
+		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeKillCursors:
+		var msg MongoOpKillCursors
+		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeCompressed:
+		var msg MongoOpCompressed
+		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
 	default:
-		return errors.New("failed to unmarshal unknown opcode")
+		// Handle unknown opcodes gracefully - store as raw message
+		var msg MongoOpUnknown
+		msg.Opcode = int32(mr.Header.Opcode)
+		msg.Data = aux.Message
+		mr.Message = &msg
 	}
 	return nil
 }
@@ -138,8 +265,48 @@ func (mr *MongoRequest) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		mr.Message = &msg
+	case OpCodeUpdate:
+		var msg MongoOpUpdate
+		if err := json.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeInsert:
+		var msg MongoOpInsert
+		if err := json.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeDelete:
+		var msg MongoOpDelete
+		if err := json.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeGetMore:
+		var msg MongoOpGetMore
+		if err := json.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeKillCursors:
+		var msg MongoOpKillCursors
+		if err := json.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
+	case OpCodeCompressed:
+		var msg MongoOpCompressed
+		if err := json.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
 	default:
-		return errors.New("failed to unmarshal unknown opcode")
+		// Handle unknown opcodes gracefully
+		var msg MongoOpUnknown
+		msg.Opcode = int32(mr.Header.Opcode)
+		msg.Data = aux.Message
+		mr.Message = &msg
 	}
 
 	return nil
@@ -210,8 +377,18 @@ func (mr *MongoResponse) UnmarshalBSON(data []byte) error {
 			return err
 		}
 		mr.Message = &msg
+	case OpCodeCompressed:
+		var msg MongoOpCompressed
+		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
 	default:
-		return errors.New("failed to unmarshal unknown opcode")
+		// Handle unknown opcodes gracefully
+		var msg MongoOpUnknown
+		msg.Opcode = int32(mr.Header.Opcode)
+		msg.Data = aux.Message
+		mr.Message = &msg
 	}
 
 	return nil
@@ -249,12 +426,21 @@ func (mr *MongoResponse) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		mr.Message = &msg
+	case OpCodeCompressed:
+		var msg MongoOpCompressed
+		if err := json.Unmarshal(aux.Message, &msg); err != nil {
+			return err
+		}
+		mr.Message = &msg
 	default:
-		return errors.New("failed to unmarshal unknown opcode")
+		// Handle unknown opcodes gracefully
+		var msg MongoOpUnknown
+		msg.Opcode = int32(mr.Header.Opcode)
+		msg.Data = aux.Message
+		mr.Message = &msg
 	}
 
 	return nil
-
 }
 
 // MarshalJSON implements json.Marshaler for mongoResponses because of interface typeof field
