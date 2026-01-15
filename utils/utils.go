@@ -1506,8 +1506,8 @@ func GetContainerIPv4() (string, error) {
 	return "", fmt.Errorf("could not find a non-loopback IP for the container")
 }
 
-// GetFullCommandUsed returns the full command that was used to run keploy.
-// It captures os.Args and attempts to detect parent process commands like sudo/env on Linux.
+// GetFullCommandUsed returns the full command-line used to run the current process.
+// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
 func GetFullCommandUsed() string {
 	args := os.Args
 
