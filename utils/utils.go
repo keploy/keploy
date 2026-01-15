@@ -1505,3 +1505,24 @@ func GetContainerIPv4() (string, error) {
 
 	return "", fmt.Errorf("could not find a non-loopback IP for the container")
 }
+
+// GetFullCommandUsed returns the full command-line used to run the current process.
+// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
+func GetFullCommandUsed() string {
+	args := os.Args
+
+	// Build the command string with proper quoting for arguments containing spaces
+	var parts []string
+	for _, arg := range args {
+		if strings.Contains(arg, " ") || strings.Contains(arg, "\"") {
+			// Quote the argument if it contains spaces or quotes
+			parts = append(parts, fmt.Sprintf("%q", arg))
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+
+	cmdStr := strings.Join(parts, " ")
+
+	return cmdStr
+}
