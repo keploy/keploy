@@ -95,6 +95,9 @@ func start(ctx context.Context) {
 	conf := config.New()
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
+
+	// Capture the full command used for test runs (to be stored in report)
+	conf.Test.CmdUsed = utils.GetFullCommandUsed()
 	userDb := userDb.New(logger, conf)
 	conf.InstallationID, err = userDb.GetInstallationID(ctx)
 	if err != nil {
