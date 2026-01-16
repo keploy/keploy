@@ -100,7 +100,10 @@ func (r *MockFileReader) splitYAMLDocuments(data []byte, atEOF bool) (advance in
 	// Check if we start with "---"
 	if start+3 <= len(data) && string(data[start:start+3]) == "---" {
 		start += 3
-		// Skip newline after ---
+		// Skip newline after --- (handle both \r\n and \n)
+		if start < len(data) && data[start] == '\r' {
+			start++
+		}
 		if start < len(data) && data[start] == '\n' {
 			start++
 		}
@@ -109,9 +112,12 @@ func (r *MockFileReader) splitYAMLDocuments(data []byte, atEOF bool) (advance in
 	// Now find the next "---" delimiter (must be at start of line)
 	searchStart := start
 	for {
-		// Look for "\n---" pattern
+		// Look for "\n---" or "\r\n---" pattern (support both Unix and Windows line endings)
 		idx := bytes.Index(data[searchStart:], []byte("\n---"))
-		if idx == -1 {
+		idxCRLF := bytes.Index(data[searchStart:], []byte("\r\n---"))
+
+		// Use the earlier match if both exist, prefer \r\n--- if at same effective position
+		if idx == -1 && idxCRLF == -1 {
 			// No delimiter found
 			if atEOF {
 				// Return remaining content
@@ -125,11 +131,27 @@ func (r *MockFileReader) splitYAMLDocuments(data []byte, atEOF bool) (advance in
 			return 0, nil, nil
 		}
 
+		// Determine which delimiter to use
+		isCRLF := false
+		if idx == -1 {
+			idx = idxCRLF
+			isCRLF = true
+		} else if idxCRLF != -1 && idxCRLF < idx {
+			idx = idxCRLF
+			isCRLF = true
+		}
+
 		// Found a delimiter at searchStart + idx
 		delimPos := searchStart + idx
 
+		// Calculate delimiter length and position after delimiter
+		delimLen := 4 // Length of "\n---"
+		if isCRLF {
+			delimLen = 5 // Length of "\r\n---"
+		}
+		afterDelim := delimPos + delimLen // Position after the delimiter pattern
+
 		// Make sure this "---" is followed by newline or is at end of file
-		afterDelim := delimPos + 4 // Position after "\n---"
 		if afterDelim < len(data) && data[afterDelim] != '\n' && data[afterDelim] != '\r' && data[afterDelim] != ' ' {
 			// This is not a valid delimiter (e.g., "---something")
 			searchStart = afterDelim
@@ -139,12 +161,20 @@ func (r *MockFileReader) splitYAMLDocuments(data []byte, atEOF bool) (advance in
 		// Extract the token (content between start and the delimiter)
 		token = bytes.TrimSpace(data[start:delimPos])
 
-		// Advance past the content and the "\n" (but "---" will be part of next iteration)
-		advance = delimPos + 1
+		// Advance past the content and the line ending (but "---" will be part of next iteration)
+		if isCRLF {
+			advance = delimPos + 2 // Skip \r\n
+		} else {
+			advance = delimPos + 1 // Skip \n
+		}
 
 		if len(token) == 0 {
 			// Empty document, skip and continue
 			start = advance + 3 // Skip the "---"
+			// Skip newline after --- (handle both \r\n and \n)
+			if start < len(data) && data[start] == '\r' {
+				start++
+			}
 			if start < len(data) && data[start] == '\n' {
 				start++
 			}
