@@ -26,9 +26,13 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: windows
+        goarch: amd64
     tags:
       - viper_bind_struct
 
