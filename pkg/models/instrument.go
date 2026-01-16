@@ -79,6 +79,7 @@ type SetupOptions struct {
 	CommandType       string
 	EnableTesting     bool
 	ProxyPort         uint32
+	IncomingProxyPort uint16
 	DnsPort           uint32
 	Mode              Mode
 	GlobalPassthrough bool

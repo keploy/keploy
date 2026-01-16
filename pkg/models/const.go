@@ -44,6 +44,10 @@ const (
 )
 
 const (
+	DefaultIncomingProxyPort uint16 = 36789
+)
+
+const (
 	Unknown    Language = "Unknown"    // Unknown language
 	Go         Language = "go"         // Go language
 	Java       Language = "java"       // Java language
