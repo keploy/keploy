@@ -10,8 +10,7 @@ release:
 
 archives:
   - id: default
-    name_template: >-
-      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{- if eq .Os "windows" }}.exe{{- end }}
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
     builds:
       - keploy
       - keploy-windows
