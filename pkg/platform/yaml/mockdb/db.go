@@ -2,7 +2,6 @@
 package mockdb
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -57,14 +56,16 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		utils.LogError(ys.Logger, err, "failed to find the mocks yaml file")
 		return err
 	}
-	data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
+	// Stream the mocks from the yaml file instead of loading entire file into memory
+	file, err := yaml.OpenYAMLFileReader(path, mockFileName)
 	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+		utils.LogError(ys.Logger, err, "failed to open the mocks file for streaming", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
 		return err
 	}
+	defer file.Close()
 
-	// decode the mocks read from the yaml file
-	dec := yamlLib.NewDecoder(bytes.NewReader(data))
+	// decode the mocks by streaming from file
+	dec := yamlLib.NewDecoder(file)
 	var mockYamls []*yaml.NetworkTrafficDoc
 	for {
 		var doc *yaml.NetworkTrafficDoc
@@ -104,7 +105,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			utils.LogError(ys.Logger, err, "failed to encode the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
 			return err
 		}
-		data, err = yamlLib.Marshal(&mockYaml)
+		data, err := yamlLib.Marshal(&mockYaml)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
 			return err
@@ -165,16 +166,15 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
+		// Stream the mocks from file instead of loading entire file into memory
+		file, err := yaml.OpenYAMLFileReader(path, mockFileName)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
+			utils.LogError(ys.Logger, err, "failed to open the mocks file for streaming", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
 			return nil, err
 		}
-		if len(data) == 0 {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
-			return nil, fmt.Errorf("failed to get mocks, empty file")
-		}
-		dec := yamlLib.NewDecoder(bytes.NewReader(data))
+		defer file.Close()
+
+		dec := yamlLib.NewDecoder(file)
 		for {
 			var doc *yaml.NetworkTrafficDoc
 			err := dec.Decode(&doc)
@@ -234,12 +234,15 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockName)
+		// Stream the mocks from file instead of loading entire file into memory
+		file, err := yaml.OpenYAMLFileReader(path, mockName)
 		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
+			utils.LogError(ys.Logger, err, "failed to open the mocks file for streaming", zap.String("session", filepath.Base(path)))
 			return nil, err
 		}
-		dec := yamlLib.NewDecoder(bytes.NewReader(data))
+		defer file.Close()
+
+		dec := yamlLib.NewDecoder(file)
 		for {
 			var doc *yaml.NetworkTrafficDoc
 			err := dec.Decode(&doc)
