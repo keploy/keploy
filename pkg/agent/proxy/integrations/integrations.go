@@ -21,7 +21,8 @@ const (
 	MYSQL       IntegrationType = "mysql"
 	POSTGRES_V1 IntegrationType = "postgres_v1"
 	POSTGRES_V2 IntegrationType = "postgres_v2"
-	MONGO       IntegrationType = "mongo"
+	MONGO_V1    IntegrationType = "mongo_v1"
+	MONGO_V2    IntegrationType = "mongo_v2"
 	REDIS       IntegrationType = "redis"
 )
 
@@ -34,7 +35,7 @@ var Registered = make(map[IntegrationType]*Parsers)
 
 type Integrations interface {
 	MatchType(ctx context.Context, reqBuf []byte) bool
-	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, clientClose chan bool, opts models.OutgoingOptions) error
+	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }
 
