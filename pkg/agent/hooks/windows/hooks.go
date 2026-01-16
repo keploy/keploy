@@ -32,6 +32,11 @@ var windivert64DLL []byte
 var _ embed.FS
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
+	incomingProxyPort := cfg.IncomingProxyPort
+	if incomingProxyPort == 0 {
+		incomingProxyPort = models.DefaultIncomingProxyPort
+	}
+
 	return &Hooks{
 		logger:            logger,
 		sess:              agent.NewSessions(),
@@ -39,7 +44,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyIP4:          "127.0.0.1",
 		proxyIP6:          [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort:         cfg.ProxyPort,
-		incomingProxyPort: cfg.IncomingProxyPort,
+		incomingProxyPort: incomingProxyPort,
 		dnsPort:           cfg.DNSPort,
 		debug:             cfg.Debug,
 	}
@@ -115,6 +120,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
+
 	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, mode, h.debug)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
@@ -172,10 +178,6 @@ func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan
 
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
 	ch := make(chan models.IngressEvent, 1024)
-
-	if h.incomingProxyPort == 0 {
-		h.incomingProxyPort = models.DefaultIncomingProxyPort
-	}
 
 	ch <- models.IngressEvent{
 		OrigAppPort: h.incomingProxyPort,
