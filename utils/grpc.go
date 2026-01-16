@@ -21,10 +21,6 @@ import (
 )
 
 func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc models.ProtoConfig) (protoreflect.MessageDescriptor, []protoreflect.FileDescriptor, error) {
-	if pc.ProtoFile == "" && pc.ProtoDir == "" {
-		return nil, nil, fmt.Errorf("protoFile or protoDir must be provided")
-	}
-
 	if pc.RequestURI == "" {
 		return nil, nil, fmt.Errorf("requestURI must be provided, eg:/service.DataService/GetComplexData")
 	}
@@ -33,6 +29,21 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 	protoDir := pc.ProtoDir
 	protoInclude := pc.ProtoInclude
 	grpcPath := pc.RequestURI
+
+	// Auto-derive protoDir from gRPC path when protoInclude is available.
+	// This enables multi-service scenarios where different requests need different proto directories.
+	if len(protoInclude) > 0 && grpcPath != "" {
+		derived, err := deriveProtoDirFromPath(grpcPath, protoInclude)
+		if err == nil {
+			protoDir = derived // Use derived directory, taking precedence over config
+		}
+		// If derivation fails, fall through to use config's protoDir
+	}
+
+	// Validate that we have at least one source of proto files
+	if protoPath == "" && protoDir == "" {
+		return nil, nil, fmt.Errorf("protoFile or protoDir must be provided (auto-derive from protoInclude also failed)")
+	}
 
 	// Normalize protoInclude roots to absolute.
 	var absRoots []string
@@ -224,6 +235,63 @@ func relToAny(abs string, roots []string) string {
 		}
 	}
 	return ""
+}
+
+// deriveProtoDirFromPath extracts the package from a gRPC path and searches protoInclude roots
+// for a matching directory. This enables automatic proto directory resolution for multi-service
+// scenarios where a single protoDir config is insufficient.
+//
+// It uses a multi-strategy approach following protobuf conventions:
+//  1. Full package path: "homework.v1.Homework" → "homework/v1/"
+//  2. First segment only: "homework.v1.Homework" → "homework/"
+//
+// Returns the first matching directory path, or an error if none found.
+func deriveProtoDirFromPath(grpcPath string, protoIncludes []string) (string, error) {
+	if grpcPath == "" || len(protoIncludes) == 0 {
+		return "", fmt.Errorf("grpcPath and protoIncludes are required")
+	}
+
+	// Parse gRPC path to get service full name (e.g., "homework.v1.Homework")
+	serviceFull, _, err := ParseGRPCPath(grpcPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse gRPC path: %w", err)
+	}
+
+	parts := strings.Split(serviceFull, ".")
+	if len(parts) == 0 {
+		return "", fmt.Errorf("cannot extract package from service %q", serviceFull)
+	}
+
+	// Build search strategies in order of likelihood:
+	// 1. Full package path (minus service name): "homework.v1.Homework" → "homework/v1"
+	// 2. First segment only: "homework"
+	var strategies []string
+
+	// Strategy 1: Full package path (remove service name - last part)
+	if len(parts) > 1 {
+		packageParts := parts[:len(parts)-1] // ["homework", "v1"]
+		strategies = append(strategies, filepath.Join(packageParts...))
+	}
+
+	// Strategy 2: First segment only
+	strategies = append(strategies, parts[0])
+
+	// Search protoInclude roots for matching directory
+	for _, root := range protoIncludes {
+		absRoot, err := mustAbs(root)
+		if err != nil || absRoot == "" {
+			continue
+		}
+
+		for _, strategy := range strategies {
+			candidateDir := filepath.Join(absRoot, strategy)
+			if info, err := os.Stat(candidateDir); err == nil && info.IsDir() {
+				return candidateDir, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no proto directory found for service %q in protoInclude roots (tried: %v)", serviceFull, strategies)
 }
 
 // ProtoTextToWire turns Protoscope text into wire bytes using the library (no exec).
