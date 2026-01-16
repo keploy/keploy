@@ -9,8 +9,15 @@ release:
   draft: false
 
 archives:
- -
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{- if eq .Os "windows" }}.exe{{- end }}
+    builds:
+      - keploy
+      - keploy-windows
+    format_overrides:
+      - goos: windows
+        format: binary
 
 builds:
   - binary: keploy
