@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -151,7 +152,8 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		}
 
 		// Assuming modern Java structure (without /jre/)
-		cacertsPath := fmt.Sprintf("%s/lib/security/cacerts", javaHome)
+		// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes)
+		cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
 		// You can modify these as per your requirements
 		storePass := "changeit"
 		alias := "keployCA"
@@ -184,12 +186,68 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 	return nil
 }
 
+// installWindowsCA installs the CA certificate in Windows certificate store using certutil
+func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) error {
+	cmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			utils.LogError(logger, err, "Failed to install CA certificate using certutil", zap.String("output", string(output)))
+			return err
+		}
+	}
+	logger.Debug("Successfully installed CA certificate in Windows ROOT store", zap.String("output", string(output)))
+	return nil
+}
+
 // TODO: This function should be used even before starting the proxy server. It should be called just after the keploy is started.
 // because the custom ca in case of NODE is set via env variable NODE_EXTRA_CA_CERTS and env variables can be set only on startup.
 // As in case of unit test integration, we are starting the proxy via api.
 
 // SetupCA setups custom certificate authority to handle TLS connections
 func SetupCA(ctx context.Context, logger *zap.Logger) error {
+	// Windows-specific certificate installation
+	if runtime.GOOS == "windows" {
+		// Extract certificate to a temporary file
+		tempCertPath, err := extractCertToTemp()
+		if err != nil {
+			utils.LogError(logger, err, "Failed to extract certificate to temp folder")
+			return err
+		}
+		defer func() {
+			if err := os.Remove(tempCertPath); err != nil {
+				logger.Warn("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
+			}
+		}()
+
+		// Install certificate using certutil
+		err = installWindowsCA(ctx, logger, tempCertPath)
+		if err != nil {
+			utils.LogError(logger, err, "Failed to install CA certificate on Windows")
+			return err
+		}
+
+		// install CA in the java keystore if java is installed
+		err = installJavaCA(ctx, logger, tempCertPath)
+		if err != nil {
+			utils.LogError(logger, err, "Failed to install CA in the java keystore")
+			return err
+		}
+
+		// Set environment variables for Node.js and Python to use the custom CA
+		err = SetupCaCertEnv(logger)
+		if err != nil {
+			utils.LogError(logger, err, "Failed to set up CA cert environment variables")
+			return err
+		}
+
+		return nil
+	}
+
+	// Linux/Unix-specific certificate installation
 	caPaths, err := getCaPaths()
 	if err != nil {
 		utils.LogError(logger, err, "Failed to find the CA store path")
