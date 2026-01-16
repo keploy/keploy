@@ -32,6 +32,9 @@ jobs:
           - name: http-pokeapi
             path: http-pokeapi
             script_dir: http_pokeapi
+          - name: tls-dadjoke
+            path: tls-dadjoke
+            script_dir: tls_dadjoke
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
