@@ -92,10 +92,10 @@ Golang Application
 
 Node Application
 	Record:
-	keploy record -c “npm start --prefix /path/to/node/app"
+	keploy record -c "npm start --prefix /path/to/node/app"
 
 	Test:
-	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	keploy test -c "npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
