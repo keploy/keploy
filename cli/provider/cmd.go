@@ -434,6 +434,12 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	// Check if this is a Docker Compose command and suppress usage on validation errors
+	commandFlag, _ := cmd.Flags().GetString("command")
+	if utils.FindDockerCmd(commandFlag) == utils.DockerCompose {
+		cmd.SilenceUsage = true
+	}
+
 	err := isCompatible(c.logger)
 	if err != nil {
 		return err
