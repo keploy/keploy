@@ -28,18 +28,18 @@ disableTele: false
 generateGithubActions: false
 containerName: ""
 networkName: ""
-buildDelay: 30
+buildDelay: 30s
 test:
   selectedTests: {}
   ignoredTests: {}
   globalNoise:
     global: {}
     test-sets: {}
-  delay: 5
+  delay: 5s
   host: ""
   port: 0
   grpcPort: 0
-  apiTimeout: 5
+  apiTimeout: 5s
   skipCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
