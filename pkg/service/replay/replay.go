@@ -759,6 +759,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
+			MongoPasswords: r.config.Test.MongoPasswords,
 			SQLDelay:       time.Duration(r.config.Test.Delay),
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
@@ -850,6 +851,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
+			MongoPasswords: r.config.Test.MongoPasswords,
 			SQLDelay:       time.Duration(r.config.Test.Delay),
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,

@@ -133,6 +133,7 @@ type Test struct {
 	CoverageReportPath  string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering      bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
 	MongoPassword       string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
+	MongoPasswords      map[string]string   `json:"mongoPasswords" yaml:"mongoPasswords mapstructure:"mongoPasswords"`
 	Language            models.Language     `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks   bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
 	FallBackOnMiss      bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
