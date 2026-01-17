@@ -245,3 +245,253 @@ func TestFilterMocks_678(t *testing.T) {
 		assert.Equal(t, "mock3", result[4].Name)
 	})
 }
+
+// TestLooksLikeTimestamp_888 tests timestamp detection using dateparse library
+func TestLooksLikeTimestamp_888(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		// Standard formats that should be detected
+		{"RFC3339", "2023-12-18T10:30:00Z", true},
+		{"RFC3339Nano", "2023-12-18T10:30:00.123456789Z", true},
+		{"RFC1123", "Mon, 18 Dec 2023 10:30:00 GMT", true},
+		{"RFC822", "18 Dec 23 10:30 GMT", true},
+		{"ANSIC", "Mon Dec 18 10:30:00 2023", true},
+		{"UnixDate", "Mon Dec 18 10:30:00 UTC 2023", true},
+		{"ISO8601", "2023-12-18", true},
+		{"ISO8601Time", "2023-12-18T10:30:00", true},
+		{"USDate", "12/18/2023", true},
+		{"USDateTime", "12/18/2023 10:30:00", true},
+		{"EuropeanDate", "18/12/2023", false}, // day/month/year not universally supported by dateparse
+		{"TimeOnly", "10:30:00", true},
+		{"MonthDayYear", "December 18, 2023", true},
+		// Strings that should NOT be timestamps
+		{"EmptyString", "", false},
+		{"RandomString", "hello world", false},
+		{"UUID", "550e8400-e29b-41d4-a716-446655440000", false},
+		{"Number", "12345", false},
+		{"Email", "test@example.com", false},
+		{"URL", "https://example.com", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := LooksLikeTimestamp(tc.input)
+			assert.Equal(t, tc.expected, result, "LooksLikeTimestamp(%q) = %v, want %v", tc.input, result, tc.expected)
+		})
+	}
+}
+
+// TestLooksLikeRandomID_889 tests random ID detection (UUID, KSUID, ULID, ObjectID, Snowflake, NanoID)
+func TestLooksLikeRandomID_889(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		// UUIDs (library-based detection)
+		{"UUIDv4", "550e8400-e29b-41d4-a716-446655440000", true},
+		{"UUIDv4Uppercase", "550E8400-E29B-41D4-A716-446655440000", true},
+		{"UUIDv1", "f47ac10b-58cc-1111-bc00-d4d5c2cd9b3a", true},
+		// KSUID (27 characters, library-based)
+		{"KSUID", "0ujsswThIGTUYm2K8FjOOfXtY1K", true},
+		{"KSUID2", "1srOrx2ZWZBpBUvZwXKQmoEYga2", true},
+		// ULID (26 characters, library-based)
+		{"ULID", "01ARZ3NDEKTSV4RRFFQ69G5FAV", true},
+		{"ULID2", "01H9YP3SXNRWQY6DSMZR5XATJ6", true},
+		// MongoDB ObjectID (24 hex characters)
+		{"ObjectID", "507f1f77bcf86cd799439011", true},
+		{"ObjectIDUppercase", "507F1F77BCF86CD799439011", true},
+		// Snowflake ID (18-19 digits)
+		{"SnowflakeID", "175928847299117063", true},
+		{"SnowflakeID19", "1175928847299117063", true},
+		// NanoID (21-22 characters alphanumeric with _ and -)
+		{"NanoID21", "V1StGXR8_Z5jdHi6B-myT", true},
+		{"NanoID22", "V1StGXR8_Z5jdHi6B-myT1", true},
+		// Prefixed hex strings (like enc_xxx, id_xxx, token_xxx)
+		{"PrefixedHex_enc", "enc_ad1aeab2973130fbe617c10705c6fdb91c0be2ae", true},
+		{"PrefixedHex_id", "id_b758cec93c419abd3991ddd7655e5a891f59ecb1", true},
+		{"PrefixedHex_token", "token_e347db44c0cf388911ca259ac190cb21c79012b3", true},
+		{"PrefixedHex_short", "enc_abc123def456789a", true},
+		// Pure long hex strings (SHA256, API keys, etc.)
+		{"SHA256Hash", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", true},
+		{"LongHex32", "507f1f77bcf86cd799439011abcdef12", true},
+		// High entropy base64-like tokens
+		{"Base64Token", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", true},
+		{"SessionToken", "a352d1f893bda510a0b39a64e129b828", true},
+		// Strings that should NOT be random IDs
+		{"EmptyString", "", false},
+		{"ShortString", "abc", false},
+		{"RegularWord", "hello-world", false},
+		{"Timestamp", "2023-12-18T10:30:00Z", false},
+		{"Email", "test@example.com", false},
+		{"PhoneNumber", "+1234567890", false},
+		{"IPv4", "192.168.1.1", false},
+		{"MalformedUUID", "550e8400-e29b-41d4-a716", true}, // Partial UUID/hex-like string is still considered noisy
+		{"RegularSentence", "The quick brown fox jumps over the lazy dog", false},
+		{"SimpleWord", "hello", false},
+		{"ShortHex", "abc123", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := LooksLikeRandomID(tc.input)
+			assert.Equal(t, tc.expected, result, "LooksLikeRandomID(%q) = %v, want %v", tc.input, result, tc.expected)
+		})
+	}
+}
+
+// TestIsNoiseValue_890 tests the combined noise value detection (timestamp OR random ID)
+func TestIsNoiseValue_890(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		// Timestamps
+		{"Timestamp", "2023-12-18T10:30:00Z", true},
+		// Random IDs
+		{"UUID", "550e8400-e29b-41d4-a716-446655440000", true},
+		{"KSUID", "0ujsswThIGTUYm2K8FjOOfXtY1K", true},
+		// Neither
+		{"RegularString", "hello world", false},
+		{"EmptyString", "", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isNoiseValue(tc.input)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// TestFindJSONPathsWithPatterns_891 tests finding JSON paths with noise patterns
+func TestFindJSONPathsWithPatterns_891(t *testing.T) {
+	t.Run("NestedObjectWithTimestamp", func(t *testing.T) {
+		jsonData := map[string]interface{}{
+			"id":   "550e8400-e29b-41d4-a716-446655440000",
+			"name": "test",
+			"meta": map[string]interface{}{
+				"createdAt": "2023-12-18T10:30:00Z",
+				"updatedAt": "2023-12-18T11:30:00Z",
+			},
+		}
+		paths := findJSONPathsWithPatterns(jsonData, "")
+		assert.Contains(t, paths, "id")
+		assert.Contains(t, paths, "meta.createdAt")
+		assert.Contains(t, paths, "meta.updatedAt")
+		assert.NotContains(t, paths, "name")
+	})
+
+	t.Run("ArrayWithRandomIDs", func(t *testing.T) {
+		jsonData := []interface{}{
+			"550e8400-e29b-41d4-a716-446655440000",
+			"regular-string",
+			"0ujsswThIGTUYm2K8FjOOfXtY1K",
+		}
+		paths := findJSONPathsWithPatterns(jsonData, "items")
+		assert.Contains(t, paths, "items.0")
+		assert.Contains(t, paths, "items.2")
+		assert.NotContains(t, paths, "items.1")
+	})
+
+	t.Run("EmptyData", func(t *testing.T) {
+		paths := findJSONPathsWithPatterns(map[string]interface{}{}, "")
+		assert.Empty(t, paths)
+	})
+
+	t.Run("NoNoiseValues", func(t *testing.T) {
+		jsonData := map[string]interface{}{
+			"name":    "John",
+			"age":     30,
+			"active":  true,
+			"balance": 100.50,
+		}
+		paths := findJSONPathsWithPatterns(jsonData, "")
+		assert.Empty(t, paths)
+	})
+}
+
+// TestDetectNoiseFieldsInResp_892 tests the main noise detection function for HTTP responses
+func TestDetectNoiseFieldsInResp_892(t *testing.T) {
+	t.Run("NilResponse", func(t *testing.T) {
+		result := DetectNoiseFieldsInResp(nil)
+		assert.NotNil(t, result)
+		assert.Empty(t, result)
+	})
+
+	t.Run("HeaderWithTimestamp", func(t *testing.T) {
+		resp := &models.HTTPResp{
+			StatusCode: 200,
+			Header: map[string]string{
+				"Date":         "Mon, 18 Dec 2023 10:30:00 GMT",
+				"Content-Type": "application/json",
+			},
+			Body: "{}",
+		}
+		result := DetectNoiseFieldsInResp(resp)
+		assert.Contains(t, result, "header.date")
+		assert.NotContains(t, result, "header.content-type")
+	})
+
+	t.Run("JSONBodyWithRandomIDs", func(t *testing.T) {
+		resp := &models.HTTPResp{
+			StatusCode: 200,
+			Header:     map[string]string{},
+			Body:       `{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "test", "requestId": "0ujsswThIGTUYm2K8FjOOfXtY1K"}`,
+		}
+		result := DetectNoiseFieldsInResp(resp)
+		assert.Contains(t, result, "body.id")
+		assert.Contains(t, result, "body.requestId")
+		assert.NotContains(t, result, "body.name")
+	})
+
+	t.Run("JSONBodyWithNestedTimestamps", func(t *testing.T) {
+		resp := &models.HTTPResp{
+			StatusCode: 200,
+			Header:     map[string]string{},
+			Body:       `{"data": {"createdAt": "2023-12-18T10:30:00Z", "title": "Hello"}}`,
+		}
+		result := DetectNoiseFieldsInResp(resp)
+		assert.Contains(t, result, "body.data.createdAt")
+		assert.NotContains(t, result, "body.data.title")
+	})
+
+	t.Run("NonJSONBodyWithNoiseValue", func(t *testing.T) {
+		// isNoiseValue checks the entire body as one string - it detects if body IS a noise value
+		// not if body CONTAINS a noise value. Use a pure UUID as body.
+		resp := &models.HTTPResp{
+			StatusCode: 200,
+			Header:     map[string]string{},
+			Body:       "550e8400-e29b-41d4-a716-446655440000",
+		}
+		result := DetectNoiseFieldsInResp(resp)
+		// Non-JSON body that is itself a noise pattern marks the whole body as noisy
+		assert.Contains(t, result, "body")
+	})
+
+	t.Run("EmptyBody", func(t *testing.T) {
+		resp := &models.HTTPResp{
+			StatusCode: 204,
+			Header:     map[string]string{},
+			Body:       "",
+		}
+		result := DetectNoiseFieldsInResp(resp)
+		assert.Empty(t, result)
+	})
+
+	t.Run("ArrayInJSONBody", func(t *testing.T) {
+		resp := &models.HTTPResp{
+			StatusCode: 200,
+			Header:     map[string]string{},
+			Body:       `{"items": ["550e8400-e29b-41d4-a716-446655440000", "regular-string", "2023-12-18T10:30:00Z"]}`,
+		}
+		result := DetectNoiseFieldsInResp(resp)
+		assert.Contains(t, result, "body.items.0")
+		assert.Contains(t, result, "body.items.2")
+		assert.NotContains(t, result, "body.items.1")
+	})
+}
