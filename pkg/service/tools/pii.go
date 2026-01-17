@@ -19,8 +19,8 @@ type PIIType string
 const (
 	PIIEmail      PIIType = "Email"
 	PIIPhone      PIIType = "Phone"
-	PIIIPv4       PIIType = "Ipv4"
-	PIIIPv6       PIIType = "Ipv6"
+	PIIIPv4       PIIType = "IPv4"
+	PIIIPv6       PIIType = "IPv6"
 	PIICreditCard PIIType = "CreditCard"
 	PIISSN        PIIType = "Ssn"
 	PIIPassport   PIIType = "Passport"
@@ -79,6 +79,7 @@ var defaultPIIPatterns = map[PIIType]string{
 	PIIIPv6:       `(?i)(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}`,
 	PIICreditCard: `\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\b`,
 	PIISSN:        `\b[0-9]{3}[-.\s]?[0-9]{2}[-.\s]?[0-9]{4}\b`,
+	PIIZipCode:    `\b\d{5}(?:-\d{4})?\b`,
 }
 
 // NewPIIDetector creates a new PII detector with the given configuration

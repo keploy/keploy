@@ -345,3 +345,11 @@ title = "gitleaks config"
     tags = ["pii", "name"]
     keywords = ["name", "first", "last", "full", "user", "customer"]
 
+# ============ ADDRESSES ============
+[[rules]]
+    id = "pii-us-zipcode"
+    description = "US Zip Code (PII/Address)"
+    regex = '''\b\d{5}(?:-\d{4})?\b'''
+    tags = ["pii", "address", "location"]
+    keywords = ["zip", "postal", "code", "address"]
+
