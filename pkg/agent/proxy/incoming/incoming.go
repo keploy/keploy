@@ -60,7 +60,7 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origAppPort))
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newAppPort))
 	// Start the basic TCP forwarder
-	stop := runTCPForwarder(ctx, pm.logger, origAppAddr, newAppAddr, pm, pm.incomingOpts)
+	stop := pm.runTCPForwarder(ctx, pm.logger, origAppAddr, newAppAddr)
 	pm.mu.Lock()
 	pm.active[origAppPort] = stop
 	pm.mu.Unlock()
@@ -102,7 +102,7 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 }
 
 // runTCPForwarder starts a basic proxy that forwards traffic and logs data.
-func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAppAddr string, pm *IngressProxyManager, opts models.IncomingOptions) func() error {
+func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAppAddr string) func() error {
 	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
 		logger.Error("Ingress proxy failed to listen", zap.String("original_addr", origAppAddr), zap.Error(err))
@@ -143,7 +143,7 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 			}
 
 			go func(cc net.Conn) {
-				handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, opts, pm.synchronous, sem)
+				pm.handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, sem)
 			}(clientConn)
 		}
 	}()
@@ -157,7 +157,7 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions, synchronous bool, sem chan struct{}) {
+func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}) {
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
@@ -168,10 +168,14 @@ func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr strin
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		logger.Debug("Detected HTTP/2 connection")
-		upConn, err := net.DialTimeout("tcp4", newAppAddr, 3*time.Second)
+
+		// Get the actual destination for gRPC on Windows
+		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+
+		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server",
-				zap.String("New_App_Address", newAppAddr),
+				zap.String("Final_App_Address", finalAppAddr),
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
@@ -180,7 +184,7 @@ func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr strin
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
-		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, opts, synchronous, sem)
+		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem)
 	}
 }
 

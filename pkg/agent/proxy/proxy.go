@@ -94,6 +94,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		logger := p.logger.With(zap.Any("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
+		logger.Debug("initialized the parser integration", zap.String("ParserType", string(parserType)))
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
 	sort.Slice(p.integrationsPriority, func(i, j int) bool {

@@ -10,7 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models/postgres"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
-	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 )
 
