@@ -23,6 +23,9 @@ proxyPort: 16789
 incomingProxyPort: %d
 dnsPort: 26789
 debug: false
+debugModules:
+  include: []
+  exclude: []
 disableANSI: false
 disableTele: false
 generateGithubActions: false

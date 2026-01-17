@@ -18,6 +18,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/pkg/service/export"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
@@ -28,7 +29,7 @@ import (
 
 func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, reportDB ReportDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
 	return &Tools{
-		logger:      logger,
+		logger:      logger.Named(models.ToolsService),
 		telemetry:   telemetry,
 		auth:        auth,
 		testSetConf: testsetConfig,

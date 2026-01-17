@@ -56,6 +56,7 @@ var HookImpl TestHooks
 
 type Replayer struct {
 	logger          *zap.Logger
+	coverageLogger  *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
 	mappingDB       MappingDB
@@ -72,7 +73,6 @@ type Replayer struct {
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
-
 	// TODO: add some comment.
 	mock := &mock{
 		cfg:        config,
@@ -88,7 +88,8 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 
 	instrument := config.Command != ""
 	return &Replayer{
-		logger:          logger,
+		logger:          logger.Named(models.ReplayService),
+		coverageLogger:  logger.Named(models.CoverageService),
 		testDB:          testDB,
 		mockDB:          mockDB,
 		mappingDB:       mappingDB,
@@ -198,18 +199,18 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var cov coverage.Service
 	switch r.config.Test.Language {
 	case models.Go:
-		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
+		cov = golang.New(ctx, r.coverageLogger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
 		// if the executable is not starting with "python" or "python3" then skipCoverage
 		if !strings.HasPrefix(executable, "python") && !strings.HasPrefix(executable, "python3") {
 			r.logger.Warn("python command not python or python3, skipping coverage calculation")
 			r.config.Test.SkipCoverage = true
 		}
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+		cov = python.New(ctx, r.coverageLogger, r.reportDB, r.config.Command, executable)
 	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+		cov = javascript.New(ctx, r.coverageLogger, r.reportDB, r.config.Command)
 	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+		cov = java.New(ctx, r.coverageLogger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
 	default:
 		r.config.Test.SkipCoverage = true
 	}
