@@ -124,6 +124,7 @@ func TestPIIDetector_Detect_Email(t *testing.T) {
 }
 
 func TestPIIDetector_Detect_CreditCard(t *testing.T) {
+	// Test with ValidateCreditCards = true (Luhn validation enabled)
 	detector := NewPIIDetector(PIIConfig{
 		ValidateCreditCards: true,
 	})
@@ -160,6 +161,48 @@ func TestPIIDetector_Detect_CreditCard(t *testing.T) {
 			for _, f := range cardFindings {
 				if tt.validate && !f.Validated {
 					t.Errorf("Expected card %q to be validated", f.Value)
+				}
+			}
+		})
+	}
+}
+
+func TestPIIDetector_Detect_CreditCard_NoValidation(t *testing.T) {
+	// Test with ValidateCreditCards = false (no Luhn validation)
+	// All credit card patterns should be returned, even those failing Luhn
+	detector := NewPIIDetector(PIIConfig{
+		ValidateCreditCards: false,
+	})
+
+	tests := []struct {
+		name      string
+		input     string
+		wantLen   int
+		validated bool
+	}{
+		{"visa_valid", "Card: 4111111111111111", 1, false},
+		{"visa_invalid_luhn", "Card: 4111111111111112", 1, false}, // Would fail Luhn but still detected
+		{"no_cards", "No credit cards here", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			findings := detector.Detect(tt.input)
+			var cardFindings []PIIFinding
+			for _, f := range findings {
+				if f.Type == PIICreditCard {
+					cardFindings = append(cardFindings, f)
+				}
+			}
+
+			if len(cardFindings) != tt.wantLen {
+				t.Errorf("Detect(%q) found %d cards, want %d", tt.input, len(cardFindings), tt.wantLen)
+			}
+
+			// When validation is disabled, findings should have Validated=false
+			for _, f := range cardFindings {
+				if f.Validated != tt.validated {
+					t.Errorf("Expected card %q Validated=%v, got %v", f.Value, tt.validated, f.Validated)
 				}
 			}
 		})
@@ -253,17 +296,27 @@ func TestPIIDetector_Detect_Phone(t *testing.T) {
 func TestPIIDetector_Detect_SSN(t *testing.T) {
 	detector := NewDefaultPIIDetector()
 
-	// Note: SSN regex uses negative lookahead for invalid patterns (000, 666, 9xx start)
-	// The regex is strict per IRS rules
+	// Note: SSN regex is permissive and matches SSN-like 9-digit patterns with separators.
+	// IRS-specific invalid patterns (000, 666, 9xx start, etc.) are rejected in validateFinding post-match.
 	tests := []struct {
 		name    string
 		input   string
 		wantLen int
 	}{
-		// Valid SSN formats - Note: regex pattern may match differently based on context
-		{"invalid_start", "Invalid: 000-12-3456", 0}, // 000 is invalid per IRS
-		{"invalid_666", "Invalid: 666-12-3456", 0},   // 666 is invalid per IRS
+		// Valid SSN formats that should be detected
+		{"valid_with_dashes", "SSN: 123-45-6789", 1},
+		{"valid_with_spaces", "Social: 123 45 6789", 1},
+		{"valid_no_separator", "Number: 123456789", 1},
+		{"valid_mixed", "ID: 456-78-9012", 1},
+		// Invalid SSN formats per IRS rules (rejected post-match)
+		{"invalid_start_000", "Invalid: 000-12-3456", 0}, // 000 is invalid per IRS
+		{"invalid_start_666", "Invalid: 666-12-3456", 0}, // 666 is invalid per IRS
+		{"invalid_start_9xx", "Invalid: 900-12-3456", 0}, // 9xx is invalid per IRS
+		{"invalid_group_00", "Invalid: 123-00-4567", 0},  // 00 group is invalid
+		{"invalid_serial_0000", "Invalid: 123-45-0000", 0}, // 0000 serial is invalid
+		// Edge cases
 		{"no_ssn", "No SSN here", 0},
+		{"too_short", "Short: 12-34-567", 0}, // Only 8 digits
 	}
 
 	for _, tt := range tests {

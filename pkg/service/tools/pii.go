@@ -93,9 +93,13 @@ func NewPIIDetector(cfg PIIConfig) *PIIDetector {
 
 	// Compile regex patterns
 	for piiType, pattern := range defaultPIIPatterns {
-		if re, err := regexp.Compile(pattern); err == nil {
-			d.patterns[piiType] = re
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			// Log compilation error - pattern will be skipped
+			// This helps with debugging if patterns are modified
+			continue
 		}
+		d.patterns[piiType] = re
 	}
 
 	// Set up enabled types
@@ -205,12 +209,18 @@ func (d *PIIDetector) validateFinding(piiType PIIType, value string, start, end 
 
 	switch piiType {
 	case PIICreditCard:
+		// When ValidateCreditCards is true, only cards passing Luhn check are returned.
+		// When false, all credit card patterns are returned for manual review.
 		if d.config.ValidateCreditCards {
 			if !ValidateLuhn(value) {
 				return nil // Failed Luhn check
 			}
 			validated = true
 			confidence = 0.95
+		} else {
+			// No validation - return all matches with lower confidence
+			validated = false
+			confidence = 0.7
 		}
 
 	case PIIIPv4:
@@ -228,43 +238,49 @@ func (d *PIIDetector) validateFinding(piiType PIIType, value string, start, end 
 		confidence = 0.9
 
 	case PIIEmail:
-		// Basic email validation
-		if strings.Count(value, "@") == 1 && strings.Contains(value, ".") {
+		// Basic email validation: ensure exactly one "@" and at least one "." in domain part
+		if strings.Count(value, "@") == 1 && strings.LastIndex(value, ".") > strings.Index(value, "@") {
 			validated = true
 			confidence = 0.95
+		} else {
+			return nil // Invalid email format
 		}
 
 	case PIIPhone:
-		// Clean and validate phone
+		// Clean and validate phone number length
 		cleaned := cleanPhoneNumber(value)
 		if len(cleaned) >= 10 && len(cleaned) <= 15 {
 			validated = true
 			confidence = 0.85
+		} else {
+			return nil // Invalid phone number length, skip
 		}
 
 	case PIISSN:
 		cleaned := cleanSSN(value)
-		if len(cleaned) == 9 {
-			// Validate SSN per IRS rules:
-			// - Cannot start with 000, 666, or 9xx
-			// - Middle 2 digits cannot be 00
-			// - Last 4 digits cannot be 0000
-			area := cleaned[0:3]
-			group := cleaned[3:5]
-			serial := cleaned[5:9]
-			
-			if area == "000" || area == "666" || area[0] == '9' {
-				return nil // Invalid SSN
-			}
-			if group == "00" {
-				return nil // Invalid SSN
-			}
-			if serial == "0000" {
-				return nil // Invalid SSN
-			}
-			validated = true
-			confidence = 0.9
+		if len(cleaned) != 9 {
+			// Discard SSNs that do not have exactly 9 digits after cleaning
+			return nil
 		}
+		// Validate SSN per IRS rules:
+		// - Cannot start with 000, 666, or 9xx
+		// - Middle 2 digits cannot be 00
+		// - Last 4 digits cannot be 0000
+		area := cleaned[0:3]
+		group := cleaned[3:5]
+		serial := cleaned[5:9]
+
+		if area == "000" || area == "666" || area[0] == '9' {
+			return nil // Invalid SSN per IRS rules
+		}
+		if group == "00" {
+			return nil // Invalid SSN per IRS rules
+		}
+		if serial == "0000" {
+			return nil // Invalid SSN per IRS rules
+		}
+		validated = true
+		confidence = 0.9
 	}
 
 	return &PIIFinding{
