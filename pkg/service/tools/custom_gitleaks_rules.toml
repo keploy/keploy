@@ -240,3 +240,108 @@ title = "gitleaks config"
     regex = '''(?i)(?:token|access_token|auth_token|session_token|sig|signature|apikey|api_key)(?:=|\\u003d)([A-Za-z0-9._~%-]{32,})(?:&|\\u0026|%26|["'\s]|$)'''
     tags = ["token", "escape-aware"]
 
+
+# ============================================================================
+# PII DETECTION RULES
+# Supports GDPR, CCPA, HIPAA compliance
+# Added for issue #3400: Automatic PII Detection and Masking
+# ============================================================================
+
+# ============ EMAIL ADDRESSES ============
+[[rules]]
+    id = "pii-email"
+    description = "Email Address (PII)"
+    regex = '''[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'''
+    tags = ["pii", "email"]
+    keywords = ["email", "mail", "e-mail", "address"]
+
+# ============ PHONE NUMBERS ============
+[[rules]]
+    id = "pii-phone-us"
+    description = "US Phone Number (PII)"
+    regex = '''(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}'''
+    tags = ["pii", "phone"]
+    keywords = ["phone", "mobile", "cell", "tel", "telephone"]
+
+[[rules]]
+    id = "pii-phone-intl"
+    description = "International Phone Number E.164 (PII)"
+    regex = '''\+[1-9]\d{6,14}'''
+    tags = ["pii", "phone"]
+
+# ============ IP ADDRESSES ============
+[[rules]]
+    id = "pii-ipv4"
+    description = "IPv4 Address (PII)"
+    regex = '''\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'''
+    tags = ["pii", "ip", "network"]
+    keywords = ["ip", "address", "host", "remote", "client"]
+
+[[rules]]
+    id = "pii-ipv6"
+    description = "IPv6 Address (PII)"
+    regex = '''(?i)(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:|(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,5}(?::[0-9a-f]{1,4}){1,2}|(?:[0-9a-f]{1,4}:){1,4}(?::[0-9a-f]{1,4}){1,3}'''
+    tags = ["pii", "ip", "network"]
+
+# ============ CREDIT CARDS ============
+[[rules]]
+    id = "pii-credit-card-visa"
+    description = "Visa Credit Card Number (PII/Financial)"
+    regex = '''\b4[0-9]{12}(?:[0-9]{3})?\b'''
+    tags = ["pii", "financial", "credit-card"]
+    keywords = ["card", "credit", "visa", "payment"]
+
+[[rules]]
+    id = "pii-credit-card-mastercard"
+    description = "Mastercard Credit Card Number (PII/Financial)"
+    regex = '''\b(?:5[1-5][0-9]{2}|222[1-9]|22[3-9][0-9]|2[3-6][0-9]{2}|27[01][0-9]|2720)[0-9]{12}\b'''
+    tags = ["pii", "financial", "credit-card"]
+    keywords = ["card", "credit", "mastercard", "payment"]
+
+[[rules]]
+    id = "pii-credit-card-amex"
+    description = "American Express Card Number (PII/Financial)"
+    regex = '''\b3[47][0-9]{13}\b'''
+    tags = ["pii", "financial", "credit-card"]
+    keywords = ["card", "credit", "amex", "american express"]
+
+[[rules]]
+    id = "pii-credit-card-discover"
+    description = "Discover Card Number (PII/Financial)"
+    regex = '''\b6(?:011|5[0-9]{2})[0-9]{12}\b'''
+    tags = ["pii", "financial", "credit-card"]
+    keywords = ["card", "credit", "discover"]
+
+# ============ GOVERNMENT IDs ============
+[[rules]]
+    id = "pii-ssn"
+    description = "US Social Security Number (PII/Government)"
+    # Simple SSN pattern: 3 digits, separator, 2 digits, separator, 4 digits
+    # Note: Does not validate IRS rules (no 000/666/9xx start) - validation done post-match
+    regex = '''\b[0-9]{3}[-.\s]?[0-9]{2}[-.\s]?[0-9]{4}\b'''
+    tags = ["pii", "government", "ssn"]
+    keywords = ["ssn", "social", "security", "tax"]
+
+[[rules]]
+    id = "pii-passport"
+    description = "Passport Number Pattern (PII/Government)"
+    regex = '''(?i)(?:passport|pp)[\s:="']+[a-z0-9]{6,12}'''
+    tags = ["pii", "government", "passport"]
+    keywords = ["passport", "travel", "document"]
+
+# ============ DATES ============
+[[rules]]
+    id = "pii-dob-labeled"
+    description = "Date of Birth with Label (PII)"
+    regex = '''(?i)(?:dob|birth|birthday|born)[\s:="']+\d{1,4}[-/]\d{1,2}[-/]\d{1,4}'''
+    tags = ["pii", "dob", "date"]
+    keywords = ["dob", "birth", "birthday", "born"]
+
+# ============ NAMES (Field-based) ============
+[[rules]]
+    id = "pii-name-field"
+    description = "Name Field Pattern (PII)"
+    regex = '''(?i)(?:first_?name|last_?name|full_?name|user_?name|customer_?name)[\s:="']+[a-zA-Z][a-zA-Z\s'-]{1,50}'''
+    tags = ["pii", "name"]
+    keywords = ["name", "first", "last", "full", "user", "customer"]
+

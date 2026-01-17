@@ -13,6 +13,41 @@ type MockDownload struct {
 	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
 }
 
+// Sanitize configures the sanitization behavior for PII and secret detection
+// Used by the 'keploy sanitize' command
+type Sanitize struct {
+	// EnablePII enables PII detection (emails, phones, IPs, credit cards, SSNs)
+	// Default: true
+	EnablePII bool `json:"enablePII" yaml:"enablePII" mapstructure:"enablePII"`
+
+	// EnableSecrets enables secret/API key detection using gitleaks
+	// Default: true
+	EnableSecrets bool `json:"enableSecrets" yaml:"enableSecrets" mapstructure:"enableSecrets"`
+
+	// SensitiveFields are custom field names to always treat as sensitive (case-insensitive)
+	// Example: ["customer_id", "internal_token"]
+	SensitiveFields []string `json:"sensitiveFields" yaml:"sensitiveFields" mapstructure:"sensitiveFields"`
+
+	// ExcludeFields are field names to never mask (case-insensitive)
+	// Example: ["public_id", "request_id"]
+	ExcludeFields []string `json:"excludeFields" yaml:"excludeFields" mapstructure:"excludeFields"`
+
+	// PIICategories specifies which PII types to detect
+	// Options: "all", "email", "phone", "ip", "credit-card", "ssn"
+	// Default: ["all"]
+	PIICategories []string `json:"piiCategories" yaml:"piiCategories" mapstructure:"piiCategories"`
+
+	// ValidateCreditCards enables Luhn algorithm validation for credit card numbers
+	// When true, only numbers passing Luhn check are masked
+	// Default: true
+	ValidateCreditCards bool `json:"validateCreditCards" yaml:"validateCreditCards" mapstructure:"validateCreditCards"`
+
+	// ExcludePrivateIPs excludes private/local IP addresses from detection
+	// When true, IPs like 192.168.x.x, 10.x.x.x, 127.0.0.1 are not masked
+	// Default: true
+	ExcludePrivateIPs bool `json:"excludePrivateIPs" yaml:"excludePrivateIPs" mapstructure:"excludePrivateIPs"`
+}
+
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
@@ -54,6 +89,7 @@ type Config struct {
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
 	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
+	Sanitize              Sanitize            `json:"sanitize" yaml:"sanitize" mapstructure:"sanitize"`
 }
 
 type Agent struct {
