@@ -258,7 +258,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 
 	outputData := buf.Bytes()
 
-	if err := os.WriteFile("output.json", outputData, 0644); err != nil {
+	if err := os.WriteFile("output.json", outputData, models.FilePermReadWrite); err != nil {
 		utils.LogError(logger, err, "failed to write the output JSON file")
 		return err
 	}
