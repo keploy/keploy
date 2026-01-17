@@ -14,9 +14,9 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-// LineBasedMockReader provides line-by-line reading with "---" as the document delimiter.
-// This is an alternative implementation that reads line by line and accumulates until delimiter.
-type LineBasedMockReader struct {
+// MockReader provides line-by-line reading with "---" as the document delimiter.
+// It reads line by line and accumulates until delimiter for memory-efficient streaming.
+type MockReader struct {
 	file    *os.File
 	reader  *bufio.Reader
 	ctx     context.Context
@@ -26,15 +26,15 @@ type LineBasedMockReader struct {
 	done    bool
 }
 
-// NewLineBasedMockReader creates a reader that accumulates lines until "---" delimiter.
-func NewLineBasedMockReader(ctx context.Context, logger *zap.Logger, path, name string) (*LineBasedMockReader, error) {
+// NewMockReader creates a reader that accumulates lines until "---" delimiter.
+func NewMockReader(ctx context.Context, logger *zap.Logger, path, name string) (*MockReader, error) {
 	filePath := filepath.Join(path, name+".yaml")
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open mock file: %w", err)
 	}
 
-	return &LineBasedMockReader{
+	return &MockReader{
 		file:    file,
 		reader:  bufio.NewReader(file),
 		ctx:     ctx,
@@ -46,7 +46,7 @@ func NewLineBasedMockReader(ctx context.Context, logger *zap.Logger, path, name 
 }
 
 // ReadNextDocument reads lines until it encounters "---" or EOF, returning the accumulated document.
-func (r *LineBasedMockReader) ReadNextDocument() ([]byte, error) {
+func (r *MockReader) ReadNextDocument() ([]byte, error) {
 	if r.done {
 		return nil, io.EOF
 	}
@@ -100,7 +100,7 @@ func (r *LineBasedMockReader) ReadNextDocument() ([]byte, error) {
 }
 
 // ReadNextDoc reads and decodes the next document.
-func (r *LineBasedMockReader) ReadNextDoc() (*NetworkTrafficDoc, error) {
+func (r *MockReader) ReadNextDoc() (*NetworkTrafficDoc, error) {
 	data, err := r.ReadNextDocument()
 	if err != nil {
 		return nil, err
@@ -119,7 +119,7 @@ func (r *LineBasedMockReader) ReadNextDoc() (*NetworkTrafficDoc, error) {
 }
 
 // Close closes the file.
-func (r *LineBasedMockReader) Close() error {
+func (r *MockReader) Close() error {
 	if r.file != nil {
 		return r.file.Close()
 	}

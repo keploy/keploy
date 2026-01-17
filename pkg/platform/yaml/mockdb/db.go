@@ -57,7 +57,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		return err
 	}
 	// Use buffered reader instead of loading entire file into memory
-	reader, err := yaml.NewLineBasedMockReader(ctx, ys.Logger, path, mockFileName)
+	reader, err := yaml.NewMockReader(ctx, ys.Logger, path, mockFileName)
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
 		return err
@@ -165,7 +165,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 
 	if _, err := os.Stat(mockPath); err == nil {
 		// Use buffered reader for memory-efficient reading of large mock files
-		reader, err := yaml.NewLineBasedMockReader(ctx, ys.Logger, path, mockFileName)
+		reader, err := yaml.NewMockReader(ctx, ys.Logger, path, mockFileName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
 			return nil, err
@@ -238,7 +238,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 
 	if _, err := os.Stat(mockPath); err == nil {
 		// Use buffered reader for memory-efficient reading of large mock files
-		reader, err := yaml.NewLineBasedMockReader(ctx, ys.Logger, path, mockName)
+		reader, err := yaml.NewMockReader(ctx, ys.Logger, path, mockName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
 			return nil, err
