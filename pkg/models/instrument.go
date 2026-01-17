@@ -91,6 +91,7 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	ConfigPath        string
 	ExtraArgs         []string
+	AgentTimeout      time.Duration // Timeout for agent readiness check
 }
 
 type RunOptions struct {

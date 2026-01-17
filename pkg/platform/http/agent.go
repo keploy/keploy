@@ -906,7 +906,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Info("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		timeout := a.conf.Agent.Timeout
+		if timeout == 0 {
+			timeout = 60 * time.Second // default fallback
+		}
+		agentCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
