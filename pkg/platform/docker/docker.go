@@ -49,6 +49,36 @@ func New(logger *zap.Logger, c *config.Config) (Client, error) {
 	}, nil
 }
 
+// NewWithCmdType creates a Docker/Podman client based on the command type.
+// For Podman commands, it attempts to find and use the podman socket.
+// For Docker commands, it uses the default docker socket or DOCKER_HOST env.
+func NewWithCmdType(logger *zap.Logger, c *config.Config, cmdType utils.CmdType) (Client, error) {
+	opts := []nativeDockerClient.Opt{
+		nativeDockerClient.WithAPIVersionNegotiation(),
+	}
+
+	// If it's a podman command, try to use the podman socket
+	if utils.IsPodmanCmd(cmdType) {
+		socketPath := utils.GetContainerSocket(cmdType)
+		logger.Debug("Using container socket", zap.String("socket", socketPath), zap.String("cmdType", string(cmdType)))
+		opts = append(opts, nativeDockerClient.WithHost(socketPath))
+	} else {
+		// For Docker, use FromEnv to respect DOCKER_HOST env var
+		opts = append(opts, nativeDockerClient.FromEnv)
+	}
+
+	dockerClient, err := nativeDockerClient.NewClientWithOpts(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Impl{
+		APIClient:             dockerClient,
+		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
+		logger:                logger,
+		conf:                  c,
+	}, nil
+}
+
 // ExtractNetworksForContainer returns the list of all the networks that the container is a part of.
 // Note that if a user did not explicitly attach the container to a network, the Docker daemon attaches it
 // to a network called "bridge".

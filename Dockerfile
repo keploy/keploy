@@ -27,8 +27,9 @@ FROM debian:bookworm-slim
 ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
+# podman-remote provides CLI-only podman support for interacting with podman daemon on host
 RUN apt-get update
-RUN apt-get install -y ca-certificates curl sudo && \
+RUN apt-get install -y ca-certificates curl sudo podman-remote && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
