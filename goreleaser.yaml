@@ -9,8 +9,14 @@ release:
   draft: false
 
 archives:
- -
+  - id: default
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    builds:
+      - keploy
+      - keploy-windows
+    format_overrides:
+      - goos: windows
+        format: binary
 
 builds:
   - binary: keploy
