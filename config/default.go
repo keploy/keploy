@@ -22,6 +22,7 @@ port: 0
 proxyPort: 16789
 incomingProxyPort: %d
 dnsPort: 26789
+dbPort: 3306
 debug: false
 disableANSI: false
 disableTele: false
