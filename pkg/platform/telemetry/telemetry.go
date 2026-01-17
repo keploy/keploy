@@ -20,14 +20,14 @@ type Telemetry struct {
 	logger         *zap.Logger
 	InstallationID string
 	KeployVersion  string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	client         *http.Client
 }
 
 type Options struct {
 	Enabled        bool
 	Version        string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	InstallationID string
 }
 

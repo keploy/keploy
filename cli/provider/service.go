@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var TeleGlobalMap sync.Map
+var TeleGlobalMap *sync.Map = &sync.Map{}
 
 type ServiceProvider struct {
 	logger *zap.Logger
@@ -30,7 +30,7 @@ func NewServiceProvider(logger *zap.Logger, cfg *config.Config, auth service.Aut
 	}
 }
 
-func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
+func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (any, error) {
 
 	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
