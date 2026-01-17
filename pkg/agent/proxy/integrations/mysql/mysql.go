@@ -38,10 +38,10 @@ func (m *MySQL) MatchType(_ context.Context, _ []byte) bool {
 	return false
 }
 
-func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, clientClose chan bool, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 
-	err := recorder.Record(ctx, logger, src, dst, mocks, opts)
+	err := recorder.Record(ctx, logger, src, dst, mocks, clientClose, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
 		return err
