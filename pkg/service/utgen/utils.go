@@ -195,8 +195,11 @@ func RunCommand(command string, cwd string, logger *zap.Logger) (stdout string, 
 	var cmd *exec.Cmd
 
 	if runtime.GOOS == "windows" {
-		cmdArgs := strings.Fields(command)
-		cmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
+		// Use cmd.exe /C to properly handle shell operators like ||, &&, etc.
+		cmd = exec.Command("cmd", "/C", command)
+		if cwd != "" {
+			cmd.Dir = cwd
+		}
 	} else {
 		// Create the command with the specified working directory
 		cmd = exec.Command("sh", "-c", command)
