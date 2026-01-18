@@ -57,6 +57,41 @@ _~/.gitconfig_
   commit = commit -s
 ```
 
+## <a name="setting-up-pre-commit-hooks">Setting up Pre-commit Hooks</a>
+
+To ensure consistent code formatting and quality across all contributions, we use pre-commit hooks with golangci-lint.
+
+### Install pre-commit
+
+You can install pre-commit globally using either Homebrew or pip:
+
+```sh
+brew install pre-commit
+# or
+pip install pre-commit
+```
+After installation, you can verify the installed version by running:
+```sh
+pre-commit --version
+```
+### Install the Git hook
+
+Once pre-commit is installed, run the following command inside your cloned Keploy repository:
+```sh
+pre-commit install
+```
+
+This will automatically run golangci-lint checks every time you commit changes.
+
+### Verify installation(recommended)
+
+You can verify that pre-commit is working correctly by running:
+```sh
+pre-commit run --all-files
+```
+
+If any linting issues are found, please fix them before committing your changes.
+
 # How to contribute ?
 
 We encourage contributions from the community.
