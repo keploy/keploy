@@ -571,7 +571,7 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 // query-aware EXEC scoring.
 //   - Keep the existing header/flags/params scoring.
 //   - Do NOT reward raw StatementID equality.
-//   - If both expectedQuery and actualQuery are present, require them to match (exact or structural).
+//   - If both expectedQuery and actualQuery are present, require them to match (exact).
 //     If they don't match, return (false, 0) immediately.
 //   - If either query is missing, fall back to best-effort scoring (returns (false, score)).
 func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, mockName string) (bool, int) {
@@ -657,7 +657,7 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 		} else if sigE, errE := getQueryStructureCached(eq); errE == nil {
 			if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
 				matchCount += 6
-				queryMatched = true
+				queryMatched = false
 				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
 			}
 		}
