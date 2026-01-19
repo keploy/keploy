@@ -696,7 +696,13 @@ func LooksLikeRandomID(s string) bool {
 	}
 
 	// Regex-based detection for formats without libraries
-	if objectIDRe.MatchString(s) || snowflakeRe.MatchString(s) || nanoIDRe.MatchString(s) {
+	// ObjectID (MongoDB) and Snowflake IDs have strict formats, so regex alone is sufficient
+	if objectIDRe.MatchString(s) || snowflakeRe.MatchString(s) {
+		return true
+	}
+
+	// NanoID check with entropy validation to avoid false positives on human-readable strings
+	if nanoIDRe.MatchString(s) && looksHighEntropy(s) {
 		return true
 	}
 
