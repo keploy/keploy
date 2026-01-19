@@ -283,8 +283,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		})
 	}
 
-	r.logger.Info("🔴 Stopping Keploy recording... Please wait.")
-
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
 		errGrp.Go(func() error {
@@ -360,6 +358,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
 		if err != nil {
+			if ctx.Err() == context.Canceled {
+				return nil
+			}
 			errChan <- err
 			return fmt.Errorf("failed to get incoming test cases: %w", err)
 		}
@@ -402,6 +403,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		})
 		if err != nil {
+			if ctx.Err() == context.Canceled {
+				return nil
+			}
 			return fmt.Errorf("failed to get outgoing mocks: %w", err)
 		}
 
