@@ -659,7 +659,7 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 		} else if sigE, errE := getQueryStructureCached(eq); errE == nil {
 			if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
 				matchCount += 6
-				queryMatched = true
+				queryMatched = false
 				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
 			}
 		}
