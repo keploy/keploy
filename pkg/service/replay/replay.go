@@ -742,6 +742,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Total:     0,
 			Ignored:   0,
 			TimeTaken: time.Since(startTime).String(),
+			CmdUsed:   r.config.Test.CmdUsed,
 		}
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
@@ -760,6 +761,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Total:     len(testCases),
 			Ignored:   len(testCases),
 			TimeTaken: timeTaken.String(),
+			CmdUsed:   r.config.Test.CmdUsed,
 		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -995,6 +997,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Total:     testCasesCount,
 		Status:    string(models.TestStatusRunning),
 		TimeTaken: time.Since(startTime).String(),
+		CmdUsed:   r.config.Test.CmdUsed,
 	}
 
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -1429,6 +1432,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		HighRisk:   riskHigh,
 		MediumRisk: riskMed,
 		LowRisk:    riskLow,
+		CmdUsed:    r.config.Test.CmdUsed,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1456,13 +1460,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
-		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
-		if err != nil {
-			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
+		// Only save mappings if we have meaningful data to save
+		// This prevents replays from overwriting valid mappings with empty data
+		if len(actualTestMockMappings) > 0 {
+			err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
+			if err != nil {
+				r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
+			} else {
+				r.logger.Info("Successfully saved test-mock mappings",
+					zap.String("testSetID", testSetID),
+					zap.Int("numTests", len(actualTestMockMappings)))
+			}
 		} else {
-			r.logger.Info("Successfully saved test-mock mappings",
-				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings)))
+			r.logger.Debug("Skipping saving test-mock mappings as no mocks were consumed during replay",
+				zap.String("testSetID", testSetID))
 		}
 	}
 
