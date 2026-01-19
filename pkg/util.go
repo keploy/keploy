@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"html/template"
 	"io"
 	"io/fs"
 	"net"
@@ -146,45 +145,21 @@ func IsTime(stringDate string) bool {
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
-
 	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
 			tc.HTTPReq.URL = decoded
 		}
 	}
-	//TODO: adjust this logic in the render function in order to remove the redundant code
-	// convert testcase to string and render the template values.
-	// Render any template values in the test case before simulation.
+
 	// Render any template values in the test case before simulation.
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
-		testCaseBytes, err := json.Marshal(tc)
+		renderedTC, err := RenderTestCaseWithTemplates(logger, tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase for templating")
+			utils.LogError(logger, err, "failed to render the testcase")
 			return nil, err
 		}
-
-		// Build the template data
-		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
-		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
-		}
-		if len(utils.SecretValues) > 0 {
-			templateData["secret"] = utils.SecretValues
-		}
-
-		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
-		// ignoring LaTeX/HTML like {{\pi}}.
-		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
-		if rerr != nil {
-			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
-		}
-
-		err = json.Unmarshal([]byte(renderedStr), &tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
-			return nil, err
-		}
+		tc = renderedTC
 	}
 
 	reqBody := []byte(tc.HTTPReq.Body)
@@ -441,7 +416,19 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 // current templated and secret values applied. This is useful for producing
 // a concrete "expected" testcase (for example expected responses) before
 // the test is executed and templates may get updated by the runtime.
-func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) {
+func RenderTestCaseWithTemplates(logger *zap.Logger, tc *models.TestCase) (*models.TestCase, error) {
+	if tc == nil {
+		return nil, nil
+	}
+
+	// Handle URL string that has encoded template placeholders
+	if strings.Contains(tc.HTTPReq.URL, "%7B") {
+		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
+		if err == nil {
+			tc.HTTPReq.URL = decoded
+		}
+	}
+
 	// If there are no templated or secret values, just return a deep copy
 	if len(utils.TemplatizedValues) == 0 && len(utils.SecretValues) == 0 {
 		copy := *tc
@@ -449,36 +436,29 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	}
 
 	// Marshal the testcase and execute the template with current values
-	testCaseStr, err := json.Marshal(tc)
+	testCaseBytes, err := json.Marshal(tc)
 	if err != nil {
 		return nil, err
 	}
 
-	funcMap := template.FuncMap{
-		"int":    utils.ToInt,
-		"string": utils.ToString,
-		"float":  utils.ToFloat,
-	}
-	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-	if err != nil || tmpl == nil {
-		return nil, err
-	}
-
-	data := make(map[string]interface{})
+	// Build the template data
+	templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
 	for k, v := range utils.TemplatizedValues {
-		data[k] = v
+		templateData[k] = v
 	}
 	if len(utils.SecretValues) > 0 {
-		data["secret"] = utils.SecretValues
+		templateData["secret"] = utils.SecretValues
 	}
 
-	var output bytes.Buffer
-	if err := tmpl.Execute(&output, data); err != nil {
-		return nil, err
+	// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
+	// ignoring LaTeX/HTML like {{\pi}}.
+	renderedStr, err := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
+	if err != nil {
+		logger.Debug("template rendering had recoverable errors", zap.Error(err))
 	}
 
 	var rendered models.TestCase
-	if err := json.Unmarshal(output.Bytes(), &rendered); err != nil {
+	if err := json.Unmarshal([]byte(renderedStr), &rendered); err != nil {
 		return nil, err
 	}
 	return &rendered, nil
