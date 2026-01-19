@@ -91,6 +91,10 @@ jobs:
           wget -q https://github.com/Bearer/gon/releases/download/v0.0.37/gon_macos.zip
           unzip gon_macos.zip -d /usr/local/bin
           rm -rf gon_macos.zip
+
+      - name: Install cross-compilation tools
+        run: |
+          brew install mingw-w64
           
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
