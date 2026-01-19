@@ -39,6 +39,19 @@ func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
+// IsNetworkClosedErr checks if the error is due to a closed network connection.
+// This includes broken pipe, connection reset by peer, and use of closed network connection errors.
+// These errors are expected during graceful shutdown and should not be logged as errors.
+func IsNetworkClosedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "use of closed network connection")
+}
+
 // Conn is helpful for multiple reads from the same connection
 type Conn struct {
 	net.Conn
@@ -640,8 +653,8 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		if client != nil {
 			err := client.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				// Use IsNetworkClosedErr to check for the specific error
+				if !IsNetworkClosedErr(err) {
 					// Log other errors
 					utils.LogError(logger, err, "failed to close the client connection")
 				}
@@ -651,8 +664,8 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		if dest != nil {
 			err := dest.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				// Use IsNetworkClosedErr to check for the specific error
+				if !IsNetworkClosedErr(err) {
 					// Log other errors
 					utils.LogError(logger, err, "failed to close the destination connection")
 				}
