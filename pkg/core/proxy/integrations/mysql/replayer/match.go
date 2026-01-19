@@ -573,7 +573,7 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 // query-aware EXEC scoring.
 //   - Keep the existing header/flags/params scoring.
 //   - Do NOT reward raw StatementID equality.
-//   - If both expectedQuery and actualQuery are present, require them to match (exact or structural).
+//   - If both expectedQuery and actualQuery are present, require them to match (exact).
 //     If they don't match, return (false, 0) immediately.
 //   - If either query is missing, fall back to best-effort scoring (returns (false, score)).
 func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, mockName string) (bool, int) {
