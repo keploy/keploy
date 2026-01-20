@@ -7,17 +7,16 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
-
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
 
 type Recorder struct {
 	logger          *zap.Logger
@@ -28,6 +27,9 @@ type Recorder struct {
 	testSetConf     TestSetConfig
 	config          *config.Config
 	globalMockCh    chan<- *models.Mock
+
+	// ✅ used for config persistence (writing into keploy.yml)
+	toolsSvc Tools
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
@@ -42,9 +44,18 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
+// SetToolsService sets tools service for persisting config (writing keploy.yml)
+func (r *Recorder) SetToolsService(toolsSvc Tools) {
+	r.toolsSvc = toolsSvc
+}
+
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
 	r.logger.Info("🔴 Starting Keploy recording... Please wait.")
+
+	// ✅ Auto delay calc: record start -> first testcase insert + buffer
+	recordStartTime := time.Now()
+	autoDelaySaved := false
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -80,7 +91,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case <-ctx.Done():
 		default:
 			if !reRecordCfg.Rerecord {
-
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -125,7 +135,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		r.logger.Info("Starting mocks-only refresh for existing test set.", zap.String("testSet", newTestSetID))
 
 		// Delete ONLY the old mocks.
-		err := r.mockDB.DeleteMocksForSet(ctx, newTestSetID) // We will create this new function
+		err := r.mockDB.DeleteMocksForSet(ctx, newTestSetID)
 		if err != nil {
 			stopReason = "failed to clear existing mocks for refresh"
 			utils.LogError(r.logger, err, stopReason)
@@ -154,14 +164,19 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	passPortsUint := config.GetByPassPorts(r.config)
-	passPortsUint32 := make([]uint32, len(passPortsUint)) // slice type of uint32
-	for i, port := range passPortsUint {
-		passPortsUint32[i] = uint32(port)
-	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath})
-
+	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{
+		Container:          r.config.ContainerName,
+		DockerDelay:        r.config.BuildDelay,
+		Mode:               models.MODE_RECORD,
+		CommandType:         r.config.CommandType,
+		EnableTesting:       false,
+		GlobalPassthrough:   r.config.Record.GlobalPassthrough,
+		BuildDelay:          r.config.BuildDelay,
+		PassThroughPorts:    passPortsUint,
+		ConfigPath:          r.config.ConfigPath,
+	})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -176,7 +191,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
-			if (runAppError.AppErrorType == models.ErrCtxCanceled || runAppError == models.AppError{}) {
+			if runAppError.AppErrorType == models.ErrCtxCanceled || runAppError == (models.AppError{}) {
 				return nil
 			}
 			appErrChan <- runAppError
@@ -198,7 +213,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Info("🟢 Keploy agent is ready to record test cases and mocks.")
 
-	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
 		stopReason = "failed to get data frames"
@@ -212,7 +226,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	r.logger.Info("🟢 Keploy is now recording test cases and mocks for you application...")
 
 	if r.config.CommandType == string(utils.DockerCompose) {
-
 		r.logger.Info("🟢 Making keploy-agent ready for docker compose...")
 
 		err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
@@ -221,10 +234,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 	}
 
-	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
+	r.mockDB.ResetCounterID()
+
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+
 			if reRecordCfg.TestSet == "" {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 				if err != nil {
@@ -233,6 +248,50 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					}
 					insertTestErrChan <- err
 				} else {
+
+					// ✅ Save delay after FIRST successful testcase insert
+					// ✅ Only if user did NOT explicitly provide delay
+					// ✅ Persist to keploy.yml silently
+					if !autoDelaySaved {
+						autoDelaySaved = true
+
+						secondsTaken := int(time.Since(recordStartTime).Seconds())
+						autoDelay := secondsTaken + 10 // + buffer
+
+						// clamp
+						if autoDelay < 5 {
+							autoDelay = 5
+						}
+						if autoDelay > 120 {
+							autoDelay = 120
+						}
+
+						if !r.config.Test.DelayExplicit {
+							if r.config.Test.Delay == 0 || r.config.Test.Delay == 5 {
+								r.config.Test.Delay = uint64(autoDelay)
+
+								r.logger.Info("✅ Auto-set test delay based on record startup time",
+									zap.Uint64("delaySeconds", r.config.Test.Delay),
+								)
+
+								// Persist to keploy.yml
+								if r.toolsSvc != nil {
+    r.logger.Info("📝 Persisting delay into keploy.yml",
+        zap.String("configPath", r.config.ConfigPath),
+        zap.Uint64("delay", r.config.Test.Delay),
+    )
+
+    if err := r.toolsSvc.UpdateTestDelayInConfig(ctx, r.config.ConfigPath, r.config.Test.Delay); err != nil {
+        r.logger.Error("❌ failed to persist auto delay to config", zap.Error(err))
+    }
+} else {
+    r.logger.Warn("❌ toolsSvc is nil, cannot persist delay")
+}
+
+							}
+						}
+					}
+
 					testCount++
 					r.telemetry.RecordedTestAndMocks()
 				}
@@ -245,12 +304,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
-			// Send a copy to global mock channel for correlation manager if available
+
 			if r.globalMockCh != nil {
 				currMockID := r.mockDB.GetCurrMockID()
-				// Create a deep copy of the mock to avoid race conditions
+
 				mockCopy := *mock
 				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
+
 				select {
 				case r.globalMockCh <- &mockCopy:
 					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
@@ -258,6 +318,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
 				}
 			}
+
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
@@ -283,7 +344,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		})
 	}
 
-	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
 		errGrp.Go(func() error {
 			r.logger.Info("Setting a timer of " + r.config.Record.RecordTimer.String() + " for recording")
@@ -303,7 +363,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		})
 	}
 
-	// Waiting for the error to occur in any of the go routines
 	select {
 	case appErr := <-appErrChan:
 		switch appErr.AppErrorType {
@@ -333,6 +392,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	case <-ctx.Done():
 		return nil
 	}
+
 	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf("%s", stopReason)
 }
@@ -343,7 +403,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		Filters: r.config.Record.Filters,
 	}
 
-	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.Mock)
 	errChan := make(chan error, 2)
@@ -353,6 +412,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
+	// INCOMING
 	g.Go(func() error {
 		defer close(incomingChan)
 
@@ -373,7 +433,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				if !ok {
 					return nil
 				}
-				// forward but remain cancelable
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -387,11 +446,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	g.Go(func() error {
 		defer close(outgoingChan)
 
-		// Create a cancelable child that we always cancel when ctx is done.
 		mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
 
-		// Cancel child as soon as parent is done
 		go func() {
 			<-ctx.Done()
 			cancel()
@@ -427,11 +484,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		}
 	})
 
+	_ = errChan
+
 	return FrameChan{
 		Incoming: incomingChan,
 		Outgoing: outgoingChan,
 	}, nil
-
 }
 
 func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
@@ -447,6 +505,7 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	if r.config.Record.Metadata == "" {
 		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
 	}
+
 	r.config.Record.Metadata = utils.TrimSpaces(r.config.Record.Metadata)
 	meta, err := utils.ParseMetadata(r.config.Record.Metadata)
 	if err != nil || meta == nil {
@@ -492,12 +551,12 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 }
 
 func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID string) {
-	// Parse metadata from the config
 	metadata, err := utils.ParseMetadata(r.config.Record.Metadata)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to parse metadata", zap.String("metadata", r.config.Record.Metadata))
 		return
 	}
+
 	testSet := &models.TestSet{
 		PreScript:  "",
 		PostScript: "",
