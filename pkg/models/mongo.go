@@ -1,8 +1,11 @@
 package models
 
 import (
+	"bytes"
+	"encoding/binary"  
 	"encoding/gob"
 	"encoding/json"
+	"fmt" 
 	"errors"
 	"time"
 
@@ -33,9 +36,15 @@ type ResponseYaml struct {
 }
 
 type MongoOpMessage struct {
-	FlagBits int      `json:"flagBits" yaml:"flagBits" bson:"flagBits"`
-	Sections []string `json:"sections" yaml:"sections" bson:"sections"`
-	Checksum int      `json:"checksum" yaml:"checksum" bson:"checksum"`
+	FlagBits int            `json:"flagBits" yaml:"flagBits" bson:"flagBits"`
+	Sections []OpMsgSection `json:"sections" yaml:"sections" bson:"sections"`
+	Checksum int            `json:"checksum" yaml:"checksum" bson:"checksum"`
+}
+
+type OpMsgSection struct {
+	Kind       int           `json:"kind" yaml:"kind" bson:"kind"` // 0 = Body, 1 = Document Sequence
+	Identifier string        `json:"identifier,omitempty" yaml:"identifier,omitempty" bson:"identifier,omitempty"`
+	Documents  []interface{} `json:"documents" yaml:"documents" bson:"documents"`
 }
 
 type MongoOpQuery struct {
@@ -102,11 +111,12 @@ func (mr *MongoRequest) UnmarshalBSON(data []byte) error {
 	// unmarshal the message into the correct type
 	switch mr.Header.Opcode {
 	case wiremessage.OpMsg:
-		var msg MongoOpMessage
-		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
-			return err
-		}
-		mr.Message = &msg
+                // Parse the raw OpMsg binary body
+                msg, err := parseOpMsg(aux.Message)
+                if err != nil {
+                        return err
+                }
+                mr.Message = msg
 	case wiremessage.OpQuery:
 		var msg MongoOpQuery
 		if err := bson.Unmarshal(aux.Message, &msg); err != nil {
@@ -289,4 +299,109 @@ func (mr *MongoResponse) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(aux)
+}
+
+// parseOpMsg decodes the raw binary body of a MongoDB OP_MSG packet.
+// See: https://www.mongodb.com/docs/manual/reference/mongodb-wire-protocol/#op_msg
+func parseOpMsg(data []byte) (*MongoOpMessage, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("invalid OpMsg: data too short for flags")
+	}
+
+	// 1. Read Flags (First 4 bytes)
+	flags := int(binary.LittleEndian.Uint32(data[0:4]))
+	data = data[4:]
+
+	msg := &MongoOpMessage{
+		FlagBits: flags,
+		Sections: []OpMsgSection{},
+	}
+
+	// 2. Read Sections
+	// Loop until we hit the Checksum (last 4 bytes) or end of data.
+	for len(data) > 4 { 
+		kind := int(data[0])
+		data = data[1:]
+
+		section := OpMsgSection{Kind: kind}
+
+		if kind == 0 {
+			// Kind 0: Single BSON Document (Body)
+			if len(data) < 4 {
+				return nil, fmt.Errorf("invalid OpMsg: data too short for section 0 size")
+			}
+			bsonSize := int(binary.LittleEndian.Uint32(data[0:4]))
+			if len(data) < bsonSize {
+				return nil, fmt.Errorf("invalid OpMsg: section 0 data incomplete")
+			}
+
+			rawBson := data[:bsonSize]
+			var doc interface{}
+			if err := bson.Unmarshal(rawBson, &doc); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal section 0 bson: %w", err)
+			}
+			
+			// Store as a single document slice
+			section.Documents = []interface{}{doc}
+			msg.Sections = append(msg.Sections, section)
+			
+			data = data[bsonSize:]
+
+		} else if kind == 1 {
+			// Kind 1: Document Sequence (Bulk)
+			if len(data) < 4 {
+				return nil, fmt.Errorf("invalid OpMsg: data too short for section 1 size")
+			}
+			sectionSize := int(binary.LittleEndian.Uint32(data[0:4]))
+			if len(data) < sectionSize {
+				return nil, fmt.Errorf("invalid OpMsg: section 1 data incomplete")
+			}
+			
+			// Isolate the section data
+			sectionData := data[:sectionSize]
+			data = data[sectionSize:]
+			
+			// Skip the 4 size bytes we just read
+			sectionData = sectionData[4:]
+			
+			// Read Identifier (CString)
+			idx := bytes.IndexByte(sectionData, 0)
+			if idx == -1 {
+				return nil, fmt.Errorf("invalid OpMsg: section 1 identifier missing null terminator")
+			}
+			section.Identifier = string(sectionData[:idx])
+			sectionData = sectionData[idx+1:] 
+
+			// Read Sequence of BSONs
+			for len(sectionData) > 0 {
+				// Each BSON doc starts with its size (int32)
+				if len(sectionData) < 4 {
+					break 
+				}
+				docSize := int(binary.LittleEndian.Uint32(sectionData[0:4]))
+				if len(sectionData) < docSize {
+					return nil, fmt.Errorf("invalid OpMsg: section 1 document incomplete")
+				}
+				
+				rawDoc := sectionData[:docSize]
+				var doc interface{}
+				if err := bson.Unmarshal(rawDoc, &doc); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal section 1 bson: %w", err)
+				}
+				section.Documents = append(section.Documents, doc)
+				sectionData = sectionData[docSize:]
+			}
+			msg.Sections = append(msg.Sections, section)
+
+		} else {
+			return nil, fmt.Errorf("unknown OpMsg section kind: %d", kind)
+		}
+	}
+
+	// 3. Handle Checksum (Remaining 4 bytes)
+	if len(data) == 4 {
+		msg.Checksum = int(binary.LittleEndian.Uint32(data))
+	}
+
+	return msg, nil
 }
