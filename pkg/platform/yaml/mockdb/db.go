@@ -2,6 +2,7 @@
 package mockdb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"

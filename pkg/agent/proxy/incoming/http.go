@@ -27,7 +27,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 	}
-	
+
 	var releaseOnce sync.Once
 	releaseLock := func() {
 		if pm.synchronous {
@@ -74,6 +74,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			logger.Debug("Detected chunked request. Releasing lock.")
 			releaseLock()
 			chunked = true
+
 		} else if pm.synchronous {
 
 			mgr := syncMock.Get()
