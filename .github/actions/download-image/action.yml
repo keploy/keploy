@@ -8,7 +8,7 @@ inputs:
   version:
     description: "Version string to tag the pulled image with"
     required: false
-    default: 2-dev
+    default: 3-dev
 runs:
   using: composite
   steps:
