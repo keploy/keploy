@@ -159,3 +159,64 @@ func findSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+func TestBuildProtoSchemaCache(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("returns error when no gRPC paths provided", func(t *testing.T) {
+		pc := models.ProtoConfig{
+			ProtoDir: "/some/path",
+		}
+		_, err := BuildProtoSchemaCache(logger, pc, []string{})
+		if err == nil {
+			t.Error("expected error for empty grpcPaths")
+		}
+		if !contains(err.Error(), "no gRPC paths provided") {
+			t.Errorf("expected error about no gRPC paths, got: %v", err)
+		}
+	})
+
+	t.Run("returns error when no proto sources available", func(t *testing.T) {
+		pc := models.ProtoConfig{
+			// No ProtoFile, ProtoDir, or ProtoInclude
+		}
+		_, err := BuildProtoSchemaCache(logger, pc, []string{"/homework.v1.Homework/Create"})
+		if err == nil {
+			t.Error("expected error for missing proto sources")
+		}
+		if !contains(err.Error(), "protoFile or protoDir must be provided") {
+			t.Errorf("expected error about missing proto sources, got: %v", err)
+		}
+	})
+
+	t.Run("returns error when proto directory doesn't exist", func(t *testing.T) {
+		pc := models.ProtoConfig{
+			ProtoDir: "/nonexistent/path",
+		}
+		_, err := BuildProtoSchemaCache(logger, pc, []string{"/homework.v1.Homework/Create"})
+		if err == nil {
+			t.Error("expected error for nonexistent proto directory")
+		}
+	})
+}
+
+func TestProtoTextToJSONCached(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("returns false when cache is nil", func(t *testing.T) {
+		_, ok := ProtoTextToJSONCached(nil, "service/Method", "data", logger)
+		if ok {
+			t.Error("expected false when cache is nil")
+		}
+	})
+
+	t.Run("returns false when method not in cache", func(t *testing.T) {
+		cache := &ProtoSchemaCache{
+			OutputByMethod: make(map[string]protoreflect.MessageDescriptor),
+		}
+		_, ok := ProtoTextToJSONCached(cache, "unknown.Service/Method", "data", logger)
+		if ok {
+			t.Error("expected false when method not in cache")
+		}
+	})
+}
