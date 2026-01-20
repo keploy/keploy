@@ -103,7 +103,7 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	m := make(chan *models.Mock, 500)
+	m := make(chan *models.Mock, 1000)
 
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {

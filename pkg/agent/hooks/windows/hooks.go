@@ -32,25 +32,34 @@ var windivert64DLL []byte
 var _ embed.FS
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
+	incomingProxyPort := cfg.IncomingProxyPort
+	if incomingProxyPort == 0 {
+		incomingProxyPort = models.DefaultIncomingProxyPort
+	}
+
 	return &Hooks{
-		logger:    logger,
-		sess:      agent.NewSessions(),
-		m:         sync.Mutex{},
-		proxyIP4:  "127.0.0.1",
-		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort: cfg.ProxyPort,
-		dnsPort:   cfg.DNSPort,
+		logger:            logger,
+		sess:              agent.NewSessions(),
+		m:                 sync.Mutex{},
+		proxyIP4:          "127.0.0.1",
+		proxyIP6:          [4]uint32{0000, 0000, 0000, 0001},
+		proxyPort:         cfg.ProxyPort,
+		incomingProxyPort: incomingProxyPort,
+		dnsPort:           cfg.DNSPort,
+		debug:             cfg.Debug,
 	}
 }
 
 type Hooks struct {
-	logger    *zap.Logger
-	sess      *agent.Sessions
-	proxyIP4  string
-	proxyIP6  [4]uint32
-	proxyPort uint32
-	dnsPort   uint32
-	m         sync.Mutex
+	logger            *zap.Logger
+	sess              *agent.Sessions
+	proxyIP4          string
+	proxyIP6          [4]uint32
+	proxyPort         uint32
+	incomingProxyPort uint16
+	dnsPort           uint32
+	debug             bool
+	m                 sync.Mutex
 }
 
 func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Agent) error {
@@ -83,8 +92,14 @@ func (h *Hooks) Load(ctx context.Context, cfg agent.HookCfg, setupOpts config.Ag
 }
 
 func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
+	// Check if running with administrator privileges (required for WinDivert)
+	if !isAdmin() {
+		h.logger.Error("Keploy on Windows requires Administrator privileges to load the network driver.")
+		return errors.New("administrator privileges required")
+	}
+
 	// Ensure the WinDivert artifacts are present in the executable's directory.
-	dllPath, err := h.ensureWinDivertAssets()
+	_, err := h.ensureWinDivertAssets()
 	if err != nil {
 		// Log and return the error so load fails fast if writing assets fails.
 		h.logger.Error("failed to ensure windivert assets", zap.Error(err))
@@ -105,7 +120,7 @@ func (h *Hooks) load(_ context.Context, setupOpts config.Agent) error {
 		mode = 0
 	}
 
-	err = StartRedirector(clientPID, agentPID, h.proxyPort, uint32(3000), h.dnsPort, dllPath, mode)
+	err = StartRedirector(clientPID, agentPID, h.proxyPort, h.incomingProxyPort, mode, h.debug)
 	if err != nil {
 		h.logger.Error("failed to start redirector", zap.Error(err))
 		return err
@@ -152,6 +167,8 @@ func (h *Hooks) unLoad(_ context.Context) {
 	if err != nil {
 		h.logger.Error("failed to stop redirector", zap.Error(err))
 	}
+
+	h.logger.Info("Successfully unloaded Windows hooks")
 }
 
 func (h *Hooks) Record(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
@@ -162,7 +179,7 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 	ch := make(chan models.IngressEvent, 1024)
 
 	ch <- models.IngressEvent{
-		OrigAppPort: 3000,
+		OrigAppPort: h.incomingProxyPort,
 		NewAppPort:  0000,
 	}
 

@@ -1,13 +1,13 @@
+
 #!/usr/bin/env bash
 
-# This script orchestrates the testing of the Postgres fuzzer with Keploy.
-# It handles setting up a Postgres instance for recording, generating Keploy tests and mocks,
-# and then running tests in a mock environment to validate Keploy's functionality.
+# This script orchestrates the testing of the Mongo fuzzer with Keploy.
+# It handles setting up a sharded, multi-cluster Mongo environment for recording,
+# generating Keploy tests and mocks, and then running tests in a mock environment
+# to validate Keploy's functionality.
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
-
-echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # --- Helper Functions for Logging and Error Handling ---
 
@@ -34,9 +34,9 @@ final_cleanup() {
   
   dump_logs
 
-  section "Stopping Postgres container..."
-  docker stop postgres-container || true
-  docker rm postgres-container || true
+  section "Stopping Mongo cluster..."
+  # We are already in the correct directory, so no subshell is needed.
+  docker compose down -v || true
   endsec
 
   if [[ $rc -eq 0 ]]; then
@@ -66,7 +66,7 @@ check_for_errors() {
       exit 1
     fi
   fi
-  echo "No critical errors found in $logfile."
+  echo "No critical errors in $logfile."
 }
 
 # Validates the Keploy test report to ensure all test sets passed
@@ -110,107 +110,100 @@ check_test_report() {
     return 0
 }
 
-# Waits for the Postgres container to become ready and accept connections
-wait_for_postgres() {
-  section "Waiting for Postgres to become ready..."
-  for i in {1..90}; do
-    # Use PGPASSWORD env var for non-interactive login
-    if PGPASSWORD=password docker exec postgres-container psql -U postgres -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
-      echo "✅ Postgres is ready."
+# Waits for an HTTP endpoint to become available
+wait_for_http() {
+  local host="localhost" # Assuming localhost
+  local port="$2"
+  section "Waiting for application on port $port..."
+  for i in {1..120}; do
+    # Use netcat (nc) to check if the port is open without sending app-level data
+    if nc -z "$host" "$port" >/dev/null 2>&1; then
+      echo "✅ Application port $port is open."
       endsec
       return 0
     fi
-    echo "Waiting for Postgres... (attempt $i/90)"
     sleep 1
   done
-  echo "::error::Postgres did not become ready in the allotted time."
-  endsec
-  return 1
-}
-
-wait_for_http() {
-  local port="$1"
-  local host="${2:-127.0.0.1}"
-  local timeout_s="${3:-60}"
-
-  section "Waiting for application on $host:$port..."
-
-  for ((i=1; i<=timeout_s; i++)); do
-    # 1) Try real HTTP if curl is present (any status code is fine)
-    if command -v curl >/dev/null 2>&1; then
-      if curl -fsS --max-time 1 "http://$host:$port/" -o /dev/null; then
-        echo "✅ HTTP responded on $host:$port"
-        endsec; return 0
-      fi
-    fi
-
-    # 2) Bash TCP fallback (no external deps)
-    if bash -c ">/dev/tcp/$host/$port" >/dev/null 2>&1; then
-      echo "✅ TCP open on $host:$port (/dev/tcp)"
-      endsec; return 0
-    fi
-
-    # 3) netcat if available (both v4 and v6)
-    if command -v nc >/dev/null 2>&1; then
-      if nc -z -w 1 "$host" "$port" >/dev/null 2>&1 || nc -z -w 1 ::1 "$port" >/dev/null 2>&1; then
-        echo "✅ TCP open on $host:$port (nc)"
-        endsec; return 0
-      fi
-    fi
-
-    sleep 1
-  done
-
-  echo "::error::Application did not become available on $host:$port in time."
-  echo "🔎 Quick diagnostics:"
-  command -v ss   >/dev/null 2>&1 && ss -ltnp | awk 'NR==1 || /:'"$port"'\b/'
-  command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$port" -sTCP:LISTEN || true
-  ps -eo pid,cmd | grep -E "my-app|keploy" | grep -v grep || true
+  echo "::error::Application did not become available on port $port in time."
   endsec
   return 1
 }
 
 # Triggers the fuzzer, lets it run for a short time, and then kills the Keploy process.
 send_requests() {
-  # Wait for the fuzzer's API to be ready
-  wait_for_http 8080
+  local kp_pid="$1"
+
+  # Wait for the fuzzer's API to be ready on port 18082
+  wait_for_http "http://localhost:18082/run" 18082
 
   echo "Triggering the fuzzer to generate traffic..."
-  curl -sS --request POST 'http://localhost:8080/fuzz' \
-    --header 'Content-Type: application/json' \
-    --data-raw '{  
-      "host": "127.0.0.1",
-      "port": 5432,
-      "user": "postgres",
-      "password": "password",
-      "dbName": "postgres",
-      "seed": 12345,
-      "totalOps": 2000,
-      "drop_db_first": true,
-      "schema": "fuzz_schema_12345"
-    }'
-}
 
+  curl -X POST http://localhost:18082/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "record",
+    "seed": 424242,
+    "total_ops": 10000,
+    "golden_path": "./golden/full_coverage.json",
+    "timeout_sec": 1000,
+
+    "use_multi_cluster": true,
+    "cluster_uris": [
+      "mongodb://localhost:27017",
+      "mongodb://localhost:27037"
+    ],
+    "uri": "mongodb://localhost:27017",
+    "database": "fuzztest",
+    "drop_db_first": true,
+
+    "username": "admin",
+    "password": "password",
+    "auth_source": "admin",
+    "auth_mechanism": "SCRAM-SHA-256",
+
+    "max_sessions": 8,
+    "max_pool_size": 50,
+    "min_pool_size": 5,
+    "connect_timeout_sec": 10,
+    "max_conn_idle_time_sec": 30,
+    "max_staleness_sec": 90,
+    
+    "max_diffs": 20
+  }'
+}
 
 # --- Main Execution Logic ---
 
 # Initial setup and environment logging
 section "Initializing Environment"
-echo "POSTGRES_FUZZER_BIN: $POSTGRES_FUZZER_BIN"
+echo "MONGO_FUZZER_BIN: $MONGO_FUZZER_BIN"
 echo "RECORD_KEPLOY_BIN: $RECORD_KEPLOY_BIN"
 echo "REPLAY_KEPLOY_BIN: $REPLAY_KEPLOY_BIN"
-rm -rf keploy/ keploy.yml golden/ record.txt test.txt
+rm -rf keploy/ keploy.yml golden/ record.txt test.txt go-fuzzers/
 mkdir -p golden/
-sudo chmod +x $POSTGRES_FUZZER_BIN
+sudo chmod +x $MONGO_FUZZER_BIN
 sudo chown -R $(whoami):$(whoami) golden
+endsec
 
-# Start a Postgres instance for the recording session
-docker run --name postgres-container \
-  -e POSTGRES_PASSWORD=password \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_DB=postgres \
-  -p 5432:5432 --rm -d postgres:latest
-wait_for_postgres
+# Clone the private go-fuzzers repository and navigate to the mongo directory
+section "Cloning go-fuzzers Repository"
+echo "Cloning keploy/go-fuzzers using PRO_ACCESS_TOKEN..."
+if [ -n "${PRO_ACCESS_TOKEN:-}" ]; then
+  git clone https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git
+else
+  echo "::warning::PRO_ACCESS_TOKEN not set, attempting clone without auth (will fail for private repo)"
+  git clone https://github.com/keploy/go-fuzzers.git
+fi
+cd go-fuzzers/mongo
+echo "Now in directory: $(pwd)"
+# store this path in a variable
+GO_FUZZERS_PATH=$(pwd)
+endsec
+
+# Start the sharded Mongo cluster environment.
+section "Starting Mongo Cluster"
+chmod +x ./init_cluster.sh
+./init_cluster.sh
 
 # Generate Keploy configuration and add noise parameter
 sudo "$RECORD_KEPLOY_BIN" config --generate
@@ -220,15 +213,17 @@ endsec
 
 # --- Recording Phase ---
 section "Start Recording Server"
-sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record.txt &
+# The command includes the fuzzer binary and its specific arguments
+sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
 section "Generate Fuzzer Traffic"
 # Trigger traffic and explicitly kill the Keploy process after a delay
-send_requests
-sleep 20
+send_requests "$KEPLOY_PID"
+# Increased sleep time to capture more of the complex, sharded operations
+sleep 7
 endsec
 
 section "Stop Recording"
@@ -237,38 +232,29 @@ echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
 REC_PID="$(pgrep -n -f 'keploy record' || true)"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
-if [[ -n "$REC_PID" ]]; then
-  sudo kill -INT "$REC_PID" 2>/dev/null || true
-else
-  echo "No Keploy record process found to kill."
-fi
+sudo kill -INT "$REC_PID" 2>/dev/null || true
 
-sleep 10
+sleep 5
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec
 
-# --- FIX PERMISSIONS ---
-section "Fixing File Permissions"
-echo "Changing ownership of recorded files back to the user..."
-# Change ownership of all files created by the sudo/root record process
-sudo chown -R $(whoami):$(whoami) keploy/ golden/
-echo "New permissions for golden/:"
-ls -la golden/
-echo "New permissions for keploy/:"
-ls -la keploy/
-endsec
-
 # --- Teardown before Replay ---
-section "Shutting Down Postgres for Replay"
-docker stop postgres-container || true
-echo "✅ Postgres container stopped. Replay will rely on Keploy mocks."
+section "Shutting Down Mongo Cluster for Replay"
+# Tear down the entire docker compose environment to ensure replay relies on mocks
+docker compose down -v 
+echo "✅ Mongo cluster stopped. Replay will rely on Keploy mocks."
 endsec
+sleep 5
 
 # --- Replay Phase ---
 section "Replaying Tests"
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$POSTGRES_FUZZER_BIN" --delay 15 --api-timeout=1000 2>&1 | tee test.txt
-check_for_errors "test.txt"
+cd $GO_FUZZERS_PATH
+# The test command must match the record command
+sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test.txt &
+TEST_PID=$!
+echo "Keploy test process started with PID: $TEST_PID"
+wait $TEST_PID
 check_test_report
 endsec
 

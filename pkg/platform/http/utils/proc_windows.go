@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"go.uber.org/zap"
 )
@@ -15,7 +16,12 @@ import (
 // NewAgentCommand on Windows returns a plain command (no sudo).
 // If the agent needs admin, run the parent process with Administrator rights.
 func NewAgentCommand(bin string, args []string) *exec.Cmd {
-	return exec.Command(bin, args...)
+	cmd := exec.Command(bin, args...)
+	// Run in a separate process group so Ctrl+C in the parent console doesn't hit the agent.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+	return cmd
 }
 
 func StartCommand(cmd *exec.Cmd) error {
@@ -46,13 +52,16 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	if err != nil {
 		logger.Warn("forced taskkill failed; checking if process already exited", zap.Int("pid", pid), zap.String("output", strings.TrimSpace(string(out))), zap.Error(err))
 
-		// If tasklist shows no such PID, consider it already gone
-		tlOut, tlErr := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH").CombinedOutput()
-		if tlErr == nil {
-			s := strings.TrimSpace(string(tlOut))
-			if s == "" || strings.Contains(s, "No tasks are running") || strings.Contains(strings.ToLower(s), "no tasks") {
+		// Check if process exists using exit code instead of parsing locale-dependent output.
+		// tasklist returns exit code 0 if process found, non-zero if not found.
+		tlCmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")
+		if tlErr := tlCmd.Run(); tlErr != nil {
+			// Non-zero exit code means process not found - already gone, which is what we want
+			if exitError, ok := tlErr.(*exec.ExitError); ok && exitError.ExitCode() != 0 {
 				return nil
 			}
+		} else {
+			// Exit code 0 means process still exists, but taskkill failed - fall through to Process.Kill()
 		}
 
 		// Try Process.Kill() as a last resort; tolerate "invalid argument" which indicates the process already exited.

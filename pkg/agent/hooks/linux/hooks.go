@@ -65,7 +65,6 @@ type Hooks struct {
 	socket     link.Link
 	connect4   link.Link
 	gp4        link.Link
-	udpp4      link.Link
 	tcpv4      link.Link
 	tcpv4Ret   link.Link
 	connect6   link.Link
@@ -306,25 +305,57 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
-	closeLink := func(name string, l link.Link) {
-		if l == nil {
-			return
-		}
-		if err := l.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the "+name)
+	if h.socket != nil {
+		if err := h.socket.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the socket")
 		}
 	}
 
-	closeLink("socket", h.socket)
-	closeLink("udpp4", h.udpp4)
-	closeLink("connect4", h.connect4)
-	closeLink("gp4", h.gp4)
-	closeLink("tcpv4", h.tcpv4)
-	closeLink("tcpv4Ret", h.tcpv4Ret)
-	closeLink("connect6", h.connect6)
-	closeLink("gp6", h.gp6)
-	closeLink("tcpv6", h.tcpv6)
-	closeLink("tcpv6Ret", h.tcpv6Ret)
+	if h.connect4 != nil {
+		if err := h.connect4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect4")
+		}
+	}
+
+	if h.gp4 != nil {
+		if err := h.gp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp4")
+		}
+	}
+
+	if h.tcpv4 != nil {
+		if err := h.tcpv4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv4")
+		}
+	}
+
+	if h.tcpv4Ret != nil {
+		if err := h.tcpv4Ret.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
+		}
+	}
+
+	if h.connect6 != nil {
+		if err := h.connect6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect6")
+		}
+	}
+	if h.gp6 != nil {
+		if err := h.gp6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp6")
+		}
+	}
+
+	if h.tcpv6 != nil {
+		if err := h.tcpv6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv6")
+		}
+	}
+	if h.tcpv6Ret != nil {
+		if err := h.tcpv6Ret.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+		}
+	}
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()

@@ -389,8 +389,6 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 		})
 	}
 
-	r.logger.Info("🔴 Stopping Keploy recording... Please wait.")
-
 	// setting a timer for recording
 	if recordTimer != 0 {
 		errGrp.Go(func() error {
@@ -490,11 +488,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 		g.Go(func() error {
 			defer close(incomingChan)
 
-			ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
-			if err != nil {
-				errChan <- err
-				return fmt.Errorf("failed to get incoming test cases: %w", err)
+		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+		if err != nil {
+			if ctx.Err() == context.Canceled {
+				return nil
 			}
+			errChan <- err
+			return fmt.Errorf("failed to get incoming test cases: %w", err)
+		}
 
 			for {
 				select {
@@ -530,14 +531,17 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 				cancel()
 			}()
 
-			ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-				Rules:          r.config.BypassRules,
-				MongoPassword:  r.config.Test.MongoPassword,
-				FallBackOnMiss: r.config.Test.FallBackOnMiss,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to get outgoing mocks: %w", err)
+		ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
+			Rules:          r.config.BypassRules,
+			MongoPassword:  r.config.Test.MongoPassword,
+			FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		})
+		if err != nil {
+			if ctx.Err() == context.Canceled {
+				return nil
 			}
+			return fmt.Errorf("failed to get outgoing mocks: %w", err)
+		}
 
 			for {
 				select {

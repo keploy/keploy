@@ -41,7 +41,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	defer releaseLock()
 
 	// Get the actual destination address (handles Windows vs others platform logic)
-	finalAppAddr := pm.getActualDestination(clientConn, newAppAddr, logger)
+	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
 	// 1. Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
