@@ -21,10 +21,6 @@ import (
 )
 
 func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc models.ProtoConfig) (protoreflect.MessageDescriptor, []protoreflect.FileDescriptor, error) {
-	if pc.ProtoFile == "" && pc.ProtoDir == "" {
-		return nil, nil, fmt.Errorf("protoFile or protoDir must be provided")
-	}
-
 	if pc.RequestURI == "" {
 		return nil, nil, fmt.Errorf("requestURI must be provided, eg:/service.DataService/GetComplexData")
 	}
@@ -33,6 +29,21 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 	protoDir := pc.ProtoDir
 	protoInclude := pc.ProtoInclude
 	grpcPath := pc.RequestURI
+
+	// Auto-derive protoDir from gRPC path when protoInclude is available.
+	// This enables multi-service scenarios where different requests need different proto directories.
+	if len(protoInclude) > 0 && grpcPath != "" {
+		derived, err := deriveProtoDirFromPath(grpcPath, protoInclude)
+		if err == nil {
+			protoDir = derived // Use derived directory, taking precedence over config
+		}
+		// If derivation fails, fall through to use config's protoDir
+	}
+
+	// Validate that we have at least one source of proto files
+	if protoPath == "" && protoDir == "" {
+		return nil, nil, fmt.Errorf("protoFile or protoDir must be provided (auto-derive from protoInclude also failed)")
+	}
 
 	// Normalize protoInclude roots to absolute.
 	var absRoots []string
@@ -226,6 +237,63 @@ func relToAny(abs string, roots []string) string {
 	return ""
 }
 
+// deriveProtoDirFromPath extracts the package from a gRPC path and searches protoInclude roots
+// for a matching directory. This enables automatic proto directory resolution for multi-service
+// scenarios where a single protoDir config is insufficient.
+//
+// It uses a multi-strategy approach following protobuf conventions:
+//  1. Full package path: "homework.v1.Homework" → "homework/v1/"
+//  2. First segment only: "homework.v1.Homework" → "homework/"
+//
+// Returns the first matching directory path, or an error if none found.
+func deriveProtoDirFromPath(grpcPath string, protoIncludes []string) (string, error) {
+	if grpcPath == "" || len(protoIncludes) == 0 {
+		return "", fmt.Errorf("grpcPath and protoIncludes are required")
+	}
+
+	// Parse gRPC path to get service full name (e.g., "homework.v1.Homework")
+	serviceFull, _, err := ParseGRPCPath(grpcPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse gRPC path: %w", err)
+	}
+
+	parts := strings.Split(serviceFull, ".")
+	if len(parts) == 0 {
+		return "", fmt.Errorf("cannot extract package from service %q", serviceFull)
+	}
+
+	// Build search strategies in order of likelihood:
+	// 1. Full package path (minus service name): "homework.v1.Homework" → "homework/v1"
+	// 2. First segment only: "homework"
+	var strategies []string
+
+	// Strategy 1: Full package path (remove service name - last part)
+	if len(parts) > 1 {
+		packageParts := parts[:len(parts)-1] // ["homework", "v1"]
+		strategies = append(strategies, filepath.Join(packageParts...))
+	}
+
+	// Strategy 2: First segment only
+	strategies = append(strategies, parts[0])
+
+	// Search protoInclude roots for matching directory
+	for _, root := range protoIncludes {
+		absRoot, err := mustAbs(root)
+		if err != nil || absRoot == "" {
+			continue
+		}
+
+		for _, strategy := range strategies {
+			candidateDir := filepath.Join(absRoot, strategy)
+			if info, err := os.Stat(candidateDir); err == nil && info.IsDir() {
+				return candidateDir, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no proto directory found for service %q in protoInclude roots (tried: %v)", serviceFull, strategies)
+}
+
 // ProtoTextToWire turns Protoscope text into wire bytes using the library (no exec).
 func ProtoTextToWire(text string) ([]byte, error) {
 	sc := protoscope.NewScanner(text) // expects string
@@ -327,6 +395,247 @@ func ProtoTextToJSON(md protoreflect.MessageDescriptor, files []protoreflect.Fil
 	if err != nil {
 		// We don't know if it failed in unmarshal or marshal, so keep this generic.
 		LogError(logger, err, "failed to convert wire to json, cannot convert grpc response to json")
+		return nil, false
+	}
+
+	return j, true
+}
+
+// ProtoSchemaCache holds pre-compiled proto schemas for efficient reuse across multiple test cases.
+// This avoids the overhead of re-compiling protos and re-creating type resolvers for each test case.
+type ProtoSchemaCache struct {
+	// Files contains all compiled file descriptors
+	Files []protoreflect.FileDescriptor
+	// OutputByMethod maps "package.Service/Method" to its output message descriptor
+	OutputByMethod map[string]protoreflect.MessageDescriptor
+	// TypeResolver is the pre-built type resolver for Any type resolution
+	TypeResolver *protoregistry.Types
+}
+
+// BuildProtoSchemaCache compiles all proto files once and builds a lookup cache for method output descriptors.
+// This function should be called once per test-set (before the testcase loop) to avoid repeated compilation.
+//
+// Parameters:
+//   - logger: zap logger for error reporting
+//   - pc: ProtoConfig containing protoFile, protoDir, and protoInclude settings
+//   - grpcPaths: unique :path values from gRPC testcases (e.g., "/homework.v1.Homework/CreateHomework")
+//
+// The function:
+//  1. Derives proto directories from gRPC paths (for multi-service support)
+//  2. Collects all .proto files from all relevant directories
+//  3. Compiles them once
+//  4. Builds a map from "service.Full/Method" -> output MessageDescriptor
+//  5. Pre-creates the type resolver for Any type resolution
+func BuildProtoSchemaCache(logger *zap.Logger, pc models.ProtoConfig, grpcPaths []string) (*ProtoSchemaCache, error) {
+	if len(grpcPaths) == 0 {
+		return nil, fmt.Errorf("no gRPC paths provided")
+	}
+
+	protoPath := pc.ProtoFile
+	protoDir := pc.ProtoDir
+	protoInclude := pc.ProtoInclude
+
+	// Collect all unique proto directories to compile from
+	// Key: absolute directory path, Value: true (for dedup)
+	protoDirsToCompile := make(map[string]bool)
+
+	// If protoDir is explicitly configured, include it
+	if protoDir != "" {
+		absDir, err := mustAbs(protoDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get absolute path for protoDir: %w", err)
+		}
+		protoDirsToCompile[absDir] = true
+	}
+
+	// Auto-derive proto directories from gRPC paths when protoInclude is available
+	if len(protoInclude) > 0 {
+		for _, grpcPath := range grpcPaths {
+			derived, err := deriveProtoDirFromPath(grpcPath, protoInclude)
+			if err == nil && derived != "" {
+				absDir, err := mustAbs(derived)
+				if err == nil {
+					protoDirsToCompile[absDir] = true
+				}
+			}
+			// If derivation fails for a path, we continue with others - the explicit protoDir/protoFile will cover it
+		}
+	}
+
+	// Validate that we have at least one source of proto files
+	if protoPath == "" && len(protoDirsToCompile) == 0 {
+		return nil, fmt.Errorf("protoFile or protoDir must be provided (auto-derive from protoInclude also failed)")
+	}
+
+	// Normalize protoInclude roots to absolute
+	var absRoots []string
+	for _, p := range protoInclude {
+		absPath, err := mustAbs(p)
+		if err != nil {
+			return nil, err
+		}
+		absRoots = append(absRoots, absPath)
+	}
+
+	// If -proto is given, ensure its directory is an include root
+	var absProto string
+	if protoPath != "" {
+		var err error
+		absProto, err = mustAbs(protoPath)
+		if err != nil {
+			return nil, err
+		}
+		protoDirOfFile := filepath.Dir(absProto)
+		if !containsDir(absRoots, protoDirOfFile) {
+			absRoots = append(absRoots, protoDirOfFile)
+		}
+	}
+
+	// Add all proto directories as include roots
+	for dir := range protoDirsToCompile {
+		if !containsDir(absRoots, dir) {
+			absRoots = append(absRoots, dir)
+		}
+	}
+
+	// Build compile list:
+	// - If -proto provided, it goes first (priority)
+	// - Add all .proto files from all collected directories
+	compileNames := make([]string, 0, 64)
+	seenCompile := map[string]bool{}
+
+	// Helper to add a file by absolute path: convert to import-style rel to any -I root
+	addFile := func(abs string) {
+		rel := relToAny(abs, absRoots)
+		if rel == "" {
+			rel = filepath.ToSlash(filepath.Base(abs))
+		}
+		if !seenCompile[rel] {
+			seenCompile[rel] = true
+			compileNames = append(compileNames, rel)
+		}
+	}
+
+	// 1) -proto (preferred)
+	if absProto != "" {
+		addFile(absProto)
+	}
+
+	// 2) Walk all proto directories
+	for dir := range protoDirsToCompile {
+		err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if strings.HasSuffix(d.Name(), ".proto") {
+				absPath, err := mustAbs(path)
+				if err != nil {
+					return err
+				}
+				addFile(absPath)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walking proto directory %s: %v", dir, err)
+		}
+	}
+
+	if len(compileNames) == 0 {
+		return nil, fmt.Errorf("no .proto files found to compile")
+	}
+
+	// Compile all protos once
+	c := &protocompile.Compiler{
+		Resolver: &protocompile.SourceResolver{ImportPaths: absRoots},
+		Reporter: reporter.NewReporter(
+			func(e reporter.ErrorWithPos) error { return e },
+			func(w reporter.ErrorWithPos) { /* optionally log warnings */ },
+		),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	files, err := c.Compile(ctx, compileNames...)
+	if err != nil {
+		return nil, fmt.Errorf("compile %v (relative to -I: %v): %w", compileNames, absRoots, err)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no files compiled for %v", compileNames)
+	}
+
+	// Convert linker.Files to []protoreflect.FileDescriptor
+	fileDescs := make([]protoreflect.FileDescriptor, len(files))
+	for i, f := range files {
+		fileDescs[i] = f
+	}
+
+	// Build OutputByMethod map by iterating all services/methods in compiled files
+	outputByMethod := make(map[string]protoreflect.MessageDescriptor)
+	for _, fd := range files {
+		svcs := fd.Services()
+		for i := 0; i < svcs.Len(); i++ {
+			sd := svcs.Get(i)
+			svcFull := string(sd.FullName()) // e.g., "homework.v1.Homework"
+			methods := sd.Methods()
+			for j := 0; j < methods.Len(); j++ {
+				md := methods.Get(j)
+				key := svcFull + "/" + string(md.Name())
+				outputByMethod[key] = md.Output()
+			}
+		}
+	}
+
+	// Pre-create the type resolver for Any type resolution
+	typeResolver := createTypeResolver(fileDescs)
+
+	return &ProtoSchemaCache{
+		Files:          fileDescs,
+		OutputByMethod: outputByMethod,
+		TypeResolver:   typeResolver,
+	}, nil
+}
+
+// ProtoTextToJSONCached converts Protoscope text to JSON using a pre-built cache.
+// This is the fast-path version that should be used within testcase loops.
+func ProtoTextToJSONCached(cache *ProtoSchemaCache, methodKey string, text string, logger *zap.Logger) ([]byte, bool) {
+	if cache == nil {
+		LogError(logger, fmt.Errorf("proto schema cache is nil"), "cannot convert grpc response to json")
+		return nil, false
+	}
+
+	md, ok := cache.OutputByMethod[methodKey]
+	if !ok || md == nil {
+		LogError(logger, fmt.Errorf("method %q not found in proto schema cache", methodKey), "cannot convert grpc response to json")
+		return nil, false
+	}
+
+	// Protoscope text -> raw protobuf wire
+	wire, err := ProtoTextToWire(text)
+	if err != nil {
+		LogError(logger, err, "failed to convert protoscope text to raw protobuf wire, cannot convert grpc response to json")
+		return nil, false
+	}
+
+	// wire -> JSON using cached type resolver
+	msg := dynamicpb.NewMessage(md)
+	if err := proto.Unmarshal(wire, msg); err != nil {
+		LogError(logger, err, "failed to unmarshal wire to proto message")
+		return nil, false
+	}
+
+	j, err := protojson.MarshalOptions{
+		Indent:          "  ",
+		EmitUnpopulated: true,
+		UseProtoNames:   true,
+		Resolver:        cache.TypeResolver,
+	}.Marshal(msg)
+	if err != nil {
+		LogError(logger, err, "failed to marshal proto message to json")
 		return nil, false
 	}
 

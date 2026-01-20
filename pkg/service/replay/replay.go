@@ -68,6 +68,7 @@ type Replayer struct {
 	appCtxCancel    context.CancelFunc
 	appErrGrp       *errgroup.Group
 	appErrChan      chan models.AppError
+	protoCache      *utils.ProtoSchemaCache // cached proto schema for entire test run
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -242,6 +243,46 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
 		utils.LogError(r.logger, err, stopReason)
+	}
+
+	// Build proto schema cache once for entire test run
+	// This avoids re-compiling protos for each test set
+	if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
+		// Collect unique gRPC paths from ALL test sets
+		grpcPaths := make([]string, 0, 64)
+		seenPaths := make(map[string]bool)
+		for _, testSetID := range testSets {
+			testCases, tcErr := r.testDB.GetTestCases(ctx, testSetID)
+			if tcErr != nil {
+				continue
+			}
+			for _, tc := range testCases {
+				if tc.Kind != models.GRPC_EXPORT {
+					continue
+				}
+				p, ok := tc.GrpcReq.Headers.PseudoHeaders[":path"]
+				if !ok || p == "" || seenPaths[p] {
+					continue
+				}
+				seenPaths[p] = true
+				grpcPaths = append(grpcPaths, p)
+			}
+		}
+
+		if len(grpcPaths) > 0 {
+			pc := models.ProtoConfig{
+				ProtoFile:    r.config.Test.ProtoFile,
+				ProtoDir:     r.config.Test.ProtoDir,
+				ProtoInclude: r.config.Test.ProtoInclude,
+			}
+			cache, cacheErr := utils.BuildProtoSchemaCache(r.logger, pc, grpcPaths)
+			if cacheErr != nil {
+				r.logger.Debug("failed to build proto schema cache for test run, will fall back to per-testcase compilation", zap.Error(cacheErr))
+			} else {
+				r.protoCache = cache
+				r.logger.Debug("built proto schema cache for test run", zap.Int("methods", len(cache.OutputByMethod)), zap.Int("files", len(cache.Files)))
+			}
+		}
 	}
 
 	// setting the appId for the first test-set.
@@ -1205,7 +1246,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			respCopy := *grpcResp
 
-			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 				// get the :path header from the request
 				method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
 				if !ok {
@@ -1213,27 +1254,48 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					goto compareResp
 				}
 
-				pc := models.ProtoConfig{
-					ProtoFile:    r.config.Test.ProtoFile,
-					ProtoDir:     r.config.Test.ProtoDir,
-					ProtoInclude: r.config.Test.ProtoInclude,
-					RequestURI:   method,
-				}
+				// Use cached proto schema if available (fast path)
+				if r.protoCache != nil {
+					// Parse the method path to build the cache key
+					svcFull, mName, parseErr := utils.ParseGRPCPath(method)
+					if parseErr != nil {
+						utils.LogError(r.logger, parseErr, "failed to parse gRPC path, cannot convert grpc response to json")
+						goto compareResp
+					}
+					methodKey := svcFull + "/" + mName
 
-				// get the proto message descriptor
-				md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
-					goto compareResp
-				}
+					// Convert using cached schema
+					actJSON, actOK := utils.ProtoTextToJSONCached(r.protoCache, methodKey, respCopy.Body.DecodedData, r.logger)
+					testJSON, testOK := utils.ProtoTextToJSONCached(r.protoCache, methodKey, testCase.GrpcResp.Body.DecodedData, r.logger)
 
-				// convert both actual and expected using the same path (protoscope-text -> wire -> json)
-				actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
-				testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+					if actOK && testOK {
+						respCopy.Body.DecodedData = string(actJSON)
+						testCase.GrpcResp.Body.DecodedData = string(testJSON)
+					}
+				} else {
+					// Fall back to per-testcase compilation (slow path, backward compatible)
+					pc := models.ProtoConfig{
+						ProtoFile:    r.config.Test.ProtoFile,
+						ProtoDir:     r.config.Test.ProtoDir,
+						ProtoInclude: r.config.Test.ProtoInclude,
+						RequestURI:   method,
+					}
 
-				if actOK && testOK {
-					respCopy.Body.DecodedData = string(actJSON)
-					testCase.GrpcResp.Body.DecodedData = string(testJSON)
+					// get the proto message descriptor
+					md, files, err := utils.GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+					if err != nil {
+						utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
+						goto compareResp
+					}
+
+					// convert both actual and expected using the same path (protoscope-text -> wire -> json)
+					actJSON, actOK := utils.ProtoTextToJSON(md, files, respCopy.Body.DecodedData, r.logger)
+					testJSON, testOK := utils.ProtoTextToJSON(md, files, testCase.GrpcResp.Body.DecodedData, r.logger)
+
+					if actOK && testOK {
+						respCopy.Body.DecodedData = string(actJSON)
+						testCase.GrpcResp.Body.DecodedData = string(testJSON)
+					}
 				}
 			}
 
