@@ -55,38 +55,47 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	defer m.mu.Unlock()
 	return m.firstReqSeen
 }
-
 func (m *SyncMockManager) ResolveRange(start, end time.Time, keep bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Process in-place to avoid allocations
+	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
+	cutoffTime := time.Now().Add(-7 * time.Second)
+
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 		mockTime := mock.Spec.ReqTimestampMock
 
-		// Mocks WITHIN this request window:
+		// SAFETY VALVE: Expire old mocks
+		// If the mock is older than 7 seconds, we discard it immediately.
+		// This stops the infinite growth.
+		if mockTime.Before(cutoffTime) {
+			continue
+		}
+
+		// MATCHING LOGIC: Process mocks in the requested window
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
 				m.outChan <- mock
 			}
-			// We skip these, effectively discarding them from the slice
+			// We successfully matched and handled this mock.
+			// We discard it from the buffer so it doesn't get processed again.
 			continue
 		}
 
-		// Mocks AFTER this range (Future Mocks):
-		// Shift them to the front. This operation is fast because it is just a pointer copy.
+		// RETENTION: Keep the mock if it's recent (within 7s) but didn't match this specific window.
+		// It might be matched by a future out-of-order request.
 		m.buffer[keepIdx] = mock
 		keepIdx++
 	}
 
-	// Nil out the tail to prevent memory leaks.
-	// This allows garbage collector to reclaim the underlying mock data immediately.
+	// MEMORY CLEANUP: Nil out the deleted entries to allow GC to reclaim the memory
 	for i := keepIdx; i < len(m.buffer); i++ {
 		m.buffer[i] = nil
 	}
 
+	// Reslice the buffer
 	m.buffer = m.buffer[:keepIdx]
 }
