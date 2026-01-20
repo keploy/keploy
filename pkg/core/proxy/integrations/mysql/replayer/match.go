@@ -492,6 +492,19 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 	expectedQuery := getQuery(expected)
 	actualQuery := getQuery(actual)
 
+	// Count placeholders in both queries - this is crucial for PREPARE statements
+	// to ensure we match mocks with the same number of parameters
+	expectedPlaceholders := strings.Count(expectedQuery, "?")
+	actualPlaceholders := strings.Count(actualQuery, "?")
+	if expectedPlaceholders != actualPlaceholders {
+		// log.Debug("placeholder count mismatch",
+		// 	zap.String("expected_query", expectedQuery),
+		// 	zap.String("actual_query", actualQuery),
+		// 	zap.Int("expected_placeholders", expectedPlaceholders),
+		// 	zap.Int("actual_placeholders", actualPlaceholders))
+		return false, 0
+	}
+
 	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
 		matchCount++
 		if expectedQuery == actualQuery {
