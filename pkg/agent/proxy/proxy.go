@@ -269,7 +269,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			defer utils.Recover(p.logger)
 			conn, err := listener.Accept()
 			if err != nil {
-				if util.IsNetworkClosedErr(err) {
+				if strings.Contains(err.Error(), "use of closed network connection") {
 					errCh <- nil
 					return
 				}
@@ -289,7 +289,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			clientConnErrGrp.Go(func() error {
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil && err != io.EOF && !util.IsNetworkClosedErr(err) {
+				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
 				}
 				return nil
@@ -376,7 +376,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if srcConn != nil {
 			err := srcConn.Close()
 			if err != nil {
-				if !util.IsNetworkClosedErr(err) {
+				if !strings.Contains(err.Error(), "use of closed network connection") {
 					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 				}
 			}
@@ -385,8 +385,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if dstConn != nil {
 			err = dstConn.Close()
 			if err != nil {
-				// Use IsNetworkClosedErr to check for the specific error
-				if !util.IsNetworkClosedErr(err) {
+				// Use string matching as a last resort to check for the specific error
+				if !strings.Contains(err.Error(), "use of closed network connection") {
 					// Log other errors
 					utils.LogError(p.logger, err, "failed to close the destination connection")
 				}
@@ -427,7 +427,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 
-			// Note: dstCfg is not needed for RecordOutgoing as it doesn't use it
+			dstCfg := &models.ConditionalDstCfg{
+				Port: uint(destInfo.Port),
+			}
+			rule.DstCfg = dstCfg
+
 			// Record the outgoing message into a mock
 			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
@@ -546,6 +550,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//make new connection to the destination server
 	if isTLS {
+
 		// get the destinationUrl from the map for the tls connection
 		url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
 		if !ok {
@@ -587,9 +592,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.Addr = dstAddr
 	}
 
-	// Note: We don't set rule.DstCfg here as it would cause a data race.
-	// dstCfg is passed directly to MockOutgoing instead.
-
+	rule.DstCfg = dstCfg
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
