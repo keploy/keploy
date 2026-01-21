@@ -68,6 +68,15 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 
 	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))
 
+	// Flush stdout/stderr before starting child process to prevent
+	// output interleaving with buffered parent process output.
+	_ = os.Stdout.Sync()
+	_ = os.Stderr.Sync()
+
+	// Small delay to allow parent's log output to be fully written
+	// before child process starts writing to the same console.
+	time.Sleep(50 * time.Millisecond)
+
 	// Start the command
 	err := cmd.Start()
 	if err != nil {
