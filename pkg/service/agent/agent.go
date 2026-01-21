@@ -110,7 +110,7 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
-	a.logger.Debug("Inside MockOutgoing of agent binary !!")
+	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
