@@ -315,6 +315,7 @@ func ProtoTextToJSON(md protoreflect.MessageDescriptor, files []protoreflect.Fil
 		return nil, false
 	}
 
+	logger.Debug("proto text is", zap.Any("proto text", text))
 	// Protoscope text -> raw protobuf wire
 	wire, err := ProtoTextToWire(text)
 	if err != nil {
