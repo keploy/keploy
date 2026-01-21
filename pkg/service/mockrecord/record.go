@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -74,18 +75,20 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		useTimer = true
 	}
 
+	enableIncomingProxy := runtime.GOOS == "windows"
 	result, err := r.runner.StartWithOptions(ctx, models.ReRecordCfg{}, record.StartOptions{
-		Command:            opts.Command,
-		TestSetID:          sessionID,
-		RecordTimer:        recordTimer,
-		UseRecordTimer:     useTimer,
-		ProxyPort:          opts.ProxyPort,
-		DNSPort:            opts.DNSPort,
-		CaptureIncoming:    false,
-		CaptureOutgoing:    true,
-		WriteTestSetConfig: false,
-		IgnoreAppError:     true,
-		MockDB:             db,
+		Command:             opts.Command,
+		TestSetID:           sessionID,
+		RecordTimer:         recordTimer,
+		UseRecordTimer:      useTimer,
+		ProxyPort:           opts.ProxyPort,
+		DNSPort:             opts.DNSPort,
+		CaptureIncoming:     false,
+		EnableIncomingProxy: enableIncomingProxy,
+		CaptureOutgoing:     true,
+		WriteTestSetConfig:  false,
+		IgnoreAppError:      true,
+		MockDB:              db,
 		OnMock: func(mock *models.Mock) error {
 			collector.addMock(mock)
 			return nil

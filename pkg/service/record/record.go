@@ -332,6 +332,13 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 			}
 			return nil
 		})
+	} else if opts.EnableIncomingProxy {
+		// Drain incoming frames to keep the ingress proxy responsive.
+		errGrp.Go(func() error {
+			for range frames.Incoming {
+			}
+			return nil
+		})
 	}
 
 	if opts.CaptureOutgoing {
@@ -466,13 +473,14 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 	outgoingChan := make(chan *models.Mock)
 	errChan := make(chan error, 2)
 
-	if !opts.CaptureIncoming {
+	incomingEnabled := opts.CaptureIncoming || opts.EnableIncomingProxy
+	if !incomingEnabled {
 		close(incomingChan)
 	}
 	if !opts.CaptureOutgoing {
 		close(outgoingChan)
 	}
-	if !opts.CaptureIncoming && !opts.CaptureOutgoing {
+	if !incomingEnabled && !opts.CaptureOutgoing {
 		return FrameChan{
 			Incoming: incomingChan,
 			Outgoing: outgoingChan,
@@ -484,18 +492,18 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
-	if opts.CaptureIncoming {
+	if incomingEnabled {
 		g.Go(func() error {
 			defer close(incomingChan)
 
-		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
-		if err != nil {
-			if ctx.Err() == context.Canceled {
-				return nil
+			ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					return nil
+				}
+				errChan <- err
+				return fmt.Errorf("failed to get incoming test cases: %w", err)
 			}
-			errChan <- err
-			return fmt.Errorf("failed to get incoming test cases: %w", err)
-		}
 
 			for {
 				select {
@@ -531,17 +539,17 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 				cancel()
 			}()
 
-		ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-		})
-		if err != nil {
-			if ctx.Err() == context.Canceled {
-				return nil
+			ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
+				Rules:          r.config.BypassRules,
+				MongoPassword:  r.config.Test.MongoPassword,
+				FallBackOnMiss: r.config.Test.FallBackOnMiss,
+			})
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					return nil
+				}
+				return fmt.Errorf("failed to get outgoing mocks: %w", err)
 			}
-			return fmt.Errorf("failed to get outgoing mocks: %w", err)
-		}
 
 			for {
 				select {

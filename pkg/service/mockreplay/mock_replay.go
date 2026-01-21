@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -173,6 +174,25 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 		case <-agentCtx.Done():
 			return nil, fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
+		}
+	}
+
+	if runtime.GOOS == "windows" {
+		type incomingProxyStarter interface {
+			GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+		}
+		if starter, ok := instrumentation.(incomingProxyStarter); ok {
+			go func() {
+				incomingCh, err := starter.GetIncoming(grpCtx, models.IncomingOptions{
+					Filters: r.cfg.Record.Filters,
+				})
+				if err != nil {
+					r.logger.Debug("failed to start incoming proxy for mock replay", zap.Error(err))
+					return
+				}
+				for range incomingCh {
+				}
+			}()
 		}
 	}
 
