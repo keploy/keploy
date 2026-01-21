@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/term"
 )
 
 func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
@@ -45,41 +44,41 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 		Setpgid: true,
 	}
 
-	// Check if the command is docker-compose related and output is a TTY
-	cmdType := FindDockerCmd(userCmd)
-	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	// // Check if the command is docker-compose related and output is a TTY
+	// cmdType := FindDockerCmd(userCmd)
+	// isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
-	if cmdType == DockerCompose && isTTY {
-		// Create log file for docker-compose output in OS-specific temp directory
-		timestamp := time.Now().Unix()
-		logFileName := fmt.Sprintf("docker-compose-tmp-keploy-%d.logs", timestamp)
-		logFilePath := filepath.Join(os.TempDir(), logFileName)
+	// if cmdType == DockerCompose && isTTY {
+	// Create log file for docker-compose output in OS-specific temp directory
+	timestamp := time.Now().Unix()
+	logFileName := fmt.Sprintf("docker-compose-tmp-keploy-%d.logs", timestamp)
+	logFilePath := filepath.Join(os.TempDir(), logFileName)
 
-		logFile, err := os.Create(logFilePath)
-		if err != nil {
-			logger.Error("failed to create log file for docker-compose output", zap.Error(err))
-			return CmdError{Type: Init, Err: err}
-		}
-		defer logFile.Close()
-
-		// Set command output to the log file
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-
-		logger.Debug("Output is a TTY (Docker Compose -> Logs to file)")
-		logger.Info("Docker compose logs are being written to file", zap.String("path", logFilePath))
-		logger.Info("You can view live logs using tail -f", zap.String("command", "tail -f "+logFilePath))
-	} else {
-		if cmdType == DockerCompose {
-			logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
-		}
-		// Set the output of the command to stdout/stderr
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+	logFile, err := os.Create(logFilePath)
+	if err != nil {
+		logger.Error("failed to create log file for docker-compose output", zap.Error(err))
+		return CmdError{Type: Init, Err: err}
 	}
+	defer logFile.Close()
+
+	// Set command output to the log file
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	logger.Debug("Output is a TTY (Docker Compose -> Logs to file)")
+	logger.Info("Docker compose logs are being written to file", zap.String("path", logFilePath))
+	logger.Info("You can view live logs using tail -f", zap.String("command", "tail -f "+logFilePath))
+	// // } else {
+	// 	if cmdType == DockerCompose {
+	// 		logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
+	// 	}
+	// 	// Set the output of the command to stdout/stderr
+	// 	cmd.Stdout = os.Stdout
+	// 	cmd.Stderr = os.Stderr
+	// // }
 
 	logger.Info("Starting Application :", zap.String("executing_cli", cmd.String()))
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
