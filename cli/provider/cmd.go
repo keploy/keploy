@@ -272,7 +272,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 				}
 				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 				cmd.Flags().StringP("path", "p", pathDefault, "Path to store mock files")
-				cmd.Flags().Duration("duration", 60*time.Second, "Recording duration (e.g., \"60s\")")
+				cmd.Flags().Duration("duration", 0, "Recording duration (e.g., \"60s\")")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
@@ -654,8 +654,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return err
 		}
 	} else {
-		disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-		PrintLogo(os.Stdout, disableAnsi)
+		// NOTE: Logo is already printed in PersistentPreRun (root.go),
+		// so we don't print it again here to avoid duplicate logos.
 		if c.cfg.Debug {
 			logger, err := log.ChangeLogLevel(zap.DebugLevel)
 			*c.logger = *logger
@@ -971,9 +971,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				if err != nil {
 					utils.LogError(c.logger, err, "failed to get duration flag")
 					return errors.New("failed to get duration flag")
-				}
-				if duration == 0 {
-					duration = 60 * time.Second
 				}
 				c.cfg.Record.RecordTimer = duration
 				return nil

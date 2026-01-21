@@ -18,7 +18,7 @@ func MockRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, ser
 	var cmd = &cobra.Command{
 		Use:     "record",
 		Short:   "record outgoing calls as mocks",
-		Example: `keploy mock record -c "npm start" -p ./keploy --duration 60s`,
+		Example: `keploy mock record -c "npm start" -p ./keploy`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -36,10 +36,17 @@ func MockRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, ser
 			}
 
 			recorder := mockrecord.New(logger, cfg, runner, nil)
+
+			// Read the --duration flag if provided, otherwise fall back to config
+			duration, _ := cmd.Flags().GetDuration("duration")
+			if duration == 0 {
+				duration = cfg.Record.RecordTimer
+			}
+
 			result, err := recorder.Record(ctx, models.RecordOptions{
 				Command:   cfg.Command,
 				Path:      cfg.Path,
-				Duration:  cfg.Record.RecordTimer,
+				Duration:  duration,
 				ProxyPort: cfg.ProxyPort,
 				DNSPort:   cfg.DNSPort,
 			})
