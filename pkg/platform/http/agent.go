@@ -582,8 +582,8 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		appErr := app.Run(runAppCtx)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
-			appErrCh <- appErr
 		}
+		appErrCh <- appErr
 		return nil
 	})
 
