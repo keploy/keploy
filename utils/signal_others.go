@@ -67,8 +67,15 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 		cmd.Stderr = logFile
 
 		logger.Debug("Output is a TTY (Docker Compose -> Logs to file)")
-		logger.Info("Docker compose logs are being written to file", zap.String("path", logFilePath))
-		logger.Info("You can view live logs using tail -f", zap.String("command", "tail -f "+logFilePath))
+		const (
+			bold  = "\033[1m"
+			reset = "\033[0m"
+		)
+		logger.Info(
+			bold+"Docker compose logs are being written to file. View live logs using: tail -f"+reset,
+			zap.String("path", logFilePath),
+			zap.String("command", "tail -f "+logFilePath),
+		)
 	} else {
 		if cmdType == DockerCompose {
 			logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
@@ -78,7 +85,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 		cmd.Stderr = os.Stderr
 	}
 
-	logger.Info("Starting Application :", zap.String("executing_cli", cmd.String()))
+	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
 	err := cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}

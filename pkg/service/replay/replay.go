@@ -105,7 +105,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 
 func (r *Replayer) Start(ctx context.Context) error {
 
-	r.logger.Info("🟢 Starting Keploy replay...")
+	r.logger.Info("Starting Keploy replay... Please wait.")
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)

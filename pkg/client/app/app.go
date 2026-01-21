@@ -179,7 +179,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
-	a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
+	a.logger.Info("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
 	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
 	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
