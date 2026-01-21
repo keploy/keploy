@@ -65,7 +65,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
-	logger.Debug("Output is a TTY (Docker Compose -> Logs to file)")
+	// logger.Debug("Output is a TTY (Docker Compose -> Logs to file)")
 	logger.Info("Docker compose logs are being written to file", zap.String("path", logFilePath))
 	logger.Info("You can view live logs using tail -f", zap.String("command", "tail -f "+logFilePath))
 	// // } else {
