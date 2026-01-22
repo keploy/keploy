@@ -36,8 +36,9 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 		derived, err := deriveProtoDirFromPath(grpcPath, protoInclude)
 		if err == nil {
 			protoDir = derived // Use derived directory, taking precedence over config
+		} else {
+			logger.Debug("could not auto-derive protoDir from protoInclude; proceeding with provided protoDir", zap.Error(err))
 		}
-		// If derivation fails, fall through to use config's protoDir
 	}
 
 	// Validate that we have at least one source of proto files
@@ -242,8 +243,8 @@ func relToAny(abs string, roots []string) string {
 // scenarios where a single protoDir config is insufficient.
 //
 // It uses a multi-strategy approach following protobuf conventions:
-//  1. Full package path: "homework.v1.Homework" → "homework/v1/"
-//  2. First segment only: "homework.v1.Homework" → "homework/"
+//  1. Full package path: "keploy.v1.keploy" → "keploy/v1"
+//  2. First segment only: "keploy.v1.keploy" → "keploy"
 //
 // Returns the first matching directory path, or an error if none found.
 func deriveProtoDirFromPath(grpcPath string, protoIncludes []string) (string, error) {
@@ -251,25 +252,22 @@ func deriveProtoDirFromPath(grpcPath string, protoIncludes []string) (string, er
 		return "", fmt.Errorf("grpcPath and protoIncludes are required")
 	}
 
-	// Parse gRPC path to get service full name (e.g., "homework.v1.Homework")
+	// Parse gRPC path to get service full name (e.g., "keploy.v1.keploy")
 	serviceFull, _, err := ParseGRPCPath(grpcPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse gRPC path: %w", err)
 	}
 
 	parts := strings.Split(serviceFull, ".")
-	if len(parts) == 0 {
-		return "", fmt.Errorf("cannot extract package from service %q", serviceFull)
-	}
 
 	// Build search strategies in order of likelihood:
-	// 1. Full package path (minus service name): "homework.v1.Homework" → "homework/v1"
-	// 2. First segment only: "homework"
+	// 1. Full package path (minus service name): "keploy.v1.keploy" → "keploy/v1"
+	// 2. First segment only: "keploy"
 	var strategies []string
 
 	// Strategy 1: Full package path (remove service name - last part)
 	if len(parts) > 1 {
-		packageParts := parts[:len(parts)-1] // ["homework", "v1"]
+		packageParts := parts[:len(parts)-1] // ["keploy", "v1"]
 		strategies = append(strategies, filepath.Join(packageParts...))
 	}
 
