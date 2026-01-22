@@ -572,17 +572,39 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
+
+		// Check if the traffic is HTTP/2 (gRPC) to set the correct ALPN
+		var nextProtos []string
+		if bytes.HasPrefix(initialBuf, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
+			// Offer both h2 and http/1.1 to be compatible with dual-stack listeners.
+			// Ideally, the server should pick h2 for gRPC traffic.
+			nextProtos = []string{"h2", "http/1.1"}
+		}
+
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
+			NextProtos:         nextProtos,
 		}
 
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		logger.Debug("dialing tls connection",
+			zap.String("sni", dstURL),
+			zap.Strings("alpn_offer", nextProtos),
+			zap.String("addr", addr))
+
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
+			}
+			// Log the negotiated protocol
+			if tlsConn, ok := dstConn.(*tls.Conn); ok {
+				state := tlsConn.ConnectionState()
+				logger.Debug("tls handshake complete",
+					zap.String("negotiated_protocol", state.NegotiatedProtocol),
+					zap.String("server_name", state.ServerName))
 			}
 		}
 
