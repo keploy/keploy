@@ -1,0 +1,21 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Keploy artifacts
+keploy.yml
+keploy_agent.log
+stubs/
+
+# Virtual environments
+venv/
+.venv/
+env/
