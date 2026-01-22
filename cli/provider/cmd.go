@@ -311,6 +311,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		// The Agent command (which runs inside that child process) must be configured to accept these new flags, otherwise, the subprocess will crash with an “unknown flag” error.
+		cmd.Flags().StringSlice("include", c.cfg.DebugModules.Include, "List of modules to include in debug logs")
+		cmd.Flags().StringSlice("exclude", c.cfg.DebugModules.Exclude, "List of modules to exclude from debug logs")
 
 	default:
 		return errors.New("unknown command name")
@@ -574,26 +577,6 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
-	if c.cfg.Debug {
-		logger, err := log.ChangeLogLevel(zap.DebugLevel)
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to change log level"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-	}
-
-	if c.cfg.Record.BasePath != "" {
-		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)
-		if err != nil {
-			errMsg := "failed to extract port from base URL"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Port = port
-		c.cfg.E2E = true
-	}
 
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing
@@ -605,6 +588,45 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.DisableTele = true
+	}
+
+	// Check if we have active debug module filtering from config file
+	hasIncludeModules := len(c.cfg.DebugModules.Include) > 0
+	hasExcludeModules := len(c.cfg.DebugModules.Exclude) > 0
+
+	if c.cfg.Debug {
+		// debug=true: Enable debug logging with include/exclude filtering
+		if hasIncludeModules || hasExcludeModules {
+			// Use SetDebugModules for filtered debug logging
+			logger, err := log.SetDebugModules(c.cfg.DebugModules.Include, c.cfg.DebugModules.Exclude, true)
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to set debug modules"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+		} else {
+			// No filtering, just enable global debug (all modules)
+			logger, err := log.ChangeLogLevel(zap.DebugLevel)
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to change log level"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+		}
+	}
+	// debug=false: Do nothing - no debug logs at all (include/exclude are ignored)
+
+	if c.cfg.Record.BasePath != "" {
+		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)
+		if err != nil {
+			errMsg := "failed to extract port from base URL"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Port = port
+		c.cfg.E2E = true
 	}
 
 	if c.cfg.DisableANSI {
@@ -1297,5 +1319,9 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
 	defaultCfg.Test.DisableLineCoverage = c.cfg.Test.DisableLineCoverage
+	defaultCfg.DebugModules = config.DebugModules{
+		Include: []string{},
+		Exclude: []string{},
+	}
 	return defaultCfg
 }

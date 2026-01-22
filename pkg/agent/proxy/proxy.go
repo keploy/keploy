@@ -71,7 +71,7 @@ type Proxy struct {
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
-		logger:            logger,
+		logger:            logger.Named(models.ProxyService),
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
 		synchronous:       opts.Agent.Synchronous,
@@ -93,7 +93,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
-		logger := p.logger.With(zap.Any("Type", parserType))
+		logger := p.logger.Named(strings.ToLower(string(parserType))).With(zap.Any("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
 		logger.Debug("initialized the parser integration", zap.String("ParserType", string(parserType)))
@@ -624,7 +624,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			continue // Skip if parser not found
 		}
 
-		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
+		// Use parser-specific logger to show module name (e.g., "proxy.mongo", "proxy.http")
+		parserLogger := p.logger.Named(strings.ToLower(string(parserPair.ParserType)))
+		parserLogger.Debug("Checking for the parser")
 		if parser.MatchType(parserCtx, initialBuf) {
 			matchedParser = parser
 			parserType = parserPair.ParserType
@@ -634,7 +636,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if !generic {
-		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		// Use parser-specific logger to show module name (e.g., "proxy.mongo", "proxy.http")
+		matchedLogger := p.logger.Named(strings.ToLower(string(parserType)))
+		matchedLogger.Info("The external dependency is supported. Hence using the parser")
 		switch rule.Mode {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
@@ -658,7 +662,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if generic {
-		logger.Debug("The external dependency is not supported. Hence using generic parser")
+		// Use generic parser logger to show as "proxy.generic"
+		genericLogger := p.logger.Named("generic")
+		genericLogger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {

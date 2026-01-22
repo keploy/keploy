@@ -30,7 +30,7 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 	return &MockYaml{
 		MockPath:  mockPath,
 		MockName:  mockName,
-		Logger:    Logger,
+		Logger:    Logger.Named(models.MockDBService),
 		idCounter: -1,
 	}
 }

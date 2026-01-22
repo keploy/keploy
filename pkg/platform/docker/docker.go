@@ -49,7 +49,7 @@ func New(logger *zap.Logger, c *config.Config) (Client, error) {
 	return &Impl{
 		APIClient:             dockerClient,
 		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
-		logger:                logger,
+		logger:                logger.Named(models.DockerService),
 		conf:                  c,
 	}, nil
 }

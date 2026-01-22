@@ -32,7 +32,7 @@ type Recorder struct {
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
 	return &Recorder{
-		logger:          logger,
+		logger:          logger.Named(models.RecordService),
 		testDB:          testDB,
 		mockDB:          mockDB,
 		telemetry:       telemetry,

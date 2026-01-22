@@ -32,7 +32,7 @@ type IngressProxyManager struct {
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
 	pm := &IngressProxyManager{
-		logger:      logger,
+		logger:      logger.Named(models.ProxyService),
 		hooks:       h,
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),

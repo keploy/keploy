@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -30,10 +31,10 @@ type MockUploadResponse struct {
 	Error     string `json:"error"`
 }
 
-func New(serverURL string, logger *zap.Logger) *Storage {
+func New(apiServerURL string, logger *zap.Logger) *Storage {
 	return &Storage{
-		serverURL: serverURL,
-		logger:    logger,
+		serverURL: apiServerURL,
+		logger:    logger.Named(models.StorageService),
 	}
 }
 

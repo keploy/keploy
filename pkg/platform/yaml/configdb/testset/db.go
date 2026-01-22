@@ -21,7 +21,7 @@ type Db[T any] struct {
 
 func New[T any](logger *zap.Logger, path string) *Db[T] {
 	return &Db[T]{
-		logger: logger,
+		logger: logger.Named(models.TestSetDBService),
 		path:   path,
 	}
 }

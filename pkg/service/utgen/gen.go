@@ -73,7 +73,7 @@ func NewUnitTestGenerator(
 		cmd:           genConfig.TestCommand,
 		dir:           genConfig.TestDir,
 		maxIterations: genConfig.MaxIterations,
-		logger:        logger,
+		logger:        logger.Named(models.GenService),
 		tel:           tel,
 		ai:            NewAIClient(genConfig, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
 		cov: &Coverage{
