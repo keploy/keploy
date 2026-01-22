@@ -404,7 +404,7 @@ func (sm *DefaultStreamManager) processCompleteMessage(s *HTTP2StreamState, isOu
 // checkStreamCompletion decides when a stream is complete (request done + response done with trailers)
 func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
 	s := sm.streams[streamID]
-	if s == nil || s.isComplete == false {
+	if s == nil || s.isComplete {
 		// Request considered "done" once END_STREAM seen on request side and headers received.
 		reqDone := s.reqHeadersReceived && s.reqEndStreamReceived
 
