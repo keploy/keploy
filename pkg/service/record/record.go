@@ -183,7 +183,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		timeout := r.config.Agent.Timeout
+		if timeout == 0 {
+			timeout = 60 * time.Second // default fallback
+		}
+		agentCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -195,7 +199,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case <-agentReadyCh:
 		}
 	}
-
 	r.logger.Info("🟢 Keploy agent is ready to record test cases and mocks.")
 
 	// fetching test cases and mocks from the application and inserting them into the database

@@ -58,6 +58,7 @@ type Config struct {
 
 type Agent struct {
 	models.SetupOptions
+	Timeout time.Duration `json:"timeout" yaml:"timeout" mapstructure:"timeout"` // Timeout for agent readiness check
 }
 
 type UtGen struct {

@@ -76,6 +76,8 @@ contract:
   path: ""
   download: false
   generate: false
+agent:
+  timeout: 60s
 inCi: false
 `, models.DefaultIncomingProxyPort)
 
