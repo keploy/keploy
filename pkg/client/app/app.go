@@ -138,7 +138,7 @@ func (a *App) attachInitPid(_ context.Context) error {
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
 
 	// Modify the command to insert the pidMode
-	a.cmd = fmt.Sprintf("%s %s %s %s %s", parts[0], parts[1], injection, parts[2])
+	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], injection, parts[2])
 	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
 }
