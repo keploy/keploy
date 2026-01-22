@@ -93,7 +93,7 @@ func (a *App) SetupDocker() error {
 	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
 	// attaching the init container's PID namespace to the app container
-	err := a.attachInitPid(context.Background())
+	err := a.modifyDockerRun(context.Background())
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to attach init pid")
 		return err
@@ -101,8 +101,8 @@ func (a *App) SetupDocker() error {
 	return nil
 }
 
-// AttachInitPid modifies the existing Docker command to attach the init container's PID namespace
-func (a *App) attachInitPid(_ context.Context) error {
+// ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace
+func (a *App) modifyDockerRun(_ context.Context) error {
 	if a.cmd == "" {
 		return fmt.Errorf("no command provided to modify")
 	}
@@ -126,7 +126,6 @@ func (a *App) attachInitPid(_ context.Context) error {
 	// In CLI args, setting it blindly is usually safe as it overrides or adds.
 	// Ideally we would check if -e JAVA_TOOL_OPTIONS exists, but for now:
 	javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
-	// Note: We use quotes for Java opts to handle spaces
 	tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
 
 	// Inject the pidMode flag after 'docker run' in the command
@@ -137,7 +136,7 @@ func (a *App) attachInitPid(_ context.Context) error {
 
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
 
-	// Modify the command to insert the pidMode
+	// Modify the command to insert the pidMode and environment variables
 	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], injection, parts[2])
 	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
