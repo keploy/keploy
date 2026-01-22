@@ -24,8 +24,8 @@ type MockCorrelationManager struct {
 	activeTests map[string]TestContext
 	// Mutex for thread safety
 	mutex sync.RWMutex
-	// Global mock channel from proxy
-	globalMockCh chan *models.Mock
+	// Global mock queue from proxy (unbounded to prevent dropping)
+	globalMockQueue *models.MockQueue
 	// Context for shutdown
 	ctx    context.Context
 	logger *zap.Logger
@@ -49,11 +49,11 @@ func (atr *ActiveTestRouter) RouteToTest(mock *models.Mock, activeTests map[stri
 }
 
 // NewMockCorrelationManager creates a new mock correlation manager
-func NewMockCorrelationManager(ctx context.Context, globalMockCh chan *models.Mock, logger *zap.Logger) *MockCorrelationManager {
+func NewMockCorrelationManager(ctx context.Context, globalMockQueue *models.MockQueue, logger *zap.Logger) *MockCorrelationManager {
 	mcm := &MockCorrelationManager{
 		testMockChannels: make(map[string]chan *models.Mock),
 		activeTests:      make(map[string]TestContext),
-		globalMockCh:     globalMockCh,
+		globalMockQueue:  globalMockQueue,
 		ctx:              ctx,
 		logger:           logger,
 		router:           &ActiveTestRouter{},
@@ -65,13 +65,14 @@ func NewMockCorrelationManager(ctx context.Context, globalMockCh chan *models.Mo
 // routeMocks continuously routes incoming mocks to appropriate test channels
 func (mcm *MockCorrelationManager) routeMocks() {
 	for {
-		select {
-		case mock := <-mcm.globalMockCh:
-			mcm.routeMockToTest(mock)
-		case <-mcm.ctx.Done():
+		// Pop from queue with context (blocks until mock available or context cancelled)
+		mock := mcm.globalMockQueue.PopWithContext(mcm.ctx)
+		if mock == nil {
+			// Context cancelled or queue closed
 			mcm.closeAllChannels()
 			return
 		}
+		mcm.routeMockToTest(mock)
 	}
 }
 
