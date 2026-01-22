@@ -501,7 +501,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	}
 
 	// 4) Use provided configPath and convert to absolute path
-	configPath, err := cmd.Flags().GetString("config-path")
+  configPath, err := cmd.Flags().GetString("config-path")
 	if err != nil {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
@@ -516,9 +516,9 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	}
 	configPath = absConfigPath
 
+
 	c.logger.Debug("config path is ", zap.String("configPath", configPath))
 
-	// 5) Read base keploy.yml exactly like before
 	viper.SetConfigName("keploy")
 	viper.SetConfigType("yml")
 	viper.AddConfigPath(configPath)
@@ -533,15 +533,24 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
-		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
+		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the application folder (current working directory)
 		lastDir, err := utils.GetLastDirectory()
 		if err != nil {
-			errMsg := fmt.Sprintf("failed to get last directory name for override config file in path '%s'", configPath)
+			errMsg := "failed to get last directory name for override config file"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		// overridePath is <configPath>/<lastDir>.keploy.yml
-		overridePath := filepath.Join(configPath, fmt.Sprintf("%s.keploy.yml", lastDir))
+
+		// Get current working directory (application folder) for override file
+		appDir, err := os.Getwd()
+		if err != nil {
+			errMsg := "failed to get current working directory for override config file"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		// overridePath is <appDir>/<lastDir>.keploy.yml (in application folder, not configPath)
+		overridePath := filepath.Join(appDir, fmt.Sprintf("%s.keploy.yml", lastDir))
 
 		if _, statErr := os.Stat(overridePath); statErr == nil {
 			viper.SetConfigFile(overridePath)
