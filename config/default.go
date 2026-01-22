@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+
+	"go.keploy.io/server/v3/pkg/models"
 	yaml3 "gopkg.in/yaml.v3"
 	"sigs.k8s.io/kustomize/kyaml/yaml"
 	"sigs.k8s.io/kustomize/kyaml/yaml/merge2"
@@ -8,7 +11,7 @@ import (
 )
 
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
-var defaultConfig = `
+var defaultConfig = fmt.Sprintf(`
 path: ""
 appId: 0
 appName: ""
@@ -17,6 +20,7 @@ templatize:
   testSets: []
 port: 0
 proxyPort: 16789
+incomingProxyPort: %d
 dnsPort: 26789
 debug: false
 disableANSI: false
@@ -79,7 +83,7 @@ diagnose:
   minConfidence: 95
   showDiff: true
 inCi: false
-`
+`, models.DefaultIncomingProxyPort)
 
 func GetDefaultConfig() string {
 	return defaultConfig

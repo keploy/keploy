@@ -93,7 +93,7 @@ func (a *App) SetupDocker() error {
 	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
 	// attaching the init container's PID namespace to the app container
-	err := a.attachInitPid(context.Background())
+	err := a.modifyDockerRun(context.Background())
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to attach init pid")
 		return err
@@ -101,8 +101,8 @@ func (a *App) SetupDocker() error {
 	return nil
 }
 
-// AttachInitPid modifies the existing Docker command to attach the init container's PID namespace
-func (a *App) attachInitPid(_ context.Context) error {
+// ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace
+func (a *App) modifyDockerRun(_ context.Context) error {
 	if a.cmd == "" {
 		return fmt.Errorf("no command provided to modify")
 	}
@@ -112,14 +112,32 @@ func (a *App) attachInitPid(_ context.Context) error {
 	pidMode := fmt.Sprintf("--pid=container:%s", a.keployContainer)
 	networkMode := fmt.Sprintf("--network=container:%s", a.keployContainer)
 
+	keployTLSVolumeName := "keploy-tls-certs"
+	keployTLSMountPath := "/tmp/keploy-tls"
+	certPath := fmt.Sprintf("%s/ca.crt", keployTLSMountPath)
+	trustStorePath := fmt.Sprintf("%s/truststore.jks", keployTLSMountPath)
+
+	tlsFlags := fmt.Sprintf("-v %s:%s:ro ", keployTLSVolumeName, keployTLSMountPath)
+	tlsFlags += fmt.Sprintf("-e NODE_EXTRA_CA_CERTS=%s ", certPath)
+	tlsFlags += fmt.Sprintf("-e REQUESTS_CA_BUNDLE=%s ", certPath)
+	tlsFlags += fmt.Sprintf("-e SSL_CERT_FILE=%s ", certPath)
+	tlsFlags += fmt.Sprintf("-e CARGO_HTTP_CAINFO=%s ", certPath)
+	// For Java, we append to existing options if possible, or just set it.
+	// In CLI args, setting it blindly is usually safe as it overrides or adds.
+	// Ideally we would check if -e JAVA_TOOL_OPTIONS exists, but for now:
+	javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
+	tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
+
 	// Inject the pidMode flag after 'docker run' in the command
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
 	if len(parts) < 3 {
 		return fmt.Errorf("invalid command structure: %s", a.cmd)
 	}
 
-	// Modify the command to insert the pidMode
-	a.cmd = fmt.Sprintf("%s %s %s %s %s", parts[0], parts[1], pidMode, networkMode, parts[2])
+	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
+
+	// Modify the command to insert the pidMode and environment variables
+	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], injection, parts[2])
 	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
 }
@@ -182,7 +200,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
 
 	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
-	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath)
+	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
 
 	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
 

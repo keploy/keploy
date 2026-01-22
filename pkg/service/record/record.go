@@ -43,6 +43,9 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 }
 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
+
+	r.logger.Info("🔴 Starting Keploy recording... Please wait.")
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -84,6 +87,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 			}
 		}
+
+		r.logger.Info("🔴 Stopping Keploy recording... in the defer")
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
@@ -137,7 +142,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	}
 
 	// Create config.yaml if metadata is provided
-	if r.config.Record.Metadata != "" {
+	if r.config.Record.Metadata != "" && r.testSetConf != nil {
 		r.createConfigWithMetadata(ctx, newTestSetID)
 	}
 
@@ -163,22 +168,26 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
+	r.logger.Info("Command type:", zap.String("commandType", r.config.CommandType))
+
 	if r.config.CommandType == string(utils.DockerCompose) {
+
+		r.logger.Info("🟢 Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", r.config.Agent.AgentURI))
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
-			if runAppError.AppErrorType == models.ErrCtxCanceled {
+			if (runAppError.AppErrorType == models.ErrCtxCanceled || runAppError == models.AppError{}) {
 				return nil
 			}
 			appErrChan <- runAppError
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		agentCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
-		go pkg.AgentHealthTicker(agentCtx, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
 		case <-agentCtx.Done():
@@ -186,6 +195,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case <-agentReadyCh:
 		}
 	}
+
+	r.logger.Info("🟢 Keploy agent is ready to record test cases and mocks.")
 
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
@@ -198,7 +209,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
+	r.logger.Info("🟢 Keploy is now recording test cases and mocks for you application...")
+
 	if r.config.CommandType == string(utils.DockerCompose) {
+
+		r.logger.Info("🟢 Making keploy-agent ready for docker compose...")
+
 		err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 		if err != nil {
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
@@ -296,7 +312,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case models.ErrUnExpected:
 			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
 		case models.ErrInternal:
-			stopReason = "internal error occured while hooking into the application, hence stopping keploy"
+			stopReason = "internal error occurred while hooking into the application, hence stopping keploy"
 		case models.ErrAppStopped:
 			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
 			r.logger.Warn(stopReason, zap.Error(appErr))
@@ -307,7 +323,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
-			stopReason = "unknown error recieved from application, hence stopping keploy"
+			stopReason = "unknown error received from application, hence stopping keploy"
 		}
 
 	case err = <-insertTestErrChan:
@@ -342,9 +358,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
 		if err != nil {
+			if ctx.Err() == context.Canceled {
+				return nil
+			}
 			errChan <- err
 			return fmt.Errorf("failed to get incoming test cases: %w", err)
 		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -383,6 +403,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		})
 		if err != nil {
+			if ctx.Err() == context.Canceled {
+				return nil
+			}
 			return fmt.Errorf("failed to get outgoing mocks: %w", err)
 		}
 

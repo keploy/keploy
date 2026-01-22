@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -36,6 +37,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/storemocks", a.StoreMocks)
 		r.Post("/updatemockparams", a.UpdateMockParams)
+		r.Post("/stop", a.Stop)
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
@@ -133,6 +135,24 @@ func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (a *Agent) Stop(w http.ResponseWriter, _ *http.Request) {
+	// Stop the agent first
+	if err := utils.Stop(a.logger, "stop requested via agent API"); err != nil {
+		a.logger.Error("failed to stop agent", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, writeErr := w.Write([]byte("Failed to stop agent\n")); writeErr != nil {
+			a.logger.Error("failed to write error response", zap.Error(writeErr))
+		}
+		return
+	}
+
+	// Send response after agent has stopped successfully
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Agent stopped successfully\n")); err != nil {
+		a.logger.Error("failed to write response", zap.Error(err))
+	}
+}
+
 func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -140,6 +160,9 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
+
+	a.logger.Info("🟢 Received request to handle incoming test cases")
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -171,6 +194,8 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
+	a.logger.Info("🟢 Streaming incoming test cases to client")
+
 	// TODO: make a uniform implementation for both test and mock streaming channels
 	// Keep the connection alive and stream data
 	for t := range tc {
@@ -189,6 +214,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
+
+	a.logger.Info("🟢 Received request to handle outgoing mocks...")
+
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -215,6 +243,8 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		a.logger.Error("failed to get outgoing", zap.Error(err))
 		return
 	}
+
+	a.logger.Info("🟢 Streaming outgoing mocks to client...")
 
 	enc := gob.NewEncoder(w)
 
