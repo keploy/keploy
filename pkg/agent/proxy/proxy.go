@@ -683,38 +683,48 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 }
 
 func (p *Proxy) StopProxyServer(ctx context.Context) {
-	<-ctx.Done()
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	<-cleanupCtx.Done()
 
 	p.logger.Info("stopping proxy server...")
 	var cleanupErrors []error
 	p.connMutex.Lock()
-	for _, clientConn := range p.clientConnections {
-		if err := clientConn.Close(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
+	if p.clientConnections != nil {
+		for _, clientConn := range p.clientConnections {
+			if clientConn != nil {
+				if err := clientConn.Close(); err != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
 
+				}
+			}
 		}
+		p.clientConnections = nil
 	}
 	p.clientConnections = nil
 	p.connMutex.Unlock()
+
+	p.connMutex.Lock()
 	if p.Listener != nil {
 		if err := p.Listener.Close(); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close listener: %w", err))
 		}
 		p.Listener = nil
 	}
+	p.connMutex.Unlock()
+
 	if p.UDPDNSServer != nil || p.TCPDNSServer != nil {
 		if err := p.stopDNSServers(ctx); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
-
 		}
+		p.UDPDNSServer = nil
+		p.TCPDNSServer = nil
 	}
 
 	p.CloseErrorChannel()
 	if len(cleanupErrors) > 0 {
-		for _, err := range cleanupErrors {
-			utils.LogError(p.logger, err, "cleanup error in StopProxyServer")
-		}
-		p.logger.Warn("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
+		fmt.Errorf("proxy stopped with %d errors: %v", len(cleanupErrors), cleanupErrors)
 	} else {
 		p.logger.Info("proxy stopped cleanly...")
 	}
