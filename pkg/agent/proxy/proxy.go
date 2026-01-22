@@ -571,7 +571,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Check if the traffic is HTTP/2 (gRPC) to set the correct ALPN
 		var nextProtos []string
 		if bytes.HasPrefix(initialBuf, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-			nextProtos = []string{"h2"}
+			// Offer both h2 and http/1.1 to be compatible with dual-stack listeners.
+			// Ideally, the server should pick h2 for gRPC traffic.
+			nextProtos = []string{"h2", "http/1.1"}
 		}
 
 		cfg := &tls.Config{
