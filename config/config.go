@@ -33,6 +33,7 @@ type Config struct {
 	Test                  Test                `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record              `json:"record" yaml:"record" mapstructure:"record"`
 	Report                Report              `json:"report" yaml:"report" mapstructure:"report"`
+	Diagnose              Diagnose            `json:"diagnose" yaml:"diagnose" mapstructure:"diagnose"`
 	Gen                   UtGen               `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
@@ -159,6 +160,14 @@ type Report struct {
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
 }
 
+type Diagnose struct {
+	SelectedTestSets map[string][]string `json:"selectedTestSets" yaml:"selectedTestSets" mapstructure:"selectedTestSets"`
+	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
+	AutoFix          bool                `json:"autoFix" yaml:"autoFix" mapstructure:"autoFix"`
+	MinConfidence    int                 `json:"minConfidence" yaml:"minConfidence" mapstructure:"minConfidence"`
+	ShowDiff         bool                `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"`
+}
+
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
 	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
@@ -212,6 +221,13 @@ func SetSelectedTestSets(conf *Config, testSets []string) {
 	conf.Report.SelectedTestSets = make(map[string][]string)
 	for _, testSet := range testSets {
 		conf.Report.SelectedTestSets[testSet] = []string{}
+	}
+}
+
+func SetSelectedDiagnoseTestSets(conf *Config, testSets []string) {
+	conf.Diagnose.SelectedTestSets = make(map[string][]string)
+	for _, testSet := range testSets {
+		conf.Diagnose.SelectedTestSets[testSet] = []string{}
 	}
 }
 

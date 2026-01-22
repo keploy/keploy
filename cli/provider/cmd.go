@@ -275,6 +275,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
+	case "diagnose":
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Diagnose.SelectedTestSets), "Testsets to diagnose e.g. --testsets \"test-set-1, test-set-2\"")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
+		cmd.Flags().Bool("auto-fix", c.cfg.Diagnose.AutoFix, "Auto-apply fixes when confidence is high")
+		cmd.Flags().Int("min-confidence", c.cfg.Diagnose.MinConfidence, "Minimum confidence to auto-apply fixes")
+		cmd.Flags().Bool("show-diff", c.cfg.Diagnose.ShowDiff, "Show structured diffs for mismatches")
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -720,6 +727,63 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		c.cfg.Report.TestCaseIDs = cleaned
+
+	case "diagnose":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to get the test-sets"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedDiagnoseTestSets(c.cfg, testSets)
+
+		tcIDs, err := cmd.Flags().GetStringSlice("test-case")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the test-case flag")
+			return errors.New("failed to get the test-case flag")
+		}
+		cleaned := make([]string, 0, len(tcIDs))
+		for _, x := range tcIDs {
+			for _, y := range strings.Split(x, ",") {
+				y = strings.TrimSpace(y)
+				if y != "" {
+					cleaned = append(cleaned, y)
+				}
+			}
+		}
+		c.cfg.Diagnose.TestCaseIDs = cleaned
+
+		autoFix, err := cmd.Flags().GetBool("auto-fix")
+		if err != nil {
+			errMsg := "failed to get the auto-fix flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Diagnose.AutoFix = autoFix
+
+		minConfidence, err := cmd.Flags().GetInt("min-confidence")
+		if err != nil {
+			errMsg := "failed to get the min-confidence flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Diagnose.MinConfidence = minConfidence
+
+		showDiff, err := cmd.Flags().GetBool("show-diff")
+		if err != nil {
+			errMsg := "failed to get the show-diff flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Diagnose.ShowDiff = showDiff
 
 	case "sanitize":
 		path, err := cmd.Flags().GetString("path")
