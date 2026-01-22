@@ -531,7 +531,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 		IsConfigFileFound = false
-		c.logger.Info("config file not found; proceeding with flags only")
+		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
 		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
 		lastDir, err := utils.GetLastDirectory()
@@ -965,11 +965,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
 			//check if the keploy folder exists
+			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
 				recordCmd := models.HighlightGrayString("keploy record")
-				errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
-				utils.LogError(c.logger, nil, errMsg)
-				return errors.New(errMsg)
+				c.logger.Info(fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd))
+				cmdType := utils.CmdType(c.cfg.CommandType)
+				if cmdType == utils.DockerRun || cmdType == utils.DockerStart || cmdType == utils.DockerCompose {
+					c.logger.Info(`Example: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+				} else {
+					c.logger.Info(`Example: keploy record -c "./myApp serve" --delay 6`)
+				}
+				os.Exit(1)
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
