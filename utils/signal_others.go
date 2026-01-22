@@ -28,7 +28,6 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 }
 
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
-	// Run the app as the user who invoked sudo
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 

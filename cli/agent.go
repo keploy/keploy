@@ -40,23 +40,27 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
+			serverDone := make(chan struct{})
 
 			routes.ActiveHooks.New(router, a, logger)
 			go func() {
+				defer close(serverDone)
 				select {
 				case <-ctx.Done():
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case p := <-startAgentCh:
-					routes.StartAgentServer(logger, p, router)
+					routes.StartAgentServer(ctx, logger, p, router)
 				}
 			}()
 
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
-				return nil
 			}
+
+			// Wait for HTTP server to finish shutting down
+			<-serverDone
 
 			return nil
 		},

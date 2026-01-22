@@ -245,8 +245,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
 			if utils.IsDockerCmd(a.kind) {
-				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
-				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				a.logger.Debug("sending SIGINT to the command", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+				err := utils.SendSignal(a.logger, cmd.Process.Pid, syscall.SIGINT)
 
 				return err
 			}

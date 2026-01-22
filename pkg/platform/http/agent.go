@@ -582,8 +582,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		appErr := app.Run(runAppCtx)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
-			appErrCh <- appErr
 		}
+		// Always send the app error to the channel, even if Err is nil
+		// This ensures that ErrAppStopped (when app exits gracefully) is propagated
+		appErrCh <- appErr
 		return nil
 	})
 
@@ -827,6 +829,14 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 	case <-clientCtx.Done():
 		// Client context cancelled, stop the agent
 		a.logger.Info("Client context cancelled, stopping agent")
+
+		// First try to stop agent via API (important for Docker Compose where agent runs in container)
+		if a.conf != nil && a.conf.Agent.AgentURI != "" {
+			if err := a.requestAgentStop(); err != nil {
+				a.logger.Debug("failed to request agent stop via API", zap.Error(err))
+			}
+		}
+
 		a.stopAgent()
 	case <-agentCtx.Done():
 		// Agent context cancelled or agent stopped

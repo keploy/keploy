@@ -79,7 +79,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		select {
 		case <-ctx.Done():
 		default:
-			if !reRecordCfg.Rerecord {
+			// Only call Stop if there's a stop reason (i.e., an error occurred)
+			// For graceful shutdowns (ErrAppStopped, ErrCtxCanceled), stopReason will be empty
+			if !reRecordCfg.Rerecord && stopReason != "" {
 
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
@@ -314,8 +316,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case models.ErrInternal:
 			stopReason = "internal error occurred while hooking into the application, hence stopping keploy"
 		case models.ErrAppStopped:
-			stopReason = "user application terminated unexpectedly hence stopping keploy, please check application logs if this behaviour is not expected"
-			r.logger.Warn(stopReason, zap.Error(appErr))
+			r.logger.Info("Application stopped, stopping keploy gracefully")
 			return nil
 		case models.ErrCtxCanceled:
 			return nil
