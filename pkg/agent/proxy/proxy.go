@@ -565,9 +565,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
+
+		// Check if the traffic is HTTP/2 (gRPC) to set the correct ALPN
+		var nextProtos []string
+		if bytes.HasPrefix(initialBuf, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
+			nextProtos = []string{"h2"}
+		}
+
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
+			NextProtos:         nextProtos,
 		}
 
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
