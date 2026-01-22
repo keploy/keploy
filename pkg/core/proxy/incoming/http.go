@@ -16,6 +16,7 @@ import (
 	hooksUtils "go.keploy.io/server/v2/pkg/core/hooks/conn"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -33,6 +34,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 	for {
 		reqTimestamp := time.Now()
 
+		// Read request directly
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -40,19 +42,24 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			} else {
 				logger.Warn("Failed to read client request", zap.Error(err))
 			}
-			return // Exit the loop and close the connection.
+			return
 		}
 		defer req.Body.Close()
+
+		// Dump request for capturing
 		reqData, err := httputil.DumpRequest(req, true)
 		if err != nil {
 			logger.Error("Failed to dump request for capturing", zap.Error(err))
 			return
 		}
+
+		// Forward the request to upstream
 		if err := req.Write(upConn); err != nil {
 			logger.Error("Failed to forward request to upstream", zap.Error(err))
 			return
 		}
 
+		// Read the response
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
 			logger.Error("Failed to read upstream response", zap.Error(err))
@@ -75,10 +82,12 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		// Since we have already read the body in the write calls for forwarding traffic
 		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 		if err != nil {
+			utils.LogError(logger, err, "Failed to parse HTTP request")
 			return
 		}
 		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
 		if err != nil {
+			utils.LogError(logger, err, "Failed to parse HTTP response")
 			return
 		}
 
