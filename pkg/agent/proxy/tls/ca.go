@@ -1,3 +1,4 @@
+// Package tls provides functionality for handling tls connetions.
 package tls
 
 import (
@@ -52,19 +53,19 @@ var caStoreUpdateCmd = []string{
 	"certctl rehash",
 }
 
-// SetupCA is the main entry point for the AGENT.
-// It detects if we are running in "Shared Volume Mode" (Docker) or "Native Mode" (Host).
-func SetupCA(ctx context.Context, logger *zap.Logger) error {
+// TODO: This function should be used even before starting the proxy server. It should be called just after the keploy is started.
+// because the custom ca in case of NODE is set via env variable NODE_EXTRA_CA_CERTS and env variables can be set only on startup.
+// As in case of unit test integration, we are starting the proxy via api.
 
-	// 1. Check for CERT_EXPORT_PATH (Injected by Client CLI for Docker)
-	exportPath := os.Getenv("CERT_EXPORT_PATH")
+// SetupCA setups custom certificate authority to handle TLS connections
+func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 
-	if exportPath != "" {
-		logger.Info("Detected Docker Shared Volume mode. Exporting certs...", zap.String("path", exportPath))
-		return setupSharedVolume(ctx, logger, exportPath)
+	if isDocker {
+		logger.Info("Detected Docker Shared Volume mode. Exporting certs...", zap.String("path", "/tmp/keploy-tls"))
+		return setupSharedVolume(ctx, logger, "/tmp/keploy-tls")
 	}
 
-	// 2. Fallback: Native Mode (Host Machine)
+	// Native Mode
 	logger.Info("Detected Native Mode. Installing to system store...")
 	return setupNative(ctx, logger)
 }
@@ -126,6 +127,7 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 func setupNative(ctx context.Context, logger *zap.Logger) error {
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
+		// Extract certificate to a temporary file
 		tempCertPath, err := extractCertToTemp()
 		if err != nil {
 			utils.LogError(logger, err, "Failed to extract certificate to temp folder")
@@ -137,16 +139,19 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 			}
 		}()
 
+		// Install certificate using certutil
 		if err = installWindowsCA(ctx, logger, tempCertPath); err != nil {
 			utils.LogError(logger, err, "Failed to install CA certificate on Windows")
 			return err
 		}
 
+		// install CA in the java keystore if java is installed
 		if err = installJavaCA(ctx, logger, tempCertPath); err != nil {
 			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
 		}
 
+		// Set environment variables for Node.js and Python to use the custom CA
 		return SetEnvForPath(logger, tempCertPath)
 	}
 
@@ -175,6 +180,7 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		}
 		fs.Close()
 
+		// install CA in the java keystore if java is installed
 		if err := installJavaCA(ctx, logger, caPath); err != nil {
 			utils.LogError(logger, err, "Failed to install CA in the java keystore")
 			return err
@@ -217,7 +223,7 @@ func extractCertToTemp() (string, error) {
 
 // generateTrustStoreNative creates a JKS file using pure Go, avoiding 'keytool' dependency
 func generateTrustStore(certPath, jksPath string) error {
-	// 1. Read and Parse the PEM Certificate
+	// Read and Parse the PEM Certificate
 	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
 		return fmt.Errorf("failed to read cert pem: %w", err)
@@ -309,17 +315,25 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 	return err == nil
 }
 
+// installJavaCA installs the CA in the Java keystore
 func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error {
+	// check if java is installed
 	if util.IsJavaInstalled() {
+		logger.Debug("checking java path from default java home")
 		javaHome, err := util.GetJavaHome(ctx)
 		if err != nil {
 			utils.LogError(logger, err, "Java detected but failed to find JAVA_HOME")
 			return err
 		}
 
+		// Assuming modern Java structure (without /jre/)
+		// Use filepath.Join for proper cross-platform path handling (Windows uses backslashes)
 		cacertsPath := filepath.Join(javaHome, "lib", "security", "cacerts")
+		// You can modify these as per your requirements
 		storePass := "changeit"
 		alias := "keployCA"
+
+		logger.Debug("", zap.String("java_home", javaHome), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
 
 		if isJavaCAExist(ctx, alias, storePass, cacertsPath) {
 			logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
@@ -332,13 +346,15 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 			utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
 			return err
 		}
-		logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath))
+		logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
+		logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	} else {
 		logger.Debug("Java is not installed on the system")
 	}
 	return nil
 }
 
+// installWindowsCA installs the CA certificate in Windows certificate store using certutil
 func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) error {
 	cmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
 	output, err := cmd.CombinedOutput()
@@ -356,12 +372,25 @@ var SrcPortToDstURL = sync.Map{}
 var setLogLevelOnce sync.Once
 
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
+	// Ensure log level is set only once
 
+	/*
+	* Since multiple goroutines can call this function concurrently, we need to ensure that the log level is set only once.
+	 */
 	setLogLevelOnce.Do(func() {
-		// Set cfssl log level to error to avoid verbose logs
+		// * Set the log level to error to avoid unnecessary logs. like below...
+
+		// 2025/03/18 20:54:25 [INFO] received CSR
+		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
+		// 2025/03/18 20:54:25 [INFO] received CSR
+		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
+		// 2025/03/18 20:54:25 [INFO] encoded CSR
+		// 2025/03/18 20:54:25 [INFO] encoded CSR
+		// 2025/03/18 20:54:25 [INFO] signed certificate with serial number 435398774381835435678674951099961010543769077102
 		cfsslLog.Level = cfsslLog.LevelError
 	})
 
+	// Generate a new server certificate and private key for the given hostname
 	dstURL := clientHello.ServerName
 	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
@@ -369,6 +398,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	SrcPortToDstURL.Store(sourcePort, dstURL)
 
 	serverReq := &csr.CertificateRequest{
+		//Make the name accordng to the ip of the request
 		CN: clientHello.ServerName,
 		Hosts: []string{
 			clientHello.ServerName,
@@ -394,6 +424,14 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		backdate = time.Now()
 	}
 
+	// Case: time freezing (an Ent. feature) is enabled,
+	// If application time is frozen in past, and the certificate is signed today, then the certificate will be invalid.
+	// This results in a certificate error during tls handshake.
+	// To avoid this, we set the certificate’s validity period (NotBefore and NotAfter)
+	// by referencing the testcase request time of the application (backdate) instead of the current real time.
+	//
+	// Note: If you have recorded test cases before April 20, 2024 (http://www.sslchecker.com/certdecoder?su=269725513dfeb137f6f29b8488f17ca9)
+	// and are using time freezing, please reach out to us if you get tls handshake error.
 	signReq := signer.SignRequest{
 		Hosts:     serverReq.Hosts,
 		Request:   string(serverCsr),
@@ -407,6 +445,9 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		return nil, fmt.Errorf("failed to sign server certificate: %v", err)
 	}
 
+	logger.Debug("signed the certificate for a duration of 2 years", zap.String("notBefore", signReq.NotBefore.String()), zap.String("notAfter", signReq.NotAfter.String()))
+
+	// Load the server certificate and private key
 	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
