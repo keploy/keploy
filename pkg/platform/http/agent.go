@@ -874,7 +874,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 
-	a.logger.Info("Using available ports",
+	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
 		zap.Uint32("proxy-port", proxyPort),
 		zap.Uint32("dns-port", dnsPort))
@@ -882,7 +882,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if isDockerCmd {
 
 		var origCmd = cmd
-		a.logger.Info("Application command provided :", zap.String("cmd", cmd))
+		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
@@ -951,7 +951,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return err
 	}
 
-	a.logger.Info("Keploy client setup completed successfully")
+	a.logger.Debug("Keploy client setup completed successfully")
 	return nil
 }
 

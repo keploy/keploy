@@ -44,7 +44,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
-	r.logger.Info("Starting Keploy recording... Please wait.")
+	r.logger.Debug("Starting Keploy recording... Please wait.")
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)

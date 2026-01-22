@@ -158,7 +158,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
 
-	a.logger.Info(fmt.Sprintf("Found docker compose file paths: %v", paths))
+	a.logger.Debug(fmt.Sprintf("Found docker compose file paths: %v", paths))
 
 	newPath := "docker-compose-tmp.yaml"
 
@@ -197,12 +197,16 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
-	a.logger.Info("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
+	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
 	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
 	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
 
-	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
+	a.logger.Info(
+		"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
+		zap.String("cmd", a.cmd),
+		zap.String("composePath", newPath),
+	)
 
 	return nil
 }

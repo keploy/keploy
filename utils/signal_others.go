@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,6 +57,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Setsid: true,
 		}
+		logger.Debug("Output is a TTY (Docker Compose -> PTY)")
 		return executeWithPTY(ctx, logger, cmd)
 	}
 
@@ -99,7 +101,7 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 		return CmdError{Type: Init, Err: err}
 	}
 
-	logger.Info("Starting Application with PTY:", zap.String("executing_cmd", cmd.String()))
+	logger.Info("Starting Application:", zap.String("executing_cmd", cmd.String()))
 
 	// Handle terminal resize - propagate size changes from real terminal to PTY
 	resizeCh := make(chan os.Signal, 1)
@@ -139,8 +141,14 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 		logger.Debug("error copying PTY output to stdout", zap.Error(copyErr))
 	}
 
-	// Stop listening for resize signals
+	// Stop listening for resize signals first, then drain any pending signals
+	// before closing the channel to avoid potential write to closed channel
 	signal.Stop(resizeCh)
+	// Drain any pending signals
+	select {
+	case <-resizeCh:
+	default:
+	}
 	close(resizeCh)
 
 	if cmdErr != nil {
@@ -156,7 +164,13 @@ func isClosedPTYError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// When PTY is closed, io.Copy returns with read errors like "input/output error"
-	// or "file already closed" which are expected
-	return true
+	errStr := err.Error()
+	// When PTY is closed, io.Copy returns with read errors like:
+	// - "read /dev/ptmx: input/output error" (Linux)
+	// - "read /dev/ptmx: file already closed"
+	// - EOF is also expected
+	return err == io.EOF ||
+		strings.Contains(errStr, "input/output error") ||
+		strings.Contains(errStr, "file already closed") ||
+		strings.Contains(errStr, "bad file descriptor")
 }

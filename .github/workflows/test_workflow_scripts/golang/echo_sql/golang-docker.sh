@@ -87,11 +87,6 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 test_container="echoApp"
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
 
-# Always show test output for debugging
-echo "=== Test mode output ==="
-cat "${test_container}.txt"
-echo "=== End of test output ==="
-
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
