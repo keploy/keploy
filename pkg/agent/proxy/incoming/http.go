@@ -56,7 +56,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	upstreamReader := bufio.NewReader(upConn)
 
 	for {
-		reqTimestamp := time.Now()
 
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
@@ -67,6 +66,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 			return
 		}
+		reqTimestamp := time.Now()
+
 		var chunked bool = false
 
 		// SYNCHRONOUS : Disable Keep-Alive for the Upstream
