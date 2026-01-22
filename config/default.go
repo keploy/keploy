@@ -72,6 +72,12 @@ contract:
   path: ""
   download: false
   generate: false
+diagnose:
+  selectedTestSets: {}
+  testCaseIDs: []
+  autoFix: false
+  minConfidence: 95
+  showDiff: true
 inCi: false
 `
 
