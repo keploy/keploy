@@ -1007,15 +1007,33 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
 	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))
 
 	if err := cmd.Run(); err != nil {
+		// Case 1: Detect docker exit code
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code := exitErr.ExitCode()
+
+			// User pressed Ctrl+C -> exit status 130
+			if code == 130 {
+				logger.Warn("Keploy docker agent stopped by user (Ctrl+C)")
+				return nil // clean exit, no extra logs
+			}
+
+			// Container or compose failure
+			return fmt.Errorf("keploy agent docker container exited with status %d", code)
+		}
+
+		// Case 2: Context cancellation (example: parent process shutdown)
 		if ctx.Err() == context.Canceled {
-			cmd.Process.Kill()
-			logger.Info("Keploy agent in docker stopped gracefully.")
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			logger.Info("Keploy agent in docker stopped gracefully after context cancellation.")
 			return nil
 		}
+
+		// Case 3: Unknown fallback error
 		utils.LogError(logger, err, "failed to run keploy agent in docker")
 		return err
 	}
