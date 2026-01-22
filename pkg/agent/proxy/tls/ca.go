@@ -53,10 +53,6 @@ var caStoreUpdateCmd = []string{
 	"certctl rehash",
 }
 
-// TODO: This function should be used even before starting the proxy server. It should be called just after the keploy is started.
-// because the custom ca in case of NODE is set via env variable NODE_EXTRA_CA_CERTS and env variables can be set only on startup.
-// As in case of unit test integration, we are starting the proxy via api.
-
 // SetupCA setups custom certificate authority to handle TLS connections
 func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 
