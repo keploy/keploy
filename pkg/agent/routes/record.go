@@ -194,7 +194,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
-	a.logger.Info("Streaming incoming test cases to client")
+	a.logger.Debug("Streaming incoming test cases to client")
 
 	// TODO: make a uniform implementation for both test and mock streaming channels
 	// Keep the connection alive and stream data
@@ -244,7 +244,7 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.logger.Info("Streaming outgoing mocks to client")
+	a.logger.Debug("Streaming outgoing mocks to client")
 
 	enc := gob.NewEncoder(w)
 
@@ -285,6 +285,6 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Agent marked as ready", zap.String("file", readyFile))
 	w.WriteHeader(http.StatusOK)
-	a.logger.Info("Keploy Agent is ready...")
+	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
 }
