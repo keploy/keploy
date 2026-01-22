@@ -95,9 +95,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	}
 
 	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
-    
-    // [NEW] Define Export Path Env Var
-    tlsEnvVar := fmt.Sprintf("-e CERT_EXPORT_PATH=%s ", KeployTLSMountPath)
+
+	tlsEnvVar := fmt.Sprintf("-e CERT_EXPORT_PATH=%s ", KeployTLSMountPath)
 
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
