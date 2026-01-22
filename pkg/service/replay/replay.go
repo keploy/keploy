@@ -1138,7 +1138,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			respCopy := *grpcResp
 
-			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 				// get the :path header from the request
 				method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
 				if !ok {
@@ -1791,7 +1791,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 		respCopy := *actualResponse
 
-		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 			// get the :path header from the request
 			method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
 			if !ok {
