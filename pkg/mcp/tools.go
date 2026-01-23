@@ -257,13 +257,17 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	}
 
 	// Generate contextual name using LLM callback
-	contextualName, err := s.generateContextualName(ctx, result.Metadata)
-	if err != nil {
-		s.logger.Warn("Failed to generate contextual name, using fallback",
-			zap.Error(err),
-		)
-		contextualName = s.fallbackName(result.Metadata)
-	}
+	// NOTE: Disabled LLM naming to prevent crashes when MCP connection is unstable during shutdown
+	// contextualName, err := s.generateContextualName(ctx, result.Metadata)
+	// if err != nil {
+	// 	s.logger.Warn("Failed to generate contextual name, using fallback",
+	// 		zap.Error(err),
+	// 	)
+	// 	contextualName = s.fallbackName(result.Metadata)
+	// }
+
+	// Use fallback naming directly (deterministic based on metadata)
+	contextualName := s.fallbackName(result.Metadata)
 
 	// Rename mock file with contextual name
 	newPath := s.renameMockFile(result.MockFilePath, contextualName)

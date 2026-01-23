@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -36,8 +37,12 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			logger.Debug("Starting new command iteration",
 				zap.Int("command_count", commandCount))
 
-			// Set a read deadline on the client connection
-			readTimeout := 2 * time.Second * time.Duration(opts.SQLDelay)
+			// Set a read deadline on the client connection.
+			// SQLDelay is already a duration (seconds), so don't multiply by time.Second again.
+			readTimeout := 2 * opts.SQLDelay
+			if readTimeout <= 0 {
+				readTimeout = 2 * time.Second
+			}
 			err := clientConn.SetReadDeadline(time.Now().Add(readTimeout))
 			if err != nil {
 				utils.LogError(logger, err, "failed to set read deadline on client conn")
@@ -108,9 +113,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			if !ok {
-				logger.Error("Connection closing due to no matching mock found",
-					zap.Int("commands_processed", commandCount),
-					zap.String("request_type", req.Header.Type))
+				logNoMatch(logger, req, decodeCtx, commandCount)
 				utils.LogError(logger, nil, "No matching mock found for the command", zap.Any("command", command))
 				return fmt.Errorf("error while simulating the command phase due to no matching mock found")
 			}
@@ -183,4 +186,50 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				zap.String("last_request", req.Header.Type))
 		}
 	}
+}
+
+func logNoMatch(logger *zap.Logger, req mysql.Request, decodeCtx *wire.DecodeContext, commandCount int) {
+	fields := []zap.Field{
+		zap.Int("commands_processed", commandCount),
+		zap.String("request_type", req.Header.Type),
+	}
+
+	switch req.Header.Type {
+	case mysql.CommandStatusToString(mysql.COM_QUERY):
+		if qp, ok := req.Message.(*mysql.QueryPacket); ok {
+			fields = append(fields, zap.String("query", strings.TrimSpace(qp.Query)))
+		}
+	case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
+		if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok {
+			fields = append(fields, zap.String("query", strings.TrimSpace(sp.Query)))
+		}
+	case mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE):
+		// Enhanced logging for prepared statement execution failures
+		// Logs statement ID, parameter count, and most importantly the actual SQL query text
+		// This helps to see which exact query failed to match a mock, rather than just seeing an opaque statement ID
+		if execPkt, ok := req.Message.(*mysql.StmtExecutePacket); ok {
+			fields = append(fields,
+				zap.Uint32("statement_id", execPkt.StatementID),
+				zap.Int("parameter_count", int(execPkt.ParameterCount)),
+			)
+			// Look up the actual SQL query text from the statement ID mapping
+			// This provides context about what query was being executed when the mock match failed
+			if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+				fields = append(fields, zap.String("query", strings.TrimSpace(decodeCtx.StmtIDToQuery[execPkt.StatementID])))
+			}
+		}
+	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE):
+		// Enhanced logging for prepared statement close operations
+		// Logs the statement ID and the actual SQL query text to help identify which prepared statement is being closed
+		if closePkt, ok := req.Message.(*mysql.StmtClosePacket); ok {
+			fields = append(fields, zap.Uint32("statement_id", closePkt.StatementID))
+			// Look up the query text to provide context about which statement is being closed
+			// Useful for debugging when close operations fail to match expected mocks
+			if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+				fields = append(fields, zap.String("query", strings.TrimSpace(decodeCtx.StmtIDToQuery[closePkt.StatementID])))
+			}
+		}
+	}
+
+	logger.Warn("No matching mock found for MySQL command", fields...)
 }
