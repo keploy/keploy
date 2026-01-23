@@ -752,7 +752,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 			}
 			return nil
 		}
-		a.logger.Info("Keploy agent stoppped.")
+		a.logger.Info("Keploy agent stopped.")
 		return nil
 	})
 
