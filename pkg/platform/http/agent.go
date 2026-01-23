@@ -706,7 +706,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		// Join them with a comma and add as a single argument
 		args = append(args, "--pass-through-ports", strings.Join(portStrings, ","))
 	}
-	a.logger.Info("Starting native agent with args", zap.Strings("args", args))
+	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
 		args = append(args, "--config-path", opts.ConfigPath)
@@ -731,7 +731,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 
 	pid := cmd.Process.Pid
-	a.logger.Info("keploy agent started", zap.Int("pid", pid))
+	a.logger.Debug("keploy agent started", zap.Int("pid", pid))
 
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
@@ -746,7 +746,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		a.mu.Lock()
 		a.agentCmd = nil
 		a.mu.Unlock()
-		a.logger.Info("agent process stopped")
+		a.logger.Debug("agent process stopped")
 		return nil
 	})
 
@@ -756,6 +756,8 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		if a.conf.Agent.AgentURI == "" {
 			return nil
 		}
+		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
+		a.logger.Info("Stopping keploy agent")
 		if err := a.requestAgentStop(); err != nil {
 			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
 			// Fallback: forcefully stop the agent process
@@ -769,7 +771,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 			}
 			return nil
 		}
-		a.logger.Info("Keploy agent shutdown requested", zap.Int("pid", pid))
+		a.logger.Info("Keploy agent stoppped.")
 		return nil
 	})
 
@@ -817,7 +819,7 @@ func (a *AgentClient) stopAgent() {
 
 	if a.agentCmd != nil && a.agentCmd.Process != nil {
 		pid := a.agentCmd.Process.Pid
-		a.logger.Info("Stopping keploy agent", zap.Int("pid", pid))
+		a.logger.Debug("Stopping keploy agent", zap.Int("pid", pid))
 	}
 }
 
@@ -826,7 +828,7 @@ func (a *AgentClient) monitorAgent(clientCtx context.Context, agentCtx context.C
 	select {
 	case <-clientCtx.Done():
 		// Client context cancelled, stop the agent
-		a.logger.Info("Client context cancelled, stopping agent")
+		a.logger.Debug("Client context cancelled, stopping agent")
 		a.stopAgent()
 	case <-agentCtx.Done():
 		// Agent context cancelled or agent stopped
@@ -910,7 +912,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if err != nil {
 			return fmt.Errorf("failed to start agent: %w", err)
 		}
-		a.logger.Info("Agent is now running, proceeding with setup")
+		a.logger.Debug("Agent is now running, proceeding with setup")
 
 		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
