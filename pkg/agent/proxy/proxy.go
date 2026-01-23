@@ -516,6 +516,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	// Debug log for initial buffer contents
+	bufPreview := initialBuf
+	if len(bufPreview) > 32 {
+		bufPreview = bufPreview[:32]
+	}
+	logger.Debug("initial buffer read",
+		zap.Int("buffer_size", len(initialBuf)),
+		zap.String("buffer_preview_string", string(bufPreview)),
+		zap.Binary("buffer_preview_hex", bufPreview),
+	)
+
 	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
 		// HTTP headers are never chunked according to the HTTP protocol,
 		// but at the TCP layer, we cannot be sure if we have received the entire
