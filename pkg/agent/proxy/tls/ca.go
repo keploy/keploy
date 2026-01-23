@@ -57,12 +57,12 @@ var caStoreUpdateCmd = []string{
 func SetupCA(ctx context.Context, logger *zap.Logger, isDocker bool) error {
 
 	if isDocker {
-		logger.Info("Detected Docker Shared Volume mode. Exporting certs...", zap.String("path", "/tmp/keploy-tls"))
+		logger.Debug("Detected Docker Shared Volume mode. Exporting certs...", zap.String("path", "/tmp/keploy-tls"))
 		return setupSharedVolume(ctx, logger, "/tmp/keploy-tls")
 	}
 
 	// Native Mode
-	logger.Info("Detected Native Mode. Installing to system store...")
+	logger.Debug("Detected Native Mode. Installing to system store...")
 	return setupNative(ctx, logger)
 }
 
@@ -116,7 +116,7 @@ func setupSharedVolume(_ context.Context, logger *zap.Logger, exportPath string)
 		return err
 	}
 
-	logger.Info("TLS Certificates successfully exported to shared volume")
+	logger.Debug("TLS Certificates successfully exported to shared volume")
 	return nil
 }
 

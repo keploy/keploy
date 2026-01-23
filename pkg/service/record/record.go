@@ -51,7 +51,7 @@ func (r *Recorder) SetToolsService(toolsSvc Tools) {
 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
-	r.logger.Info("🔴 Starting Keploy recording... Please wait.")
+	r.logger.Debug("Starting Keploy recording... Please wait.")
 
 	// ✅ Auto delay calc: record start -> first testcase insert + buffer
 	recordStartTime := time.Now()
@@ -98,7 +98,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			}
 		}
 
-		r.logger.Info("🔴 Stopping Keploy recording... in the defer")
+		r.logger.Info("Stopping Keploy recording...")
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
@@ -183,11 +183,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.logger.Info("Command type:", zap.String("commandType", r.config.CommandType))
+	r.logger.Debug("Command type:", zap.String("commandType", r.config.CommandType))
 
 	if r.config.CommandType == string(utils.DockerCompose) {
 
-		r.logger.Info("🟢 Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", r.config.Agent.AgentURI))
+		r.logger.Info("Waiting for keploy-agent to be ready for docker compose...", zap.String("Agent-uri", r.config.Agent.AgentURI))
 
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
@@ -211,7 +211,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 	}
 
-	r.logger.Info("🟢 Keploy agent is ready to record test cases and mocks.")
+	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
@@ -223,10 +223,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.logger.Info("🟢 Keploy is now recording test cases and mocks for you application...")
-
 	if r.config.CommandType == string(utils.DockerCompose) {
-		r.logger.Info("🟢 Making keploy-agent ready for docker compose...")
+
+		r.logger.Debug("Making keploy-agent ready for docker compose...")
 
 		err := r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 		if err != nil {
@@ -234,8 +233,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 	}
 
-	r.mockDB.ResetCounterID()
+	r.logger.Info("Keploy agent is ready to record test cases and mocks.")
 
+	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
@@ -418,7 +418,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
 		if err != nil {
-			if ctx.Err() == context.Canceled {
+			// During shutdown, context cancellation or EOF errors are expected
+			if ctx.Err() != nil || utils.IsShutdownError(err) {
+				r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
 				return nil
 			}
 			errChan <- err
@@ -460,7 +462,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		})
 		if err != nil {
-			if ctx.Err() == context.Canceled {
+			// During shutdown, context cancellation or EOF errors are expected
+			if ctx.Err() != nil || utils.IsShutdownError(err) {
+				r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
 				return nil
 			}
 			return fmt.Errorf("failed to get outgoing mocks: %w", err)
