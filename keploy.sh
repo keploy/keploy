@@ -321,12 +321,13 @@ installKeploy (){
         PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
         rc_file="$1"
         if [ -f "$rc_file" ]; then
-            if ! grep -q "$PATH_CMD" "$rc_file"; then
+            # Use regex to match only uncommented export lines containing .keploy/bin
+            if ! grep -qE "^export PATH=.*\.keploy/bin" "$rc_file"; then
                 append_to_rc "$PATH_CMD" "$rc_file"
             fi
-        else
-            export PATH="$PATH_CMD"
         fi
+        # Always export PATH for the current session
+        export PATH="$HOME/.keploy/bin:$PATH"
     }
 
 
