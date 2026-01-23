@@ -647,24 +647,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		return fmt.Errorf("failed to get errorgroup from the context")
 	}
 
-	// Open the log file (truncate to start fresh)
-	filepath := "keploy_agent.log"
-	logFile, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to open log file")
-		return err
-	}
-
 	keployBin, err := utils.GetCurrentBinaryPath()
 	if err != nil {
-		if logFile != nil {
-			logFileCloseErr := logFile.Close()
-			if logFileCloseErr != nil {
-				utils.LogError(a.logger, logFileCloseErr, "failed to close log file")
-			}
-
-			utils.LogError(a.logger, err, "failed to get current keploy binary path")
-		}
+		utils.LogError(a.logger, err, "failed to get current keploy binary path")
 		return err
 	}
 
@@ -715,18 +700,15 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
 	cmd := agentUtils.NewAgentCommand(keployBin, args)
 
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
 	a.mu.Unlock()
 	// Start (OS-specific tweaks happen inside utils.StartCommand)
 	if err := agentUtils.StartCommand(cmd); err != nil {
-		if logFile != nil {
-			_ = logFile.Close()
-			utils.LogError(a.logger, err, "failed to start keploy agent")
-		}
+		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
 	}
 
@@ -735,7 +717,6 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer logFile.Close()
 
 		err := cmd.Wait()
 		// If ctx wasn't cancelled, bubble up unexpected exits
@@ -984,7 +965,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	cmd := kdocker.PrepareDockerCommand(ctx, keployAlias)
 
 	cmd.Cancel = func() error {
-		logger.Info("Context cancelled. Explicitly stopping the 'keploy-v3' Docker container.")
+		logger.Debug("Context cancelled. Explicitly stopping the 'keploy-v3' Docker container.")
 
 		containerName := opts.KeployContainer
 
@@ -1004,7 +985,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 				zap.Error(err),
 				zap.String("output", string(output)))
 		} else {
-			logger.Info("Successfully sent stop command to the container.", zap.String("container", containerName))
+			logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
 		}
 
 		if cmd.Process != nil {
@@ -1016,7 +997,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	logger.Info("running the following command to start agent in docker", zap.String("command", cmd.String()))
+	logger.Debug("running the following command to start agent in docker", zap.String("command", cmd.String()))
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.Canceled {

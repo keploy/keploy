@@ -573,7 +573,10 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-	PrintLogo(os.Stdout, disableAnsi)
+	// Skip printing logo for agent command to avoid duplicate logos in native mode
+	if cmd.Name() != "agent" {
+		PrintLogo(os.Stdout, disableAnsi)
+	}
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
@@ -595,14 +598,27 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.E2E = true
 	}
 
-	if c.cfg.EnableTesting {
-		// Add mode to logger to debug the keploy during testing
+	// Add mode to logger for agent command to differentiate agent logs from client logs
+	if cmd.Name() == "agent" {
 		logger, err := log.AddMode(cmd.Name())
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to add mode to logger"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
+		}
+	}
+
+	if c.cfg.EnableTesting {
+		// Add mode to logger to debug the keploy during testing
+		if cmd.Name() != "agent" { // Skip if already added for agent
+			logger, err := log.AddMode(cmd.Name())
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to add mode to logger"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 		c.cfg.DisableTele = true
 	}

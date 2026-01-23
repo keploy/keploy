@@ -237,7 +237,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if err != nil {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}
-		p.logger.Info("proxy stopped...")
+		p.logger.Debug("proxy stopped...")
 	}(listener)
 
 	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
@@ -716,7 +716,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		}
 		p.logger.Warn("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
 	} else {
-		p.logger.Info("proxy stopped cleanly...")
+		p.logger.Debug("proxy stopped cleanly...")
 	}
 }
 
