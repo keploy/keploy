@@ -105,7 +105,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 
 func (r *Replayer) Start(ctx context.Context) error {
 
-	r.logger.Info("🟢 Starting Keploy replay...")
+	r.logger.Debug("Starting Keploy replay... Please wait.")
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
@@ -790,7 +790,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
-			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
 
 		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
@@ -837,7 +837,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
-			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
 
 		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
@@ -2160,14 +2160,14 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 
 	if hasMeaningfulMappings {
 		// Meaningful mappings were found, so use the mapping-based strategy.
-		r.logger.Info("Using mapping-based mock filtering strategy",
+		r.logger.Debug("Using mapping-based mock filtering strategy",
 			zap.String("testSetID", testSetID),
 			zap.Int("totalMappings", len(expectedTestMockMappings)))
 		return true, expectedTestMockMappings
 	}
 
 	// No meaningful mappings were found, so fall back to the timestamp-based strategy.
-	r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+	r.logger.Debug("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
 		zap.String("testSetID", testSetID))
 	return false, defaultMappings
 }

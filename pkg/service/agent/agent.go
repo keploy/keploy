@@ -219,7 +219,7 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	a.clientMocks.Store(uint64(0), storage)
 
-	a.logger.Info("Successfully stored mocks for client")
+	a.logger.Debug("Successfully stored mocks for client")
 	return nil
 }
 

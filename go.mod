@@ -99,6 +99,7 @@ require (
 	github.com/andybalholm/brotli v1.2.0
 	github.com/bufbuild/protocompile v0.14.1
 	github.com/charmbracelet/glamour v0.6.0
+	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.28.1

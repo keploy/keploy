@@ -385,7 +385,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
-	h.logger.Info("Registering the client Info with keploy")
+	h.logger.Debug("Registering the client Info with keploy")
 	// Register the client and start processing
 
 	clientInfo := structs.ClientInfo{}

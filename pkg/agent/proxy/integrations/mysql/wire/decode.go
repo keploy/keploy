@@ -173,7 +173,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 			pktType = mysql.SSLRequest
 			decodeCtx.UseSSL = true
-			logger.Info("SSL Request packet detected")
+			logger.Debug("SSL Request packet detected")
 			// Don't change the last operation if the packet is an SSL Request
 		}
 
