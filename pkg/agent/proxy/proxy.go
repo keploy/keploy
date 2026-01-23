@@ -556,49 +556,44 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// get the destinationUrl from the map for the tls connection
 		url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
 		if !ok {
-			return fmt.Errorf("failed to fetch destination url for source port %d", sourcePort)
+			utils.LogError(logger, err, "failed to fetch the destination url")
+			return err
 		}
+		//type case the dstUrl to string
 		dstURL, ok := url.(string)
 		if !ok {
-			return fmt.Errorf("failed to type cast destination url: %T", url)
+			utils.LogError(logger, err, "failed to type cast the destination url")
+			return err
 		}
 
-		// ServerName must NOT contain a port
-		serverName := dstURL
-		if h, _, err := net.SplitHostPort(dstURL); err == nil {
-			serverName = h
-		}
+		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 
-		// Always offer h2 for TLS connections (safe even for non-gRPC)
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         serverName,
+			ServerName:         dstURL,
 			NextProtos:         []string{"h2", "http/1.1"},
 		}
 
-		// IMPORTANT: Dial the resolved IP, not hostname, to match destInfo routing
-		dialAddr := dstAddr // already "ip:port" or "[ip]:port" from destInfo
-
+		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
-			// Use temp var to avoid typed-nil in interface on error
-			tc, dialErr := tls.Dial("tcp", dialAddr, cfg)
-			if dialErr != nil {
-				utils.LogError(logger, dialErr, "failed to dial tls conn to destination server",
-					zap.String("dialAddr", dialAddr), zap.String("sni", serverName))
-				return dialErr
+			dstConn, err = tls.Dial("tcp", addr, cfg)
+			if err != nil {
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				return err
 			}
-
-			st := tc.ConnectionState()
-			logger.Debug("upstream tls negotiated",
-				zap.String("negotiatedALPN", st.NegotiatedProtocol),
-				zap.String("serverName", cfg.ServerName),
-				zap.Any("offeredNextProtos", cfg.NextProtos),
-			)
-			dstConn = tc
+			// Log ALPN negotiated protocol for debugging
+			if tlsConn, ok := dstConn.(*tls.Conn); ok {
+				state := tlsConn.ConnectionState()
+				logger.Debug("TLS connection established",
+					zap.String("negotiated_protocol (ALPN)", state.NegotiatedProtocol),
+					zap.String("server_name", state.ServerName),
+					zap.Uint16("tls_version", state.Version),
+				)
+			}
 		}
 
 		dstCfg.TLSCfg = cfg
-		dstCfg.Addr = dialAddr
+		dstCfg.Addr = addr
 	} else {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
