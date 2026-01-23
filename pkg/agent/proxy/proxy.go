@@ -66,6 +66,7 @@ type Proxy struct {
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
+	IsDocker          bool
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
@@ -85,6 +86,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:          opts.Agent.IsDocker,
 	}
 }
 
@@ -114,7 +116,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	}
 
 	// set up the CA for tls connections
-	err = pTls.SetupCA(ctx, p.logger)
+	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
 	if err != nil {
 		// log the error and continue
 		p.logger.Warn("failed to setup CA", zap.Error(err))
@@ -569,7 +571,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Check if the traffic is HTTP/2 (gRPC) to set the correct ALPN
 		var nextProtos []string
 		if bytes.HasPrefix(initialBuf, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-			nextProtos = []string{"h2"}
+			// Offer both h2 and http/1.1 to be compatible with dual-stack listeners.
+			// Ideally, the server should pick h2 for gRPC traffic.
+			nextProtos = []string{"h2", "http/1.1"}
 		}
 
 		cfg := &tls.Config{
