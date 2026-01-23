@@ -214,6 +214,15 @@ Example VS Code configuration:
 
 			mcpLogger.Info("Initializing Keploy MCP server")
 
+			// Set default path for MCP commands if not already set.
+			// This ensures the mockDB has the correct base path ("./keploy")
+			// for both recording and replay, fixing the path mismatch where
+			// mock replay was looking for "mockName/mocks.yaml" instead of
+			// "./keploy/mockName/mocks.yaml".
+			if cfg.Path == "" {
+				cfg.Path = "./keploy"
+			}
+
 			recordSvc, err := serviceFactory.GetService(ctx, "record")
 			if err != nil {
 				utils.LogError(mcpLogger, err, "failed to get record service")
@@ -252,7 +261,13 @@ Example VS Code configuration:
 			})
 
 			mcpLogger.Info("Starting Keploy MCP server on stdio transport")
-			return server.Run(ctx)
+
+			// Use NewMCPCtx() to create an independent context for the MCP server.
+			// This prevents the server from being cancelled when utils.Stop() is called
+			// after mock recording/replay completes. The MCP server should only exit
+			// on OS signals (Ctrl+C, SIGTERM), not when individual operations finish.
+			mcpCtx := utils.NewMCPCtx()
+			return server.Run(mcpCtx)
 		},
 	}
 	cmd.Annotations = map[string]string{provider.MCPStdioAnnotationKey: "true"}
