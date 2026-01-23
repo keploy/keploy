@@ -47,6 +47,25 @@ var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
+// IsShutdownError checks if the error is related to shutdown (EOF, connection closed, etc.)
+// This is useful for gracefully handling errors during application shutdown.
+func IsShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for EOF errors
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Check error message for common shutdown-related patterns
+	errStr := err.Error()
+	return strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "use of closed network connection")
+}
+
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
