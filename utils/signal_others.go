@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -106,10 +107,17 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	// Handle terminal resize - propagate size changes from real terminal to PTY
 	resizeCh := make(chan os.Signal, 1)
 	signal.Notify(resizeCh, syscall.SIGWINCH)
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for range resizeCh {
 			if resizeErr := pty.InheritSize(os.Stdin, ptmx); resizeErr != nil {
-				logger.Debug("failed to resize PTY", zap.Error(resizeErr))
+				// We might get an error if the PTY is closed while we try to resize it.
+				// This is expected during shutdown.
+				if !isClosedPTYError(resizeErr) {
+					logger.Debug("failed to resize PTY", zap.Error(resizeErr))
+				}
 			}
 		}
 	}()
@@ -128,6 +136,19 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	// Wait for the command to finish
 	cmdErr := cmd.Wait()
 
+	// Stop listening for resize signals first, then drain any pending signals
+	// before closing the channel to avoid potential write to closed channel
+	signal.Stop(resizeCh)
+	// Drain any pending signals
+	select {
+	case <-resizeCh:
+	default:
+	}
+	close(resizeCh)
+
+	// Wait for the resize goroutine to finish to ensure it's done using the PTY
+	wg.Wait()
+
 	// Close PTY - this will unblock the io.Copy goroutine reading from ptmx
 	if closeErr := ptmx.Close(); closeErr != nil {
 		logger.Debug("failed to close PTY", zap.Error(closeErr))
@@ -140,16 +161,6 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	if copyErr != nil && !isClosedPTYError(copyErr) {
 		logger.Debug("error copying PTY output to stdout", zap.Error(copyErr))
 	}
-
-	// Stop listening for resize signals first, then drain any pending signals
-	// before closing the channel to avoid potential write to closed channel
-	signal.Stop(resizeCh)
-	// Drain any pending signals
-	select {
-	case <-resizeCh:
-	default:
-	}
-	close(resizeCh)
 
 	if cmdErr != nil {
 		return CmdError{Type: Runtime, Err: cmdErr}
