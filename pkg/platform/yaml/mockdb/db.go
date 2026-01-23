@@ -201,7 +201,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 					isFilteredMock = false
 				case "Redis":
 					isFilteredMock = false
-				case "MySQL", "PostgresV2":
+				case "MySQL":
 					isFilteredMock = false
 				}
 				if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
@@ -217,6 +217,8 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	}
 
 	filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime)
+	fmt.Println("Filtered mocks count::  ", len(filtered))
+
 	return filtered, nil
 }
 
