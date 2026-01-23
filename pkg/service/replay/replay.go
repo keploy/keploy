@@ -603,6 +603,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Total:     0,
 			Ignored:   0,
 			TimeTaken: time.Since(startTime).String(),
+			CmdUsed:   r.config.Test.CmdUsed,
 		}
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
@@ -621,6 +622,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Total:     len(testCases),
 			Ignored:   len(testCases),
 			TimeTaken: timeTaken.String(),
+			CmdUsed:   r.config.Test.CmdUsed,
 		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -935,6 +937,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Total:     testCasesCount,
 		Status:    string(models.TestStatusRunning),
 		TimeTaken: time.Since(startTime).String(),
+		CmdUsed:   r.config.Test.CmdUsed,
 	}
 
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -1135,7 +1138,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			respCopy := *grpcResp
 
-			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 				// get the :path header from the request
 				method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
 				if !ok {
@@ -1337,6 +1340,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		HighRisk:   riskHigh,
 		MediumRisk: riskMed,
 		LowRisk:    riskLow,
+		CmdUsed:    r.config.Test.CmdUsed,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1787,7 +1791,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 		respCopy := *actualResponse
 
-		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 			// get the :path header from the request
 			method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
 			if !ok {

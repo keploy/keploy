@@ -251,6 +251,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
@@ -301,6 +302,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
@@ -396,6 +398,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
 		"proxyPort":             "proxy-port",
+		"incomingProxyPort":     "incoming-proxy-port",
 		"dnsPort":               "dns-port",
 		"command":               "command",
 		"cmdType":               "cmd-type",
@@ -528,7 +531,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 		IsConfigFileFound = false
-		c.logger.Info("config file not found; proceeding with flags only")
+		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
 		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
 		lastDir, err := utils.GetLastDirectory()
@@ -872,8 +875,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
-		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" { // need to check this one
-			return errors.New("non docker command not supported for os : " + runtime.GOOS)
+		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
+			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
 
 		// empty the command if base path is provided, because no need of command even if provided
@@ -962,11 +965,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
 			//check if the keploy folder exists
+			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
 				recordCmd := models.HighlightGrayString("keploy record")
-				errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
-				utils.LogError(c.logger, nil, errMsg)
-				return errors.New(errMsg)
+				c.logger.Info(fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd))
+				cmdType := utils.CmdType(c.cfg.CommandType)
+				if cmdType == utils.DockerRun || cmdType == utils.DockerStart || cmdType == utils.DockerCompose {
+					c.logger.Info(`Example: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+				} else {
+					c.logger.Info(`Example: keploy record -c "./myApp serve" --delay 6`)
+				}
+				os.Exit(1)
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
@@ -1209,6 +1218,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ProxyPort = proxyPort
+
+		incomingProxyPort, err := cmd.Flags().GetUint16("incoming-proxy-port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get incomingProxyPort flag")
+			return nil
+		}
+		c.cfg.Agent.IncomingProxyPort = incomingProxyPort
 
 		dnsPort, err := cmd.Flags().GetUint32("dns-port")
 		if err != nil {

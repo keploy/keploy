@@ -19,8 +19,8 @@ import (
 	"go.uber.org/zap"
 )
 
-func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions, synchronous bool, sem chan struct{}) {
-	if synchronous {
+func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}) {
+	if pm.synchronous {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -30,7 +30,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 
 	var releaseOnce sync.Once
 	releaseLock := func() {
-		if synchronous {
+		if pm.synchronous {
 			releaseOnce.Do(func() {
 				<-sem
 				logger.Debug("Lock released early for concurrent streaming")
@@ -40,10 +40,13 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 	// Ensure lock is released eventually if we exit early or finish normally
 	defer releaseLock()
 
+	// Get the actual destination address (handles Windows vs others platform logic)
+	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+
 	// 1. Dial Upstream
-	upConn, err := net.DialTimeout("tcp4", newAppAddr, 3*time.Second)
+	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	if err != nil {
-		logger.Warn("Failed to dial upstream new app port", zap.String("New_App_Port", newAppAddr), zap.Error(err))
+		logger.Warn("Failed to dial upstream app port", zap.String("Final_App_Port", finalAppAddr), zap.Error(err))
 		return
 	}
 	// This closes the upstream connection when this function returns
@@ -53,7 +56,6 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 	upstreamReader := bufio.NewReader(upConn)
 
 	for {
-		reqTimestamp := time.Now()
 
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
@@ -64,14 +66,17 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			}
 			return
 		}
+		reqTimestamp := time.Now()
+
 		var chunked bool = false
 
 		// SYNCHRONOUS : Disable Keep-Alive for the Upstream
-		if synchronous && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
+		if pm.synchronous && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
 			logger.Debug("Detected chunked request. Releasing lock.")
 			releaseLock()
 			chunked = true
-		} else if synchronous {
+
+		} else if pm.synchronous {
 
 			mgr := syncMock.Get()
 			if !mgr.GetFirstReqSeen() {
@@ -79,7 +84,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			}
 
 			// we will close connection in case of keep alive (to allow multiple clients to make connections)
-			// if we don't close a connection in synchronous mode, the next request from other client will be blocked
+			// if we don't close a connection in pm.synchronous mode, the next request from other client will be blocked
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}
@@ -105,11 +110,11 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		}
 
 		// SYNCHRONOUS : Disable Keep-Alive for the Client
-		if synchronous && (resp.ContentLength == -1 || isChunked(resp.TransferEncoding)) {
+		if pm.synchronous && (resp.ContentLength == -1 || isChunked(resp.TransferEncoding)) {
 			logger.Debug("Detected chunked response. Releasing lock.")
 			releaseLock()
 			chunked = true
-		} else if synchronous {
+		} else if pm.synchronous {
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
@@ -129,7 +134,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		}
 		resp.Body.Close() // Close explicitly
 
-		if chunked && synchronous { // for chunked requests/responses, we will not capture test cases in case of synchronous mode
+		if chunked && pm.synchronous { // for chunked requests/responses, we will not capture test cases in case of pm.synchronous mode
 			return
 		}
 
@@ -145,10 +150,10 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 		go func() {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, opts, synchronous)
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous)
 		}()
 
-		if synchronous {
+		if pm.synchronous {
 			return
 		}
 	}
