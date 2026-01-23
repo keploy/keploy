@@ -79,7 +79,7 @@ func NewProxyError(component string, port uint32, err error) *ProxyError {
 		pe.Solutions = []string{
 			fmt.Sprintf("Check what's using the port: sudo lsof -i :%d", port),
 			fmt.Sprintf("Kill the process: sudo lsof -i :%d | grep LISTEN | awk '{print $2}' | xargs kill -9", port),
-			fmt.Sprintf("Use a different port with flags (e.g., --proxyPort %d or --dnsPort %d)", port+1, port+1),
+			fmt.Sprintf("Use a different port by specifying the appropriate port configuration flag"),
 			"Wait a moment and try again (port might be in TIME_WAIT state)",
 		}
 
@@ -90,7 +90,7 @@ func NewProxyError(component string, port uint32, err error) *ProxyError {
 			pe.Hint = fmt.Sprintf("Port %d is a privileged port (< 1024) and requires elevated privileges", port)
 			pe.Solutions = []string{
 				"Run Keploy with sudo: sudo keploy record -c \"your-app-command\"",
-				fmt.Sprintf("Use an unprivileged port (> 1024) with --dnsPort flag (e.g., --dnsPort %d)", port+10000),
+				fmt.Sprintf("Use an unprivileged port (> 1024) by configuring the appropriate port flag"),
 				"Grant CAP_NET_BIND_SERVICE capability: sudo setcap cap_net_bind_service=+ep /path/to/keploy",
 			}
 		} else {
@@ -98,7 +98,7 @@ func NewProxyError(component string, port uint32, err error) *ProxyError {
 			pe.Solutions = []string{
 				"Run Keploy with sudo: sudo keploy record -c \"your-app-command\"",
 				"Check if a firewall or security policy is blocking the port",
-				fmt.Sprintf("Try a different port: --proxyPort %d", port+100),
+				fmt.Sprintf("Try a different port using the appropriate port configuration flag"),
 			}
 		}
 
