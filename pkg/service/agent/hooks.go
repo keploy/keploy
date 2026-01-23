@@ -55,3 +55,19 @@ var StartupAgentHook StartupHook = &StartupHooks{}
 func RegisterStartupHook(h StartupHook) {
 	StartupAgentHook = h
 }
+
+type SetupHooks interface {
+	AfterSetup(ctx context.Context) error
+}
+
+type SetupHook struct{}
+
+func (s *SetupHook) AfterSetup(ctx context.Context) error {
+	return nil
+}
+
+var SetupAgentHook SetupHooks = &SetupHook{}
+
+func RegisterSetupHook(h SetupHooks) {
+	SetupAgentHook = h
+}
