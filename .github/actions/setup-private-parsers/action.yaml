@@ -8,7 +8,7 @@ inputs:
   go-cache:
     description: 'Whether to enable Go module caching (default: true).'
     required: false
-    default: true
+    default: 'true'
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
@@ -23,18 +23,35 @@ runs:
         go-version: ">=1.24"
         cache: ${{ inputs.go-cache }}
 
-    - name: Add GitHub to known hosts
+    # --- Linux/macOS: Add Known Hosts ---
+    - name: Add GitHub to known hosts (non-Windows)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         mkdir -p ~/.ssh
         ssh-keyscan github.com >> ~/.ssh/known_hosts
 
+    # --- Windows: Add Known Hosts ---
+    - name: Add GitHub to known hosts (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $sshDir = Join-Path $Env:USERPROFILE ".ssh"
+        if (-not (Test-Path -Path $sshDir)) {
+            New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+        }
+        # Using ascii ensures no BOM issues with SSH
+        ssh-keyscan github.com | Out-File -FilePath (Join-Path $sshDir "known_hosts") -Encoding ascii -Append
+
+    # --- SSH Agent (Common) ---
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 
-    - name: Configure Git, Fetch Dependencies, and Create Parsers File
+    # --- Linux/macOS: Fetch & Create File ---
+    - name: Config Git & Fetch (non-Windows)
+      if: runner.os != 'Windows'
       shell: bash
       env:
         INTEGRATION_REF: ${{ inputs.integration-ref }}
@@ -42,21 +59,58 @@ runs:
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${{ inputs.integration-ref }}
+        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
         
-        echo "Creating extraparsers.go..."
+        echo "Creating extraparsers.go (platform-independent)..."
         mkdir -p pkg/agent/proxy
         cat <<'EOF' > pkg/agent/proxy/extraparsers.go
-        //go:build linux
+        package proxy
 
+        import (
+        	_ "github.com/keploy/integrations/pkg/parsers"
+        	_ "github.com/keploy/integrations/pkg/postgres/v2/types"
+        )
+        EOF
+
+    # --- Windows: Fetch & Create File ---
+    - name: Configure Git, Fetch Dependencies, and Create Parsers File (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        INTEGRATION_REF: ${{ inputs.integration-ref }}
+      run: |
+        git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+        Write-Host "Fetching private integrations dependency via SSH..."
+        $env:GOPRIVATE = "github.com/keploy/integrations"
+        go get "github.com/keploy/integrations@${{ inputs.integration-ref }}"
+
+        Write-Host "Creating extraparsers.go..."
+        New-Item -ItemType Directory -Path "pkg/agent/proxy" -Force | Out-Null
+        
+        # FIX 1: Indentation of Here-String is now safe for YAML
+        $content = @"
         package proxy
 
         import (
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
-        EOF
-    - name: Add any missing Go modules
+        "@
+        
+        $content | Set-Content -Path "pkg/agent/proxy/extraparsers.go" -Encoding UTF8
+
+    # --- Tidy (Split to avoid WSL error) ---
+    - name: Add any missing Go modules (non-Windows)
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         echo "Tidying up Go modules..."
-        go mod tidy    
+        go mod tidy
+
+    # FIX 2: Explicitly use pwsh on Windows to avoid 'bash' invoking WSL
+    - name: Add any missing Go modules (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Write-Host "Tidying up Go modules..."
+        go mod tidy
