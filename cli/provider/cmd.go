@@ -471,7 +471,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 
 	if c.cfg.AppName == "" {
-		c.logger.Info("Using the last directory name as appName : " + appName)
+		c.logger.Debug("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
 		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
