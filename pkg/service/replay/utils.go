@@ -119,6 +119,35 @@ func removeFromMap(map1, map2 map[string][]string) map[string][]string {
 	return map1
 }
 
+func buildHTTPDiagnostic(tc *models.TestCase, actualResp *models.HTTPResp, expectedMocks, actualMocks []string) *models.MockDiagnostic {
+	if tc == nil || actualResp == nil {
+		return nil
+	}
+	return &models.MockDiagnostic{
+		RequestSignature: fmt.Sprintf("%s %s", tc.HTTPReq.Method, tc.HTTPReq.URL),
+		ExpectedStatus:   tc.HTTPResp.StatusCode,
+		ActualStatus:     actualResp.StatusCode,
+		ExpectedBody:     tc.HTTPResp.Body,
+		ActualBody:       actualResp.Body,
+		ExpectedMocks:    expectedMocks,
+		ActualMocks:      actualMocks,
+	}
+}
+
+func buildGRPCDiagnostic(tc *models.TestCase, actualResp *models.GrpcResp, expectedMocks, actualMocks []string) *models.MockDiagnostic {
+	if tc == nil || actualResp == nil {
+		return nil
+	}
+	reqPath := tc.GrpcReq.Headers.PseudoHeaders[":path"]
+	return &models.MockDiagnostic{
+		RequestSignature: fmt.Sprintf("gRPC %s", reqPath),
+		ExpectedBody:     tc.GrpcResp.Body.DecodedData,
+		ActualBody:       actualResp.Body.DecodedData,
+		ExpectedMocks:    expectedMocks,
+		ActualMocks:      actualMocks,
+	}
+}
+
 func timeWithUnits(duration time.Duration) string {
 	if duration.Seconds() < 1 {
 		return fmt.Sprintf("%v ms", duration.Milliseconds())
