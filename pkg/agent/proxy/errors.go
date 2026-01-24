@@ -78,7 +78,7 @@ func NewProxyError(component string, port uint32, err error) *ProxyError {
 		pe.Hint = "Another instance of Keploy or another application is using this port"
 		pe.Solutions = []string{
 			fmt.Sprintf("Check what's using the port: sudo lsof -i :%d", port),
-			fmt.Sprintf("Kill the process: sudo lsof -i :%d | grep LISTEN | awk '{print $2}' | xargs kill -9", port),
+			fmt.Sprintf("Kill the process: sudo lsof -t -i :%d | xargs -r kill", port),
 			fmt.Sprintf("Use a different port by specifying the appropriate port configuration flag"),
 			"Wait a moment and try again (port might be in TIME_WAIT state)",
 		}
