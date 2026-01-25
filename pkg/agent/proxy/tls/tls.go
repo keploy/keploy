@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cloudflare/cfssl/helpers"
+	"go.keploy.io/server/v3/pkg/core/certs"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -21,12 +22,12 @@ func IsTLSHandshake(data []byte) bool {
 func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, error) {
 	//Load the CA certificate and private key
 
-	caPrivKey, err := helpers.ParsePrivateKeyPEM(caPKey)
+	caPrivKey, err := helpers.ParsePrivateKeyPEM(certs.CAPKey)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to parse CA private key")
 		return nil, err
 	}
-	caCertParsed, err := helpers.ParseCertificatePEM(caCrt)
+	caCertParsed, err := helpers.ParseCertificatePEM(certs.CACrt)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to parse CA certificate")
 		return nil, err

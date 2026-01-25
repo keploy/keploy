@@ -22,7 +22,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
-	ptls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/core/certs"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
@@ -937,9 +937,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 	}()
 
-	// TODO : Proxy or TLS should not be importes in the agent
 	// This is done because to set env variable for TLS
-	err = ptls.SetupCaCertEnv(a.logger)
+	err = certs.SetupCaCertEnv(a.logger)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to set TLS environment")
 		return err
