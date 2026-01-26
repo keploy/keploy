@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -304,20 +303,23 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 				break
 			}
 		}
-	}
-	results, err := yamlLib.Marshal(node.Content[0])
-	if err != nil {
-		utils.LogError(t.logger, err, "failed to marshal the config")
-		return nil
-	}
+	
+		results, err := yamlLib.Marshal(node.Content[0])
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to marshal the config")
+			return err
+		}
 
-	finalOutput := append(results, []byte(utils.ConfigGuide)...)
-	finalOutput = append([]byte(utils.GetVersionAsComment()), finalOutput...)
+		finalOutput := append(results, []byte(utils.ConfigGuide)...)
+		finalOutput = append([]byte(utils.GetVersionAsComment()), finalOutput...)
 
-	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
-	if err != nil {
-		utils.LogError(t.logger, err, "failed to write config file")
-		return nil
+		err = os.WriteFile(filePath, finalOutput, 0644)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to write config file")
+			return err
+		}
+	}else{
+		return fmt.Errorf("failed to create config: provided data resulted in empty yaml")
 	}
 
 	err = os.Chmod(filePath, 0777) // Set permissions to 777
