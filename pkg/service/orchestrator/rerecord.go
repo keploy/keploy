@@ -425,7 +425,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 
 		// Create a rendered copy of testcase with current template/secret values
 		// so that comparison uses concrete expected values (not the templatized form)
-		renderedTC, renderErr := pkg.RenderTestCaseWithTemplates(tc)
+		renderedTC, renderErr := pkg.RenderTestCaseWithTemplates(o.logger, tc)
 		if renderErr != nil {
 			utils.LogError(o.logger, renderErr, "failed to render testcase with templates")
 			// fallback to using the original testcase
