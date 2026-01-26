@@ -117,7 +117,7 @@ jobs:
       image_tag: ${{ needs.build-docker-image.outputs.image_tag }}
     uses: ./.github/workflows/golang_docker.yml
   run_fuzzer_linux:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/fuzzer_linux.yml
     secrets:

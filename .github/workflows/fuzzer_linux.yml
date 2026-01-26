@@ -22,7 +22,7 @@ on:
 
 jobs:
   rerecord_fuzzer:
-    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'rerecord_fuzzer') }}
+    # if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'rerecord_fuzzer') }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
@@ -103,7 +103,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/rerecord/golang-linux.sh
 
   mysql_fuzzer:
-    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'mysql_fuzzer') }}
+    # if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'mysql_fuzzer') }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
@@ -170,7 +170,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/mysql/golang-linux.sh
 
   grpc_fuzzer:
-    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'grpc_fuzzer') }}
+    # if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'grpc_fuzzer') }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
@@ -249,7 +249,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/fuzzer/grpc/golang-linux.sh ${{ matrix.mode }}
   
   postgres_fuzzer:
-    if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'postgres_fuzzer') }}
+    # if: ${{ inputs.jobs-to-run == 'all' || contains(inputs.jobs-to-run, 'postgres_fuzzer') }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
