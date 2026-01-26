@@ -516,7 +516,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	}
 	configPath = absConfigPath
 
-	c.logger.Debug("config path is ", zap.String("configPath", configPath))
+	c.logger.Info("config path is ", zap.String("configPath", configPath))
 
 	// 5) Read base keploy.yml exactly like before
 	viper.SetConfigName("keploy")
