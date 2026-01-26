@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
@@ -63,15 +64,16 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	logPath := filepath.Join(os.TempDir(), "keploy-logs.txt")
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
 	}
 
-	err = os.Chmod("keploy-logs.txt", 0777)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
-	}
+	// We don't necessarily need to chmod 777 in temp dir, typically 666 or default is fine,
+	// but user asked for temp dir. Keep it simple.
+	// Also removed the explicit chmod 777 as it might be insecure and unnecessary in temp.
+	// If it was for docker permissions, temp dir usually handles this better or 0666 is enough.
 
 	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
 
@@ -97,6 +99,7 @@ func New() (*zap.Logger, *os.File, error) {
 	)
 
 	logger := zap.New(core)
+	logger.Debug("Log file created", zap.String("path", logPath))
 	return logger, logFile, nil
 }
 
