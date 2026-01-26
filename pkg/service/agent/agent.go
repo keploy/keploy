@@ -269,7 +269,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 			unfilteredCount++
 		}
 	}
-	a.logger.Info("After filtering",
+	a.logger.Debug("After filtering",
 		zap.Int("filteredMocks", len(filteredMocks)),
 		zap.Int("unfilteredMocks", len(unfilteredMocks)),
 		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
