@@ -72,7 +72,7 @@ func (h *Hooks) SendClientInfo(clientInfo structs.ClientInfo) error {
 
 func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	key := 0
-	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
+	err := h.agentRegistrationMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
 		return err
