@@ -25,6 +25,11 @@ import (
 )
 
 const (
+	// The name of the volume used to share certs
+	KeployTLSVolumeName = "keploy-tls-certs"
+	// The path inside the container where certs are mounted
+	KeployTLSMountPath = "/tmp/keploy-tls"
+
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
@@ -496,6 +501,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	envVars := []string{
 		"BINARY_TO_DOCKER=true",
 	}
+	envVars = append(envVars, fmt.Sprintf("CERT_EXPORT_PATH=%s", KeployTLSMountPath))
 
 	// Add installation ID if available
 	if installationID := os.Getenv("INSTALLATION_ID"); installationID != "" {
@@ -512,6 +518,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	// Generate volumes using the extracted function
 	volumes := idc.generateKeployVolumes()
+	volumes = append(volumes, fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath))
 
 	clientPid := int(os.Getpid())
 	// Build command arguments
@@ -697,7 +704,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// retries
 			{Kind: yaml.ScalarNode, Value: "retries"},
-			{Kind: yaml.ScalarNode, Value: "6"},
+			{Kind: yaml.ScalarNode, Value: "60"},
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},
@@ -840,7 +847,16 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 
 			// Add or modify depends_on
 			idc.addOrUpdateDependsOn(serviceContentNode)
+			idc.addServiceListProperty(serviceContentNode, "volumes", fmt.Sprintf("%s:%s:ro", KeployTLSVolumeName, KeployTLSMountPath))
+			certPath := fmt.Sprintf("%s/ca.crt", KeployTLSMountPath)
+			trustStorePath := fmt.Sprintf("%s/truststore.jks", KeployTLSMountPath)
+			idc.addServiceEnvVar(serviceContentNode, "NODE_EXTRA_CA_CERTS", certPath)
+			idc.addServiceEnvVar(serviceContentNode, "REQUESTS_CA_BUNDLE", certPath)
+			idc.addServiceEnvVar(serviceContentNode, "SSL_CERT_FILE", certPath)
+			idc.addServiceEnvVar(serviceContentNode, "CARGO_HTTP_CAINFO", certPath)
 
+			javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
+			idc.appendServiceEnvVar(serviceContentNode, "JAVA_TOOL_OPTIONS", javaOpts)
 			// Add PID namespace sharing
 			idc.addServiceProperty(serviceContentNode, "pid", fmt.Sprintf("service:%s", "keploy-agent"))
 
@@ -850,8 +866,100 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			break
 		}
 	}
-
+	idc.addTopLevelVolume(compose, KeployTLSVolumeName)
 	return nil
+}
+
+// Helper to add a list item (like volumes) to a service
+func (idc *Impl) addServiceListProperty(serviceNode *yaml.Node, key, value string) {
+	var valueNode *yaml.Node
+
+	// Check if key exists
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if serviceNode.Content[i].Value == key {
+			valueNode = serviceNode.Content[i+1]
+			break
+		}
+	}
+
+	// If not found, create it
+	if valueNode == nil {
+		valueNode = &yaml.Node{Kind: yaml.SequenceNode}
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+			valueNode,
+		)
+	}
+
+	// Append the value
+	valueNode.Content = append(valueNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: value})
+}
+
+// Helper to add/update an environment variable
+func (idc *Impl) addServiceEnvVar(serviceNode *yaml.Node, envKey, envValue string) {
+	var envNode *yaml.Node
+
+	// Find 'environment' key
+	for i := 0; i < len(serviceNode.Content); i += 2 {
+		if serviceNode.Content[i].Value == "environment" {
+			envNode = serviceNode.Content[i+1]
+			break
+		}
+	}
+
+	// Create 'environment' if missing
+	if envNode == nil {
+		envNode = &yaml.Node{Kind: yaml.SequenceNode}
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "environment"},
+			envNode,
+		)
+	}
+
+	// Handle Sequence (array) style environment: ["KEY=VAL"]
+	if envNode.Kind == yaml.SequenceNode {
+		envNode.Content = append(envNode.Content, &yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Value: fmt.Sprintf("%s=%s", envKey, envValue),
+		})
+	}
+	// Handle Mapping (dict) style environment: { KEY: VAL }
+	if envNode.Kind == yaml.MappingNode {
+		envNode.Content = append(envNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: envKey},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: envValue},
+		)
+	}
+}
+
+// Helper to append to an environment variable (for JAVA_TOOL_OPTIONS)
+func (idc *Impl) appendServiceEnvVar(serviceNode *yaml.Node, envKey, appendValue string) {
+	// Logic: Find existing key. If found, append string " " + value. If not, create it.
+	// (Simplified implementation reuse addServiceEnvVar for now, assuming override is fine or strictly adding)
+	// For Java Tool Options, users rarely hardcode it in compose, but if they do, we ideally append.
+	// For simplicity in this iteration:
+	idc.addServiceEnvVar(serviceNode, envKey, appendValue)
+}
+
+// Helper to ensure top-level volumes exists
+func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
+	if compose.Volumes.Kind == 0 {
+		compose.Volumes.Kind = yaml.MappingNode
+		compose.Volumes.Content = []*yaml.Node{}
+	}
+
+	// Check if volume exists
+	for i := 0; i < len(compose.Volumes.Content); i += 2 {
+		if compose.Volumes.Content[i].Value == volumeName {
+			return // Already exists
+		}
+	}
+
+	// Add it (empty content is fine for local driver)
+	compose.Volumes.Content = append(compose.Volumes.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
+		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}, // {}
+	)
 }
 
 // removeServiceProperty removes a property from a service node

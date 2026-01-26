@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -44,6 +46,25 @@ var TemplatizedValues = map[string]interface{}{}
 var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
+
+// IsShutdownError checks if the error is related to shutdown (EOF, connection closed, etc.)
+// This is useful for gracefully handling errors during application shutdown.
+func IsShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for EOF errors
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Check error message for common shutdown-related patterns
+	errStr := err.Error()
+	return strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "use of closed network connection")
+}
 
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
@@ -779,10 +800,86 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
-	// Find all descendant PIDs of the given PID & then signal them.
-	// Any shell doesn't signal its children when it receives a signal.
-	// Children may have their own process groups, so we need to signal them separately.
+	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
+	if runtime.GOOS == "windows" {
+		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
+		// List ALL descendant processes (recursively) before attempting to kill
+		listAllCmd := exec.Command("powershell", "-Command",
+			fmt.Sprintf(`$parent = %d
+$processes = Get-CimInstance Win32_Process
+function Get-ChildProcesses($parentId) {
+    $children = $processes | Where-Object {$_.ParentProcessId -eq $parentId}
+    foreach ($child in $children) {
+        $child
+        Get-ChildProcesses $child.ProcessId
+    }
+}
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List`, ppid))
+		if output, err := listAllCmd.CombinedOutput(); err == nil {
+			logger.Debug("ALL descendant processes before kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
+		} else {
+			logger.Debug("Failed to list descendant processes", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+		}
+
+		// Prefer a console Ctrl+Break event so the app can exit cleanly.
+		if sig == syscall.SIGINT {
+			if err := SendSignal(logger, -ppid, sig); err == nil {
+				if err := waitForProcessExit(ppid, 10*time.Second, logger); err != nil {
+					logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
+				}
+				if running, err := isProcessRunning(ppid); err == nil && !running {
+					return nil
+				}
+			} else {
+				logger.Debug("failed to send console ctrl event", zap.Int("pid", ppid), zap.Error(err))
+			}
+		}
+
+		// Try graceful taskkill as a fallback (without /F).
+		cmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			logger.Debug("taskkill graceful failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+		} else {
+			logger.Debug("taskkill graceful succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
+		}
+
+		// Force kill as the last resort if the process tree is still alive.
+		if running, err := isProcessRunning(ppid); err != nil {
+			logger.Debug("failed to check process state after graceful taskkill", zap.Int("pid", ppid), zap.Error(err))
+		} else if running {
+			forcedCmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T", "/F")
+			if output, err := forcedCmd.CombinedOutput(); err != nil {
+				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+			} else {
+				logger.Debug("taskkill forced succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
+			}
+		}
+
+		// Check for remaining descendant processes after kill
+		verifyAllCmd := exec.Command("powershell", "-Command",
+			fmt.Sprintf(`$parent = %d
+$processes = Get-CimInstance Win32_Process
+function Get-ChildProcesses($parentId) {
+    $children = $processes | Where-Object {$_.ParentProcessId -eq $parentId}
+    foreach ($child in $children) {
+        $child
+        Get-ChildProcesses $child.ProcessId
+    }
+}
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Format-List`, ppid))
+		if output, err := verifyAllCmd.CombinedOutput(); err == nil {
+			logger.Debug("ALL descendant processes after kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
+		}
+
+		// Wait a short while for processes to exit (same helper used elsewhere)
+		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
+			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
+		}
+		return nil
+	}
+
+	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
 	children, err := findChildPIDs(ppid)
@@ -850,7 +947,26 @@ func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) erro
 
 // isProcessRunning checks if a particular process is still running using os.FindProcess
 func isProcessRunning(pid int) (bool, error) {
-	// Try to find the process
+	// On Windows use PowerShell to check PID presence because signalling with 0 fails.
+	if runtime.GOOS == "windows" {
+		// Use exit code instead of parsing output to avoid locale-dependent string matching.
+		// PowerShell exits with 0 when process exists, 1 when not found.
+		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("if (Get-Process -Id %d -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }", pid))
+		err := cmd.Run()
+		if err != nil {
+			// Non-zero exit code means process not found
+			if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() != 0 {
+				return false, nil
+			}
+			// Other errors (like command not found) are treated as errors
+			return false, err
+		}
+		// Exit code 0 means process was found
+		return true, nil
+	}
+
+	// POSIX: try to find the process and signal 0 to check existence
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false, err // Process lookup failed
@@ -860,10 +976,10 @@ func isProcessRunning(pid int) (bool, error) {
 	err = process.Signal(syscall.Signal(0))
 	if err != nil {
 		// If error occurs when signaling, it means the process is no longer running
+		// If there’s another error, consider the process as still running
 		if errors.Is(err, os.ErrProcessDone) || err == syscall.ESRCH {
 			return false, nil
 		}
-		// If there’s another error, consider the process as still running
 		return true, nil
 	}
 
@@ -1504,4 +1620,25 @@ func GetContainerIPv4() (string, error) {
 	}
 
 	return "", fmt.Errorf("could not find a non-loopback IP for the container")
+}
+
+// GetFullCommandUsed returns the full command-line used to run the current process.
+// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
+func GetFullCommandUsed() string {
+	args := os.Args
+
+	// Build the command string with proper quoting for arguments containing spaces
+	var parts []string
+	for _, arg := range args {
+		if strings.Contains(arg, " ") || strings.Contains(arg, "\"") {
+			// Quote the argument if it contains spaces or quotes
+			parts = append(parts, fmt.Sprintf("%q", arg))
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+
+	cmdStr := strings.Join(parts, " ")
+
+	return cmdStr
 }

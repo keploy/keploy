@@ -99,7 +99,7 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
-	m := make(chan *models.Mock, 500)
+	m := make(chan *models.Mock, 1000)
 
 	err := a.Proxy.Record(ctx, m, opts)
 	if err != nil {
@@ -110,7 +110,7 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
-	a.logger.Debug("Inside MockOutgoing of agent binary !!")
+	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -219,7 +219,7 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	a.clientMocks.Store(uint64(0), storage)
 
-	a.logger.Info("Successfully stored mocks for client")
+	a.logger.Debug("Successfully stored mocks for client")
 	return nil
 }
 

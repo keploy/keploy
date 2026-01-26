@@ -66,6 +66,7 @@ type Proxy struct {
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
+	IsDocker          bool
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
@@ -85,6 +86,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:          opts.Agent.IsDocker,
 	}
 }
 
@@ -94,6 +96,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		logger := p.logger.With(zap.Any("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
+		logger.Debug("initialized the parser integration", zap.String("ParserType", string(parserType)))
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
 	sort.Slice(p.integrationsPriority, func(i, j int) bool {
@@ -113,7 +116,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	}
 
 	// set up the CA for tls connections
-	err = pTls.SetupCA(ctx, p.logger)
+	err = pTls.SetupCA(ctx, p.logger, p.IsDocker)
 	if err != nil {
 		// log the error and continue
 		p.logger.Warn("failed to setup CA", zap.Error(err))
@@ -331,7 +334,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	p.logger.Info("🟢 Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
+	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
@@ -564,9 +567,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
+
+		// Check if the traffic is HTTP/2 (gRPC) to set the correct ALPN
+		var nextProtos []string
+		if bytes.HasPrefix(initialBuf, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
+			// Offer both h2 and http/1.1 to be compatible with dual-stack listeners.
+			// Ideally, the server should pick h2 for gRPC traffic.
+			nextProtos = []string{"h2", "http/1.1"}
+		}
+
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
+			NextProtos:         nextProtos,
 		}
 
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)

@@ -59,7 +59,7 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 
 func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 
-	a.logger.Info("🔵 Connecting to incoming test cases stream...")
+	a.logger.Debug("Connecting to incoming test cases stream...")
 
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
@@ -131,13 +131,13 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		}
 	}()
 
-	a.logger.Info("🟢 Successfully connected to incoming test cases stream.")
+	a.logger.Debug("Successfully connected to incoming test cases stream.")
 	return tcChan, nil
 }
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
-	a.logger.Info("🔵 Connecting to outgoing mocks stream...")
+	a.logger.Debug("Connecting to outgoing mocks stream...")
 
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
@@ -203,7 +203,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil
 	})
 
-	a.logger.Info("🟢 Successfully connected to outgoing mocks stream.")
+	a.logger.Debug("Successfully connected to outgoing mocks stream.")
 
 	return mockChan, nil
 }
@@ -753,14 +753,55 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
 		<-ctx.Done()
-		if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
-			// Process already finished is expected during graceful shutdown, not an error
-			if stopErr.Error() != "os: process already finished" {
-				utils.LogError(a.logger, stopErr, "failed to stop keploy agent")
-			}
+		if a.conf.Agent.AgentURI == "" {
+			return nil
 		}
+		if err := a.requestAgentStop(); err != nil {
+			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			// Fallback: forcefully stop the agent process
+			a.mu.Lock()
+			cmd := a.agentCmd
+			a.mu.Unlock()
+			if cmd != nil {
+				if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
+					a.logger.Error("failed to forcefully stop agent", zap.Error(stopErr))
+				}
+			}
+			return nil
+		}
+		a.logger.Info("Keploy agent shutdown requested", zap.Int("pid", pid))
 		return nil
 	})
+
+	return nil
+}
+
+func (a *AgentClient) requestAgentStop() error {
+	if a.conf == nil {
+		return fmt.Errorf("agent config is nil")
+	}
+	if a.conf.Agent.AgentURI == "" {
+		return fmt.Errorf("agent URI is not configured")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(stopCtx, http.MethodPost, fmt.Sprintf("%s/stop", a.conf.Agent.AgentURI), nil)
+	if err != nil {
+		return err
+	}
+
+	res, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("agent stop http %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	return nil
 }
@@ -775,14 +816,8 @@ func (a *AgentClient) stopAgent() {
 	}
 
 	if a.agentCmd != nil && a.agentCmd.Process != nil {
-		a.logger.Info("Stopping keploy agent", zap.Int("pid", a.agentCmd.Process.Pid))
-		err := a.agentCmd.Process.Kill()
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to kill keploy agent process")
-		} else {
-			a.logger.Info("Keploy agent process killed successfully")
-		}
-		a.agentCmd = nil
+		pid := a.agentCmd.Process.Pid
+		a.logger.Info("Stopping keploy agent", zap.Int("pid", pid))
 	}
 }
 
@@ -839,14 +874,15 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 
-	a.logger.Info("Using available ports",
+	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
 		zap.Uint32("proxy-port", proxyPort),
 		zap.Uint32("dns-port", dnsPort))
 
 	if isDockerCmd {
 
-		a.logger.Info("Application command provided :", zap.String("cmd", cmd))
+		var origCmd = cmd
+		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
@@ -860,7 +896,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
 
-		a.logger.Info("Application command to execute :", zap.String("cmd", cmd))
+		if origCmd != cmd {
+			a.logger.Info(
+				"Updated user command to allow Keploy to serve traffic before the app",
+				zap.String("cmd", cmd),
+			)
+		}
 	}
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
@@ -910,7 +951,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return err
 	}
 
-	a.logger.Info("Client setup completed successfully")
+	a.logger.Debug("Keploy client setup completed successfully")
 	return nil
 }
 
