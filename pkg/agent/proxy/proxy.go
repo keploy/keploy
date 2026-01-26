@@ -222,7 +222,13 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
 	if err != nil {
-		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
+		errMsg := fmt.Sprintf("failed to start proxy on port:%v", p.Port)
+		if strings.Contains(err.Error(), "address already in use") {
+			errMsg = fmt.Sprintf("failed to start proxy: port %v is already in use. Try: 1) Check if another process is using this port with 'lsof -i :%v' 2) Stop the conflicting process or 3) Use a different proxy port with --proxyPort flag", p.Port, p.Port)
+		} else if strings.Contains(err.Error(), "permission denied") {
+			errMsg = fmt.Sprintf("failed to start proxy: permission denied on port %v. Try: 1) Run with sudo if using port < 1024 or 2) Use a higher port number with --proxyPort flag", p.Port)
+		}
+		utils.LogError(p.logger, err, errMsg)
 		// Notify failure
 		readyChan <- err
 		return err
