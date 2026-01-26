@@ -49,7 +49,12 @@ func RenderTestCaseTemplates(tc *models.TestCase, logger *zap.Logger) error {
 	}
 
 	// Build the template data map
-	templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
+	// Secrets are stored under a single "secret" key, regardless of their count
+	capacity := len(utils.TemplatizedValues)
+	if len(utils.SecretValues) > 0 {
+		capacity++
+	}
+	templateData := make(map[string]interface{}, capacity)
 	for k, v := range utils.TemplatizedValues {
 		templateData[k] = v
 	}
