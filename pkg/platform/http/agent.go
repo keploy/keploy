@@ -33,6 +33,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	agentReadyTimeout       = 2 * time.Minute
+	agentReadyRetryInterval = 2 * time.Second
+)
+
 // TODO: Need to refactor this file
 type AgentClient struct {
 	logger       *zap.Logger
@@ -1036,21 +1041,23 @@ func (a *AgentClient) GetErrorChannel() <-chan error {
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
-	timeout := 2 * time.Minute
-	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(agentReadyRetryInterval)
+	defer ticker.Stop()
+
+	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
 
 	for {
-		if time.Since(startTime) > timeout {
-			return fmt.Errorf("timeout waiting for agent to become ready after %v", timeout)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI), nil)
+		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 		if err != nil {
 			return err
 		}
 
 		resp, err := a.client.Do(req)
 		if err == nil {
+			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				a.logger.Info("Successfully marked agent as ready")
@@ -1063,8 +1070,11 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 
 		select {
 		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for agent to become ready")
+			}
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-ticker.C:
 			// retry
 		}
 	}
