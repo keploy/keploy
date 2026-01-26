@@ -40,11 +40,44 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	if err != nil {
 		return nil, err
 	}
+
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
-	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, cfg)
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlMappingDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
+
+	// ✅ tools service (needed for persisting delay to keploy.yml)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, commonServices.YamlReportDb, tel, auth, cfg)
+
+	// ✅ record service
+	recordSvc := record.New(
+		logger,
+		commonServices.YamlTestDB,
+		commonServices.YamlMockDb,
+		tel,
+		commonServices.Instrumentation,
+		commonServices.YamlTestSetDB,
+		cfg,
+	)
+
+	// ✅ IMPORTANT FIX: inject tools service so recorder can persist delay to keploy.yml
+	recordSvc.SetToolsService(toolsSvc)
+
+	// ✅ replay service
+	replaySvc := replay.NewReplayer(
+		logger,
+		commonServices.YamlTestDB,
+		commonServices.YamlMockDb,
+		commonServices.YamlReportDb,
+		commonServices.YamlMappingDb,
+		commonServices.YamlTestSetDB,
+		tel,
+		commonServices.Instrumentation,
+		auth,
+		commonServices.Storage,
+		cfg,
+	)
+
+	// ✅ report service
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
+
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
@@ -61,7 +94,6 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	default:
 		return nil, errors.New("invalid command")
 	}
-
 }
 
 func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
@@ -109,6 +141,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	storage := storage.New(c.APIServerURL, logger)
+
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
