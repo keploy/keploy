@@ -14,6 +14,7 @@ archives:
     builds:
       - keploy
       - keploy-windows
+      - keploy-mac-universal
     format_overrides:
       - goos: windows
         format: binary
