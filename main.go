@@ -50,6 +50,7 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+	isAgent := len(os.Args) > 1 && os.Args[1] == "agent"
 
 	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
@@ -91,17 +92,26 @@ func start(ctx context.Context) {
 	defer func() {
 		inDocker := os.Getenv("KEPLOY_INDOCKER")
 		if inDocker != "true" {
+			cleanupLogger := logger
+			if stderrLogger, err := log.NewStderrLogger(log.LogCfg.Level.Level()); err == nil {
+				cleanupLogger = stderrLogger
+			} else {
+				cleanupLogger = zap.NewNop()
+			}
 			if utils.LogFile != nil {
 				err := utils.LogFile.Close()
 				if err != nil {
-					utils.LogError(logger, err, "Failed to close Keploy Logs")
+					utils.LogError(cleanupLogger, err, "Failed to close Keploy Logs")
 				}
+				utils.LogFile = nil
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
-				return
-			}
-			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-				return
+			if !isAgent {
+				if err := utils.DeleteFileIfNotExists(cleanupLogger, "keploy-logs.txt"); err != nil {
+					return
+				}
+				if err := utils.DeleteFileIfNotExists(cleanupLogger, "docker-compose-tmp.yaml"); err != nil {
+					return
+				}
 			}
 		}
 	}()

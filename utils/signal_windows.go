@@ -59,10 +59,23 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	}
 
 	// Set the output of the command
-	cmd.Stdout = os.Stdout
+	stdoutWriter := os.Stdout
+	if IsMCPStdio() {
+		stdoutWriter = os.Stderr
+	}
+	cmd.Stdout = stdoutWriter
 	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application (Windows):", zap.String("executing_cli", cmd.String()))
+
+	// Flush stdout/stderr before starting child process to prevent
+	// output interleaving with buffered parent process output.
+	_ = os.Stdout.Sync()
+	_ = os.Stderr.Sync()
+
+	// Small delay to allow parent's log output to be fully written
+	// before child process starts writing to the same console.
+	time.Sleep(50 * time.Millisecond)
 
 	// Start the command
 	err := cmd.Start()
