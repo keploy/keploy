@@ -99,6 +99,7 @@ require (
 	github.com/andybalholm/brotli v1.2.0
 	github.com/bufbuild/protocompile v0.14.1
 	github.com/charmbracelet/glamour v0.6.0
+	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.28.1
@@ -108,6 +109,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/keploy/jsonDiff v1.0.8
+	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.10.0
 	github.com/wI2L/jsondiff v0.5.0

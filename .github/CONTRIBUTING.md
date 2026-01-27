@@ -1,101 +1,122 @@
-# Keploy Record/Replay CI Guide
+# Contributing to Keploy
 
-This document describes the **one‑time build / one‑time download** strategy we use in all CI jobs that exercise Keploy, and how you can plug new sample workflows into the same system.
+Thank you for your interest in Keploy and for taking the time to contribute to this project. 🙌 Keploy is a project by developers for developers and there are a lot of ways you can contribute.
 
----
+If you don't know where to start contributing, ask us on our [Slack channel](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg).
 
-## Table of contents
+## Code of conduct
 
-1. Why we build the PR binary **once** and download the latest release **once**.
-2. Why we also **build *one* Docker image** and reuse it via a temporary registry.
-3. Key files that implement the mechanism.
-4. Checklist – add a new language / sample workflow in < 2 mins.
-5. Troubleshooting tips.
+Contributors are expected to adhere to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
----
+## Prerequisites for the contributors
 
-## 1. Why one‑time *build + download*
+Contributors should have knowledge of git, go, and markdown for most projects since the project work heavily depends on them.
+We encourage Contributors to set up Keploy for local development and play around with the code and tests to get more comfortable with the project. 
 
-* **Speed** – compiling and downloading just once keeps the fan‑out jobs lean.
-* **Consistency** – every downstream job gets the *exact same* PR binary and the *exact same* "latest" binary (avoids the "a new patch went live mid‑run" race).
-* **Flexibility** – the 3‑row test‑matrix lets us cover all flows:
-  * record **latest** → replay **build**
-  * record **build**  → replay **latest**
-  * record **build**  → replay **build** *(the legacy flow)*
+Sections
 
----
+- <a name="contributing"> General Contribution Flow</a>
+  - <a name="#commit-signing">Developer Certificate of Origin</a>
+- <a name="contributing-keploy">Keploy Contribution Flow</a>
+  - <a name="keploy-server">Keploy Server</a>
+  - <a name="keploy-docs">Keploy Documentation</a>
 
-## 2. Why one‑time *build & push Docker image*
-Some samples (e.g. `gin‑mongo` in Docker‑mode) need a container image. Building it repeatedly inside every matrix row is wasteful, so we:
+# <a name="contributing">General Contribution Flow</a>
 
-1. **Build once** in `prepare_and_run.yml` → job `build‑docker‑image`.
-2. **Push** the result to [`ttl.sh`](https://ttl.sh) with a 1‑hour TTL (`ttl.sh/keploy/keploy:1h`).
-3. **Pull & re‑tag** it inside downstream jobs via the composite action `download‑image` so that the image name matches what the samples expect (`ghcr.io/keploy/keploy:v3‑dev`).
+## <a name="commit-signing">Signing-off on Commits (Developer Certificate of Origin)</a>
 
-Advantages are identical to the binary‑artifact strategy – plus we keep our public registries clean because the image auto‑expires.
+To contribute to this project, you must agree to the Developer Certificate of
+Origin (DCO) for each commit you make. The DCO is a simple statement that you,
+as a contributor, have the legal right to make the contribution.
 
----
+See the [DCO](https://developercertificate.org) file for the full text of what you must agree to
+and how it works [here](https://github.com/probot/dco#how-it-works).
+To signify that you agree to the DCO for contributions, you simply add a line to each of your
+git commit messages:
 
-## 3. Key files
+```
+Signed-off-by: Jane Smith <jane.smith@example.com>
+```
 
-| File / dir                                         | Purpose                                                                                                                                                                             |
-| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.github/workflows/prepare_and_run.yml`            | The *aggregator* – builds the PR binary, downloads `latest`, uploads both as artifacts **and** builds + pushes the one Docker image. Then it fans‑out to language/sample workflows. |
-| `.github/actions/download-binary/action.yml`       | Composite action – downloads **one** of those two binary artifacts and outputs its absolute path.                                                                                   |
-| `.github/actions/download-image/action.yml`        | Composite action – pulls the temporary image from `ttl.sh`, re‑tags it to `ghcr.io/keploy/keploy:v3-dev`, and makes it available for the sample.                                    |
-| `.github/workflows/*_linux.yml`, `*_docker.yml`, … | Language/sample workflows. They declare the 3‑row matrix and obtain the two binaries (and, for Docker flows, the image) via the composite actions.                                  |
-| `.github/workflows/test_workflow_scripts/*.sh`     | Bash helpers that run the sample under record / replay. All scripts use the two env vars **`$RECORD_BIN`** / **`$REPLAY_BIN`** that the workflow passes in.                         |
+In most cases, you can add this signoff to your commit automatically with the
+`-s` or `--signoff` flag to `git commit`. You must use your real name and a reachable email
+address (sorry, no pseudonyms or anonymous contributions). An example of signing off on a commit:
 
-### Why fail-fast: false in every matrix?
+```
+$ commit -s -m “my commit message w/signoff”
+```
 
-We set fail-fast: false inside each strategy.matrix to ensure that all matrix permutations run to completion even if one of them fails. This gives us full visibility into the different record/replay combinations, helps surface flaky paths, and prevents a single early failure from masking other regressions.
+To ensure all your commits are signed, you may choose to add this alias to your global `.gitconfig`:
 
----
+_~/.gitconfig_
 
-## 4. Adding a new workflow – checklist
+```
+[alias]
+  amend = commit -s --amend
+  cm = commit -s -m
+  commit = commit -s
+```
 
-1. **Copy an existing sibling** (e.g. `golang_linux.yml`) ➜ rename it.
-2. Keep the **matrix** block *as is* unless you truly need fewer combinations.
-3. Add the two `download-binary` steps:
+# How to contribute ?
 
-   ```yaml
-   - id: record
-     uses: ./.github/actions/download-binary
-     with: { src: ${{ matrix.record_src }} }
+We encourage contributions from the community.
 
-   - id: replay
-     uses: ./.github/actions/download-binary
-     with: { src: ${{ matrix.replay_src }} }
-   ```
-4. **Docker‑based sample?**  Insert the `download-image` step *before* you start the app:
+**Create a [GitHub issue](https://github.com/keploy/keploy/issues) for any changes beyond typos and small fixes.**
 
-   ```yaml
-   - id: image
-     uses: ./.github/actions/download-image
-   ```
-5. Pass the paths into your run step:
+We review GitHub issues and PRs on a regular schedule.
 
-   ```yaml
-   env:
-     RECORD_BIN: ${{ steps.record.outputs.path }}
-     REPLAY_BIN: ${{ steps.replay.outputs.path }}
-   ```
-6. In the helper script you invoke, ensure every `keploy record|test` call uses `$RECORD_BIN` / `$REPLAY_BIN`.
-7. **Wire the workflow** into `prepare_and_run.yml`:
+To ensure that each change is relevant and properly peer reviewed, please adhere to best practices for open-source contributions.
+This means that if you are outside the Keploy organization, you must fork the repository and create PRs from branches on your own fork.
+The README in GitHub's [first-contributions repo](https://github.com/firstcontributions/first-contributions) provides an example.
 
-   ```yaml
-   run_<new_workflow_name>:
-     needs: [build-and-upload, upload-latest]
-     uses: ./.github/workflows/my_<new_workflow_name>.yml
-   ```
-   Replace `<new_workflow_name>` with the name of your workflow.
-   **Note:** *If your sample needs the pre‑built Docker image add `build-docker-image` to the `needs` list.*
+## ## How to set up the docs website locally?
 
----
+1. Fork the repository
 
-## 5. Troubleshooting
+<br/>
 
-When a workflow fails, and log isn't visible, then it might be due to the error happening not in record/replay step, but somewhere else, could be that some referenced binary was not found (exit code 127), could be some permission issues, could be file not found. Look for the exit code to determine what failed (https://tldp.org/LDP/abs/html/exitcodes.html), and check the previous successful step to pipe out the line in bash script related to the workflow run.
+2. Clone the repository with the following command. Replace the <GITHUB_USERNAME> with your username
 
----
+```sh
+git clone https://github.com/<GITHUB_USERNAME>/keploy.git
+```
 
+<br/>
+
+3. Go into the directory containing the project and edit the changes.
+
+
+When we merge your PR, a new build automatically occurs and your changes publish to [https://keploy.io](https://github.com/keploy/keploy).
+
+## <a name="contributing-keploy">Keploy Contribution Flow</a>
+
+Keploy is written in `Go` (Golang) and leverages Go Modules. Relevant coding style guidelines are the [Go Code Review Comments](https://code.google.com/p/go-wiki/wiki/CodeReviewComments) and the _Formatting and style_ section of Peter Bourgon's [Go: Best
+Practices for Production Environments](https://peter.bourgon.org/go-in-production/#formatting-and-style).
+
+There are many ways in which you can contribute to Keploy.
+
+###  <a name="keploy-server">Keploy Server</a>
+
+#### Report a Bug
+Report all issues through GitHub Issues using the [Report a Bug](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=bug_report.md&title=) template.
+To help resolve your issue as quickly as possible, read the template and provide all the requested information.
+
+#### Feature request
+We welcome all feature requests, whether it's to add new functionality to an existing extension or to offer an idea for a brand new extension.
+File your feature request through GitHub Issues using the [Feature Request](https://github.com/keploy/keploy/issues/new?assignees=&labels=&template=feature_request.md&title=) template.
+
+#### Close a Bug
+We welcome contributions that help make keploy bug free & improve the experience of our users. You can also find issues tagged [Good First Issues](https://github.com/keploy/keploy/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+
+###  <a name="keploy-docs">Keploy Documentation</a>
+
+The Keploy documentation site uses Docusaurus 2, which is a static website generator, you can make changes locally without previewing them in the browser.
+
+In the process of shipping features quickly, we may forget to keep our docs up to date. You can help by suggesting improvements to our documentation using the [Documentation Improvement](https://github.com/keploy/docs/issues) template. 
+
+Please refer to [Keploy Docs Contributing Guide](https://github.com/keploy/docs/blob/main/CONTRIBUTING.md#-how-to-set-up-the-docs-website-locally) for setting up your development environment and the follow [Keploy Style Guide](https://github.com/keploy/docs/blob/main/STYLE.md).
+
+
+# Contact
+
+Feel free to join [slack](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg) to start a conversation with us.
