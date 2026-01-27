@@ -71,6 +71,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=false
+          tags: |
+            type=semver,pattern={{version}}
 
       - name: Set version
         shell: bash
