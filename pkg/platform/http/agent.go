@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -122,6 +123,12 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 					// End of the stream
 					break
 				}
+				if ctx.Err() != nil {
+					break
+				}
+				if errors.Is(err, net.ErrClosed) {
+					break
+				}
 				utils.LogError(a.logger, err, "failed to decode test case from stream")
 				break
 			}
@@ -191,6 +198,12 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 			if err := decoder.Decode(&mock); err != nil {
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					// End of the stream
+					break
+				}
+				if ctx.Err() != nil {
+					return nil
+				}
+				if errors.Is(err, net.ErrClosed) {
 					break
 				}
 				utils.LogError(a.logger, err, "failed to decode mock from stream")

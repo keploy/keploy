@@ -15,7 +15,7 @@ on:
 
 jobs:
   golang_linux:
-    if: ${{ inputs.jobs_to_run == 'all' }}
+    # if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
@@ -88,7 +88,7 @@ jobs:
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
   golang_linux_private:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
