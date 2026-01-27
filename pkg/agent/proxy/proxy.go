@@ -220,10 +220,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
 	if err != nil {
-		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
+		enhanced := utils.SuggestProxyStartError(err, p.Port)
+		utils.LogError(p.logger, enhanced, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
 		// Notify failure
-		readyChan <- err
-		return err
+		readyChan <- enhanced
+		return enhanced
 	}
 	p.Listener = listener
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
