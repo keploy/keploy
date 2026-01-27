@@ -48,7 +48,6 @@ func getCompiled(pattern string) *regexp.Regexp {
 		// Fallback to a regex that never matches to avoid panics / repeated compiles
 		compiled, _ = regexp.Compile(`$.^`)
 	}
-
 	regexCacheMu.Lock()
 	// Double-check to avoid races.
 	if old := regexCache[pattern]; old == nil {
