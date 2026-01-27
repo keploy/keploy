@@ -330,11 +330,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
-		return err
+		// Gracefully handle untracked connections (eBPF lookup failed)
+		// This can happen when:
+		// 1. A new connection was opened after test completion (e.g., driver health check)
+		// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
+		// 3. The entry was already deleted before this lookup
+		//
+		// Instead of failing with an error (which causes the app to see a broken connection),
+		// we close the connection gracefully. The client will see "connection refused" or EOF,
+		// which is cleaner than a partial/broken connection that causes "already closed" errors.
+		p.logger.Warn("Untracked connection (eBPF lookup failed), closing gracefully",
+			zap.Int("Source port", sourcePort), zap.Error(err))
+		if srcConn != nil {
+			srcConn.Close()
+		}
+		return nil
 	}
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
+
+	// Prevent proxy loop where destination is the proxy itself
+	if destInfo.Port == p.Port {
+		p.logger.Warn("Incoming connection destination is proxy port, ignoring to prevent loop", zap.Uint32("Port", destInfo.Port))
+		return nil
+	}
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))

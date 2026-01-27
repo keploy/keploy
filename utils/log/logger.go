@@ -58,6 +58,8 @@ func (e ansiConsoleEncoder) Clone() zapcore.Encoder {
 	}
 }
 
+var defaultWriter zapcore.WriteSyncer
+
 func New() (*zap.Logger, *os.File, error) {
 	// Register the ANSI-friendly encoder
 	_ = zap.RegisterEncoder("ansiConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
@@ -75,7 +77,7 @@ func New() (*zap.Logger, *os.File, error) {
 	// Also removed the explicit chmod 777 as it might be insecure and unnecessary in temp.
 	// If it was for docker permissions, temp dir usually handles this better or 0666 is enough.
 
-	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
+	defaultWriter = zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
 
 	LogCfg = zap.NewDevelopmentConfig()
 	LogCfg.Encoding = "ansiConsole" // Use our custom encoder
@@ -94,7 +96,7 @@ func New() (*zap.Logger, *os.File, error) {
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		writer,
+		defaultWriter,
 		LogCfg.Level,
 	)
 
@@ -104,17 +106,22 @@ func New() (*zap.Logger, *os.File, error) {
 }
 
 func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
-	LogCfg.Level = zap.NewAtomicLevelAt(level)
+	// Update the existing atomic level so all cores using it get updated
+	LogCfg.Level.SetLevel(level)
+
 	if level == zap.DebugLevel {
 		LogCfg.DisableStacktrace = false
 		LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
+	} else {
+		LogCfg.DisableStacktrace = true
+		LogCfg.EncoderConfig.EncodeCaller = nil
 	}
 
 	// Use our custom encoder when building
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		zapcore.AddSync(os.Stdout),
+		defaultWriter,
 		LogCfg.Level,
 	)
 
@@ -123,6 +130,8 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 }
 
 func AddMode(mode string) (*zap.Logger, error) {
+	// We clone the config for AddMode to avoid affecting other loggers' time formatting,
+	// but we keep the SAME AtomicLevel to ensure level updates still propagate.
 	cfg := LogCfg
 	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		emoji := "\U0001F430"
@@ -133,8 +142,8 @@ func AddMode(mode string) (*zap.Logger, error) {
 	encoder := NewANSIConsoleEncoder(cfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		zapcore.AddSync(os.Stdout),
-		cfg.Level,
+		defaultWriter,
+		LogCfg.Level, // Use shared level
 	)
 
 	logger := zap.New(core)
@@ -146,9 +155,13 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	LogCfg.Encoding = "console"
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 
-	logger, err := LogCfg.Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build config for logger: %v", err)
-	}
+	encoder := zapcore.NewConsoleEncoder(LogCfg.EncoderConfig)
+	core := zapcore.NewCore(
+		encoder,
+		defaultWriter,
+		LogCfg.Level, // Use shared level
+	)
+
+	logger := zap.New(core)
 	return logger, nil
 }

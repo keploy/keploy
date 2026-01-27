@@ -15,7 +15,7 @@ import (
 
 // NewAgentCommand on Windows returns a plain command (no sudo).
 // If the agent needs admin, run the parent process with Administrator rights.
-func NewAgentCommand(bin string, args []string) *exec.Cmd {
+func NewAgentCommand(bin string, args []string, _ bool) *exec.Cmd {
 	cmd := exec.Command(bin, args...)
 	// Run in a separate process group so Ctrl+C in the parent console doesn't hit the agent.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
