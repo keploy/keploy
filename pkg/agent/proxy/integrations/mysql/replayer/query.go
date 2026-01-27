@@ -21,7 +21,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 	// Log initial mock state at the start of command phase
 	total, cfg, data := mockDb.GetMySQLCounts()
-	logger.Info("Command phase starting",
+	logger.Debug("Command phase starting",
 		zap.Int("total_mysql_mocks", total),
 		zap.Int("config_mocks", cfg),
 		zap.Int("data_mocks_available", data))
@@ -99,7 +99,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			resp, ok, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
 			if err != nil {
 				if err == io.EOF {
-					logger.Info("Connection closing due to EOF from matchCommand",
+					logger.Debug("Connection closing due to EOF from matchCommand",
 						zap.Int("commands_processed", commandCount),
 						zap.String("request_type", req.Header.Type))
 					return io.EOF

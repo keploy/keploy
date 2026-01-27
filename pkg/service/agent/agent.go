@@ -110,7 +110,7 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
-	a.logger.Debug("Inside MockOutgoing of agent binary !!")
+	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -219,12 +219,18 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	a.clientMocks.Store(uint64(0), storage)
 
-	a.logger.Info("Successfully stored mocks for client")
+	a.logger.Debug("Successfully stored mocks for client")
 	return nil
 }
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+
+	a.logger.Debug("UpdateMockParams called",
+		zap.Time("afterTime", params.AfterTime),
+		zap.Time("beforeTime", params.BeforeTime),
+		zap.Bool("useMappingBased", params.UseMappingBased),
+		zap.Int("mockMappingCount", len(params.MockMapping)))
 
 	// Get stored mocks for the
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
@@ -239,6 +245,10 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	copy(originalUnfiltered, storage.unfiltered)
 	storage.mu.RUnlock()
 
+	a.logger.Debug("Original mocks before filtering",
+		zap.Int("originalFiltered", len(originalFiltered)),
+		zap.Int("originalUnfiltered", len(originalUnfiltered)))
+
 	var filteredMocks, unfilteredMocks []*models.Mock
 
 	// Apply filtering based on parameters
@@ -249,6 +259,21 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime)
 		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
 	}
+
+	// Count IsFiltered distribution for debugging
+	var filteredCount, unfilteredCount int
+	for _, m := range unfilteredMocks {
+		if m.TestModeInfo.IsFiltered {
+			filteredCount++
+		} else {
+			unfilteredCount++
+		}
+	}
+	a.logger.Debug("After filtering",
+		zap.Int("filteredMocks", len(filteredMocks)),
+		zap.Int("unfilteredMocks", len(unfilteredMocks)),
+		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
+		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.TotalConsumedMocks != nil {
