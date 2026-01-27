@@ -175,29 +175,33 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 				param.Value = float64(binary.LittleEndian.Uint64(data[pos : pos+8]))
 				pos += 8
 
+			// Support DATE types in query attributes.
+			// These are encoded in binary format when sent as query parameters/attributes.
 			case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
-				value, _, err := utils.ParseBinaryDate(data[pos:])
+				value, n, err := utils.ParseBinaryDate(data[pos:])
 				if err != nil {
 					return nil, err
 				}
 				param.Value = value
-				pos += len(param.Value.(string)) // Assuming date parsing returns a string
+				pos += n
 
+			//Support TIMESTAMP and DATETIME types in query attributes.
 			case mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime:
-				value, _, err := utils.ParseBinaryDateTime(data[pos:])
+				value, n, err := utils.ParseBinaryDateTime(data[pos:])
 				if err != nil {
 					return nil, err
 				}
 				param.Value = value
-				pos += len(param.Value.(string)) // Assuming datetime parsing returns a string
+				pos += n
 
+			// Fix: Support TIME types in query attributes.
 			case mysql.FieldTypeTime:
-				value, _, err := utils.ParseBinaryTime(data[pos:])
+				value, n, err := utils.ParseBinaryTime(data[pos:])
 				if err != nil {
 					return nil, err
 				}
 				param.Value = value
-				pos += len(param.Value.(string)) // Assuming time parsing returns a string
+				pos += n
 			default:
 				return nil, fmt.Errorf("unsupported parameter type: %d", param.Type)
 			}
