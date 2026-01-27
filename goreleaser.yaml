@@ -1,11 +1,9 @@
 # GoReleaser configuration
-version: 2
-
 release:
-  # FORCE "Not Latest". 
-  # GoReleaser will not mark this release as "Latest" on GitHub.
+  # Do not mark release as latest automatically
+  # This allows manual control via GitHub UI
   make_latest: false
-  
+
 archives:
  -
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
