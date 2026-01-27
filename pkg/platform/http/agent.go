@@ -118,8 +118,8 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		for {
 			var testCase models.TestCase
 			if err := decoder.Decode(&testCase); err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					// End of the stream
+				if utils.IsShutdownError(err) {
+					// End of the stream or connection closed during shutdown
 					break
 				}
 				utils.LogError(a.logger, err, "failed to decode test case from stream")
@@ -189,8 +189,8 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		for {
 			var mock models.Mock
 			if err := decoder.Decode(&mock); err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					// End of the stream
+				if utils.IsShutdownError(err) {
+					// End of the stream or connection closed during shutdown
 					break
 				}
 				utils.LogError(a.logger, err, "failed to decode mock from stream")

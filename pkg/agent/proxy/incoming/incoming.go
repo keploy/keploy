@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -163,7 +164,10 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
-		utils.LogError(logger, err, "error reading initial bytes from client connection")
+		//if not EOF then log
+		if err != io.EOF {
+			utils.LogError(logger, err, "error reading initial bytes from client connection")
+		}
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
