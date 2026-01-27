@@ -351,6 +351,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	// Create a local copy of OutgoingOptions to avoid data race when multiple
+	// goroutines handle connections concurrently and modify DstCfg/Synchronous
+	outgoingOpts := rule.OutgoingOptions
+
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
 	var dstAddr string
@@ -417,7 +421,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 	if p.synchronous {
-		rule.OutgoingOptions.Synchronous = true
+		outgoingOpts.Synchronous = true
 	}
 
 	//checking for the destination port of "mysql"
@@ -432,10 +436,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstCfg := &models.ConditionalDstCfg{
 				Port: uint(destInfo.Port),
 			}
-			rule.DstCfg = dstCfg
+			outgoingOpts.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -451,7 +455,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			// Send specific error type to error channel for external monitoring
@@ -604,7 +608,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.Addr = dstAddr
 	}
 
-	rule.DstCfg = dstCfg
+	outgoingOpts.DstCfg = dstCfg
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
@@ -637,13 +641,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		case models.MODE_TEST:
-			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -660,13 +664,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
