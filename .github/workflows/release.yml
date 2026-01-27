@@ -96,8 +96,10 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: v1.26.2
-          args: release --rm-dist --skip-validate
+          # Updated to v2.5.0 as requested
+          version: v2.5.0
+          # Updated args: --rm-dist is deprecated in v2, using --clean instead
+          args: release --clean --skip-validate
         env:
           AC_PROVIDER: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
