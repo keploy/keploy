@@ -87,7 +87,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		utils.LogError(a.logger, err, "error during agent setup")
 		return err
 	}
-	a.logger.Info("Context cancelled, stopping the agent")
+	a.logger.Debug("Context cancelled, stopping the agent")
 	return context.Canceled
 
 }

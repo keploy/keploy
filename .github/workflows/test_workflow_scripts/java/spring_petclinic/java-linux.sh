@@ -175,7 +175,7 @@ for i in 1 2; do
   app_name="javaApp_${i}"
 
   # Start keploy in background, capture PID
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+  "$RECORD_BIN" record \
     -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
     > "${app_name}.txt" 2>&1 &
   KEPLOY_PID=$!
@@ -219,7 +219,7 @@ endsec
 
 section "Replay"
 set +e
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test \
+"$REPLAY_BIN" test \
   -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
   --delay 20 \
   > test_logs.txt 2>&1

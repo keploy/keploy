@@ -99,7 +99,7 @@ send_request(){
 for i in 1 2; do
     app_name="flaskSecret_${i}"
     send_request "secrets" &
-    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
+    $RECORD_BIN record -c "python3 main.py" --metadata "suite=secrets,run=$i" 2>&1 | tee ${app_name}.txt
     if grep "ERROR" "${app_name}.txt"; then exit 1; fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
     sleep 5
@@ -115,7 +115,7 @@ sleep 5
 # --- Record cycle for the new /astro endpoint (its own test set) ---
 app_name="flaskAstro"
 send_request "astro" &
-sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
+$RECORD_BIN record -c "python3 main.py" --metadata "suite=astro,endpoint=/astro" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "${app_name}.txt"; then exit 1; fi
 sleep 5
@@ -137,7 +137,7 @@ else
 fi
 
 # Testing phase
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
+$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs.txt
 if grep "ERROR" "test_logs.txt"; then exit 1; fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then exit 1; fi
 
@@ -177,7 +177,7 @@ fi
 
 # Run test with config path pointing to the new location
 echo "Running test with --config-path $CONFIG_TEST_DIR"
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 --config-path "$CONFIG_TEST_DIR" 2>&1 | tee config_path_test_logs.txt
+$REPLAY_BIN test -c "python3 main.py" --delay 10 --config-path "$CONFIG_TEST_DIR" 2>&1 | tee config_path_test_logs.txt
 
 # Check if keploy.yml was created in the original location (should NOT happen)
 if [ -f "keploy.yml" ]; then
@@ -219,14 +219,14 @@ echo "Removing astro test-set-2 to focus normalize on secret sets"
 rm -rf keploy/test-set-2
 
 echo "Running test again, this will fail as expected"
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_fail.txt
+$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_fail.txt
 
 echo "Running the normalize command"
-sudo -E env PATH="$PATH" $REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
+$REPLAY_BIN normalize 2>&1 | tee normalize_logs.txt
 if grep "ERROR" "normalize_logs.txt"; then exit 1; fi
 
 echo "Running test again, this time it will pass"
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_pass.txt
+$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee test_logs_pass.txt
 if grep "ERROR" "test_logs_pass.txt"; then exit 1; fi
 
 all_passed=true
@@ -260,7 +260,7 @@ rm -rf keploy
 # Record the "misc" endpoints as a new test suite
 app_name="flaskMisc"
 send_request "misc" &
-sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
+$RECORD_BIN record -c "python3 main.py" --metadata "suite=misc" 2>&1 | tee ${app_name}.txt
 if grep "ERROR" "${app_name}.txt"; then
     echo "Error found in misc recording..."
     cat "${app_name}.txt"
@@ -276,7 +276,7 @@ wait
 echo "Recorded misc test case and mocks"
 
 # Sanitize the newly created test cases
-sudo -E env PATH="$PATH" $RECORD_BIN sanitize 2>&1 | tee sanitize_logs_misc.txt
+$RECORD_BIN sanitize 2>&1 | tee sanitize_logs_misc.txt
 if grep "ERROR" "sanitize_logs_misc.txt"; then
     echo "Error found in misc sanitize..."
     cat "sanitize_logs_misc.txt"
@@ -285,7 +285,7 @@ fi
 
 # Final testing phase
 echo "Running test on the new 'misc' test suite..."
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs.txt
+$REPLAY_BIN test -c "python3 main.py" --delay 10 2>&1 | tee final_test_logs.txt
 if grep "ERROR" "final_test_logs.txt"; then
     echo "Error found in final test run..."
     cat "final_test_logs.txt"
