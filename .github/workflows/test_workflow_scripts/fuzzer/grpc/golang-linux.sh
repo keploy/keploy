@@ -41,7 +41,7 @@ command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
 
 # Generate keploy config and add duration_ms noise to avoid timing diffs
 rm -f ./keploy.yml keploy
-sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
+"$RECORD_BIN" config --generate
 config_file="./keploy.yml"
 if [ -f "$config_file" ]; then
   sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "$config_file"
@@ -132,9 +132,9 @@ if [ "$MODE" = "incoming" ]; then
 
   # Start server with keploy in record mode
   if [[ "$RECORD_SRC" == "latest" ]]; then
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
+    "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
   else
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+    "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
   fi
  
  sleep 10
@@ -186,7 +186,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Replay
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true --disableMockUpload 2>&1 | tee test_incoming.txt
+ "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true --disableMockUpload 2>&1 | tee test_incoming.txt
  echo "checking for errors"
  check_for_errors test_incoming.txt
  check_test_report
@@ -235,7 +235,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
 
  # Record the client (it makes outgoing RPCs)
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
+ "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
  sleep 10
 
 
@@ -270,7 +270,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
 
  # Replay the client (relying on mocks)
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true --disableMockUpload 2>&1 | tee test_outgoing.txt
+ "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true --disableMockUpload 2>&1 | tee test_outgoing.txt
  echo "checking for errors"
  check_for_errors test_outgoing.txt
  check_test_report
