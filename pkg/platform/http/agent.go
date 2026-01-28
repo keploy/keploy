@@ -33,6 +33,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	agentReadyTimeout       = 2 * time.Minute
+	agentReadyRetryInterval = 2 * time.Second
+)
+
 // TODO: Need to refactor this file
 type AgentClient struct {
 	logger       *zap.Logger
@@ -113,10 +118,14 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		for {
 			var testCase models.TestCase
 			if err := decoder.Decode(&testCase); err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
+				if err == io.EOF || err == io.ErrUnexpectedEOF || ctx.Err() != nil {
 					// End of the stream
 					break
 				}
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					break
+				}
+
 				utils.LogError(a.logger, err, "failed to decode test case from stream")
 				break
 			}
@@ -1036,16 +1045,41 @@ func (a *AgentClient) GetErrorChannel() <-chan error {
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
+	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI), nil)
-	if err != nil {
-		return err
+	ticker := time.NewTicker(agentReadyRetryInterval)
+	defer ticker.Stop()
+
+	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
+
+	for {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+		if err != nil {
+			return err
+		}
+
+		resp, err := a.client.Do(req)
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				a.logger.Info("Successfully marked agent as ready")
+				return nil
+			}
+			a.logger.Warn("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
+		} else {
+			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
+		}
+
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for agent to become ready")
+			}
+			return ctx.Err()
+		case <-ticker.C:
+			// retry
+		}
 	}
-
-	_, err = a.client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -667,7 +668,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		)
 	}
 
-	// Add command
+	// Add command ... existed code
 	if len(command) > 0 {
 		commandNode := &yaml.Node{Kind: yaml.SequenceNode}
 		for _, cmd := range command {
@@ -683,7 +684,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		)
 	}
 
-	// Add healthcheck
+	// Add healthcheck ... existed code
 	healthcheckNode := &yaml.Node{
 		Kind: yaml.MappingNode,
 		Content: []*yaml.Node{
@@ -704,7 +705,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 			// retries
 			{Kind: yaml.ScalarNode, Value: "retries"},
-			{Kind: yaml.ScalarNode, Value: "6"},
+			{Kind: yaml.ScalarNode, Value: "60"},
 
 			// start_period
 			{Kind: yaml.ScalarNode, Value: "start_period"},
@@ -716,6 +717,75 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		&yaml.Node{Kind: yaml.ScalarNode, Value: "healthcheck"},
 		healthcheckNode,
 	)
+
+	// Inject Pprof Environment Variables and Mounts if enabled on host
+	// This logic has been automated to support offline profiling via file dumps.
+	var pprofEnv []string
+	var pprofMount string
+
+	// Check for CPU_PROFILE
+	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
+		// We want the docker container to write to a specific file that is synced to host.
+		// We use a fixed directory /tmp/pprof_output in the container and map PWD to it.
+		// For the filename, we prepend "docker-" to avoid conflict if the user runs it in the same dir.
+		baseName := filepath.Base(cpuProfile)
+		dockerCpuProfile := fmt.Sprintf("/tmp/pprof_output/docker-%s", baseName)
+		pprofEnv = append(pprofEnv, fmt.Sprintf("CPU_PROFILE=%s", dockerCpuProfile))
+		pprofMount = "/tmp/pprof_output"
+	}
+
+	// Check for HEAP_PROFILE
+	if heapProfile := os.Getenv("HEAP_PROFILE"); heapProfile != "" {
+		baseName := filepath.Base(heapProfile)
+		dockerHeapProfile := fmt.Sprintf("/tmp/pprof_output/docker-%s", baseName)
+		pprofEnv = append(pprofEnv, fmt.Sprintf("HEAP_PROFILE=%s", dockerHeapProfile))
+		pprofMount = "/tmp/pprof_output"
+	}
+
+	// If either profiling is enabled, updated environment and volumes
+	if len(pprofEnv) > 0 {
+		// 1. Append Env Vars
+		// Find environment node
+		var envNode *yaml.Node
+		for i := 0; i < len(serviceNode.Content); i += 2 {
+			if serviceNode.Content[i].Value == "environment" {
+				envNode = serviceNode.Content[i+1]
+				break
+			}
+		}
+		// If environment node doesn't exist (unlikely given previous logic, but safe to check), create it?
+		// The previous logic guarantees environment node creation because BINARY_TO_DOCKER is always added.
+		if envNode != nil {
+			for _, env := range pprofEnv {
+				envNode.Content = append(envNode.Content, &yaml.Node{
+					Kind: yaml.ScalarNode, Value: env,
+				})
+			}
+		}
+
+		// 2. Append Volume
+		// Mount current working directory to /tmp/pprof_output
+		cwd, err := os.Getwd()
+		if err == nil && pprofMount != "" {
+			mount := fmt.Sprintf("%s:%s", cwd, pprofMount)
+			// Find volume node
+			var volNode *yaml.Node
+			for i := 0; i < len(serviceNode.Content); i += 2 {
+				if serviceNode.Content[i].Value == "volumes" {
+					volNode = serviceNode.Content[i+1]
+					break
+				}
+			}
+			// Volumes node also guaranteed to exist
+			if volNode != nil {
+				volNode.Content = append(volNode.Content, &yaml.Node{
+					Kind: yaml.ScalarNode, Value: mount,
+				})
+			}
+		} else {
+			idc.logger.Warn("Failed to get current working directory for pprof mount", zap.Error(err))
+		}
+	}
 
 	return serviceNode, nil
 }

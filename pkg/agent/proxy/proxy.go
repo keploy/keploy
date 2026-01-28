@@ -626,7 +626,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if !generic {
-		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
