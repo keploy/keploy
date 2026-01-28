@@ -32,9 +32,39 @@ runs:
       run: |
         $ErrorActionPreference = 'Stop'
         $IMAGE_REF = "${{ inputs.image_tag }}"
-        Write-Host "Pulling $IMAGE_REF ..."
-        docker pull $IMAGE_REF
 
-        # Retag to the name your stack expects (works for tags and digests)
+        Write-Host "Ensuring Docker is running..."
+
+        try { wsl --shutdown } catch {}
+
+        Get-Service docker -ErrorAction SilentlyContinue |
+          Where-Object {$_.Status -ne "Running"} |
+          Start-Service
+
+        Write-Host "Waiting for Docker engine..."
+
+        for ($i = 0; $i -lt 60; $i++) {
+          try {
+            docker info | Out-Null
+            docker system info | Out-Null
+            docker image ls | Out-Null
+            break
+          } catch {
+            Start-Sleep 3
+          }
+        }
+
+        Write-Host "Pulling $IMAGE_REF ..."
+
+        for ($i = 0; $i -lt 5; $i++) {
+          try {
+            docker pull $IMAGE_REF
+            break
+          } catch {
+            Write-Host "Pull failed, retrying..."
+            Start-Sleep 5
+          }
+        }
+
         docker tag $IMAGE_REF ghcr.io/keploy/keploy:v${{ inputs.version }}
         docker images --format "{{.Repository}}:{{.Tag}}" | Select-String -Pattern "keploy/keploy" -SimpleMatch
