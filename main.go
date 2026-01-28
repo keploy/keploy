@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -97,7 +98,7 @@ func start(ctx context.Context) {
 					utils.LogError(logger, err, "Failed to close Keploy Logs")
 				}
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+			if err := utils.DeleteFileIfNotExists(logger, filepath.Join(os.TempDir(), "keploy-logs.txt")); err != nil {
 				return
 			}
 			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {

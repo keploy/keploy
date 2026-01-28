@@ -104,6 +104,14 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 
 	logger.Info("Starting Application:", zap.String("executing_cmd", cmd.String()))
 
+	// Handle terminal raw mode for Stdin pass-through
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err == nil {
+		defer func() {
+			_ = term.Restore(int(os.Stdin.Fd()), oldState)
+		}()
+	}
+
 	// Handle terminal resize - propagate size changes from real terminal to PTY
 	resizeCh := make(chan os.Signal, 1)
 	signal.Notify(resizeCh, syscall.SIGWINCH)
@@ -123,6 +131,11 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	}()
 	// Trigger initial resize
 	resizeCh <- syscall.SIGWINCH
+
+	// Pass Stdin to PTY
+	go func() {
+		_, _ = io.Copy(ptmx, os.Stdin)
+	}()
 
 	// Copy PTY output to real stdout
 	// This goroutine will exit when ptmx is closed after cmd.Wait() returns

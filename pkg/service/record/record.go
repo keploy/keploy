@@ -183,7 +183,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)

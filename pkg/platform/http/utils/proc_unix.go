@@ -15,8 +15,8 @@ import (
 // NewAgentCommand returns a command that runs elevated on Unix.
 // - If already root, we run the binary directly.
 // - Otherwise we prefix with "sudo".
-// - We put the process in its own group so we can signal the whole group.
-func NewAgentCommand(bin string, args []string) *exec.Cmd {
+// - Uses Setpgid for process group management.
+func NewAgentCommand(bin string, args []string, _ bool) *exec.Cmd {
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
 		cmd = exec.Command(bin, args...)
@@ -26,13 +26,14 @@ func NewAgentCommand(bin string, args []string) *exec.Cmd {
 		cmd = exec.Command("sudo", all...)
 	}
 
+	// Always use Setpgid for process group management
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true, // new process group: pgid == leader pid
+		Setpgid: true,
 	}
 	return cmd
 }
 
-// StartCommand simply starts the process; group set via SysProcAttr above.
+// StartCommand simply starts the process.
 func StartCommand(cmd *exec.Cmd) error {
 	return cmd.Start()
 }
@@ -44,7 +45,6 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	}
 	pid := cmd.Process.Pid
 
-	// Determine pgid (with Setpgid, leader's pgid == pid)
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
 		logger.Warn("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
@@ -63,7 +63,9 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 		return cmd.Process.Kill()
 	}
 
-	// Graceful: SIGTERM group
+	logger.Debug("sending SIGTERM to process group", zap.Int("pid", pid), zap.Int("pgid", pgid))
+
+	// Graceful: SIGTERM group (negative pgid sends to all processes in the group)
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
 		logger.Warn("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
 	}
