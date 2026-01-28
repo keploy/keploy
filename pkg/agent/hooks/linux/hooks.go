@@ -362,6 +362,10 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}
+	h.BindEvents = nil
+	h.clientRegistrationMap = nil
+	h.agentRegistartionMap = nil
+	h.redirectProxyMap = nil
 	h.objectsMutex.Unlock()
 
 	if opts.Mode == models.MODE_RECORD {

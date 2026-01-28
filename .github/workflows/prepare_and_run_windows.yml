@@ -139,17 +139,50 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Ensure Docker is running
+    - name: Ensure Docker daemon is ready
       shell: powershell
       run: |
-        $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
-        if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+        Write-Host "Resetting WSL..."
+        try {
+          wsl --shutdown
+        } catch {
+          Write-Host "WSL not running"
+        }
 
-    
+        Write-Host "Starting Docker service..."
+        Get-Service docker -ErrorAction SilentlyContinue | Where-Object {$_.Status -ne "Running"} | Start-Service
+
+        Write-Host "Waiting for Docker engine..."
+
+        for ($i = 0; $i -lt 60; $i++) {
+          try {
+            docker info | Out-Null
+            docker system info | Out-Null
+            docker image ls | Out-Null
+            Write-Host "Docker image subsystem ready"
+            exit 0
+          } catch {
+            Write-Host "Docker still initializing..."
+            Start-Sleep -Seconds 3
+          }
+        }
+
+        Write-Error "Docker never became fully ready"
+        exit 1
+
     - name: Pull Docker image
       shell: powershell
       run: |
-        docker pull ${{ needs.docker-image-build.outputs.image_tag }}
+        for ($i=0; $i -lt 5; $i++) {
+          try {
+            docker pull ${{ needs.docker-image-build.outputs.image_tag }}
+            exit 0
+          } catch {
+            Write-Host "Pull failed, retrying..."
+            Start-Sleep 5
+          }
+        }
+        exit 1
 
   run_golang_docker_windows:
     needs: [build-and-upload, docker-image-build, pull-docker-image]

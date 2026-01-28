@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
+	"fmt"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -81,7 +81,13 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 }
 
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
+	h.objectsMutex.RLock()
+	if h.BindEvents == nil {
+		h.objectsMutex.RUnlock()
+		return nil, fmt.Errorf("ebpf map is closed or nil")
+	}
 	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
+	h.objectsMutex.RUnlock()
 	if err != nil {
 		return nil, err // Return error if we can't create the reader
 	}
@@ -96,11 +102,7 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 			// Read raw data from the ring buffer
 			rec, err := rb.Read()
 			if err != nil {
-				// If the reader was closed, it's a clean shutdown.
-				if errors.Is(err, ringbuf.ErrClosed) {
-					return
-				}
-				continue
+				return
 			}
 
 			var e models.IngressEvent

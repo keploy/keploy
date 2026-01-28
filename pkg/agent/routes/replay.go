@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/agent"
+	"go.uber.org/zap"
 )
 
 func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
@@ -113,4 +115,76 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 
 	render.JSON(w, r, updateParamsRes)
 	render.Status(r, http.StatusOK)
+}
+
+func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
+	var req models.BeforeTestRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.BeforeTestRun(r.Context(), req.TestRunID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleBeforeTestSetCompose(w http.ResponseWriter, r *http.Request) {
+	var req models.BeforeTestSetCompose
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.BeforeTestSetCompose(r.Context(), req.TestRunID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleAfterTestRun(w http.ResponseWriter, r *http.Request) {
+	var req models.AfterTestRunReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.AfterTestRun(r.Context(), req.TestRunID, req.TestSetIDs, req.Coverage); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleBeforeSimulate(w http.ResponseWriter, r *http.Request) {
+	var req models.BeforeSimulateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.BeforeSimulate(r.Context(), req.TimeStamp, req.TestSetID, req.TestCaseName); err != nil {
+		a.logger.Error("failed to execute before simulate hook", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (a *Agent) HandleAfterSimulate(w http.ResponseWriter, r *http.Request) {
+	var req models.AfterSimulateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if err := agent.ActiveHooks.AfterSimulate(r.Context(), req.TestSetID, req.TestCaseName); err != nil {
+		a.logger.Error("failed to execute after simulate hook", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

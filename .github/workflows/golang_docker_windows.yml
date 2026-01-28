@@ -32,6 +32,32 @@ jobs:
         uses: actions/checkout@v4
         with:
           clean: true
+      
+      - name: Ensure Docker daemon is ready
+        shell: powershell
+        run: |
+          Write-Host "Resetting WSL..."
+          try { wsl --shutdown } catch {}
+
+          Write-Host "Starting Docker service..."
+          Get-Service docker -ErrorAction SilentlyContinue | Where-Object {$_.Status -ne "Running"} | Start-Service
+
+          Write-Host "Waiting for Docker engine..."
+
+          for ($i = 0; $i -lt 60; $i++) {
+            try {
+              docker info | Out-Null
+              docker system info | Out-Null
+              docker image ls | Out-Null
+              Write-Host "Docker ready"
+              exit 0
+            } catch {
+              Start-Sleep 3
+            }
+          }
+
+          Write-Error "Docker never became ready"
+          exit 1
 
       # --- CLI binaries (same as before) ---
       - name: Download Record Binary (${{ matrix.config.record_src }})
