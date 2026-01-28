@@ -50,8 +50,6 @@ type AgentClient struct {
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 }
 
-// var initStopScript []byte
-
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
 
 	return &AgentClient{
