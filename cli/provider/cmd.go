@@ -50,24 +50,24 @@ Note: If installed keploy without One Click Install, use "keploy example --custo
 var Examples = `
 Golang Application
 	Record:
-	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
+	keploy record -c "/path/to/user/app/binary"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
+	keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
-	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
+	keploy record -c “npm start --prefix /path/to/node/app"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
-	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
+	keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
+	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
 
 Docker
 	Alias:
@@ -80,6 +80,7 @@ Docker
 	Test:
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 10 --buildDelay 60
 
+Note: Keploy will automatically prompt for sudo password when elevated privileges are required for eBPF operations.
 `
 
 var ExampleOneClickInstall = `

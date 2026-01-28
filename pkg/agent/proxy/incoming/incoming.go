@@ -98,7 +98,7 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
-	pm.logger.Info("Stopping ingress event listener as the event channel was closed.")
+	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")
 	pm.StopAll()
 }
 

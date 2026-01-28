@@ -45,7 +45,8 @@ type AgentClient struct {
 	apps         sync.Map
 	client       http.Client
 	conf         *config.Config
-	agentCmd     *exec.Cmd // Track the agent process
+	agentCmd     *exec.Cmd             // Track the agent process
+	agentPTY     *agentUtils.PTYHandle // Track the PTY handle for interactive commands
 	mu           sync.Mutex
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 }
@@ -702,6 +703,11 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
+	// Check if we need PTY for interactive input (e.g., sudo password)
+	if agentUtils.NeedsPTY() {
+		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
+	}
+
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
 	cmd := agentUtils.NewAgentCommand(keployBin, args)
 
@@ -752,6 +758,73 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 			a.mu.Unlock()
 			if cmd != nil {
 				if stopErr := agentUtils.StopCommand(cmd, a.logger); stopErr != nil {
+					a.logger.Error("failed to forcefully stop agent", zap.Error(stopErr))
+				}
+			}
+			return nil
+		}
+		a.logger.Info("Keploy agent stopped.")
+		return nil
+	})
+
+	return nil
+}
+
+// startNativeAgentWithPTY starts the agent with PTY support for interactive input (e.g., sudo password)
+func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin string, args []string, grp *errgroup.Group) error {
+	// Create command configured for PTY
+	cmd := agentUtils.NewAgentCommandForPTY(keployBin, args)
+
+	a.logger.Debug("Starting native agent with PTY for interactive input")
+
+	// Start with PTY
+	ptyHandle, err := agentUtils.StartCommandWithPTY(cmd, a.logger)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to start keploy agent with PTY")
+		return err
+	}
+
+	a.mu.Lock()
+	a.agentCmd = cmd
+	a.agentPTY = ptyHandle
+	a.mu.Unlock()
+
+	pid := cmd.Process.Pid
+	a.logger.Debug("keploy agent started with PTY", zap.Int("pid", pid))
+
+	grp.Go(func() error {
+		defer utils.Recover(a.logger)
+
+		err := ptyHandle.Wait()
+		// If ctx wasn't cancelled, bubble up unexpected exits
+		if err != nil && ctx.Err() == nil {
+			a.logger.Error("agent process exited with error", zap.Error(err))
+			return err
+		}
+		a.mu.Lock()
+		a.agentCmd = nil
+		a.agentPTY = nil
+		a.mu.Unlock()
+		a.logger.Debug("agent process stopped")
+		return nil
+	})
+
+	grp.Go(func() error {
+		defer utils.Recover(a.logger)
+		<-ctx.Done()
+		if a.conf.Agent.AgentURI == "" {
+			return nil
+		}
+		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
+		a.logger.Info("Stopping keploy agent")
+		if err := a.requestAgentStop(); err != nil {
+			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			// Fallback: forcefully stop the agent process
+			a.mu.Lock()
+			ptyHandle := a.agentPTY
+			a.mu.Unlock()
+			if ptyHandle != nil {
+				if stopErr := agentUtils.StopPTYCommand(ptyHandle, a.logger); stopErr != nil {
 					a.logger.Error("failed to forcefully stop agent", zap.Error(stopErr))
 				}
 			}
@@ -974,21 +1047,27 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 
 		containerName := opts.KeployContainer
 
-		args := []string{"docker", "stop", opts.KeployContainer}
-		var stopCmd *exec.Cmd
-
-		// Conditionally add "sudo" only for Linux
-		if runtime.GOOS == "linux" {
-			stopCmd = exec.Command("sudo", args...)
-		} else {
-			stopCmd = exec.Command(args[0], args[1:]...)
-		}
-
+		// Try stopping the container without sudo first (works if user is in docker group)
+		stopCmd := exec.Command("docker", "stop", containerName)
 		if output, err := stopCmd.CombinedOutput(); err != nil {
-			logger.Warn("Could not stop the docker container. It may have already stopped.",
-				zap.String("container", containerName),
-				zap.Error(err),
-				zap.String("output", string(output)))
+			// If that fails on Linux, try with sudo -n (non-interactive, won't prompt for password)
+			if runtime.GOOS == "linux" {
+				logger.Debug("docker stop without sudo failed, trying with sudo -n", zap.Error(err))
+				stopCmd = exec.Command("sudo", "-n", "docker", "stop", containerName)
+				if output, err := stopCmd.CombinedOutput(); err != nil {
+					logger.Warn("Could not stop the docker container. It may have already stopped.",
+						zap.String("container", containerName),
+						zap.Error(err),
+						zap.String("output", string(output)))
+				} else {
+					logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
+				}
+			} else {
+				logger.Warn("Could not stop the docker container. It may have already stopped.",
+					zap.String("container", containerName),
+					zap.Error(err),
+					zap.String("output", string(output)))
+			}
 		} else {
 			logger.Debug("Successfully sent stop command to the container.", zap.String("container", containerName))
 		}
@@ -999,10 +1078,15 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return nil
 	}
 
+	logger.Debug("running the following command to start agent in docker", zap.String("command", cmd.String()))
+
+	// Check if we need PTY for interactive input (e.g., sudo password on Linux)
+	if agentUtils.NeedsPTY() {
+		return a.startInDockerWithPTY(ctx, logger, cmd)
+	}
+
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	logger.Debug("running the following command to start agent in docker", zap.String("command", cmd.String()))
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.Canceled {
@@ -1011,6 +1095,48 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 			return nil
 		}
 		utils.LogError(logger, err, "failed to run keploy agent in docker")
+		return err
+	}
+
+	return nil
+}
+
+// startInDockerWithPTY starts the docker agent with PTY support for interactive input (e.g., sudo password)
+func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logger, cmd *exec.Cmd) error {
+	// Configure command for PTY execution (OS-specific)
+	agentUtils.ConfigureCommandForPTY(cmd)
+
+	logger.Debug("Starting docker agent with PTY for interactive input")
+
+	// Start with PTY
+	ptyHandle, err := agentUtils.StartCommandWithPTY(cmd, logger)
+	if err != nil {
+		utils.LogError(logger, err, "failed to start keploy agent in docker with PTY")
+		return err
+	}
+
+	a.mu.Lock()
+	a.agentCmd = cmd
+	a.agentPTY = ptyHandle
+	a.mu.Unlock()
+
+	pid := cmd.Process.Pid
+	logger.Debug("keploy agent in docker started with PTY", zap.Int("pid", pid))
+
+	// Wait for the command to finish
+	err = ptyHandle.Wait()
+
+	a.mu.Lock()
+	a.agentCmd = nil
+	a.agentPTY = nil
+	a.mu.Unlock()
+
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			logger.Info("Keploy agent in docker stopped gracefully.")
+			return nil
+		}
+		utils.LogError(logger, err, "failed to run keploy agent in docker with PTY")
 		return err
 	}
 
@@ -1043,7 +1169,7 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error 
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				a.logger.Info("Successfully marked agent as ready")
+				a.logger.Debug("Successfully marked agent as ready")
 				return nil
 			}
 			a.logger.Warn("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
