@@ -33,6 +33,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	agentReadyTimeout       = 2 * time.Minute
+	agentReadyRetryInterval = 2 * time.Second
+)
+
 // TODO: Need to refactor this file
 type AgentClient struct {
 	logger       *zap.Logger
@@ -59,7 +64,7 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 
 func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 
-	a.logger.Info("🔵 Connecting to incoming test cases stream...")
+	a.logger.Debug("Connecting to incoming test cases stream...")
 
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
@@ -131,13 +136,13 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		}
 	}()
 
-	a.logger.Info("🟢 Successfully connected to incoming test cases stream.")
+	a.logger.Debug("Successfully connected to incoming test cases stream.")
 	return tcChan, nil
 }
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 
-	a.logger.Info("🔵 Connecting to outgoing mocks stream...")
+	a.logger.Debug("Connecting to outgoing mocks stream...")
 
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
@@ -203,7 +208,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil
 	})
 
-	a.logger.Info("🟢 Successfully connected to outgoing mocks stream.")
+	a.logger.Debug("Successfully connected to outgoing mocks stream.")
 
 	return mockChan, nil
 }
@@ -874,14 +879,15 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 
-	a.logger.Info("Using available ports",
+	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
 		zap.Uint32("proxy-port", proxyPort),
 		zap.Uint32("dns-port", dnsPort))
 
 	if isDockerCmd {
 
-		a.logger.Info("Application command provided :", zap.String("cmd", cmd))
+		var origCmd = cmd
+		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
@@ -895,7 +901,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
 
-		a.logger.Info("Application command to execute :", zap.String("cmd", cmd))
+		if origCmd != cmd {
+			a.logger.Info(
+				"Updated user command to allow Keploy to serve traffic before the app",
+				zap.String("cmd", cmd),
+			)
+		}
 	}
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
@@ -945,7 +956,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return err
 	}
 
-	a.logger.Info("Client setup completed successfully")
+	a.logger.Debug("Keploy client setup completed successfully")
 	return nil
 }
 
@@ -1030,16 +1041,41 @@ func (a *AgentClient) GetErrorChannel() <-chan error {
 }
 
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
+	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI), nil)
-	if err != nil {
-		return err
+	ticker := time.NewTicker(agentReadyRetryInterval)
+	defer ticker.Stop()
+
+	url := fmt.Sprintf("%s/agent/ready", a.conf.Agent.AgentURI)
+
+	for {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+		if err != nil {
+			return err
+		}
+
+		resp, err := a.client.Do(req)
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				a.logger.Info("Successfully marked agent as ready")
+				return nil
+			}
+			a.logger.Warn("Agent returned non-200 status for ready check", zap.Int("status", resp.StatusCode))
+		} else {
+			a.logger.Debug("Failed to call agent ready endpoint, retrying...", zap.Error(err))
+		}
+
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for agent to become ready")
+			}
+			return ctx.Err()
+		case <-ticker.C:
+			// retry
+		}
 	}
-
-	_, err = a.client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
