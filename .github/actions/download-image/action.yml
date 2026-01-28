@@ -33,27 +33,6 @@ runs:
         $ErrorActionPreference = 'Stop'
         $IMAGE_REF = "${{ inputs.image_tag }}"
 
-        Write-Host "Ensuring Docker is running..."
-
-        try { wsl --shutdown } catch {}
-
-        Get-Service docker -ErrorAction SilentlyContinue |
-          Where-Object {$_.Status -ne "Running"} |
-          Start-Service
-
-        Write-Host "Waiting for Docker engine..."
-
-        for ($i = 0; $i -lt 60; $i++) {
-          try {
-            docker info | Out-Null
-            docker system info | Out-Null
-            docker image ls | Out-Null
-            break
-          } catch {
-            Start-Sleep 3
-          }
-        }
-
         Write-Host "Pulling $IMAGE_REF ..."
 
         for ($i = 0; $i -lt 5; $i++) {
