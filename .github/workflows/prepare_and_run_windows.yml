@@ -143,7 +143,11 @@ jobs:
       shell: powershell
       run: |
         Write-Host "Resetting WSL..."
-        wsl --shutdown || echo "WSL not running"
+        try {
+          wsl --shutdown
+        } catch {
+          Write-Host "WSL not running"
+        }
 
         Write-Host "Starting Docker service..."
         Get-Service docker -ErrorAction SilentlyContinue | Where-Object {$_.Status -ne "Running"} | Start-Service
