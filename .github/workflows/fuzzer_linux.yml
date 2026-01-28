@@ -154,7 +154,7 @@ jobs:
         id: mysql_fuzzer
         run: |
           set -e
-          KEY="releases/mysql-fuzzer/latest/mysql-fuzzer-linux-amd64.tar.gz"
+          KEY="releases/mysql-fuzzer/1.0.0-test/mysql-fuzzer-linux-amd64.tar.gz"
           aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
           tar -xzf mysql-fuzzer-linux-amd64.tar.gz
           chmod +x ./mysql-fuzzer
