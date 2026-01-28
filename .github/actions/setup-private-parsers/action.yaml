@@ -12,7 +12,7 @@ inputs:
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
-    default: 'a19d0961913d6f0afe28df130619b9699918cfea'
+    default: '1cdf341d3602dd94e1c690bcc530daad197a26b4'
 
 runs:
   using: composite
