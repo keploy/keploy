@@ -516,17 +516,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	// Debug log for initial buffer contents
-	bufPreview := initialBuf
-	if len(bufPreview) > 32 {
-		bufPreview = bufPreview[:32]
-	}
-	logger.Debug("initial buffer read",
-		zap.Int("buffer_size", len(initialBuf)),
-		zap.String("buffer_preview_string", string(bufPreview)),
-		zap.Binary("buffer_preview_hex", bufPreview),
-	)
-
 	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
 		// HTTP headers are never chunked according to the HTTP protocol,
 		// but at the TCP layer, we cannot be sure if we have received the entire
@@ -591,15 +580,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
-			}
-			// Log ALPN negotiated protocol for debugging
-			if tlsConn, ok := dstConn.(*tls.Conn); ok {
-				state := tlsConn.ConnectionState()
-				logger.Debug("TLS connection established",
-					zap.String("negotiated_protocol (ALPN)", state.NegotiatedProtocol),
-					zap.String("server_name", state.ServerName),
-					zap.Uint16("tls_version", state.Version),
-				)
 			}
 		}
 
