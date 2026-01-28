@@ -62,6 +62,7 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
+	nsSwitchMutex     sync.Mutex
 	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
@@ -255,6 +256,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 
+		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
 			// reset the hosts config in nsswitch.conf of the system (in test mode)
 			err = p.resetNsSwitchConfig()
@@ -262,6 +264,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
 			}
 		}
+		p.nsSwitchMutex.Unlock()
 	}()
 
 	for {
@@ -764,6 +767,8 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
 	}
 
+	p.nsSwitchMutex.Lock()
+	defer p.nsSwitchMutex.Unlock()
 	if string(p.nsswitchData) == "" {
 		// setup the nsswitch config to redirect the DNS queries to the proxy
 		err := p.setupNsswitchConfig()

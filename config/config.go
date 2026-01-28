@@ -138,6 +138,7 @@ type Test struct {
 	FallBackOnMiss      bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
 	JacocoAgentPath     string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
 	BasePath            string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	PgBindParamMatch   string              `json:"pgBindParamMatch" yaml:"pgBindParamMatch" mapstructure:"pgBindParamMatch"` // Match mode for Postgres Bind params (strict|len|off)
 	Mocking             bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests        map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 	DisableLineCoverage bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
