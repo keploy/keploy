@@ -144,7 +144,14 @@ if [ "$MODE" = "incoming" ]; then
  "$FUZZER_CLIENT_BIN" --http :18080 2>&1 | tee client_incoming.txt &
  sleep 10
 
-
+ echo "Waiting for client to listen on 18080..."
+ for i in {1..60}; do
+  if nc -z localhost 18080; then
+   echo "Client is up!"
+   break
+  fi
+  sleep 1
+ done
  # Kick off 1000 unary RPC fuzz calls
  curl -sS -X POST http://localhost:18080/run \
    -H 'Content-Type: application/json' \
@@ -238,7 +245,14 @@ elif [ "$MODE" = "outgoing" ]; then
  "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
  sleep 10
 
-
+ echo "Waiting for client to listen on 18080..."
+ for i in {1..60}; do
+  if nc -z localhost 18080; then
+   echo "Client is up!"
+   break
+  fi
+  sleep 1
+ done
  curl -sS -X POST http://localhost:18080/run \
    -H 'Content-Type: application/json' \
    -d '{
