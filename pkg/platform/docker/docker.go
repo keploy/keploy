@@ -555,7 +555,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
-
+	if models.IsAnsiDisabled {
+		command = append(command, "--disable-ansi")
+	}
 	if len(opts.PassThroughPorts) > 0 {
 		portStrings := make([]string, len(opts.PassThroughPorts))
 		for i, port := range opts.PassThroughPorts {
