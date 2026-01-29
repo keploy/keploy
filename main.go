@@ -52,6 +52,24 @@ func start(ctx context.Context) {
 	}
 	utils.LogFile = logFile
 
+	defer func() {
+		inDocker := os.Getenv("KEPLOY_INDOCKER")
+		if inDocker != "true" {
+			if utils.LogFile != nil {
+				err := utils.LogFile.Close()
+				if err != nil {
+					utils.LogError(logger, err, "Failed to close Keploy Logs")
+				}
+			}
+			if err := utils.DeleteFileIfNotExists(logger, filepath.Join(os.TempDir(), "keploy-logs.txt")); err != nil {
+				return
+			}
+			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+				return
+			}
+		}
+	}()
+
 	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
 		if err != nil {
@@ -64,6 +82,9 @@ func start(ctx context.Context) {
 				logger.Info("CPU profiling enabled", zap.String("file", cpuProfile))
 				defer func() {
 					pprof.StopCPUProfile()
+					if err := f.Sync(); err != nil {
+						logger.Error("could not sync CPU profile file", zap.Error(err))
+					}
 					f.Close()
 					logger.Info("CPU profiling stopped", zap.String("file", cpuProfile))
 				}()
@@ -84,28 +105,14 @@ func start(ctx context.Context) {
 			if err := pprof.WriteHeapProfile(f); err != nil {
 				logger.Error("could not write Heap profile", zap.Error(err))
 			} else {
+				if err := f.Sync(); err != nil {
+					logger.Error("could not sync Heap profile file", zap.Error(err))
+				}
 				logger.Info("Heap profile written", zap.String("file", heapProfile))
 			}
 		}()
 	}
 
-	defer func() {
-		inDocker := os.Getenv("KEPLOY_INDOCKER")
-		if inDocker != "true" {
-			if utils.LogFile != nil {
-				err := utils.LogFile.Close()
-				if err != nil {
-					utils.LogError(logger, err, "Failed to close Keploy Logs")
-				}
-			}
-			if err := utils.DeleteFileIfNotExists(logger, filepath.Join(os.TempDir(), "keploy-logs.txt")); err != nil {
-				return
-			}
-			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-				return
-			}
-		}
-	}()
 	defer utils.Recover(logger)
 
 	// The 'umask' command is commonly used in various operating systems to regulate the permissions of newly created files.

@@ -66,7 +66,10 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	logPath := filepath.Join(os.TempDir(), "keploy-logs.txt")
+	logPath := os.Getenv("KEPLOY_LOG_PATH")
+	if logPath == "" {
+		logPath = filepath.Join(os.TempDir(), "keploy-logs.txt")
+	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)

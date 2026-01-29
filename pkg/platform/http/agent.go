@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -706,11 +707,29 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// PTY is only needed for Docker Compose which has specific terminal requirements.
 	const usePTY = false
 
+	// Prepare environment variables for profiling
+	var env []string
+	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
+		if ext := filepath.Ext(cpuProfile); ext != "" {
+			env = append(env, fmt.Sprintf("CPU_PROFILE=%s_agent%s", strings.TrimSuffix(cpuProfile, ext), ext))
+		} else {
+			env = append(env, fmt.Sprintf("CPU_PROFILE=%s_agent", cpuProfile))
+		}
+	}
+	if heapProfile := os.Getenv("HEAP_PROFILE"); heapProfile != "" {
+		if ext := filepath.Ext(heapProfile); ext != "" {
+			env = append(env, fmt.Sprintf("HEAP_PROFILE=%s_agent%s", strings.TrimSuffix(heapProfile, ext), ext))
+		} else {
+			env = append(env, fmt.Sprintf("HEAP_PROFILE=%s_agent", heapProfile))
+		}
+	}
+
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
-	cmd := agentUtils.NewAgentCommand(keployBin, args, usePTY)
+	cmd := agentUtils.NewAgentCommand(keployBin, args, usePTY, env)
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
 	if err := agentUtils.StartCommand(cmd); err != nil {
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err

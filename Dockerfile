@@ -11,7 +11,12 @@ ARG SERVER_URL
 
 # Copy the Go module files and download dependencies
 COPY go.mod go.sum /app/
-RUN go mod download
+
+RUN --mount=type=ssh \
+    mkdir -p -m 0700 ~/.ssh && \
+    ssh-keyscan github.com >> ~/.ssh/known_hosts && \
+    git config --global url."git@github.com:".insteadOf "https://github.com/" && \
+    go mod download
 
 # Copy the contents of the current directory into the build container
 COPY . /app

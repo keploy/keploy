@@ -5,6 +5,7 @@ package utils
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -15,8 +16,11 @@ import (
 
 // NewAgentCommand on Windows returns a plain command (no sudo).
 // If the agent needs admin, run the parent process with Administrator rights.
-func NewAgentCommand(bin string, args []string, _ bool) *exec.Cmd {
+func NewAgentCommand(bin string, args []string, _ bool, env []string) *exec.Cmd {
 	cmd := exec.Command(bin, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	// Run in a separate process group so Ctrl+C in the parent console doesn't hit the agent.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,

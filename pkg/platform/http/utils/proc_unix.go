@@ -16,13 +16,20 @@ import (
 // - If already root, we run the binary directly.
 // - Otherwise we prefix with "sudo".
 // - Uses Setpgid for process group management.
-func NewAgentCommand(bin string, args []string, _ bool) *exec.Cmd {
+func NewAgentCommand(bin string, args []string, _ bool, env []string) *exec.Cmd {
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
 		cmd = exec.Command(bin, args...)
+		if len(env) > 0 {
+			cmd.Env = append(os.Environ(), env...)
+		}
 	} else {
-		// sudo <bin> <args...>
-		all := append([]string{bin}, args...)
+		// sudo [ENV=VAL...] <bin> <args...>
+		// We prepend env vars to the command arguments for sudo
+		all := make([]string, 0, len(env)+1+len(args))
+		all = append(all, env...)
+		all = append(all, bin)
+		all = append(all, args...)
 		cmd = exec.Command("sudo", all...)
 	}
 
@@ -58,7 +65,7 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 			}
 			logger.Warn("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(10 * time.Second)
 		// Force
 		return cmd.Process.Kill()
 	}
