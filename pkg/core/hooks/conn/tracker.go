@@ -93,6 +93,9 @@ type Tracker struct {
 	streamMgr        StreamManager
 	protocolDetected bool
 	buffer           []byte
+
+	// ServerPort is the port on which the server accepted this connection (for incoming connections)
+	serverPort uint16
 }
 
 // NewTracker creates a new connection tracker
@@ -193,10 +196,16 @@ func (conn *Tracker) AddOpenEvent(event SocketOpenEvent) {
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
 	conn.addr = event.Addr
+	conn.serverPort = event.ServerPort
 	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
 		conn.logger.Debug("Changed open info timestamp due to new request", zap.Uint64("from", conn.openTimestamp), zap.Uint64("to", event.TimestampNano))
 	}
 	conn.openTimestamp = event.TimestampNano
+	if conn.serverPort > 0 {
+		conn.logger.Debug("Stored server port from open event", zap.Uint16("serverPort", conn.serverPort))
+	} else {
+		conn.logger.Debug("Server port not available in open event (bind hooks may not be attached or port lookup failed)")
+	}
 }
 
 func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
@@ -310,8 +319,15 @@ func (conn *Tracker) getHTTP2CompletedStream() *pkg.HTTP2Stream {
 	return stream
 }
 
+// GetServerPort returns the server port for this connection
+func (conn *Tracker) GetServerPort() uint16 {
+	conn.mutex.RLock()
+	defer conn.mutex.RUnlock()
+	return conn.serverPort
+}
+
 // Existing HTTP/1 completion check
-func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Time) {
+func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Time, uint16) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 
@@ -462,7 +478,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestamps, respTimestamp))
 	}
 
-	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp
+	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp, conn.serverPort
 }
 
 // Add HTTP/2 specific handling

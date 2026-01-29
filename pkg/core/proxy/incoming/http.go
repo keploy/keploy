@@ -82,10 +82,16 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr 
 			return
 		}
 
-		go func() {
+		// Extract server port from the upstream connection
+		var serverPort uint16
+		if addr, ok := upConn.RemoteAddr().(*net.TCPAddr); ok {
+			serverPort = uint16(addr.Port)
+		}
+
+		go func(port uint16) {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.Capture(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, opts)
-		}()
+			hooksUtils.Capture(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, opts, port)
+		}(serverPort)
 	}
 }

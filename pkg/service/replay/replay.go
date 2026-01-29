@@ -1120,19 +1120,49 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		// Handle user-provided http port replacement
-		if r.config.Test.Port != 0 && testCase.Kind == models.HTTP {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.Port)))
-			if err != nil {
-				break
+		// Handle port replacement with priority: AppPort (captured during recording) > flag value
+		if testCase.Kind == models.HTTP {
+			if testCase.AppPort != 0 {
+				// Use captured app_port from recording
+				if r.config.Test.Port != 0 && r.config.Test.Port != uint32(testCase.AppPort) {
+					r.logger.Warn("Ignoring user-provided port flag, using captured app_port from recording",
+						zap.Uint32("flagPort", r.config.Test.Port),
+						zap.Uint16("appPort", testCase.AppPort),
+						zap.String("testCase", testCase.Name))
+				}
+				err = r.replacePortInTestCase(testCase, strconv.Itoa(int(testCase.AppPort)))
+				if err != nil {
+					break
+				}
+			} else if r.config.Test.Port != 0 {
+				// Fallback to user-provided port (backward compatibility for old test cases without app_port)
+				err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.Port)))
+				if err != nil {
+					break
+				}
 			}
 		}
 
-		// Handle user-provided grpc port replacement
-		if r.config.Test.GRPCPort != 0 && testCase.Kind == models.GRPC_EXPORT {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.GRPCPort)))
-			if err != nil {
-				break
+		// Handle gRPC port replacement with same priority: AppPort > flag value
+		if testCase.Kind == models.GRPC_EXPORT {
+			if testCase.AppPort != 0 {
+				// Use captured app_port from recording
+				if r.config.Test.GRPCPort != 0 && r.config.Test.GRPCPort != uint32(testCase.AppPort) {
+					r.logger.Warn("Ignoring user-provided gRPC port flag, using captured app_port from recording",
+						zap.Uint32("flagGRPCPort", r.config.Test.GRPCPort),
+						zap.Uint16("appPort", testCase.AppPort),
+						zap.String("testCase", testCase.Name))
+				}
+				err = r.replacePortInTestCase(testCase, strconv.Itoa(int(testCase.AppPort)))
+				if err != nil {
+					break
+				}
+			} else if r.config.Test.GRPCPort != 0 {
+				// Fallback to user-provided port (backward compatibility for old test cases without app_port)
+				err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.GRPCPort)))
+				if err != nil {
+					break
+				}
 			}
 		}
 
