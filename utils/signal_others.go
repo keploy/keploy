@@ -4,10 +4,12 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,32 +49,67 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// Check if the command is docker-compose related and output is a TTY
 	cmdType := FindDockerCmd(userCmd)
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	stdoutWriter := io.Writer(os.Stdout)
+	stderrWriter := io.Writer(os.Stderr)
+	if IsMCPStdio() {
+		stdoutWriter = os.Stderr
+	}
 
 	// Use PTY for Docker Compose when running in a TTY to avoid SIGTTOU/SIGTTIN issues
 	// Docker Compose needs to read terminal size for progress bars, but Setpgid: true
 	// puts it in a background process group which causes the OS to pause it.
 	// A PTY gives Docker Compose its own terminal to work with.
 	if cmdType == DockerCompose && isTTY {
-		// For PTY, we use Setsid to create a new session instead of Setpgid
-		// This allows the PTY to become the controlling terminal
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true,
+		// If running in MCP mode, we cannot use PTY effectively because io.Copy to stdout
+		// interferes with the JSON-RPC protocol. Instead, we pipe logs to a file.
+		if IsMCPStdio() {
+			// Create log file for docker-compose output in OS-specific temp directory
+			timestamp := time.Now().Unix()
+			logFileName := fmt.Sprintf("docker-compose-tmp-keploy-%d.logs", timestamp)
+			logFilePath := filepath.Join(os.TempDir(), logFileName)
+
+			logFile, err := os.Create(logFilePath)
+			if err != nil {
+				logger.Error("failed to create log file for docker-compose output", zap.Error(err))
+				return CmdError{Type: Init, Err: err}
+			}
+			// This will close when ExecuteCommand returns, which is execution finishes
+			defer logFile.Close()
+
+			// Set command output to the log file
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+
+			// Use Setpgid for process group management (like non-PTY)
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Setpgid: true,
+			}
+
+			logger.Debug("Output is a TTY (Docker Compose -> Logs to file)")
+			logger.Info("Docker compose logs are being written to file", zap.String("path", logFilePath))
+			logger.Info("You can view live logs using tail -f", zap.String("command", "tail -f "+logFilePath))
+		} else {
+			// For PTY, we use Setsid to create a new session instead of Setpgid
+			// This allows the PTY to become the controlling terminal
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Setsid: true,
+			}
+			logger.Debug("Output is a TTY (Docker Compose -> PTY)")
+			return executeWithPTY(ctx, logger, cmd)
 		}
-		logger.Debug("Output is a TTY (Docker Compose -> PTY)")
-		return executeWithPTY(ctx, logger, cmd)
-	}
+	} else {
+		// For non-PTY execution, use Setpgid for process group management
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
 
-	// For non-PTY execution, use Setpgid for process group management
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
+		if cmdType == DockerCompose {
+			logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
+		}
+		// Set the output of the command to stdout/stderr
+		cmd.Stdout = stdoutWriter
+		cmd.Stderr = stderrWriter
 	}
-
-	if cmdType == DockerCompose {
-		logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
-	}
-	// Set the output of the command to stdout/stderr
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
 	err := cmd.Start()

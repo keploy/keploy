@@ -149,3 +149,18 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	}
 	return logger, nil
 }
+
+// NewStderrLogger creates a logger that writes to stderr without ANSI color codes.
+func NewStderrLogger(level zapcore.Level) (*zap.Logger, error) {
+	cfg := zap.NewDevelopmentConfig()
+	cfg.Encoding = "console"
+	cfg.EncoderConfig.EncodeTime = customTimeEncoder
+	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	cfg.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
+	cfg.EncoderConfig.EncodeCaller = nil
+	cfg.DisableStacktrace = true
+	cfg.Level = zap.NewAtomicLevelAt(level)
+	cfg.OutputPaths = []string{"stderr"}
+	cfg.ErrorOutputPaths = []string{"stderr"}
+	return cfg.Build()
+}
