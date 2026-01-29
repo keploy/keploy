@@ -118,10 +118,14 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		for {
 			var testCase models.TestCase
 			if err := decoder.Decode(&testCase); err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
+				if err == io.EOF || err == io.ErrUnexpectedEOF || ctx.Err() != nil {
 					// End of the stream
 					break
 				}
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					break
+				}
+
 				utils.LogError(a.logger, err, "failed to decode test case from stream")
 				break
 			}
