@@ -1293,7 +1293,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Res:          *httpResp,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-					Noise:        testCase.Noise,
+					Noise:        r.getEffectiveNoise(testSetID, testCase.Noise),
 					Result:       *testResult,
 					TimeTaken:    time.Since(started).String(),
 				}
@@ -1646,18 +1646,37 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
-	noiseConfig := r.config.Test.GlobalNoise.Global
-	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+	globalNoise := r.config.Test.GlobalNoise.Global
+	tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]
+	noiseConfig := globalNoise
+	if ok {
+		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
 	}
+
+	r.logger.Debug("applying noise configuration",
+		zap.String("testSet", testSetID),
+		zap.Any("globalNoise", globalNoise),
+		zap.Any("testSetNoise", tsNoise),
+		zap.Any("effectiveNoise", noiseConfig),
+	)
+
 	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
-	noiseConfig := r.config.Test.GlobalNoise.Global
-	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+	globalNoise := r.config.Test.GlobalNoise.Global
+	tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]
+	noiseConfig := globalNoise
+	if ok {
+		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
 	}
+
+	r.logger.Debug("applying grpc noise configuration",
+		zap.String("testSet", testSetID),
+		zap.Any("globalNoise", globalNoise),
+		zap.Any("testSetNoise", tsNoise),
+		zap.Any("effectiveNoise", noiseConfig),
+	)
 
 	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 
@@ -2258,4 +2277,34 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 
 		}
 	}
+}
+
+func (r *Replayer) getEffectiveNoise(testSetID string, tcNoise map[string][]string) map[string][]string {
+	globalNoise := r.config.Test.GlobalNoise.Global
+	tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]
+	noiseConfig := globalNoise
+	if ok {
+		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
+	}
+
+	// Flatten noiseConfig into tcNoise format
+	effective := make(map[string][]string)
+
+	// Add global/testset noise first
+	if bodyNoise, ok := noiseConfig["body"]; ok {
+		for k, v := range bodyNoise {
+			effective["body."+k] = v
+		}
+	}
+	if headerNoise, ok := noiseConfig["header"]; ok {
+		for k, v := range headerNoise {
+			effective["header."+k] = v
+		}
+	}
+
+	// Overwrite with testcase noise
+	for k, v := range tcNoise {
+		effective[k] = v
+	}
+	return effective
 }
