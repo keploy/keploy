@@ -51,6 +51,15 @@ func start(ctx context.Context) {
 	}
 	utils.LogFile = logFile
 
+	// Early check: If Docker command detected and not running as root, re-exec with sudo
+	// This must happen before any other initialization to ensure clean process handoff
+	if utils.ShouldReexecWithSudo() {
+		utils.ReexecWithSudo(logger)
+		// ReexecWithSudo calls syscall.Exec which replaces the process, so this line
+		// is only reached if there's an error (which is handled inside ReexecWithSudo)
+		return
+	}
+
 	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
 		if err != nil {
@@ -145,5 +154,11 @@ func start(ctx context.Context) {
 			fmt.Println("Run 'keploy --help' for usage.")
 			os.Exit(1)
 		}
+	}
+
+	// Restore keploy folder ownership if running under sudo (for Docker mode)
+	// This ensures the next native run doesn't hit permission issues
+	if conf.Path != "" {
+		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
 }
