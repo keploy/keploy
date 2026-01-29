@@ -81,8 +81,8 @@ func CheckKeployFolderPermissions(logger *zap.Logger, keployPath string) ([]Perm
 							hasIssue = true
 						}
 					} else {
-						f.Close()
-						os.Remove(testFile)
+						_ = f.Close() // Ignore close error - file is just for permission testing
+						_ = os.Remove(testFile)
 					}
 				} else {
 					// For files, try to open for reading and writing
@@ -90,7 +90,7 @@ func CheckKeployFolderPermissions(logger *zap.Logger, keployPath string) ([]Perm
 					if readErr != nil {
 						hasIssue = true
 					} else {
-						f.Close()
+						_ = f.Close() // Ignore close error - file is just for permission testing
 					}
 
 					// Check write permission
@@ -100,7 +100,7 @@ func CheckKeployFolderPermissions(logger *zap.Logger, keployPath string) ([]Perm
 							hasIssue = true
 						}
 					} else {
-						f.Close()
+						_ = f.Close() // Ignore close error - file is just for permission testing
 					}
 				}
 
@@ -130,7 +130,7 @@ func CheckKeployFolderPermissions(logger *zap.Logger, keployPath string) ([]Perm
 
 // GetPermissionFixCommand returns the sudo command to fix keploy folder permissions.
 // This is used to prepend the fix command to docker commands so they run in the same PTY session.
-// Returns empty string if no fix is needed.
+// Returns empty string if the current user cannot be determined.
 func GetPermissionFixCommand(keployPath string) string {
 	currentUser, err := user.Current()
 	if err != nil {
@@ -277,7 +277,9 @@ func runSudoChown(ctx context.Context, username string, recursive bool, path str
 	if err != nil {
 		return fmt.Errorf("failed to open /dev/tty: %w", err)
 	}
-	defer tty.Close()
+	defer func() {
+		_ = tty.Close() // Ignore close error - tty is for terminal I/O, not data persistence
+	}()
 
 	// Reset terminal to sane mode before running sudo
 	// This ensures the terminal is in canonical mode with echo properly controlled
