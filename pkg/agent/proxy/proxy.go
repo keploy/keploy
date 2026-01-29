@@ -568,11 +568,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 
-		// Check if the traffic is HTTP/2 (gRPC) to set the correct ALPN
-		var nextProtos []string
-		if bytes.HasPrefix(initialBuf, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-			// Offer both h2 and http/1.1 to be compatible with dual-stack listeners.
-			// Ideally, the server should pick h2 for gRPC traffic.
+		nextProtos := []string{"http/1.1"} // default safe
+
+		if !util.IsHTTPReq(initialBuf) {
+			// not an HTTP/1.x request line; could be HTTP/2 (gRPC) frames
 			nextProtos = []string{"h2", "http/1.1"}
 		}
 
@@ -589,6 +588,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
 			}
+
+			conn := dstConn.(*tls.Conn)
+			state := conn.ConnectionState()
+
+			p.logger.Info("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg
