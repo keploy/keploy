@@ -656,24 +656,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		return fmt.Errorf("failed to get errorgroup from the context")
 	}
 
-	// Open the log file (truncate to start fresh)
-	filepath := "keploy_agent.log"
-	logFile, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to open log file")
-		return err
-	}
-
 	keployBin, err := utils.GetCurrentBinaryPath()
 	if err != nil {
-		if logFile != nil {
-			logFileCloseErr := logFile.Close()
-			if logFileCloseErr != nil {
-				utils.LogError(a.logger, logFileCloseErr, "failed to close log file")
-			}
-
-			utils.LogError(a.logger, err, "failed to get current keploy binary path")
-		}
+		utils.LogError(a.logger, err, "failed to get current keploy binary path")
 		return err
 	}
 
@@ -715,36 +700,38 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		// Join them with a comma and add as a single argument
 		args = append(args, "--pass-through-ports", strings.Join(portStrings, ","))
 	}
-	a.logger.Info("Starting native agent with args", zap.Strings("args", args))
 
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
-	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
-	cmd := agentUtils.NewAgentCommand(keployBin, args)
+	// Always use Setpgid (not Setsid) for native agent to avoid session-related issues.
+	// Direct stdout/stderr piping is sufficient for log visibility.
+	// PTY is only needed for Docker Compose which has specific terminal requirements.
+	const usePTY = false
 
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
+	cmd := agentUtils.NewAgentCommand(keployBin, args, usePTY)
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := agentUtils.StartCommand(cmd); err != nil {
+		utils.LogError(a.logger, err, "failed to start keploy agent")
+		return err
+	}
 
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
 	a.mu.Unlock()
-	// Start (OS-specific tweaks happen inside utils.StartCommand)
-	if err := agentUtils.StartCommand(cmd); err != nil {
-		if logFile != nil {
-			_ = logFile.Close()
-			utils.LogError(a.logger, err, "failed to start keploy agent")
-		}
-		return err
-	}
 
 	pid := cmd.Process.Pid
-	a.logger.Info("keploy agent started", zap.Int("pid", pid))
+	a.logger.Info("keploy agent started",
+		zap.Int("pid", pid),
+		zap.Strings("args", args),
+	)
 
 	grp.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer logFile.Close()
 
 		err := cmd.Wait()
 		// If ctx wasn't cancelled, bubble up unexpected exits
@@ -921,7 +908,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Info("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		agentCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
