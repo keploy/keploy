@@ -22,15 +22,22 @@ import (
 // NewAgentCommand returns a command that runs elevated on Unix.
 // - If already root, we run the binary directly.
 // - Otherwise we prefix with "sudo".
+// - If useCachedCreds is true, uses "sudo -n" (non-interactive) which relies on cached credentials.
 // - We put the process in its own group so we can signal the whole group.
-func NewAgentCommand(bin string, args []string) *exec.Cmd {
+func NewAgentCommand(bin string, args []string, useCachedCreds bool) *exec.Cmd {
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
 		cmd = exec.Command(bin, args...)
 	} else {
-		// sudo <bin> <args...>
-		all := append([]string{bin}, args...)
-		cmd = exec.Command("sudo", all...)
+		if useCachedCreds {
+			// sudo -n <bin> <args...> - non-interactive, uses cached credentials
+			all := append([]string{"-n", bin}, args...)
+			cmd = exec.Command("sudo", all...)
+		} else {
+			// sudo <bin> <args...> - may prompt for password
+			all := append([]string{bin}, args...)
+			cmd = exec.Command("sudo", all...)
+		}
 	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{

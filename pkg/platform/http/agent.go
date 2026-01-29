@@ -703,13 +703,19 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
+	// Check if sudo credentials are already cached (e.g., from permission fix)
+	// If cached, we can use sudo -n (non-interactive) and skip PTY
+	sudoCached := utils.AreSudoCredentialsCached()
+
 	// Check if we need PTY for interactive input (e.g., sudo password)
-	if agentUtils.NeedsPTY() {
+	// Skip PTY if credentials are already cached - use non-interactive sudo instead
+	if agentUtils.NeedsPTY() && !sudoCached {
 		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
 	}
 
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
-	cmd := agentUtils.NewAgentCommand(keployBin, args)
+	// If credentials are cached, this will use sudo -n (non-interactive)
+	cmd := agentUtils.NewAgentCommand(keployBin, args, sudoCached)
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -973,13 +979,16 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		agentCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
 		go pkg.AgentHealthTicker(agentCtx, a.logger, a.conf.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
+		case <-ctx.Done():
+			// Parent context cancelled (user pressed Ctrl+C)
+			return ctx.Err()
 		case <-agentCtx.Done():
 			return fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:

@@ -16,7 +16,8 @@ import (
 
 // NewAgentCommand on Windows returns a plain command (no sudo).
 // If the agent needs admin, run the parent process with Administrator rights.
-func NewAgentCommand(bin string, args []string) *exec.Cmd {
+// The useCachedCreds parameter is ignored on Windows.
+func NewAgentCommand(bin string, args []string, useCachedCreds bool) *exec.Cmd {
 	cmd := exec.Command(bin, args...)
 	// Run in a separate process group so Ctrl+C in the parent console doesn't hit the agent.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -27,7 +28,7 @@ func NewAgentCommand(bin string, args []string) *exec.Cmd {
 
 // NewAgentCommandForPTY on Windows is the same as NewAgentCommand since PTY is not supported.
 func NewAgentCommandForPTY(bin string, args []string) *exec.Cmd {
-	return NewAgentCommand(bin, args)
+	return NewAgentCommand(bin, args, false)
 }
 
 // NeedsPTY on Windows always returns false since PTY is not supported.
