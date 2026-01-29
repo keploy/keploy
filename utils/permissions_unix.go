@@ -324,8 +324,8 @@ func FixFilePermission(ctx context.Context, logger *zap.Logger, filePath string)
 // EnsureKeployFolderPermissions checks and fixes permission issues (both read and write) on the keploy folder.
 // This should be called once at startup before any file operations to ensure all files
 // are accessible by the current user. This prevents permission errors during test execution.
-// If deferForDocker is true, it stores the fix info for later use by docker PTY session instead of fixing now.
-func EnsureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployPath string, deferForDocker bool) error {
+// This function is only called for native mode - Docker commands use sudo re-exec instead.
+func EnsureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, keployPath string) error {
 	// Check if keploy folder exists
 	if _, err := os.Stat(keployPath); os.IsNotExist(err) {
 		// Folder doesn't exist yet - no permission issues to fix
@@ -339,39 +339,49 @@ func EnsureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, kepl
 
 	if len(permErrors) == 0 {
 		// No permission issues
-		PendingPermissionFix.HasIssues = false
 		return nil
 	}
 
 	// Log the problematic paths at debug level
 	logger.Debug("Found files/directories with permission issues in keploy folder", zap.Int("count", len(permErrors)))
 
-	if deferForDocker {
-		// Store for later - docker PTY will handle this
-		PendingPermissionFix.HasIssues = true
-		PendingPermissionFix.KeployPath = keployPath
-		PendingPermissionFix.PermErrors = permErrors
-
-		// Log the issue info so user knows what's happening
-		fmt.Println()
-		logger.Warn("The keploy folder contains files not accessible by current user (likely from running an older version with sudo).")
-		if len(permErrors) > 0 {
-			logger.Info("Files with permission issues:")
-			maxShow := 5
-			for i, pe := range permErrors {
-				if i >= maxShow {
-					logger.Info(fmt.Sprintf("  ... and %d more", len(permErrors)-maxShow))
-					break
-				}
-				logger.Info(fmt.Sprintf("  - %s (owner UID: %d)", pe.Path, pe.OwnerUID))
-			}
-		}
-		fmt.Println()
-		logger.Info("Permission fix will be included with the docker command (single password prompt).")
-		return nil
-	}
-
 	// Fix permissions on the entire keploy folder
 	// sudo -v will cache credentials, which will be used by subsequent sudo -n commands
 	return FixKeployFolderPermissions(ctx, logger, keployPath, permErrors)
+}
+
+// RestoreKeployFolderOwnership restores ownership of the keploy folder to the original user
+// after running with sudo. This is called at the end of Docker mode execution.
+// If SUDO_USER is set, it means we're running under sudo and should restore ownership.
+func RestoreKeployFolderOwnership(logger *zap.Logger, keployPath string) {
+	// Only restore if running under sudo (SUDO_USER will be set)
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser == "" {
+		// Not running under sudo, nothing to restore
+		return
+	}
+
+	// Check if keploy folder exists
+	if _, err := os.Stat(keployPath); os.IsNotExist(err) {
+		// Folder doesn't exist, nothing to restore
+		return
+	}
+
+	logger.Debug("Restoring keploy folder ownership to original user", zap.String("user", sudoUser), zap.String("path", keployPath))
+
+	// Run chown -R to restore ownership
+	// Since we're already running as root (under sudo), we don't need sudo here
+	cmd := exec.Command("chown", "-R", sudoUser, keployPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		logger.Warn("Failed to restore keploy folder ownership",
+			zap.String("user", sudoUser),
+			zap.String("path", keployPath),
+			zap.Error(err))
+		logger.Info(fmt.Sprintf("To fix manually, run: sudo chown -R %s %s", sudoUser, keployPath))
+	} else {
+		logger.Debug("Successfully restored keploy folder ownership", zap.String("user", sudoUser))
+	}
 }

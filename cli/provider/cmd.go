@@ -957,10 +957,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// Check and fix keploy folder permissions for native mode only
 		// (handles root-owned files from older sudo-based versions)
+		// Docker commands use sudo re-exec, so they run as root and don't need this
 		cmdType := utils.FindDockerCmd(c.cfg.Command)
 		if !utils.IsDockerCmd(cmdType) {
 			// Native mode: fix permissions immediately (this caches sudo credentials)
-			if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path, false); err != nil {
+			if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
 				utils.LogError(c.logger, err, "failed to ensure keploy folder permissions")
 				return err
 			}

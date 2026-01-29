@@ -49,7 +49,6 @@ func ReexecWithSudo(logger *zap.Logger) {
 
 	logger.Info("Docker command detected, re-executing with sudo for elevated privileges...")
 	logger.Debug("Re-exec command", zap.Strings("args", args))
-	logger.Info("Re-exec command", zap.Strings("args", args))
 
 	// Use syscall.Exec to replace the current process
 	// This means no parent process remains - clean handoff

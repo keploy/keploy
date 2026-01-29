@@ -1266,14 +1266,6 @@ type PermissionError struct {
 	IsRead   bool // true if it's a read permission issue, false if write
 }
 
-// PendingPermissionFix stores info about permission issues that need to be fixed.
-// This is used to defer fixing to docker PTY session.
-var PendingPermissionFix struct {
-	HasIssues  bool
-	KeployPath string
-	PermErrors []PermissionError
-}
-
 // AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"

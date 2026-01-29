@@ -46,6 +46,12 @@ func FixFilePermission(_ context.Context, _ *zap.Logger, _ string) error {
 
 // EnsureKeployFolderPermissions is a no-op on Windows.
 // Permission fixes using sudo/chown are not applicable on Windows.
-func EnsureKeployFolderPermissions(_ context.Context, _ *zap.Logger, _ string, _ bool) error {
+func EnsureKeployFolderPermissions(_ context.Context, _ *zap.Logger, _ string) error {
 	return nil
+}
+
+// RestoreKeployFolderOwnership is a no-op on Windows.
+// Ownership restoration using chown is not applicable on Windows.
+func RestoreKeployFolderOwnership(_ *zap.Logger, _ string) {
+	// No-op on Windows
 }
