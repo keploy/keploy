@@ -759,7 +759,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
-			SQLDelay:       time.Duration(r.config.Test.Delay),
+			SQLDelay:       r.config.Test.Delay,
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
@@ -808,7 +808,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// Delay for user application to run
 		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+		case <-time.After(r.config.Test.Delay):
 		case <-runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
@@ -850,7 +850,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
-			SQLDelay:       time.Duration(r.config.Test.Delay),
+			SQLDelay:       r.config.Test.Delay,
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
@@ -914,7 +914,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			// Delay for user application to run
 			select {
-			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			case <-time.After(r.config.Test.Delay):
 			case <-runTestSetCtx.Done():
 				return models.TestSetStatusUserAbort, context.Canceled
 			}

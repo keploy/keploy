@@ -131,7 +131,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += " --global-passthrough"
 		}
 		if opts.BuildDelay > 0 {
-			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			alias += fmt.Sprintf(" --build-delay %s", opts.BuildDelay)
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
@@ -192,7 +192,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				alias += " --global-passthrough"
 			}
 			if opts.BuildDelay > 0 {
-				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+				alias += fmt.Sprintf(" --build-delay %s", opts.BuildDelay)
 			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
@@ -237,7 +237,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += " --global-passthrough"
 		}
 		if opts.BuildDelay > 0 {
-			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			alias += fmt.Sprintf(" --build-delay %s", opts.BuildDelay)
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
@@ -297,7 +297,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				alias += " --global-passthrough"
 			}
 			if opts.BuildDelay > 0 {
-				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+				alias += fmt.Sprintf(" --build-delay %s", opts.BuildDelay)
 			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
@@ -343,7 +343,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += " --global-passthrough"
 		}
 		if opts.BuildDelay > 0 {
-			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			alias += fmt.Sprintf(" --build-delay %s", opts.BuildDelay)
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))

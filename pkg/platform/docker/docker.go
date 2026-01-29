@@ -553,7 +553,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 
 	if opts.BuildDelay > 0 {
-		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+		command = append(command, "--build-delay", opts.BuildDelay.String())
 	}
 
 	if len(opts.PassThroughPorts) > 0 {

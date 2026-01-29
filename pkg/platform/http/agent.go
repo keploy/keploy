@@ -704,7 +704,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--global-passthrough")
 	}
 	if opts.BuildDelay > 0 {
-		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+		args = append(args, "--build-delay", opts.BuildDelay.String())
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
