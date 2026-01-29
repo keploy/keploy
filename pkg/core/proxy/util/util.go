@@ -393,7 +393,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	} else {
 		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-		destConn, err = net.Dial("tcp", dstCfg.Addr)
+		destConn, err = net.DialTimeout("tcp", dstCfg.Addr, 10*time.Second)
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the destination server")
 			return nil, err
