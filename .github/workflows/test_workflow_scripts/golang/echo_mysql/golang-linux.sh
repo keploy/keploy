@@ -101,7 +101,7 @@ run_record_iteration() {
   sudo rm -f /tmp/keploy-logs.txt
 
   # Start recording in background so we capture its PID explicitly
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
+  "$RECORD_BIN" record -c "./urlShort" --generateGithubActions=false \
     2>&1 | tee "${app_name}.txt" & 
   local KEPLOY_PID=$!
 
@@ -189,7 +189,7 @@ set +e
 
 sudo rm -f /tmp/keploy-logs.txt
 
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
+"$REPLAY_BIN" test -c "./urlShort" --delay 7 --generateGithubActions=false \
   2>&1 | tee test_logs.txt || true
 REPLAY_RC=$?
 set -e
