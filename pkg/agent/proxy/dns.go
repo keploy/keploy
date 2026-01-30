@@ -31,7 +31,13 @@ func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	p.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.String("addr", server.Addr))
+		errMsg := "failed to start TCP DNS server"
+		if strings.Contains(err.Error(), "address already in use") {
+			errMsg = fmt.Sprintf("failed to start TCP DNS server: port %v is already in use. Try: 1) Check if another process is using this port with 'lsof -i :%v' 2) Stop the conflicting process or 3) Use a different DNS port with --dnsPort flag", p.DNSPort, p.DNSPort)
+		} else if strings.Contains(err.Error(), "permission denied") {
+			errMsg = fmt.Sprintf("failed to start TCP DNS server: permission denied on port %v. Try: 1) Run with sudo if using port < 1024 or 2) Use a higher port number with --dnsPort flag", p.DNSPort)
+		}
+		utils.LogError(p.logger, err, errMsg, zap.String("addr", server.Addr))
 	}
 	return nil
 }
@@ -54,7 +60,13 @@ func (p *Proxy) startUDPDNSServer(_ context.Context) error {
 	p.logger.Info(fmt.Sprintf("starting UDP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to start udp dns server", zap.String("addr", server.Addr))
+		errMsg := "failed to start UDP DNS server"
+		if strings.Contains(err.Error(), "address already in use") {
+			errMsg = fmt.Sprintf("failed to start UDP DNS server: port %v is already in use. Try: 1) Check if another process is using this port with 'lsof -i :%v' 2) Stop the conflicting process or 3) Use a different DNS port with --dnsPort flag", p.DNSPort, p.DNSPort)
+		} else if strings.Contains(err.Error(), "permission denied") {
+			errMsg = fmt.Sprintf("failed to start UDP DNS server: permission denied on port %v. Try: 1) Run with sudo if using port < 1024 or 2) Use a higher port number with --dnsPort flag", p.DNSPort)
+		}
+		utils.LogError(p.logger, err, errMsg, zap.String("addr", server.Addr))
 		return err
 	}
 	return nil
