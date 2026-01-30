@@ -237,7 +237,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if err != nil {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}
-		p.logger.Info("proxy stopped...")
+		p.logger.Debug("proxy stopped...")
 	}(listener)
 
 	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
@@ -351,6 +351,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	// Create a local copy of OutgoingOptions to avoid data race when multiple
+	// goroutines handle connections concurrently and modify DstCfg/Synchronous
+	outgoingOpts := rule.OutgoingOptions
+
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
 	var dstAddr string
@@ -417,7 +421,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 	if p.synchronous {
-		rule.OutgoingOptions.Synchronous = true
+		outgoingOpts.Synchronous = true
 	}
 
 	//checking for the destination port of "mysql"
@@ -432,10 +436,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstCfg := &models.ConditionalDstCfg{
 				Port: uint(destInfo.Port),
 			}
-			rule.DstCfg = dstCfg
+			outgoingOpts.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -451,7 +455,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			// Send specific error type to error channel for external monitoring
@@ -568,11 +572,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 
-		// Check if the traffic is HTTP/2 (gRPC) to set the correct ALPN
-		var nextProtos []string
-		if bytes.HasPrefix(initialBuf, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-			// Offer both h2 and http/1.1 to be compatible with dual-stack listeners.
-			// Ideally, the server should pick h2 for gRPC traffic.
+		nextProtos := []string{"http/1.1"} // default safe
+
+		if !util.IsHTTPReq(initialBuf) {
+			// not an HTTP/1.x request line; could be HTTP/2 (gRPC) frames
 			nextProtos = []string{"h2", "http/1.1"}
 		}
 
@@ -589,6 +592,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
 			}
+
+			conn := dstConn.(*tls.Conn)
+			state := conn.ConnectionState()
+
+			p.logger.Info("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -604,7 +612,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.Addr = dstAddr
 	}
 
-	rule.DstCfg = dstCfg
+	outgoingOpts.DstCfg = dstCfg
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
@@ -637,13 +645,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		case models.MODE_TEST:
-			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -660,13 +668,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -716,7 +724,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		}
 		p.logger.Warn("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
 	} else {
-		p.logger.Info("proxy stopped cleanly...")
+		p.logger.Debug("proxy stopped cleanly...")
 	}
 }
 
