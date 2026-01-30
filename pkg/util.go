@@ -220,7 +220,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 		// Warn if config port differs from recorded app_port (may cause test failures)
 		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-			logger.Warn("Using port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
+			logger.Info("Using port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
 				zap.Uint32("config_port", configPort),
 				zap.Uint16("recorded_app_port", tc.AppPort),
 				zap.String("url", testURL))

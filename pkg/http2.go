@@ -525,7 +525,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 		// Warn if config port differs from recorded app_port (may cause test failures)
 		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-			logger.Warn("Using grpc-port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
+			logger.Info("Using grpc-port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
 				zap.Uint32("config_grpc_port", configPort),
 				zap.Uint16("recorded_app_port", tc.AppPort),
 				zap.String("authority", authority))
