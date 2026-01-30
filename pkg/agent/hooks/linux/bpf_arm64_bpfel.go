@@ -71,16 +71,16 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
-	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
-	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
-	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
-	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
-	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
-	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
-	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
-	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
-	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
+	AppPortInfo              *ebpf.MapSpec `ebpf:"app_port_info"`
+	BindEvents               *ebpf.MapSpec `ebpf:"bind_events"`
+	KeployAgentKernelPidMap  *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
+	KeployClientKernelPidMap *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
+	M_1769749987001          *ebpf.MapSpec `ebpf:"m_1769749987_001"`
+	M_1769749987002          *ebpf.MapSpec `ebpf:"m_1769749987_002"`
+	M_1769749987003          *ebpf.MapSpec `ebpf:"m_1769749987_003"`
+	M_1769749987004          *ebpf.MapSpec `ebpf:"m_1769749987_004"`
+	RedirectProxyMap         *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
+	TargetNamespacePids      *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -109,28 +109,28 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
-	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
-	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
-	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
-	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
-	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
-	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
-	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
-	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
-	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
+	AppPortInfo              *ebpf.Map `ebpf:"app_port_info"`
+	BindEvents               *ebpf.Map `ebpf:"bind_events"`
+	KeployAgentKernelPidMap  *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
+	KeployClientKernelPidMap *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
+	M_1769749987001          *ebpf.Map `ebpf:"m_1769749987_001"`
+	M_1769749987002          *ebpf.Map `ebpf:"m_1769749987_002"`
+	M_1769749987003          *ebpf.Map `ebpf:"m_1769749987_003"`
+	M_1769749987004          *ebpf.Map `ebpf:"m_1769749987_004"`
+	RedirectProxyMap         *ebpf.Map `ebpf:"redirect_proxy_map"`
+	TargetNamespacePids      *ebpf.Map `ebpf:"target_namespace_pids"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.AppPortInfo,
 		m.BindEvents,
-		m.CurrentSockMap,
-		m.DestInfoMap,
 		m.KeployAgentKernelPidMap,
-		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
-		m.KeployClientRegistrationMap,
+		m.M_1769749987001,
+		m.M_1769749987002,
+		m.M_1769749987003,
+		m.M_1769749987004,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
 	)
@@ -186,5 +186,5 @@ func _BpfClose(closers ...io.Closer) error {
 
 // Do not access this directly.
 //
-//go:embed bpf_arm64_bpfel.stripped.o
+//go:embed bpf_arm64_bpfel.o
 var _BpfBytes []byte
