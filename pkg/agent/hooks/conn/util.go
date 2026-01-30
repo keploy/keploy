@@ -108,7 +108,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
-		Noise: map[string][]string{},
+		Noise:   map[string][]string{},
 		AppPort: appPort,
 		// Mocks: mocks,
 	}
