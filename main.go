@@ -37,7 +37,7 @@ func main() {
 
 func setVersion() {
 	if version == "" {
-		version = "3-dev"
+		version = "2-dev"
 	}
 	utils.Version = version
 	utils.VersionIdentifier = "version"

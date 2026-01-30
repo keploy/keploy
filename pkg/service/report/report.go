@@ -209,7 +209,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	}
 
 	fmt.Fprintln(r.out, "<=========================================>")
-	fmt.Fprintln(r.out, " COMPLETE TESTRUN SUMMARY.")
+	fmt.Fprintln(r.out, " COMPLETE TESTRUN SUMMARY.2")
 	fmt.Fprintf(r.out, "\tTotal tests: %d\n", total)
 	fmt.Fprintf(r.out, "\tTotal test passed: %d\n", passed)
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
@@ -695,18 +695,14 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 	}
 	return nil
 }
-
-// renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
 func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
 	// Header with risk level and categories
 	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
 
-	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
 		header += fmt.Sprintf(" [%s-RISK]", test.FailureInfo.Risk)
 	}
 
-	// Add categories if available
 	if len(test.FailureInfo.Category) > 0 {
 		categories := make([]string, len(test.FailureInfo.Category))
 		for i, cat := range test.FailureInfo.Category {
@@ -719,7 +715,10 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
-	sb.WriteString(applyCliColorsToDiff(metaDiff))
+	
+	// FIX: Output raw string, do not apply colors
+	sb.WriteString(metaDiff) 
+	
 	sb.WriteString("\n")
 	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
@@ -733,7 +732,8 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
 				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
 				if err == nil {
-					sb.WriteString(applyCliColorsToDiff(diff))
+					// FIX: Output raw string, do not apply colors
+					sb.WriteString(diff)
 					sb.WriteString("\n")
 				} else {
 					tmp := *r
@@ -747,14 +747,15 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 		// Force the old compact format for non-JSON bodies (fast).
 		diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
-		sb.WriteString(applyCliColorsToDiff(diff))
+		
+		// FIX: Output raw string, do not apply colors
+		sb.WriteString(diff)
 		sb.WriteString("\n\n")
 
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
 }
-
 // writerAdapter lets us reuse a bufio.Writer on top of strings.Builder.
 type writerAdapter struct{ sb *strings.Builder }
 
