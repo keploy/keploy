@@ -21,6 +21,12 @@ type ClientMockStorage struct {
 	filtered   []*models.Mock
 	unfiltered []*models.Mock
 	mu         sync.RWMutex
+	// Caching for filtered results to avoid O(N) operations per test
+	cachedFilteredMocks   []*models.Mock
+	cachedUnfilteredMocks []*models.Mock
+	cacheValid            bool
+	mocksAlreadySet       bool // tracks if SetMocks has been called with cached mocks
+	lastConsumedMocks     map[string]models.MockState
 }
 
 type Agent struct {
@@ -224,59 +230,166 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 }
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
+// OPTIMIZATION: Uses caching to avoid O(N) filtering operations on every test.
+// The filtered results are cached after the first call and reused for subsequent tests.
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 
 	a.logger.Debug("UpdateMockParams called",
 		zap.Time("afterTime", params.AfterTime),
 		zap.Time("beforeTime", params.BeforeTime),
 		zap.Bool("useMappingBased", params.UseMappingBased),
-		zap.Int("mockMappingCount", len(params.MockMapping)))
+		zap.Int("mockMappingCount", len(params.MockMapping)),
+		zap.Int("consumedMocksCount", len(params.TotalConsumedMocks)))
 
-	// Get stored mocks for the
+	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID")
 	}
 	storage := storageInterface.(*ClientMockStorage)
-	storage.mu.RLock()
-	originalFiltered := make([]*models.Mock, len(storage.filtered))
-	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
-	copy(originalFiltered, storage.filtered)
-	copy(originalUnfiltered, storage.unfiltered)
-	storage.mu.RUnlock()
-
-	a.logger.Debug("Original mocks before filtering",
-		zap.Int("originalFiltered", len(originalFiltered)),
-		zap.Int("originalUnfiltered", len(originalUnfiltered)))
 
 	var filteredMocks, unfilteredMocks []*models.Mock
 
-	// Apply filtering based on parameters
-	if params.UseMappingBased && len(params.MockMapping) > 0 {
-		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
-		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
-	} else {
-		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime)
-		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
+	// OPTIMIZATION: Check if we can use cached results
+	// Cache is valid if: 1) it exists, 2) no deleted mocks to filter out
+	// TotalConsumedMocks changes per test, so we still need to filter those
+	storage.mu.RLock()
+	cacheValid := storage.cacheValid && len(storage.cachedFilteredMocks) > 0
+	mocksAlreadySet := storage.mocksAlreadySet
+	lastConsumed := storage.lastConsumedMocks
+	if cacheValid {
+		// Use cached results - O(1) instead of O(N)
+		filteredMocks = storage.cachedFilteredMocks
+		unfilteredMocks = storage.cachedUnfilteredMocks
+		a.logger.Debug("Using cached filtered mocks",
+			zap.Int("filteredMocks", len(filteredMocks)),
+			zap.Int("unfilteredMocks", len(unfilteredMocks)),
+			zap.Bool("mocksAlreadySet", mocksAlreadySet))
+	}
+	storage.mu.RUnlock()
+
+	// If cache miss, perform expensive O(N) filtering
+	if !cacheValid {
+		storage.mu.RLock()
+		originalFiltered := storage.filtered
+		originalUnfiltered := storage.unfiltered
+		storage.mu.RUnlock()
+
+		a.logger.Debug("Cache miss - performing O(N) filtering",
+			zap.Int("originalFiltered", len(originalFiltered)),
+			zap.Int("originalUnfiltered", len(originalUnfiltered)))
+
+		// Apply filtering based on parameters
+		if params.UseMappingBased && len(params.MockMapping) > 0 {
+			filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+			unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
+		} else {
+			filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime)
+			unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
+		}
+
+		// Cache the filtered results for subsequent calls
+		storage.mu.Lock()
+		storage.cachedFilteredMocks = filteredMocks
+		storage.cachedUnfilteredMocks = unfilteredMocks
+		storage.cacheValid = true
+		storage.mocksAlreadySet = false // Reset since we have new filtered mocks
+		// Reset tracking since our base set changed
+		storage.lastConsumedMocks = make(map[string]models.MockState)
+		storage.mu.Unlock()
+
+		a.logger.Debug("Cached filtered results",
+			zap.Int("filteredMocks", len(filteredMocks)),
+			zap.Int("unfilteredMocks", len(unfilteredMocks)))
 	}
 
-	// Count IsFiltered distribution for debugging
-	var filteredCount, unfilteredCount int
-	for _, m := range unfilteredMocks {
-		if m.TestModeInfo.IsFiltered {
-			filteredCount++
-		} else {
-			unfilteredCount++
+	// OPTIMIZATION: Incremental Updates via Diff
+	// If the base set (filteredMocks) is ALREADY set on the Proxy, and the only change is
+	// that more mocks are consumed (TotalConsumedMocks growing), we can just Delete
+	// the newly consumed mocks instead of rebuilding the whole tree (SetMocks).
+
+	isIncremental := false
+	var mocksToDelete []*models.Mock
+
+	if mocksAlreadySet {
+		if lastConsumed == nil {
+			lastConsumed = make(map[string]models.MockState)
+		}
+
+		// Ensure TotalConsumed is a superset of lastConsumed (no resets)
+		if len(params.TotalConsumedMocks) >= len(lastConsumed) {
+			validDiff := true
+			for k := range lastConsumed {
+				if _, ok := params.TotalConsumedMocks[k]; !ok {
+					validDiff = false
+					break
+				}
+			}
+
+			if validDiff {
+				// Find newly consumed mocks
+				for k := range params.TotalConsumedMocks {
+					if _, exists := lastConsumed[k]; !exists {
+						isIncremental = true // Found at least loop entry
+						break
+					}
+				}
+
+				// If strictly equal, effectively incremental (no-op)
+				if len(params.TotalConsumedMocks) == len(lastConsumed) {
+					isIncremental = true
+				}
+
+				if isIncremental {
+					// Collect mocks from cachedFilteredMocks that match the new consumption
+					// Iterate cachedFilteredMocks (Base Subset)
+					for _, m := range filteredMocks {
+						if _, isConsumed := params.TotalConsumedMocks[m.Name]; isConsumed {
+							if _, wasConsumed := lastConsumed[m.Name]; !wasConsumed {
+								mocksToDelete = append(mocksToDelete, m)
+							}
+						}
+					}
+				}
+			}
 		}
 	}
-	a.logger.Debug("After filtering",
-		zap.Int("filteredMocks", len(filteredMocks)),
-		zap.Int("unfilteredMocks", len(unfilteredMocks)),
-		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
-		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
 
-	// Filter out deleted mocks if totalConsumedMocks is provided
-	if params.TotalConsumedMocks != nil {
+	if isIncremental {
+		type Deleter interface {
+			DeleteMocks(ctx context.Context, mocks []*models.Mock) error
+		}
+
+		// Use local interface to avoid import cycles
+		if deleter, ok := a.Proxy.(Deleter); ok {
+			if len(mocksToDelete) > 0 {
+				a.logger.Debug("Performing incremental mock deletion", zap.Int("count", len(mocksToDelete)))
+				if err := deleter.DeleteMocks(ctx, mocksToDelete); err != nil {
+					a.logger.Warn("Failed to delete mocks, falling back to SetMocks", zap.Error(err))
+					isIncremental = false
+				}
+			} else {
+				a.logger.Debug("No new mocks to delete, skipping update")
+			}
+
+			if isIncremental {
+				storage.mu.Lock()
+				newLast := make(map[string]models.MockState, len(params.TotalConsumedMocks))
+				for k, v := range params.TotalConsumedMocks {
+					newLast[k] = v
+				}
+				storage.lastConsumedMocks = newLast
+				storage.mu.Unlock()
+				return nil
+			}
+		} else {
+			a.logger.Debug("Proxy does not support DeleteMocks, falling back")
+			isIncremental = false
+		}
+	}
+
+	// Fallback to full Filter + SetMocks
+	if len(params.TotalConsumedMocks) > 0 {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
 		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
 	}
@@ -287,6 +400,16 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		utils.LogError(a.logger, err, "failed to set mocks on proxy")
 		return err
 	}
+
+	// Mark mocks as set so we can skip SetMocks on subsequent calls
+	storage.mu.Lock()
+	storage.mocksAlreadySet = true
+	newLast := make(map[string]models.MockState, len(params.TotalConsumedMocks))
+	for k, v := range params.TotalConsumedMocks {
+		newLast[k] = v
+	}
+	storage.lastConsumedMocks = newLast
+	storage.mu.Unlock()
 
 	return nil
 }

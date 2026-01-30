@@ -1093,7 +1093,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if r.instrument {
+			getConsumedStart := time.Now()
 			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
+			if time.Since(getConsumedStart) > 50*time.Millisecond {
+				r.logger.Info("Slow GetConsumedMocks", zap.Duration("duration", time.Since(getConsumedStart)))
+			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
@@ -1255,7 +1259,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
+				insertStart := time.Now()
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if time.Since(insertStart) > 50*time.Millisecond {
+					r.logger.Info("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+				}
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
