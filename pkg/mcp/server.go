@@ -124,13 +124,16 @@ func (s *Server) Run(ctx context.Context) error {
 		Instructions: `Keploy Mock MCP Server for recording and replaying outgoing calls from applications.
 
 Available tools:
-1. keploy_list_mocks - List all available recorded mock sets. Use this first to see what mocks exist.
-2. keploy_mock_record - Record outgoing calls (HTTP APIs, databases, etc.) from your application.
-3. keploy_mock_test - Replay recorded mocks during testing.
+1. keploy_manager - RECOMMENDED: Unified tool for mock recording, testing, and CI/CD pipeline generation.
+   Actions: "keploy_mock_record", "keploy_mock_test", "pipeline"
+2. keploy_list_mocks - List all available recorded mock sets. Use this first to see what mocks exist.
+3. keploy_mock_record - Record outgoing calls (HTTP APIs, databases, etc.) from your application.
+4. keploy_mock_test - Replay recorded mocks during testing.
 
-Workflow:
-- For recording: Ask user for the command to run their application, then use keploy_mock_record
-- For testing: First use keploy_list_mocks to show available mocks, then use keploy_mock_test
+Recommended Workflow (using keploy_manager):
+- For recording: keploy_manager with action="keploy_mock_record" and command
+- For testing: First use keploy_list_mocks, then keploy_manager with action="keploy_mock_test"
+- For CI/CD: keploy_manager with action="pipeline" (will prompt for missing config)
 
 Important: Always confirm configuration with user before starting record/test operations.`,
 		InitializedHandler: func(ctx context.Context, req *sdkmcp.InitializedRequest) {
@@ -169,7 +172,7 @@ func (nopWriteCloser) Close() error { return nil }
 func (s *Server) registerTools() {
 	// Register list mocks tool (for mock discovery)
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
-		Name: "keploy_list_mocks",
+		Name: ToolListMocks,
 		Description: `List all available recorded mock sets in the keploy directory.
 
 Use this tool to:
@@ -182,7 +185,7 @@ Returns a list of mock set names/IDs that can be used with keploy_mock_test.`,
 
 	// Register mock record tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
-		Name: "keploy_mock_record",
+		Name: ToolMockRecord,
 		Description: `Record outgoing calls (HTTP APIs, databases, message queues, etc.) made during command execution.
 
 This tool captures all external dependencies while running the provided command, 
@@ -201,7 +204,7 @@ Parameters:
 
 	// Register mock replay/test tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
-		Name: "keploy_mock_test",
+		Name: ToolMockTest,
 		Description: `Replay recorded mocks while running a command.
 
 This tool intercepts outgoing calls and returns recorded responses, 
@@ -218,8 +221,36 @@ Parameters:
 - fallBackOnMiss (optional): Whether to make real calls when mock not found (default: false)`,
 	}, s.handleMockReplay)
 
+	// Register unified manager tool
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name: ToolManager,
+		Description: `Unified Keploy manager tool that provides mock recording, testing, and CI/CD pipeline generation.
+
+This is the RECOMMENDED tool for interacting with Keploy. It supports three actions:
+
+1. **keploy_mock_record** - Record outgoing calls from your application
+   - Required: command (e.g., 'go run main.go', 'npm start')
+   - Optional: path (default: ./keploy)
+
+2. **keploy_mock_test** - Replay recorded mocks during testing
+   - Required: command (e.g., 'go test -v', 'npm test')
+   - Optional: mockName, fallBackOnMiss, path
+
+3. **pipeline** - Generate CI/CD pipeline for Keploy mock testing
+   - Optional: appCommand, defaultBranch (default: main), mockPath (default: ./keploy), cicdTool
+   - If appCommand is not provided, will prompt user via elicitation
+   - Auto-detects CI/CD platform from project files (GitHub Actions, GitLab CI, Jenkins, etc.)
+
+Usage examples:
+- Record: {"action": "keploy_mock_record", "command": "go run main.go"}
+- Test: {"action": "keploy_mock_test", "command": "go test -v", "mockName": "my-mocks"}
+- Pipeline: {"action": "pipeline", "appCommand": "go run main.go", "cicdTool": "github-actions"}
+
+For pipeline action with missing parameters, the tool will use MCP Elicitation to gather required configuration.`,
+	}, s.handleManager)
+
 	s.logger.Info("Registered MCP tools",
-		zap.Strings("tools", []string{"keploy_list_mocks", "keploy_mock_record", "keploy_mock_test"}),
+		zap.Strings("tools", []string{ToolListMocks, ToolMockRecord, ToolMockTest, ToolManager}),
 	)
 }
 
@@ -238,5 +269,5 @@ func (s *Server) Close() error {
 
 // String returns a string representation of the server.
 func (s *Server) String() string {
-	return "KeployMCPServer{tools: [keploy_list_mocks, keploy_mock_record, keploy_mock_test]}"
+	return "KeployMCPServer{tools: [keploy_list_mocks, keploy_mock_record, keploy_mock_test, keploy_manager]}"
 }
