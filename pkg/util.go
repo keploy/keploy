@@ -200,7 +200,20 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
-	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
+	// If AppPort is set, override the port in the URL for test execution
+	testURL := tc.HTTPReq.URL
+	if tc.AppPort > 0 {
+		parsedURL, parseErr := url.Parse(tc.HTTPReq.URL)
+		if parseErr == nil {
+			// Replace the port in the host while keeping the hostname
+			host := parsedURL.Hostname()
+			parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
+			testURL = parsedURL.String()
+			logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err

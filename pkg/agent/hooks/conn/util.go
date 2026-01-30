@@ -21,11 +21,11 @@ import (
 	"go.uber.org/zap"
 )
 
-type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool)
+type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16)
 
 var CaptureHook CaptureFunc = Capture
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -109,6 +109,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
 		Noise: map[string][]string{},
+		AppPort: appPort,
 		// Mocks: mocks,
 	}
 	if synchronous {
@@ -269,7 +270,7 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 }
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream) {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -289,6 +290,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		GrpcReq:  *http2Stream.GRPCReq,
 		GrpcResp: *http2Stream.GRPCResp,
 		Noise:    map[string][]string{},
+		AppPort:  appPort,
 	}
 
 	select {
