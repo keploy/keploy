@@ -118,6 +118,9 @@ type PipelineOutput struct {
 
 	// Configuration shows the configuration that was used.
 	Configuration *PipelineConfiguration `json:"configuration,omitempty"`
+
+	// DetectedProject shows the detected project information (language, framework, etc.)
+	DetectedProject *DetectedProjectInfo `json:"detectedProject,omitempty"`
 }
 
 // PipelineConfiguration shows the configuration used for pipeline generation.
@@ -126,6 +129,15 @@ type PipelineConfiguration struct {
 	DefaultBranch string `json:"defaultBranch"`
 	MockPath      string `json:"mockPath"`
 	CICDTool      string `json:"cicdTool"`
+}
+
+// DetectedProjectInfo shows the detected project information for transparency.
+type DetectedProjectInfo struct {
+	Language       string   `json:"language,omitempty"`
+	Framework      string   `json:"framework,omitempty"`
+	PackageManager string   `json:"packageManager,omitempty"`
+	RuntimeVersion string   `json:"runtimeVersion,omitempty"`
+	SetupSteps     []string `json:"setupSteps,omitempty"`
 }
 
 // PipelineConfig holds the configuration for generating a CI/CD pipeline.
