@@ -54,6 +54,7 @@ type TestResult struct {
 	Result       Result      `json:"result" yaml:"result"`
 	TimeTaken    string      `json:"time_taken" yaml:"time_taken"`
 	FailureInfo  FailureInfo `json:"failure_info,omitempty" yaml:"failure_info,omitempty"`
+	Diagnostic   *MockDiagnostic `json:"diagnostic,omitempty" yaml:"diagnostic,omitempty"`
 }
 
 type FailureInfo struct {
@@ -132,6 +133,16 @@ type FailureAssessment struct {
 	TypeChanges   []string          `json:"type_changes,omitempty" yaml:"type_changes,omitempty"`
 	ValueChanges  []string          `json:"value_changes,omitempty" yaml:"value_changes,omitempty"`
 	Reasons       []string          `json:"reasons,omitempty" yaml:"reasons,omitempty"`
+}
+
+type MockDiagnostic struct {
+	RequestSignature string   `json:"request_signature,omitempty" yaml:"request_signature,omitempty"`
+	ExpectedStatus   int      `json:"expected_status,omitempty" yaml:"expected_status,omitempty"`
+	ActualStatus     int      `json:"actual_status,omitempty" yaml:"actual_status,omitempty"`
+	ExpectedBody     string   `json:"expected_body,omitempty" yaml:"expected_body,omitempty"`
+	ActualBody       string   `json:"actual_body,omitempty" yaml:"actual_body,omitempty"`
+	ExpectedMocks    []string `json:"expected_mocks,omitempty" yaml:"expected_mocks,omitempty"`
+	ActualMocks      []string `json:"actual_mocks,omitempty" yaml:"actual_mocks,omitempty"`
 }
 
 type Result struct {
