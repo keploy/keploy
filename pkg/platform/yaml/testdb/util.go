@@ -104,6 +104,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			GrpcReq:  tc.GrpcReq,
 			GrpcResp: tc.GrpcResp,
 			Created:  tc.Created,
+			AppPort:  tc.AppPort,
 			// need to check here for type here as well as push in other custom assertions
 			Assertions: func() map[models.AssertionType]interface{} {
 				a := map[models.AssertionType]interface{}{}
@@ -352,6 +353,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
+		tc.AppPort = grpcSpec.AppPort
 
 		for key, raw := range grpcSpec.Assertions {
 			tc.Assertions[key] = raw

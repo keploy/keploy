@@ -459,7 +459,7 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
-func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
+func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, configPort uint32) (*models.GrpcResp, error) {
 	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
@@ -506,6 +506,27 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	if !ok {
 		return nil, fmt.Errorf("missing :authority header")
 	}
+
+	// Determine which port to use for test execution
+	// Priority: 1. Config port (from flag/config file) 2. Test case AppPort 3. Original authority port
+	if configPort > 0 {
+		// Config port takes highest priority - use it for all test cases
+		host := authority
+		if colonIdx := strings.LastIndex(authority, ":"); colonIdx != -1 {
+			host = authority[:colonIdx]
+		}
+		authority = fmt.Sprintf("%s:%d", host, configPort)
+		logger.Info("Using grpc-port from config/flag for all test cases", zap.Uint32("grpc_port", configPort), zap.String("authority", authority))
+	} else if tc.AppPort > 0 {
+		// Use test case AppPort if no config port is provided
+		host := authority
+		if colonIdx := strings.LastIndex(authority, ":"); colonIdx != -1 {
+			host = authority[:colonIdx]
+		}
+		authority = fmt.Sprintf("%s:%d", host, tc.AppPort)
+		logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("authority", authority))
+	}
+	// If neither configPort nor AppPort is set, use original authority (backward compatible)
 
 	// Extract method path
 	path, ok := grpcReq.Headers.PseudoHeaders[":path"]

@@ -143,7 +143,7 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -200,18 +200,29 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
-	// If AppPort is set, override the port in the URL for test execution
+	// Determine which port to use for test execution
+	// Priority: 1. Config port (from flag/config file) 2. Test case AppPort 3. Original URL port
 	testURL := tc.HTTPReq.URL
-	if tc.AppPort > 0 {
+	if configPort > 0 {
+		// Config port takes highest priority - use it for all test cases
 		parsedURL, parseErr := url.Parse(tc.HTTPReq.URL)
 		if parseErr == nil {
-			// Replace the port in the host while keeping the hostname
+			host := parsedURL.Hostname()
+			parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
+			testURL = parsedURL.String()
+			logger.Info("Using port from config/flag for all test cases", zap.Uint32("port", configPort), zap.String("url", testURL))
+		}
+	} else if tc.AppPort > 0 {
+		// Use test case AppPort if no config port is provided
+		parsedURL, parseErr := url.Parse(tc.HTTPReq.URL)
+		if parseErr == nil {
 			host := parsedURL.Hostname()
 			parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
 			testURL = parsedURL.String()
 			logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
 		}
 	}
+	// If neither configPort nor AppPort is set, use original URL (backward compatible)
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
