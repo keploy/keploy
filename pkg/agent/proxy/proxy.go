@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -337,14 +336,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
-	if destInfo.Port == 16789 {
-		out, err := exec.Command("lsof", "-i", fmt.Sprintf(":%d", sourcePort)).CombinedOutput()
-		if err != nil {
-			p.logger.Warn("Could not find process for port", zap.Int("port", sourcePort))
-		} else {
-			p.logger.Info("Process details for source port", zap.String("details", string(out)))
-		}
-	}
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
 	if err != nil {
