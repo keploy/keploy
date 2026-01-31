@@ -19,6 +19,8 @@ type Service interface {
 	Sanitize(ctx context.Context) error
 	Normalize(ctx context.Context) error
 	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error
+	UpdateTestDelayInConfig(ctx context.Context, configPath string, delay uint64) error
+
 }
 
 type teleDB interface {
