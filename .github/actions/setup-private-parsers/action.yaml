@@ -12,7 +12,7 @@ inputs:
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
-    default: 'main'
+    default: '1cdf341d3602dd94e1c690bcc530daad197a26b4'
 
 runs:
   using: composite
@@ -59,6 +59,7 @@ runs:
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
+        
         GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations@${INTEGRATION_REF}
         
         echo "Creating extraparsers.go (platform-independent)..."
