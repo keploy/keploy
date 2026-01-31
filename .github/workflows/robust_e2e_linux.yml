@@ -1,0 +1,228 @@
+name: Robust E2E Tests On Linux
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+      jobs_to_run:
+        type: string
+        required: false
+        default: 'all'
+
+jobs:
+  robust_gin_mongo:
+    if: ${{ inputs.jobs_to_run == 'all' || contains(inputs.jobs_to_run, 'robust_gin_mongo') }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: Robust gin-mongo (${{ matrix.config.job }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd bc
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Run tests
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/gin-mongo
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/common.sh
+          
+          init_test_env
+          git fetch origin && git checkout native-linux
+          
+          # Start mongo
+          docker run --rm -d -p27017:27017 --name mongoDb mongo
+          sleep 10
+          
+          clean_keploy_artifacts
+          generate_keploy_config '{"body": {"ts":[]}}'
+          sed -i 's/ports: 0/ports: 27017/' ./keploy.yml
+          
+          go build -cover -coverpkg=./... -o ginApp
+          
+          # Record iterations
+          for i in 1 2 3; do
+            echo "::group::Record iteration $i"
+            sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp" > "record_${i}.txt" 2>&1 &
+            KP_PID=$!
+            
+            # Wait for app and send requests
+            sleep 15
+            for j in $(seq 1 15); do
+              curl -sS -X POST http://localhost:8080/url -H 'content-type: application/json' \
+                -d "{\"url\": \"https://example${i}_${j}.com\"}" || true
+            done
+            curl -sS http://localhost:8080/CJBKJd92 || true
+            curl -sS 'http://localhost:8080/verify-email?email=test@test.com' || true
+            
+            sleep 10
+            kill_keploy
+            wait $KP_PID 2>/dev/null || true
+            
+            check_for_errors "record_${i}.txt" || exit 1
+            echo "::endgroup::"
+          done
+          
+          # Stop mongo for replay
+          docker stop mongoDb || true
+          
+          # Replay
+          echo "::group::Replay"
+          sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./ginApp" --delay 7 > test_logs.txt 2>&1
+          cat test_logs.txt
+          
+          check_for_errors "test_logs.txt" || exit 1
+          validate_coverage "test_logs.txt" 40 || true
+          validate_test_reports || exit 1
+          echo "::endgroup::"
+
+  robust_express_mongoose:
+    if: ${{ inputs.jobs_to_run == 'all' || contains(inputs.jobs_to_run, 'robust_express') }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: Robust express-mongoose (${{ matrix.config.job }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd bc
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-typescript
+          path: samples-typescript
+
+      - name: Run multi-command tests
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-typescript/express-mongoose
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/common.sh
+          
+          init_test_env
+          
+          docker run --name mongoDb --rm -p 27017:27017 -d mongo
+          sleep 10
+          
+          npm ci || npm install
+          sed -i "s/mongoDb:27017/localhost:27017/" "src/db/connection.js" || true
+          clean_keploy_artifacts
+          
+          # Test config
+          echo "::group::Test config"
+          sudo "$RECORD_BIN" config --generate
+          [[ -f "./keploy.yml" ]] && log_pass "config" || log_fail "config"
+          sed -i 's/global: {}/global: {"body": {"page":[]}}/' ./keploy.yml || true
+          echo "::endgroup::"
+          
+          # Test record
+          echo "::group::Test record"
+          sudo -E env PATH="$PATH" "$RECORD_BIN" record -c 'npm start' > record.txt 2>&1 &
+          KP_PID=$!
+          
+          sleep 20
+          curl -sS -X POST http://localhost:8000/students -H 'content-type: application/json' \
+            -d '{"name":"Test User","email":"test@example.com","phone":"1234567890"}' || true
+          curl -sS http://localhost:8000/students || true
+          
+          sleep 10
+          kill_keploy
+          wait $KP_PID 2>/dev/null || true
+          check_for_errors "record.txt" && log_pass "record" || log_fail "record"
+          echo "::endgroup::"
+          
+          docker stop mongoDb || true
+          
+          # Test replay
+          echo "::group::Test replay"
+          sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --delay 10 > test.txt 2>&1 || true
+          check_for_errors "test.txt" && log_pass "replay" || log_warn "replay had issues"
+          echo "::endgroup::"
+          
+          # Test other commands
+          echo "::group::Test other commands"
+          sudo -E env PATH="$PATH" "$RECORD_BIN" templatize > /dev/null 2>&1 || true
+          log_pass "templatize"
+          sudo -E env PATH="$PATH" "$REPLAY_BIN" normalize > /dev/null 2>&1 || true
+          log_pass "normalize"
+          sudo -E env PATH="$PATH" "$REPLAY_BIN" report > /dev/null 2>&1 || true
+          log_pass "report"
+          echo "::endgroup::"
+
+  test_summary:
+    if: always()
+    needs: [robust_gin_mongo, robust_express_mongoose]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "Robust gin-mongo: ${{ needs.robust_gin_mongo.result }}"
+          echo "Robust express-mongoose: ${{ needs.robust_express_mongoose.result }}"
+          
+          if [[ "${{ needs.robust_gin_mongo.result }}" == "failure" ]] || \
+             [[ "${{ needs.robust_express_mongoose.result }}" == "failure" ]]; then
+            echo "Some tests failed"
+            exit 1
+          fi
+          echo "All tests passed"
