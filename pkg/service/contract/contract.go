@@ -411,9 +411,9 @@ func (s *contract) DownloadTests(_ string) error {
 		return err
 	}
 
-	cprFolder, err := filepath.Abs("../VirtualCPR")
+	cprFolder, err := s.getOrCreateVirtualCPR()
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to get absolute path", zap.String("path", "../VirtualCPR"))
+		utils.LogError(s.logger, err, "failed to get VirtualCPR path")
 		return err
 	}
 
@@ -464,10 +464,10 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		return err
 	}
 
-	// Get the absolute path to the VirtualCPR folder
-	cprFolder, err := filepath.Abs("../VirtualCPR")
+	// Get the path to the VirtualCPR folder (check current and parent, create if missing)
+	cprFolder, err := s.getOrCreateVirtualCPR()
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to get absolute path", zap.String("path", "../VirtualCPR"))
+		utils.LogError(s.logger, err, "failed to get VirtualCPR path")
 		return err
 	}
 
@@ -682,4 +682,31 @@ func (s *contract) Validate(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (s *contract) getOrCreateVirtualCPR() (string, error) {
+	// 1. Check current directory
+	currentPath, err := filepath.Abs("VirtualCPR")
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(currentPath); err == nil && info.IsDir() {
+		return currentPath, nil
+	}
+
+	// 2. Check parent directory (backward compatibility)
+	parentPath, err := filepath.Abs("../VirtualCPR")
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(parentPath); err == nil && info.IsDir() {
+		return parentPath, nil
+	}
+
+	// 3. Create in current directory if not found and return it
+	if err := os.MkdirAll(currentPath, os.ModePerm); err != nil {
+		return "", fmt.Errorf("failed to create VirtualCPR folder: %w", err)
+	}
+	s.logger.Info("Created VirtualCPR folder", zap.String("path", currentPath))
+	return currentPath, nil
 }
