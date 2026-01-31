@@ -111,10 +111,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
 
-	setupErrGrp, _ := errgroup.WithContext(ctx)
-	setupCtx := context.WithoutCancel(ctx)
-	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
-	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
@@ -136,8 +132,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
 
-		setupCtxCancel()
-		err = setupErrGrp.Wait()
+		
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
