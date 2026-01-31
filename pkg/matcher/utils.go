@@ -18,7 +18,6 @@ import (
 	"sync"
 
 	"github.com/7sDream/geko"
-	"github.com/fatih/color"
 	jsonDiff "github.com/keploy/jsonDiff"
 	"github.com/olekukonko/tablewriter"
 	"go.keploy.io/server/v3/pkg"
@@ -802,7 +801,6 @@ func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]s
 func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) {
 	d.bodyExp, d.bodyAct, d.bodyNoise = exp, act, noise
 }
-
 func (d *DiffsPrinter) Render() error {
 	diffs := []string{}
 
@@ -848,7 +846,7 @@ func (d *DiffsPrinter) Render() error {
 	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+	// REMOVED: table.SetHeaderColor(...) to stop ANSI codes in headers
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
 
 	for _, e := range diffs {
@@ -858,51 +856,51 @@ func (d *DiffsPrinter) Render() error {
 	}
 
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
+		// REMOVED: color.New(...) logic
 		startPart := " Expected and actual value"
 		var midPartpaint string
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			midPartpaint = d.text
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
-		endPaint := yellowPaint(" are in different order but have the same objects")
-		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
+
+		msg := initalPart + midPartpaint + endPaint
+		table.SetHeader([]string{msg})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
-		table.Append([]string{initalPart + midPartpaint + endPaint})
+		table.Append([]string{msg})
 	}
 
 	table.Render()
 	return nil
 }
-
 func (d *DiffsPrinter) TableWriter(diffs []string) error {
 
 	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+	// REMOVED: table.SetHeaderColor(...)
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
 
 	for _, e := range diffs {
 		table.Append([]string{e})
 	}
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
+		// REMOVED: color.New(...) logic
 		startPart := " Expected and actual value"
 		var midPartpaint string
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			midPartpaint = d.text
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
 
-		endPaint := yellowPaint(" are in different order but have the same objects")
-		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
+		msg := initalPart + midPartpaint + endPaint
+		table.SetHeader([]string{msg})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
-		table.Append([]string{initalPart + midPartpaint + endPaint})
+		table.Append([]string{msg})
 	}
 	table.Render()
 	return nil
@@ -1143,7 +1141,6 @@ func truncateStrings(exp, act string) (string, string) {
 
 	return exp, act
 }
-
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
@@ -1154,12 +1151,13 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
 
-	// Apply truncation logic before processing
+	// Apply truncation logic
 	exp, act = truncateStrings(exp, act)
 
-	// jsonDiff.JsonDiff()
-	exp = wrapTextWithAnsi(exp)
-	act = wrapTextWithAnsi(act)
+	// CRITICAL FIX: Strip ANSI codes that might come from external libs (jsonDiff)
+	exp = stripANSI(exp)
+	act = stripANSI(act)
+
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
@@ -1169,8 +1167,6 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	table.Render()
 	return buf.String()
 }
-
-// expectActualTableWithColors creates a table with colored expected (red) and actual (green) values
 func expectActualTableWithColors(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
@@ -1181,28 +1177,23 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
 
-	// Apply truncation logic before processing
+	// Apply truncation logic
 	exp, act = truncateStrings(exp, act)
 
-	// Apply colors: red for expected, green for actual
-	// Force color output even when piping to files
-	greenPaint := color.New(color.FgGreen)
-	greenPaint.EnableColor()
-	redPaint := color.New(color.FgRed)
-	redPaint.EnableColor()
-
-	coloredExp := redPaint.SprintFunc()(exp)
-	coloredAct := greenPaint.SprintFunc()(act)
-
-	coloredExp = wrapTextWithAnsi(coloredExp)
-	coloredAct = wrapTextWithAnsi(coloredAct)
+	// CRITICAL FIX: Strip ANSI codes here too.
+	// Since you want clean logs, we treat this exactly like the standard table
+	// and remove any existing colors.
+	exp = stripANSI(exp)
+	act = stripANSI(act)
 
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
 	table.SetColMinWidth(0, maxLineLength)
 	table.SetColMinWidth(1, maxLineLength)
-	table.Append([]string{coloredExp, coloredAct})
+
+	table.Append([]string{exp, act})
+
 	table.Render()
 	return buf.String()
 }
