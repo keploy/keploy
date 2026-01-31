@@ -270,7 +270,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	httpResp, errHTTPReq := client.Do(req)
 	if errHTTPReq != nil {
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app\n"+models.HighlightOrangeBoldString("💡 Possible Reason:")+models.HighlightBoldString(" Seems application was not started before keploy started hitting requests. Please try to increase the delay as much your application needs to start for eg: --delay 20"))
 		return nil, errHTTPReq
 	}
 

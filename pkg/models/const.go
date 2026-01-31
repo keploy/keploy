@@ -64,33 +64,46 @@ var orangeColorSGR = []color.Attribute{38, 5, 208}
 var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
 var IsAnsiDisabled = false
-
 var HighlightString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(orangeColorSGR...).SprintFunc()(a)
+	return color.New(orangeColorSGR...).SprintFunc()(a...)
+}
+
+var HighlightOrangeBoldString = func(a ...interface{}) string {
+	if IsAnsiDisabled {
+		return fmt.Sprint(a...)
+	}
+	return color.New(append(orangeColorSGR, color.Bold)...).SprintFunc()(a...)
 }
 
 var HighlightPassingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgGreen).SprintFunc()(a)
+	return color.New(color.FgGreen).SprintFunc()(a...)
 }
 
 var HighlightFailingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgRed).SprintFunc()(a)
+	return color.New(color.FgRed).SprintFunc()(a...)
 }
 
 var HighlightGrayString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgHiBlack).SprintFunc()(a)
+	return color.New(color.FgHiBlack).SprintFunc()(a...)
+}
+
+var HighlightBoldString = func(a ...interface{}) string {
+	if IsAnsiDisabled {
+		return fmt.Sprint(a...)
+	}
+	return color.New(color.Bold).SprintFunc()(a...)
 }
 
 var defaultColorScheme = pp.ColorScheme{
