@@ -18,12 +18,12 @@ type Orchestrator struct {
 	tools                  tools.Service
 	config                 *config.Config
 	mockCorrelationManager *MockCorrelationManager
-	globalMockCh           chan *models.Mock
+	globalMockQueue        *models.MockQueue
 }
 
 func New(logger *zap.Logger, record record.Service, tools tools.Service, replay replay.Service, config *config.Config) *Orchestrator {
-	// Create global mock channel for communication between record service and correlation manager
-	globalMockCh := make(chan *models.Mock, 1000) // Buffered channel to prevent blocking
+	// Create unbounded queue for mocks to prevent dropping during correlation
+	globalMockQueue := models.NewMockQueue()
 
 	return &Orchestrator{
 		logger:                 logger,
@@ -31,12 +31,12 @@ func New(logger *zap.Logger, record record.Service, tools tools.Service, replay 
 		replay:                 replay,
 		tools:                  tools,
 		config:                 config,
-		globalMockCh:           globalMockCh,
+		globalMockQueue:        globalMockQueue,
 		mockCorrelationManager: nil, // Will be initialized when needed
 	}
 }
 
-// GetGlobalMockChannel returns the global mock channel for the record service to use
-func (o *Orchestrator) GetGlobalMockChannel() chan<- *models.Mock {
-	return o.globalMockCh
+// GetGlobalMockQueue returns the global mock queue for the record service to use
+func (o *Orchestrator) GetGlobalMockQueue() *models.MockQueue {
+	return o.globalMockQueue
 }
