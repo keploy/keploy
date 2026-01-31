@@ -3,6 +3,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -326,6 +327,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
+		cmd.Flags().String("record-filters", "", "Filters for recording in JSON format (e.g., '[{\"path\":\"/health\"}]')")
+		cmd.Flags().String("bypass-rules", "", "Bypass rules in JSON format (e.g., '[{\"path\":\"/health\"}]')")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -990,6 +993,40 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
+			// Parse record filters from JSON flag
+			recordFiltersJSON, err := cmd.Flags().GetString("record-filters")
+			if err != nil {
+				errMsg := "failed to get the record-filters flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			if recordFiltersJSON != "" {
+				var filters []config.Filter
+				if err := json.Unmarshal([]byte(recordFiltersJSON), &filters); err != nil {
+					errMsg := "failed to parse record-filters JSON"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.Filters = filters
+			}
+
+			// Parse bypass rules from JSON flag
+			bypassRulesJSON, err := cmd.Flags().GetString("bypass-rules")
+			if err != nil {
+				errMsg := "failed to get the bypass-rules flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			if bypassRulesJSON != "" {
+				var rules []config.BypassRule
+				if err := json.Unmarshal([]byte(bypassRulesJSON), &rules); err != nil {
+					errMsg := "failed to parse bypass-rules JSON"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.BypassRules = rules
+			}
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {

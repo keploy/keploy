@@ -229,6 +229,11 @@ func kebabToCamel(s string) string {
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		// Skip JSON flags that need custom parsing
+		if flag.Name == "record-filters" || flag.Name == "bypass-rules" {
+			return
+		}
+
 		camelCaseName := kebabToCamel(flag.Name)
 		err := viper.BindPFlag(camelCaseName, flag)
 		if err != nil {
