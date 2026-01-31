@@ -347,7 +347,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// TODO: to remove this sessions concept because it was meant for multiple clients-apps.
 	rule, ok := p.sessions.Get(uint64(0))
 	if !ok {
-		utils.LogError(p.logger, nil, "failed to fetch the session rule")
+		err := errors.New("failed to fetch the session rule")
+		utils.LogError(p.logger, err, "session lookup failed")
 		return err
 	}
 
@@ -450,7 +451,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// TODO: We have to remove the 0 key maps, since it was meant for appID keys maps for multiple clients-apps.
 		m, ok := p.MockManagers.Load(uint64(0))
 		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
+			err := errors.New("failed to fetch the mock manager")
+			utils.LogError(p.logger, err, "mock manager not found")
 			return err
 		}
 
@@ -500,12 +502,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
 	if !ok {
+		err := errors.New("client connection id missing from context")
 		utils.LogError(p.logger, err, "failed to fetch the client connection id")
 		return err
 	}
 
 	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
 	if !ok {
+		err := errors.New("destination connection id missing from context")
 		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
 		return err
 	}
@@ -560,13 +564,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// get the destinationUrl from the map for the tls connection
 		url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
 		if !ok {
-			utils.LogError(logger, err, "failed to fetch the destination url")
+			err := fmt.Errorf("failed to fetch destination URL for source port %d", sourcePort)
+			utils.LogError(logger, err, "TLS destination lookup failed")
 			return err
 		}
 		//type case the dstUrl to string
 		dstURL, ok := url.(string)
 		if !ok {
-			utils.LogError(logger, err, "failed to type cast the destination url")
+			err := errors.New("destination URL is not a string")
+			utils.LogError(logger, err, "invalid destination URL type")
 			return err
 		}
 
@@ -616,7 +622,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager")
+		err := errors.New("failed to fetch the mock manager")
+		utils.LogError(logger, err, "mock manager not found")
 		return err
 	}
 
