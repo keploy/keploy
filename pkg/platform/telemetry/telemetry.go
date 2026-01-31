@@ -20,18 +20,18 @@ type Telemetry struct {
 	logger         *zap.Logger
 	InstallationID string
 	KeployVersion  string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	client         *http.Client
 }
 
 type Options struct {
 	Enabled        bool
 	Version        string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	InstallationID string
 }
 
-func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
+func NewTelemetry(logger *zap.Logger, opt *Options) *Telemetry {
 	return &Telemetry{
 		Enabled:        opt.Enabled,
 		logger:         logger,
@@ -136,12 +136,20 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...*sync.Map) {
 		}
 
 		hasGlobalMap := false
+
+		if tel.GlobalMap != nil {
+			tel.GlobalMap.Range(func(key, value interface{}) bool {
+				hasGlobalMap = true
+				return false // Stop after finding the first element
+			})
+		}
+
 		tel.GlobalMap.Range(func(key, value interface{}) bool {
 			hasGlobalMap = true
 			return false // Stop iteration after finding the first element
 		})
 
-		if hasGlobalMap {
+		if hasGlobalMap && tel.GlobalMap != nil{
 			// event.Meta["global-map"] = syncMapToMap(tel.GlobalMap)
 			// If you want to nest the global map, you can do this (but the telemetry
 			// endpoint needs to support nested sync.Maps):
