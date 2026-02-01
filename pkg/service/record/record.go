@@ -90,8 +90,18 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 		r.logger.Info("Stopping Keploy recording...")
 
+		// Stop the agent/proxy FIRST so that:
+		// 1. No new connections are intercepted
+		// 2. App's shutdown hooks (e.g., closing DB connections) don't go through a dying proxy
+		setupCtxCancel()
+		err := setupErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
+		}
+
+		// Now stop the application - it can shut down cleanly without proxy interference
 		runAppCtxCancel()
-		err := runAppErrGrp.Wait()
+		err = runAppErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
@@ -100,12 +110,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		err = reqErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
-		}
-
-		setupCtxCancel()
-		err = setupErrGrp.Wait()
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
 		err = errGrp.Wait()
