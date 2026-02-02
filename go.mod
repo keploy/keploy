@@ -6,7 +6,7 @@ toolchain go1.24.6
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
-replace github.com/keploy/integrations => /home/sarthak/projects/integrations
+// replace github.com/keploy/integrations => /home/sarthak/projects/integrations
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -110,7 +110,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
-	github.com/keploy/integrations v0.0.0-20260202092820-eb770e4462d6
+	github.com/keploy/integrations v0.0.0-20260202102150-e84ad8051792
 	github.com/keploy/jsonDiff v1.0.8
 	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
 	github.com/spf13/viper v1.19.0
