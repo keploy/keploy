@@ -12,7 +12,7 @@ inputs:
   integration-ref:
     description: 'The git ref (branch, tag, or commit) of the integrations repo.'
     required: true
-    default: 'main'
+    default: 'backup-my-work'
 
 runs:
   using: composite
