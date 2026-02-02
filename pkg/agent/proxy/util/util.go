@@ -468,18 +468,9 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 }
 
 // ToIP4AddressStr converts the integer IP4 Address to the octet format
+
 func ToIP4AddressStr(ip uint32) string {
-	// convert the IP address to a 32-bit binary number
-	ipBinary := fmt.Sprintf("%032b", ip)
-
-	// divide the binary number into four 8-bit segments
-	firstByte, _ := strconv.ParseUint(ipBinary[0:8], 2, 64)
-	secondByte, _ := strconv.ParseUint(ipBinary[8:16], 2, 64)
-	thirdByte, _ := strconv.ParseUint(ipBinary[16:24], 2, 64)
-	fourthByte, _ := strconv.ParseUint(ipBinary[24:32], 2, 64)
-
-	// concatenate the four decimal segments with a dot separator to form the dot-decimal string
-	return fmt.Sprintf("%d.%d.%d.%d", firstByte, secondByte, thirdByte, fourthByte)
+    return fmt.Sprintf("%d.%d.%d.%d", byte(ip>>24), byte(ip>>16), byte(ip>>8), byte(ip))
 }
 
 func ToIPv6AddressStr(ip [4]uint32) string {
