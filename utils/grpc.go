@@ -247,11 +247,11 @@ func relToAny(abs string, roots []string) string {
 // scenarios where a single protoDir config is insufficient.
 //
 // It uses a multi-strategy approach following protobuf conventions:
-//  1. User-provided protoDir (if specified): "user-management" → "user-management"
-//  2. Full package path: "keploy.v1.keploy" → "keploy/v1"
-//  3. First segment only: "keploy.v1.keploy" → "keploy"
+//  1. User-provided protoDir (if absolute, checked directly; if relative, joined with protoInclude roots)
+//  2. Full package path (minus service name): "keploy.v1.keploy" → joined as "<protoInclude>/keploy/v1"
+//  3. First segment only: "keploy.v1.keploy" → joined as "<protoInclude>/keploy"
 //
-// Returns the first matching directory path, or an error if none found.
+// Returns the first matching absolute directory path, or an error if none found.
 func deriveProtoDirFromPath(grpcPath string, protoIncludes []string, userProtoDir string) (string, error) {
 	if grpcPath == "" || len(protoIncludes) == 0 {
 		return "", fmt.Errorf("grpcPath and protoIncludes are required")
@@ -271,7 +271,9 @@ func deriveProtoDirFromPath(grpcPath string, protoIncludes []string, userProtoDi
 	// 3. First segment only: "keploy"
 	var strategies []string
 
-	// Strategy 1: User-provided protoDir (can be relative or absolute)
+	// Strategy 1: User-provided protoDir
+	// If absolute: checked directly (must exist as a directory)
+	// If relative: joined with each protoInclude root and checked
 	if userProtoDir != "" {
 		strategies = append(strategies, userProtoDir)
 	}
