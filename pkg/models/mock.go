@@ -6,16 +6,16 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/models/postgres"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func init() {
-	gob.Register(primitive.D{})
-	gob.Register(primitive.E{})
-	gob.Register(primitive.A{})
-	gob.Register(primitive.Binary{})
-	gob.Register(primitive.M{})
-	gob.Register(primitive.ObjectID{})
+	gob.Register(bson.D{})
+	gob.Register(bson.E{})
+	gob.Register(bson.A{})
+	gob.Register(bson.Binary{})
+	gob.Register(bson.M{})
+	gob.Register(bson.ObjectID{})
 }
 
 type Kind string
