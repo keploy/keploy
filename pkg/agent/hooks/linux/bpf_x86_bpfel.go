@@ -60,10 +60,6 @@ type bpfProgramSpecs struct {
 	K_connect6              *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
-	K_recvmsg4              *ebpf.ProgramSpec `ebpf:"k_recvmsg4"`
-	K_recvmsg6              *ebpf.ProgramSpec `ebpf:"k_recvmsg6"`
-	K_sendmsg4              *ebpf.ProgramSpec `ebpf:"k_sendmsg4"`
-	K_sendmsg6              *ebpf.ProgramSpec `ebpf:"k_sendmsg6"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
 	SyscallProbeEntrySocket *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
@@ -77,10 +73,10 @@ type bpfMapSpecs struct {
 	CookieByLport            *ebpf.MapSpec `ebpf:"cookie_by_lport"`
 	KeployAgentKernelPidMap  *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployClientKernelPidMap *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
-	M_1769946249001          *ebpf.MapSpec `ebpf:"m_1769946249_001"`
-	M_1769946249002          *ebpf.MapSpec `ebpf:"m_1769946249_002"`
-	M_1769946249003          *ebpf.MapSpec `ebpf:"m_1769946249_003"`
-	M_1769946249004          *ebpf.MapSpec `ebpf:"m_1769946249_004"`
+	M_1770007647001          *ebpf.MapSpec `ebpf:"m_1770007647_001"`
+	M_1770007647002          *ebpf.MapSpec `ebpf:"m_1770007647_002"`
+	M_1770007647003          *ebpf.MapSpec `ebpf:"m_1770007647_003"`
+	M_1770007647004          *ebpf.MapSpec `ebpf:"m_1770007647_004"`
 	OrigDstByCookie          *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	RedirectProxyMap         *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids      *ebpf.MapSpec `ebpf:"target_namespace_pids"`
@@ -117,10 +113,10 @@ type bpfMaps struct {
 	CookieByLport            *ebpf.Map `ebpf:"cookie_by_lport"`
 	KeployAgentKernelPidMap  *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployClientKernelPidMap *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
-	M_1769946249001          *ebpf.Map `ebpf:"m_1769946249_001"`
-	M_1769946249002          *ebpf.Map `ebpf:"m_1769946249_002"`
-	M_1769946249003          *ebpf.Map `ebpf:"m_1769946249_003"`
-	M_1769946249004          *ebpf.Map `ebpf:"m_1769946249_004"`
+	M_1770007647001          *ebpf.Map `ebpf:"m_1770007647_001"`
+	M_1770007647002          *ebpf.Map `ebpf:"m_1770007647_002"`
+	M_1770007647003          *ebpf.Map `ebpf:"m_1770007647_003"`
+	M_1770007647004          *ebpf.Map `ebpf:"m_1770007647_004"`
 	OrigDstByCookie          *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	RedirectProxyMap         *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids      *ebpf.Map `ebpf:"target_namespace_pids"`
@@ -133,10 +129,10 @@ func (m *bpfMaps) Close() error {
 		m.CookieByLport,
 		m.KeployAgentKernelPidMap,
 		m.KeployClientKernelPidMap,
-		m.M_1769946249001,
-		m.M_1769946249002,
-		m.M_1769946249003,
-		m.M_1769946249004,
+		m.M_1770007647001,
+		m.M_1770007647002,
+		m.M_1770007647003,
+		m.M_1770007647004,
 		m.OrigDstByCookie,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
@@ -159,10 +155,6 @@ type bpfPrograms struct {
 	K_connect6              *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4          *ebpf.Program `ebpf:"k_getpeername4"`
 	K_getpeername6          *ebpf.Program `ebpf:"k_getpeername6"`
-	K_recvmsg4              *ebpf.Program `ebpf:"k_recvmsg4"`
-	K_recvmsg6              *ebpf.Program `ebpf:"k_recvmsg6"`
-	K_sendmsg4              *ebpf.Program `ebpf:"k_sendmsg4"`
-	K_sendmsg6              *ebpf.Program `ebpf:"k_sendmsg6"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
 	SyscallProbeEntrySocket *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
@@ -175,10 +167,6 @@ func (p *bpfPrograms) Close() error {
 		p.K_connect6,
 		p.K_getpeername4,
 		p.K_getpeername6,
-		p.K_recvmsg4,
-		p.K_recvmsg6,
-		p.K_sendmsg4,
-		p.K_sendmsg6,
 		p.K_sockops,
 		p.SyscallProbeEntrySocket,
 	)

@@ -62,26 +62,17 @@ type Hooks struct {
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
-	socket   link.Link
-	connect4 link.Link
-	gp4      link.Link
-	// tcpv4      link.Link
-	// tcpv4Ret   link.Link
-	connect6 link.Link
-	gp6      link.Link
-	// tcpv6      link.Link
-	// tcpv6Ret   link.Link
+	socket     link.Link
+	connect4   link.Link
+	gp4        link.Link
+	connect6   link.Link
+	gp6        link.Link
 	objects    bpfObjects
 	cgBind4    link.Link
 	cgBind6    link.Link
 	bindEnter  link.Link
 	BindEvents *ebpf.Map
-	// tpClose    link.Link
-	sockops  link.Link
-	sendmsg4 link.Link
-	recvmsg4 link.Link
-	sendmsg6 link.Link
-	recvmsg6 link.Link
+	sockops    link.Link
 }
 
 const (
@@ -140,19 +131,11 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 
 	programs := []struct {
-		name   string
-		pType  ebpf.ProgramType
-		aType  ebpf.AttachType
+		name  string
+		pType ebpf.ProgramType
+		aType ebpf.AttachType
 	}{
 		{"k_sockops", ebpf.SockOps, ebpf.AttachCGroupSockOps},
-		{"k_sendmsg4", ebpf.CGroupSockAddr, ebpf.AttachCGroupUDP4Sendmsg},
-		{"k_recvmsg4", ebpf.CGroupSockAddr, ebpf.AttachCGroupUDP4Recvmsg},
-		{"k_sendmsg6", ebpf.CGroupSockAddr, ebpf.AttachCGroupUDP6Sendmsg},
-		{"k_recvmsg6", ebpf.CGroupSockAddr, ebpf.AttachCGroupUDP6Recvmsg},
-		// {"k_connect4", ebpf.CGroupSockAddr, ebpf.AttachCGroupInet4Connect},
-		// {"k_connect6", ebpf.CGroupSockAddr, ebpf.AttachCGroupInet6Connect},
-		// {"k_getpeername4", ebpf.CGroupSockAddr, ebpf.AttachCGroupInet4GetPeername},
-		// {"k_getpeername6", ebpf.CGroupSockAddr, ebpf.AttachCGroupInet6GetPeername},
 	}
 
 	for _, p := range programs {
@@ -161,27 +144,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			prog.AttachType = p.aType
 		}
 	}
-	// 2. Explicitly force the correct ProgramType for k_sockops.
-	// This tells the verifier: "Treat this function as a SockOps program"
-	// which enables access to the `bpf_sock_ops` context and helper #59.
-	// if prog, ok := spec.Programs["k_sockops"]; ok {
-	// 	prog.Type = ebpf.SockOps
-	// }
-	// if prog, ok := spec.Programs["k_sendmsg4"]; ok {
-    //     prog.Type = ebpf.CGroupSockAddr
-    //     prog.AttachType = ebpf.AttachCGroupUDP4Sendmsg
-    // }
-
-    // // 3. FIX FOR RECVMSG4 (Add this block)
-    // // We must tell the kernel: "This program is specifically for RecvMsg"
-    // if prog, ok := spec.Programs["k_recvmsg4"]; ok {
-    //     prog.Type = ebpf.CGroupSockAddr
-    //     prog.AttachType = ebpf.AttachCGroupUDP4Recvmsg
-    // }
 
 	// 3. Now load and assign into the kernel with the corrected spec
 	if err := spec.LoadAndAssign(&objs, optsa); err != nil {
-		// ... (Keep your existing VerifierError handling logic here) ...
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
@@ -201,8 +166,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1769946249001
-	h.agentRegistartionMap = objs.M_1769946249003
+	h.clientRegistrationMap = objs.M_1770007647001
+	h.agentRegistartionMap = objs.M_1770007647003
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -217,27 +182,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
-
-	// tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
-	// if err != nil {
-	// 	utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_connect")
-	// 	return err
-	// }
-	// h.tcpv4 = tcpC4
-
-	// tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{})
-	// if err != nil {
-	// 	utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
-	// 	return err
-	// }
-	// h.tcpv4Ret = tcpRC4
-
-	// tp, err := link.Tracepoint("syscalls", "sys_enter_close", objs.TpClose, nil)
-	// if err != nil {
-	// 	utils.LogError(h.logger, err, "failed to attach tracepoint sys_enter_close")
-	// 	return err
-	// }
-	// h.tpClose = tp
 
 	// Get the first-mounted cgroupv2 path.
 	cGroupPath, err := agent.DetectCgroupPath(h.logger)
@@ -256,28 +200,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 	h.sockops = sockops
-
-	sm4, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cGroupPath,
-		Attach:  ebpf.AttachCGroupUDP4Sendmsg,
-		Program: objs.K_sendmsg4,
-	})
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach SendMsg4 (Kernel might be too old)") // Add detailed log
-		return err
-	}
-	h.sendmsg4 = sm4
-
-	rm4, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cGroupPath,
-		Attach:  ebpf.AttachCGroupUDP4Recvmsg,
-		Program: objs.K_recvmsg4,
-	})
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach RecvMsg4") // Add detailed log
-		return err
-	}
-	h.recvmsg4 = rm4
 
 	if opts.Mode == models.MODE_RECORD {
 
@@ -330,20 +252,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.gp4 = gp4
 
-	// tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
-	// if err != nil {
-	// 	utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
-	// 	return err
-	// }
-	// h.tcpv6 = tcpC6
-
-	// tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{})
-	// if err != nil {
-	// 	utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
-	// 	return err
-	// }
-	// h.tcpv6Ret = tcpRC6
-
 	c6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet6Connect,
@@ -366,17 +274,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 	h.gp6 = gp6
-
-	h.sendmsg6, err = link.AttachCgroup(link.CgroupOptions{
-		Path: cGroupPath, Attach: ebpf.AttachCGroupUDP6Sendmsg, Program: objs.K_sendmsg6,
-	})
-	if err != nil {
-		h.logger.Warn("Failed to attach sendmsg6 (IPv6 UDP redirection disabled)", zap.Error(err))
-	}
-	h.recvmsg6, _ = link.AttachCgroup(link.CgroupOptions{
-		Path: cGroupPath, Attach: ebpf.AttachCGroupUDP6Recvmsg, Program: objs.K_recvmsg6,
-	})
-
 
 	h.logger.Debug("keploy initialized and probes added to the kernel.")
 
@@ -448,18 +345,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		}
 	}
 
-	// if h.tcpv4 != nil {
-	// 	if err := h.tcpv4.Close(); err != nil {
-	// 		utils.LogError(h.logger, err, "failed to close the tcpv4")
-	// 	}
-	// }
-
-	// if h.tcpv4Ret != nil {
-	// 	if err := h.tcpv4Ret.Close(); err != nil {
-	// 		utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
-	// 	}
-	// }
-
 	if h.connect6 != nil {
 		if err := h.connect6.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the connect6")
@@ -474,28 +359,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.sockops != nil {
 		h.sockops.Close()
 	}
-	if h.sendmsg4 != nil {
-		h.sendmsg4.Close()
-	}
-	if h.recvmsg4 != nil {
-		h.recvmsg4.Close()
-	}
-
-	// if h.tcpv6 != nil {
-	// 	if err := h.tcpv6.Close(); err != nil {
-	// 		utils.LogError(h.logger, err, "failed to close the tcpv6")
-	// 	}
-	// }
-	// if h.tcpv6Ret != nil {
-	// 	if err := h.tcpv6Ret.Close(); err != nil {
-	// 		utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
-	// 	}
-	// }
-	// if h.tpClose != nil {
-	// 	if err := h.tpClose.Close(); err != nil {
-	// 		utils.LogError(h.logger, err, "failed to close tpClose")
-	// 	}
-	// }
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
