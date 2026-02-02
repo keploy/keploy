@@ -2,7 +2,6 @@ package conn
 
 import (
 	"context"
-	"encoding/binary"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -30,12 +29,15 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 			data: func() []byte {
 				// Create minimal valid handshake response
 				data := make([]byte, 32)
-				// Set CLIENT_PROTOCOL_41 capability
-				binary.LittleEndian.PutUint32(data[:4], mysql.CLIENT_PROTOCOL_41)
+				// Set CLIENT_PROTOCOL_41 capability (0x200)
+				data[0] = 0x00
+				data[1] = 0x02 // 0x0200 = 512 = CLIENT_PROTOCOL_41
+				data[2] = 0x00
+				data[3] = 0x00
 				// Add null terminator for username at position 32
 				data = append(data, 0x00)
-				// Add auth response as null-terminated string (empty)
-				data = append(data, 0x00)
+				// Add auth response length = 0 for non-plugin auth
+				data = append(data, 0x00, 0x00) // length + filler
 				return data
 			}(),
 			expectError: false,
@@ -44,7 +46,10 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 			name: "missing username null terminator",
 			data: func() []byte {
 				data := make([]byte, 32)
-				binary.LittleEndian.PutUint32(data[:4], mysql.CLIENT_PROTOCOL_41)
+				data[0] = 0x00
+				data[1] = 0x02 // CLIENT_PROTOCOL_41
+				data[2] = 0x00
+				data[3] = 0x00
 				// No null terminator for username
 				return append(data, []byte("username")...)
 			}(),
@@ -55,10 +60,11 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 			name: "auth response - insufficient data for length (plugin auth)",
 			data: func() []byte {
 				data := make([]byte, 32)
-				// CLIENT_PROTOCOL_41 + CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
-				binary.LittleEndian.PutUint32(data[:4],
-					mysql.CLIENT_PROTOCOL_41|mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA,
-				)
+				// CLIENT_PROTOCOL_41 (0x200) + CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA (0x100000)
+				data[0] = 0x00
+				data[1] = 0x02 // CLIENT_PROTOCOL_41
+				data[2] = 0x10 // CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+				data[3] = 0x00
 				// Add null terminator for username
 				data = append(data, 0x00)
 				// Don't add auth length byte
@@ -72,9 +78,10 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 			data: func() []byte {
 				data := make([]byte, 32)
 				// CLIENT_PROTOCOL_41 + CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
-				binary.LittleEndian.PutUint32(data[:4],
-					mysql.CLIENT_PROTOCOL_41|mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA,
-				)
+				data[0] = 0x00
+				data[1] = 0x02 // CLIENT_PROTOCOL_41
+				data[2] = 0x10 // CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+				data[3] = 0x00
 				// Add null terminator for username
 				data = append(data, 0x00)
 				// Add auth length = 5 but only provide 3 bytes
@@ -89,13 +96,15 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 			name: "auth response - insufficient data for length (non-plugin auth)",
 			data: func() []byte {
 				data := make([]byte, 32)
-				// CLIENT_PROTOCOL_41 + CLIENT_SECURE_CONNECTION
-				binary.LittleEndian.PutUint32(data[:4],
-					mysql.CLIENT_PROTOCOL_41|mysql.CLIENT_SECURE_CONNECTION,
-				)
+				// CLIENT_PROTOCOL_41 only (no CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA)
+				data[0] = 0x00
+				data[1] = 0x02
+				data[2] = 0x00
+				data[3] = 0x00
 				// Add null terminator for username
 				data = append(data, 0x00)
-				// Don't add auth length byte
+				// Add only 1 byte (need 2 for non-plugin auth)
+				data = append(data, 0x05)
 				return data
 			}(),
 			expectError:   true,
@@ -105,14 +114,15 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 			name: "auth response - insufficient data for auth data (non-plugin auth)",
 			data: func() []byte {
 				data := make([]byte, 32)
-				// CLIENT_PROTOCOL_41 + CLIENT_SECURE_CONNECTION
-				binary.LittleEndian.PutUint32(data[:4],
-					mysql.CLIENT_PROTOCOL_41|mysql.CLIENT_SECURE_CONNECTION,
-				)
+				// CLIENT_PROTOCOL_41 only
+				data[0] = 0x00
+				data[1] = 0x02
+				data[2] = 0x00
+				data[3] = 0x00
 				// Add null terminator for username
 				data = append(data, 0x00)
-				// Add auth length = 5 but only provide 3 bytes
-				data = append(data, 0x05)
+				// Add auth length = 5 but only provide 3 bytes (after skipping 2 bytes)
+				data = append(data, 0x05, 0x00)                  // length + filler
 				data = append(data, []byte{0x01, 0x02, 0x03}...) // Only 3 bytes (need 5)
 				return data
 			}(),
@@ -165,13 +175,16 @@ func TestDecodeHandshakeResponse_ValidCases(t *testing.T) {
 			name: "valid basic handshake",
 			data: func() []byte {
 				data := make([]byte, 32)
-				// CLIENT_PROTOCOL_41
-				binary.LittleEndian.PutUint32(data[:4], mysql.CLIENT_PROTOCOL_41)
+				// CLIENT_PROTOCOL_41 (0x200)
+				data[0] = 0x00
+				data[1] = 0x02
+				data[2] = 0x00
+				data[3] = 0x00
 				// Add username
 				data = append(data, []byte("testuser")...)
 				data = append(data, 0x00) // null terminator
-				// Add auth response as null-terminated string (empty)
-				data = append(data, 0x00)
+				// Add auth response (non-plugin style)
+				data = append(data, 0x00, 0x00) // auth length = 0 + filler
 				return data
 			}(),
 			validate: func(t *testing.T, result interface{}) {
