@@ -112,7 +112,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
-	optsa := &ebpf.CollectionOptions{
+	bpfopts := &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
 			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
 			LogSizeStart: 1 * 1024 * 1024,
@@ -141,7 +141,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 
 	// Now load and assign into the kernel with the corrected spec
-	if err := spec.LoadAndAssign(&objs, optsa); err != nil {
+	if err := spec.LoadAndAssign(&objs, bpfopts); err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
