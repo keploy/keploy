@@ -75,11 +75,6 @@ type Hooks struct {
 	sockops    link.Link
 }
 
-const (
-	AttachCGroupInet4Sendmsg = ebpf.AttachType(45) // BPF_CGROUP_INET4_SENDMSG
-	AttachCGroupInet4Recvmsg = ebpf.AttachType(46) // BPF_CGROUP_INET4_RECVMSG
-)
-
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
 
 	h.sess.Set(uint64(0), &agent.Session{
@@ -145,7 +140,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 	}
 
-	// 3. Now load and assign into the kernel with the corrected spec
+	// Now load and assign into the kernel with the corrected spec
 	if err := spec.LoadAndAssign(&objs, optsa); err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
@@ -155,15 +150,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 		return err
 	}
-	// if err != nil {
-	// 	var ve *ebpf.VerifierError
-	// 	if errors.As(err, &ve) {
-	// 		// This will now print the FULL trace
-	// 		fmt.Printf("Verifier Error:\n% +v\n", ve)
-	// 	}
-	// 	return err
-	// }
-
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
 	h.clientRegistrationMap = objs.M_1770022648001
@@ -196,7 +182,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		Program: objs.K_sockops,
 	})
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach SockOps") // Add detailed log
+		utils.LogError(h.logger, err, "failed to attach SockOps")
 		return err
 	}
 	h.sockops = sockops
