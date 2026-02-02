@@ -46,6 +46,9 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 		}
 	} else {
 		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
+		if conf.Test.PgBindParamMatch != "" {
+			DockerConfig.Envs["KEPLOY_PG_BIND_PARAM_MATCH"] = conf.Test.PgBindParamMatch
+		}
 	}
 
 	// Preserves your Docker client initialization and setup

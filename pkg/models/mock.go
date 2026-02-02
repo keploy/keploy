@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/gob"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -44,6 +45,22 @@ type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
 	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	// mu protects concurrent access to IsFiltered
+	mu sync.RWMutex `json:"-" bson:"-"`
+}
+
+// SetIsFiltered safely sets the IsFiltered field
+func (t *TestModeInfo) SetIsFiltered(val bool) {
+	t.mu.Lock()
+	t.IsFiltered = val
+	t.mu.Unlock()
+}
+
+// GetIsFiltered safely gets the IsFiltered field
+func (t *TestModeInfo) GetIsFiltered() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.IsFiltered
 }
 
 func (m *Mock) GetKind() string {
