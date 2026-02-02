@@ -432,7 +432,7 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(logger, filepath.Join(os.TempDir(), "keploy-logs.txt"))
+	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
 	if err != nil {
 		LogError(logger, err, "failed to attach log file to sentry")
 	}
