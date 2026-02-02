@@ -192,7 +192,7 @@ endsec
 
 # --- Recording Phase ---
 section "Start Recording Server"
-sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$MYSQL_FUZZER_BIN" 2>&1 | tee record.txt &
+"$RECORD_KEPLOY_BIN" record -c "$MYSQL_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
@@ -224,7 +224,7 @@ endsec
 
 # --- Replay Phase ---
 section "Replaying Tests"
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$MYSQL_FUZZER_BIN" --delay 15 --api-timeout=1000 2>&1 | tee test.txt
+"$REPLAY_KEPLOY_BIN" test -c "$MYSQL_FUZZER_BIN" --delay 15 --api-timeout=1000 2>&1 | tee test.txt
 check_for_errors "test.txt"
 check_test_report
 endsec
