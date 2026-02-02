@@ -215,29 +215,36 @@ func DecodeStmtExecute(_ context.Context, logger *zap.Logger, data []byte, prepa
 				param.Value = float64(binary.LittleEndian.Uint64(data[pos : pos+8]))
 				pos += 8
 
+			// Fix: Added support for FieldTypeDate and FieldTypeNewDate.
+			// Previously this would default to "unsupported parameter type".
+			// Uses ParseBinaryDate to correctly decode the binary date format.
 			case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
-				value, _, err := utils.ParseBinaryDate(data[pos:])
+				value, n, err := utils.ParseBinaryDate(data[pos:])
 				if err != nil {
 					return nil, err
 				}
 				param.Value = value
-				pos += len(param.Value.(string)) // Assuming date parsing returns a string
+				pos += n
 
+			// Fix: Added support for FieldTypeTimestamp and FieldTypeDateTime.
+			// Uses ParseBinaryDateTime to correctly decode the binary datetime format.
 			case mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime:
-				value, _, err := utils.ParseBinaryDateTime(data[pos:])
+				value, n, err := utils.ParseBinaryDateTime(data[pos:])
 				if err != nil {
 					return nil, err
 				}
 				param.Value = value
-				pos += len(param.Value.(string)) // Assuming datetime parsing returns a string
+				pos += n
 
+			// Fix: Added support for FieldTypeTime.
+			// Uses ParseBinaryTime to correctly decode the binary time format.
 			case mysql.FieldTypeTime:
-				value, _, err := utils.ParseBinaryTime(data[pos:])
+				value, n, err := utils.ParseBinaryTime(data[pos:])
 				if err != nil {
 					return nil, err
 				}
 				param.Value = value
-				pos += len(param.Value.(string)) // Assuming time parsing returns a string
+				pos += n
 			default:
 				return nil, fmt.Errorf("unsupported parameter type: %d", param.Type)
 			}
