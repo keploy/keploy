@@ -19,9 +19,6 @@ import (
 // The useCachedCreds parameter is ignored on Windows.
 func NewAgentCommand(bin string, args []string, useCachedCreds bool) *exec.Cmd {
 	cmd := exec.Command(bin, args...)
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
 	// Run in a separate process group so Ctrl+C in the parent console doesn't hit the agent.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,

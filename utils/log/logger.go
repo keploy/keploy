@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"go.uber.org/zap"
@@ -58,29 +57,23 @@ func (e ansiConsoleEncoder) Clone() zapcore.Encoder {
 	}
 }
 
-var defaultWriter zapcore.WriteSyncer
-
 func New() (*zap.Logger, *os.File, error) {
 	// Register the ANSI-friendly encoder
 	_ = zap.RegisterEncoder("ansiConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	logPath := os.Getenv("KEPLOY_LOG_PATH")
-	if logPath == "" {
-		logPath = filepath.Join(os.TempDir(), "keploy-logs.txt")
-	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
 	}
 
-	// We don't necessarily need to chmod 777 in temp dir, typically 666 or default is fine,
-	// but user asked for temp dir. Keep it simple.
-	// Also removed the explicit chmod 777 as it might be insecure and unnecessary in temp.
-	// If it was for docker permissions, temp dir usually handles this better or 0666 is enough.
+	err = os.Chmod("keploy-logs.txt", 0777)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
+	}
 
-	defaultWriter = zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
+	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
 
 	LogCfg = zap.NewDevelopmentConfig()
 	LogCfg.Encoding = "ansiConsole" // Use our custom encoder
@@ -99,32 +92,26 @@ func New() (*zap.Logger, *os.File, error) {
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		defaultWriter,
+		writer,
 		LogCfg.Level,
 	)
 
 	logger := zap.New(core)
-	logger.Debug("Log file created", zap.String("path", logPath))
 	return logger, logFile, nil
 }
 
 func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
-	// Update the existing atomic level so all cores using it get updated
-	LogCfg.Level.SetLevel(level)
-
+	LogCfg.Level = zap.NewAtomicLevelAt(level)
 	if level == zap.DebugLevel {
 		LogCfg.DisableStacktrace = false
 		LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
-	} else {
-		LogCfg.DisableStacktrace = true
-		LogCfg.EncoderConfig.EncodeCaller = nil
 	}
 
 	// Use our custom encoder when building
 	encoder := NewANSIConsoleEncoder(LogCfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		defaultWriter,
+		zapcore.AddSync(os.Stdout),
 		LogCfg.Level,
 	)
 
@@ -133,8 +120,6 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 }
 
 func AddMode(mode string) (*zap.Logger, error) {
-	// We clone the config for AddMode to avoid affecting other loggers' time formatting,
-	// but we keep the SAME AtomicLevel to ensure level updates still propagate.
 	cfg := LogCfg
 	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		emoji := "\U0001F430"
@@ -145,8 +130,8 @@ func AddMode(mode string) (*zap.Logger, error) {
 	encoder := NewANSIConsoleEncoder(cfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
-		defaultWriter,
-		LogCfg.Level, // Use shared level
+		zapcore.AddSync(os.Stdout),
+		cfg.Level,
 	)
 
 	logger := zap.New(core)
@@ -158,13 +143,9 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	LogCfg.Encoding = "console"
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 
-	encoder := zapcore.NewConsoleEncoder(LogCfg.EncoderConfig)
-	core := zapcore.NewCore(
-		encoder,
-		defaultWriter,
-		LogCfg.Level, // Use shared level
-	)
-
-	logger := zap.New(core)
+	logger, err := LogCfg.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build config for logger: %v", err)
+	}
 	return logger, nil
 }
