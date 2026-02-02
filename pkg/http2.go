@@ -459,7 +459,7 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
-func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
+func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, configPort uint32) (*models.GrpcResp, error) {
 	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
@@ -505,6 +505,51 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	authority, ok := grpcReq.Headers.PseudoHeaders[":authority"]
 	if !ok {
 		return nil, fmt.Errorf("missing :authority header")
+	}
+
+	// Get the original port from authority (returns empty string if not specified)
+	originalPort := ""
+	if colonIdx := strings.LastIndex(authority, ":"); colonIdx != -1 {
+		originalPort = authority[colonIdx+1:]
+	}
+
+	// Determine which port to use for test execution
+	// Priority: 1. Config port (from flag/config file) 2. Test case AppPort 3. Original authority port (defaults to 443 for gRPC)
+	if configPort > 0 {
+		// Config port takes highest priority - use it for all test cases
+		host := authority
+		if colonIdx := strings.LastIndex(authority, ":"); colonIdx != -1 {
+			host = authority[:colonIdx]
+		}
+		authority = fmt.Sprintf("%s:%d", host, configPort)
+
+		// Warn if config port differs from recorded app_port (may cause test failures)
+		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
+			logger.Info("Using grpc-port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
+				zap.Uint32("config_grpc_port", configPort),
+				zap.Uint16("recorded_app_port", tc.AppPort),
+				zap.String("authority", authority))
+		} else {
+			logger.Debug("Using grpc-port from config/flag", zap.Uint32("grpc_port", configPort), zap.String("authority", authority))
+		}
+	} else if tc.AppPort > 0 {
+		// Use test case AppPort if no config port is provided
+		host := authority
+		if colonIdx := strings.LastIndex(authority, ":"); colonIdx != -1 {
+			host = authority[:colonIdx]
+		}
+		authority = fmt.Sprintf("%s:%d", host, tc.AppPort)
+		logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("authority", authority))
+	} else {
+		// Neither configPort nor AppPort is set - use original authority
+		// If authority has no explicit port, gRPC typically uses 443
+		if originalPort == "" {
+			logger.Debug("No port specified in config or test case. Using authority as-is with default gRPC port.",
+				zap.String("authority", authority),
+				zap.String("default_port", "443"))
+		} else {
+			logger.Debug("Using port from authority", zap.String("authority", authority), zap.String("port", originalPort))
+		}
 	}
 
 	// Extract method path
