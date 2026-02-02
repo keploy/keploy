@@ -136,32 +136,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if !utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
 					utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				// Log prominent warning for mock miss
-				h.Logger.Warn("🔴 MOCK MISS: No matching mock found for outgoing HTTP request",
-					zap.String("method", request.Method),
-					zap.String("url", request.URL.String()),
-					zap.String("host", request.Host),
-					zap.Bool("fallBackOnMiss", opts.FallBackOnMiss))
 				if opts.FallBackOnMiss {
-					h.Logger.Warn("🔀 Falling back to real service (fallBackOnMiss=true)")
 					_, err = pUtil.PassThrough(ctx, h.Logger, clientConn, dstCfg, [][]byte{reqBuf})
 					if err != nil {
 						utils.LogError(h.Logger, err, "failed to passThrough http request", zap.Any("metadata", utils.GetReqMeta(request)))
 						errCh <- err
 						return
 					}
-				} else {
-					h.Logger.Error("❌ Mock not found and fallBackOnMiss=false - request will fail")
 				}
 				errCh <- nil
 				return
 			}
-
-			// Log successful mock match
-			h.Logger.Info("✅ MOCK HIT: Successfully matched mock for outgoing HTTP request",
-				zap.String("method", request.Method),
-				zap.String("url", request.URL.String()),
-				zap.String("host", request.Host))
 
 			if stub == nil {
 				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", utils.GetReqMeta(request)))
