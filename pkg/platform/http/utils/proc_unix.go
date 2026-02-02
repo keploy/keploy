@@ -52,20 +52,12 @@ func NewAgentCommandForPTY(bin string, args []string) *exec.Cmd {
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
 		cmd = exec.Command(bin, args...)
-		if len(env) > 0 {
-			cmd.Env = append(os.Environ(), env...)
-		}
 	} else {
-		// sudo [ENV=VAL...] <bin> <args...>
-		// We prepend env vars to the command arguments for sudo
-		all := make([]string, 0, len(env)+1+len(args))
-		all = append(all, env...)
-		all = append(all, bin)
-		all = append(all, args...)
+		// sudo <bin> <args...>
+		all := append([]string{bin}, args...)
 		cmd = exec.Command("sudo", all...)
 	}
 
-	// Always use Setpgid for process group management
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true, // create new session for PTY
 	}
@@ -90,6 +82,7 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 	}
 	pid := cmd.Process.Pid
 
+	// Determine pgid (with Setpgid, leader's pgid == pid)
 	pgid, err := syscall.Getpgid(pid)
 	if err != nil {
 		logger.Warn("failed to get pgid; falling back to direct kill", zap.Int("pid", pid), zap.Error(err))
@@ -103,14 +96,12 @@ func StopCommand(cmd *exec.Cmd, logger *zap.Logger) error {
 			}
 			logger.Warn("failed to send SIGTERM to process; falling back to kill", zap.Int("pid", pid), zap.Error(err))
 		}
-		time.Sleep(10 * time.Second)
+		time.Sleep(3 * time.Second)
 		// Force
 		return cmd.Process.Kill()
 	}
 
-	logger.Debug("sending SIGTERM to process group", zap.Int("pid", pid), zap.Int("pgid", pgid))
-
-	// Graceful: SIGTERM group (negative pgid sends to all processes in the group)
+	// Graceful: SIGTERM group
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
 		logger.Warn("failed to send SIGTERM to process group", zap.Int("pgid", pgid), zap.Error(err))
 	}
