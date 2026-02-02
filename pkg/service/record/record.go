@@ -190,6 +190,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
+		case <-ctx.Done():
+			// Parent context cancelled (user pressed Ctrl+C)
+			return ctx.Err()
 		case <-agentCtx.Done():
 			return fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:

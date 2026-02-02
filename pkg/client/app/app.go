@@ -269,7 +269,34 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				gracePeriod := 5
+				for i := 0; i < gracePeriod; i++ {
+					time.Sleep(1 * time.Second)
 
+					// Check if the 'docker run' command has exited
+					if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+						a.logger.Debug("docker client process exited")
+						return nil
+					}
+
+					// Check the actual container status via Docker API
+					// This handles cases where 'docker run' is dead but container is alive
+					info, err := a.docker.ContainerInspect(context.Background(), a.container)
+					if err == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
+						a.logger.Debug("container stopped gracefully")
+						return nil
+					}
+				}
+
+				// Force Kill using Docker API
+				// We tell the Docker Daemon explicitly to kill this container.
+				a.logger.Warn("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
+
+				// "SIGKILL" string is standard for Docker API to force kill
+				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
+
+				// Clean up the CLI process as well
+				err = utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				return err
 			}
 			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
