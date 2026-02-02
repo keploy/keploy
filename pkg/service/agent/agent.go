@@ -311,12 +311,24 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	isIncremental := false
 	var mocksToDelete []*models.Mock
 
-	if mocksAlreadySet {
+	if params.IsDiff {
+		if mocksAlreadySet {
+			isIncremental = true
+			if len(params.TotalConsumedMocks) > 0 {
+				for _, m := range filteredMocks {
+					if _, isConsumed := params.TotalConsumedMocks[m.Name]; isConsumed {
+						mocksToDelete = append(mocksToDelete, m)
+					}
+				}
+			}
+		} else {
+			a.logger.Warn("Received IsDiff=true but mocksAlreadySet is false. Forced rebuild.")
+		}
+	} else if mocksAlreadySet {
 		if lastConsumed == nil {
 			lastConsumed = make(map[string]models.MockState)
 		}
 
-		// Ensure TotalConsumed is a superset of lastConsumed (no resets)
 		if len(params.TotalConsumedMocks) >= len(lastConsumed) {
 			validDiff := true
 			for k := range lastConsumed {
@@ -327,22 +339,17 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 			}
 
 			if validDiff {
-				// Find newly consumed mocks
 				for k := range params.TotalConsumedMocks {
 					if _, exists := lastConsumed[k]; !exists {
-						isIncremental = true // Found at least loop entry
+						isIncremental = true
 						break
 					}
 				}
-
-				// If strictly equal, effectively incremental (no-op)
 				if len(params.TotalConsumedMocks) == len(lastConsumed) {
 					isIncremental = true
 				}
 
 				if isIncremental {
-					// Collect mocks from cachedFilteredMocks that match the new consumption
-					// Iterate cachedFilteredMocks (Base Subset)
 					for _, m := range filteredMocks {
 						if _, isConsumed := params.TotalConsumedMocks[m.Name]; isConsumed {
 							if _, wasConsumed := lastConsumed[m.Name]; !wasConsumed {
@@ -356,35 +363,31 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	}
 
 	if isIncremental {
-		type Deleter interface {
-			DeleteMocks(ctx context.Context, mocks []*models.Mock) error
-		}
+		if len(mocksToDelete) > 0 {
+			a.logger.Debug("Performing incremental mock deletion",
+				zap.Int("count", len(mocksToDelete)),
+				zap.Bool("isDiff", params.IsDiff))
 
-		// Use local interface to avoid import cycles
-		if deleter, ok := a.Proxy.(Deleter); ok {
-			if len(mocksToDelete) > 0 {
-				a.logger.Debug("Performing incremental mock deletion", zap.Int("count", len(mocksToDelete)))
-				if err := deleter.DeleteMocks(ctx, mocksToDelete); err != nil {
-					a.logger.Warn("Failed to delete mocks, falling back to SetMocks", zap.Error(err))
-					isIncremental = false
-				}
-			} else {
-				a.logger.Debug("No new mocks to delete, skipping update")
-			}
-
-			if isIncremental {
-				storage.mu.Lock()
-				newLast := make(map[string]models.MockState, len(params.TotalConsumedMocks))
-				for k, v := range params.TotalConsumedMocks {
-					newLast[k] = v
-				}
-				storage.lastConsumedMocks = newLast
-				storage.mu.Unlock()
-				return nil
+			// Direct call since Proxy interface now has DeleteMocks
+			if err := a.Proxy.DeleteMocks(ctx, mocksToDelete); err != nil {
+				a.logger.Warn("Failed to delete mocks, falling back to SetMocks", zap.Error(err))
+				isIncremental = false
 			}
 		} else {
-			a.logger.Debug("Proxy does not support DeleteMocks, falling back")
-			isIncremental = false
+			a.logger.Debug("No new mocks to delete, skipping update (Incremental No-Op)")
+		}
+
+		if isIncremental {
+			storage.mu.Lock()
+			// Update lastConsumedMocks for consistency
+			if storage.lastConsumedMocks == nil {
+				storage.lastConsumedMocks = make(map[string]models.MockState)
+			}
+			for k, v := range params.TotalConsumedMocks {
+				storage.lastConsumedMocks[k] = v
+			}
+			storage.mu.Unlock()
+			return nil
 		}
 	}
 
