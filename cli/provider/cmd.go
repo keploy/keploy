@@ -239,6 +239,27 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 
 	case "record", "test", "rerecord":
+		// Check if this is a stub subcommand first
+		if cmd.Parent() != nil && cmd.Parent().Name() == "stub" {
+			cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated stubs/mocks are stored")
+			cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+			cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+			cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to run the external tests (e.g., \"npx playwright test\")")
+			cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker/docker-compose)")
+			cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "Time to wait for docker container build")
+			cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the docker container")
+			cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the docker network")
+			cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server")
+			cmd.Flags().String("name", c.cfg.Stub.Name, "Name for the stub/mock set (auto-generated if empty)")
+			cmd.Flags().String("mongo-password", c.cfg.Stub.MongoPassword, "MongoDB password for mocking MongoDB connections")
+			cmd.Flags().Bool("in-ci", c.cfg.InCi, "Running in CI environment")
+
+			if cmd.Name() == "record" {
+				cmd.Flags().Duration("record-timer", c.cfg.Stub.RecordTimer, "Timer for recording (e.g., \"5s\", \"1m\")")
+			}
+			return nil
+		}
+
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
@@ -312,6 +333,26 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+
+	// Stub replay subcommand
+	case "replay":
+		if cmd.Parent() != nil && cmd.Parent().Name() == "stub" {
+			cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated stubs/mocks are stored")
+			cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+			cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+			cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to run the external tests (e.g., \"npx playwright test\")")
+			cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command (native/docker/docker-compose)")
+			cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "Time to wait for docker container build")
+			cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the docker container")
+			cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the docker network")
+			cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server")
+			cmd.Flags().String("name", c.cfg.Stub.Name, "Name for the stub/mock set (auto-generated if empty)")
+			cmd.Flags().String("mongo-password", c.cfg.Stub.MongoPassword, "MongoDB password for mocking MongoDB connections")
+			cmd.Flags().Bool("in-ci", c.cfg.InCi, "Running in CI environment")
+			cmd.Flags().Bool("fallback-on-miss", false, "Connect to actual service if mock not found")
+			cmd.Flags().Uint64P("delay", "d", 5, "Delay before starting the tests")
+			return nil
+		}
 
 	default:
 		return errors.New("unknown command name")
@@ -838,6 +879,115 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 	case "record", "test", "rerecord":
+		// Check if this is a stub subcommand first
+		if cmd.Parent() != nil && cmd.Parent().Name() == "stub" {
+			// Get path and set it
+			path, err := cmd.Flags().GetString("path")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get path flag")
+				return errors.New("failed to get path flag")
+			}
+			absPath, err := utils.GetAbsPath(path)
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get absolute path")
+				return errors.New("failed to get absolute path")
+			}
+			c.cfg.Path = absPath + "/keploy"
+			c.cfg.Stub.Path = c.cfg.Path
+
+			// Get stub name
+			stubName, err := cmd.Flags().GetString("name")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get name flag")
+				return errors.New("failed to get name flag")
+			}
+			c.cfg.Stub.Name = stubName
+
+			// Get command
+			command, err := cmd.Flags().GetString("command")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get command flag")
+				return errors.New("failed to get command flag")
+			}
+			if command == "" {
+				utils.LogError(c.logger, nil, "command is required for stub record/replay")
+				return errors.New("missing required -c flag for stub command")
+			}
+			c.cfg.Command = command
+
+			// Set command type
+			c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+			if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" {
+				return errors.New("non docker command not supported for os: " + runtime.GOOS)
+			}
+
+			// Get proxy port
+			proxyPort, err := cmd.Flags().GetUint32("proxy-port")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get proxy-port flag")
+				return errors.New("failed to get proxy-port flag")
+			}
+			c.cfg.ProxyPort = proxyPort
+
+			// Get DNS port
+			dnsPort, err := cmd.Flags().GetUint32("dns-port")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get dns-port flag")
+				return errors.New("failed to get dns-port flag")
+			}
+			c.cfg.DNSPort = dnsPort
+
+			// Get container name
+			containerName, err := cmd.Flags().GetString("container-name")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get container-name flag")
+				return errors.New("failed to get container-name flag")
+			}
+			c.cfg.ContainerName = containerName
+
+			// Get network name
+			networkName, err := cmd.Flags().GetString("network-name")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get network-name flag")
+				return errors.New("failed to get network-name flag")
+			}
+			c.cfg.NetworkName = networkName
+
+			// Get build delay
+			buildDelay, err := cmd.Flags().GetUint64("build-delay")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get build-delay flag")
+				return errors.New("failed to get build-delay flag")
+			}
+			c.cfg.BuildDelay = buildDelay
+
+			// Get bypass ports
+			bypassPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
+				return errors.New("failed to get pass-through-ports flag")
+			}
+			config.SetByPassPorts(c.cfg, bypassPorts)
+
+			// Get mongo password
+			mongoPassword, err := cmd.Flags().GetString("mongo-password")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get mongo-password flag")
+				return errors.New("failed to get mongo-password flag")
+			}
+			c.cfg.Stub.MongoPassword = mongoPassword
+
+			if cmd.Name() == "record" {
+				// Get record timer
+				recordTimer, err := cmd.Flags().GetDuration("record-timer")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get record-timer flag")
+					return errors.New("failed to get record-timer flag")
+				}
+				c.cfg.Stub.RecordTimer = recordTimer
+			}
+			return nil
+		}
 
 		if cmd.Name() == "rerecord" {
 			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
@@ -1282,6 +1432,130 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil // Or return an error
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
+	// Handle stub replay subcommand (record is handled in the "record", "test", "rerecord" case)
+	case "replay":
+		if cmd.Parent() != nil && cmd.Parent().Name() == "stub" {
+			// Get path and set it
+			path, err := cmd.Flags().GetString("path")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get path flag")
+				return errors.New("failed to get path flag")
+			}
+			absPath, err := utils.GetAbsPath(path)
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get absolute path")
+				return errors.New("failed to get absolute path")
+			}
+			c.cfg.Path = absPath + "/keploy"
+			c.cfg.Stub.Path = c.cfg.Path
+
+			// Get stub name
+			stubName, err := cmd.Flags().GetString("name")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get name flag")
+				return errors.New("failed to get name flag")
+			}
+			c.cfg.Stub.Name = stubName
+
+			// Get command
+			command, err := cmd.Flags().GetString("command")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get command flag")
+				return errors.New("failed to get command flag")
+			}
+			if command == "" {
+				utils.LogError(c.logger, nil, "command is required for stub replay")
+				return errors.New("missing required -c flag for stub command")
+			}
+			c.cfg.Command = command
+
+			// Set command type
+			c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+			if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" {
+				return errors.New("non docker command not supported for os: " + runtime.GOOS)
+			}
+
+			// Get proxy port
+			proxyPort, err := cmd.Flags().GetUint32("proxy-port")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get proxy-port flag")
+				return errors.New("failed to get proxy-port flag")
+			}
+			c.cfg.ProxyPort = proxyPort
+
+			// Get DNS port
+			dnsPort, err := cmd.Flags().GetUint32("dns-port")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get dns-port flag")
+				return errors.New("failed to get dns-port flag")
+			}
+			c.cfg.DNSPort = dnsPort
+
+			// Get container name
+			containerName, err := cmd.Flags().GetString("container-name")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get container-name flag")
+				return errors.New("failed to get container-name flag")
+			}
+			c.cfg.ContainerName = containerName
+
+			// Get network name
+			networkName, err := cmd.Flags().GetString("network-name")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get network-name flag")
+				return errors.New("failed to get network-name flag")
+			}
+			c.cfg.NetworkName = networkName
+
+			// Get build delay
+			buildDelay, err := cmd.Flags().GetUint64("build-delay")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get build-delay flag")
+				return errors.New("failed to get build-delay flag")
+			}
+			c.cfg.BuildDelay = buildDelay
+
+			// Get bypass ports
+			bypassPorts, err := cmd.Flags().GetUintSlice("pass-through-ports")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get pass-through-ports flag")
+				return errors.New("failed to get pass-through-ports flag")
+			}
+			config.SetByPassPorts(c.cfg, bypassPorts)
+
+			// Get mongo password
+			mongoPassword, err := cmd.Flags().GetString("mongo-password")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get mongo-password flag")
+				return errors.New("failed to get mongo-password flag")
+			}
+			c.cfg.Stub.MongoPassword = mongoPassword
+
+			// Get fallback on miss
+			fallbackOnMiss, err := cmd.Flags().GetBool("fallback-on-miss")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get fallback-on-miss flag")
+				return errors.New("failed to get fallback-on-miss flag")
+			}
+			c.cfg.Test.FallBackOnMiss = fallbackOnMiss
+
+			// Get delay
+			delay, err := cmd.Flags().GetUint64("delay")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get delay flag")
+				return errors.New("failed to get delay flag")
+			}
+			c.cfg.Test.Delay = delay
+
+			// Check if keploy folder exists for replay
+			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
+				recordCmd := models.HighlightGrayString("keploy stub record")
+				utils.LogError(c.logger, nil, fmt.Sprintf("No stubs found. Please record stubs using %s command", recordCmd))
+				return errors.New("no stubs found")
+			}
+			return nil
+		}
 	}
 
 	return nil

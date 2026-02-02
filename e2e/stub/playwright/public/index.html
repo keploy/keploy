@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Keploy Stub Test App</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .status {
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+        .status.healthy {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .section h2 {
+            color: #444;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+        }
+        .btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        .btn:hover {
+            background: #0056b3;
+        }
+        .btn.success {
+            background: #28a745;
+        }
+        .btn.danger {
+            background: #dc3545;
+        }
+        .user-list, .product-list, .search-results {
+            list-style: none;
+        }
+        .user-list li, .product-list li, .search-results li {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+        }
+        .user-list li:last-child, .product-list li:last-child, .search-results li:last-child {
+            border-bottom: none;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .search-box input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .search-box select {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .loading {
+            color: #666;
+            font-style: italic;
+        }
+        .error-message {
+            color: #dc3545;
+            padding: 10px;
+            background: #f8d7da;
+            border-radius: 4px;
+        }
+        .time-display {
+            font-family: monospace;
+            font-size: 1.2rem;
+            color: #333;
+        }
+        #echo-output {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Keploy Stub Test Application</h1>
+        
+        <div id="health-status" class="status">Checking server health...</div>
+        
+        <div class="section">
+            <h2>👥 Users</h2>
+            <div>
+                <button class="btn" onclick="loadUsers()" data-testid="load-users-btn">Load Users</button>
+                <button class="btn success" onclick="showCreateUserForm()" data-testid="show-create-user-btn">+ Add User</button>
+            </div>
+            <div id="create-user-form" style="display: none; margin-top: 15px;">
+                <div class="form-group">
+                    <label>Name</label>
+                    <input type="text" id="user-name" data-testid="user-name-input" placeholder="Enter name">
+                </div>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="user-email" data-testid="user-email-input" placeholder="Enter email">
+                </div>
+                <button class="btn success" onclick="createUser()" data-testid="create-user-btn">Create User</button>
+                <button class="btn danger" onclick="hideCreateUserForm()">Cancel</button>
+            </div>
+            <ul id="user-list" class="user-list" data-testid="user-list"></ul>
+        </div>
+        
+        <div class="section">
+            <h2>📦 Products</h2>
+            <button class="btn" onclick="loadProducts()" data-testid="load-products-btn">Load Products</button>
+            <ul id="product-list" class="product-list" data-testid="product-list"></ul>
+        </div>
+        
+        <div class="section">
+            <h2>🔍 Search</h2>
+            <div class="search-box">
+                <input type="text" id="search-query" data-testid="search-input" placeholder="Search...">
+                <select id="search-type" data-testid="search-type-select">
+                    <option value="">All</option>
+                    <option value="users">Users</option>
+                    <option value="products">Products</option>
+                </select>
+                <button class="btn" onclick="performSearch()" data-testid="search-btn">Search</button>
+            </div>
+            <ul id="search-results" class="search-results" data-testid="search-results"></ul>
+        </div>
+        
+        <div class="section">
+            <h2>⏰ Server Time</h2>
+            <button class="btn" onclick="loadTime()" data-testid="load-time-btn">Get Current Time</button>
+            <div id="time-display" class="time-display" data-testid="time-display"></div>
+        </div>
+        
+        <div class="section">
+            <h2>📡 Echo Test</h2>
+            <button class="btn" onclick="testEcho()" data-testid="echo-btn">Test Echo Endpoint</button>
+            <pre id="echo-output" data-testid="echo-output"></pre>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';  // Same origin, proxied by server
+        
+        // Health Check
+        async function checkHealth() {
+            const statusEl = document.getElementById('health-status');
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                const data = await response.json();
+                if (data.success) {
+                    statusEl.className = 'status healthy';
+                    statusEl.textContent = '✅ Server is healthy';
+                } else {
+                    throw new Error('Health check failed');
+                }
+            } catch (error) {
+                statusEl.className = 'status error';
+                statusEl.textContent = '❌ Server is not responding';
+            }
+        }
+        
+        // Users
+        async function loadUsers() {
+            const listEl = document.getElementById('user-list');
+            listEl.innerHTML = '<li class="loading">Loading users...</li>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/users`);
+                const data = await response.json();
+                
+                if (data.success && data.data.length > 0) {
+                    listEl.innerHTML = data.data.map(user => `
+                        <li data-testid="user-item-${user.id}">
+                            <span><strong>${user.name}</strong> - ${user.email}</span>
+                            <span>ID: ${user.id}</span>
+                        </li>
+                    `).join('');
+                } else {
+                    listEl.innerHTML = '<li>No users found</li>';
+                }
+            } catch (error) {
+                listEl.innerHTML = `<li class="error-message">Error loading users: ${error.message}</li>`;
+            }
+        }
+        
+        function showCreateUserForm() {
+            document.getElementById('create-user-form').style.display = 'block';
+        }
+        
+        function hideCreateUserForm() {
+            document.getElementById('create-user-form').style.display = 'none';
+            document.getElementById('user-name').value = '';
+            document.getElementById('user-email').value = '';
+        }
+        
+        async function createUser() {
+            const name = document.getElementById('user-name').value;
+            const email = document.getElementById('user-email').value;
+            
+            if (!name || !email) {
+                alert('Please fill in all fields');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/users`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, email })
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    hideCreateUserForm();
+                    loadUsers();
+                    alert(`User "${data.data.name}" created successfully!`);
+                } else {
+                    alert(`Error: ${data.message}`);
+                }
+            } catch (error) {
+                alert(`Error creating user: ${error.message}`);
+            }
+        }
+        
+        // Products
+        async function loadProducts() {
+            const listEl = document.getElementById('product-list');
+            listEl.innerHTML = '<li class="loading">Loading products...</li>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/products`);
+                const data = await response.json();
+                
+                if (data.success && data.data.length > 0) {
+                    listEl.innerHTML = data.data.map(product => `
+                        <li data-testid="product-item-${product.id}">
+                            <span><strong>${product.name}</strong> - $${product.price.toFixed(2)}</span>
+                            <span>Stock: ${product.stock}</span>
+                        </li>
+                    `).join('');
+                } else {
+                    listEl.innerHTML = '<li>No products found</li>';
+                }
+            } catch (error) {
+                listEl.innerHTML = `<li class="error-message">Error loading products: ${error.message}</li>`;
+            }
+        }
+        
+        // Search
+        async function performSearch() {
+            const query = document.getElementById('search-query').value;
+            const type = document.getElementById('search-type').value;
+            const resultsEl = document.getElementById('search-results');
+            
+            resultsEl.innerHTML = '<li class="loading">Searching...</li>';
+            
+            try {
+                const params = new URLSearchParams();
+                if (query) params.append('q', query);
+                if (type) params.append('type', type);
+                
+                const response = await fetch(`${API_BASE}/api/search?${params}`);
+                const data = await response.json();
+                
+                if (data.success && data.data.length > 0) {
+                    resultsEl.innerHTML = data.data.map(item => `
+                        <li data-testid="search-result-${item.type}-${item.id}">
+                            <span><strong>${item.name}</strong> (${item.type})</span>
+                            <span>${item.email || '$' + item.price?.toFixed(2) || ''}</span>
+                        </li>
+                    `).join('');
+                } else {
+                    resultsEl.innerHTML = '<li>No results found</li>';
+                }
+            } catch (error) {
+                resultsEl.innerHTML = `<li class="error-message">Error searching: ${error.message}</li>`;
+            }
+        }
+        
+        // Time
+        async function loadTime() {
+            const displayEl = document.getElementById('time-display');
+            displayEl.textContent = 'Loading...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/time`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    displayEl.innerHTML = `
+                        <div>ISO: ${data.data.iso}</div>
+                        <div>Unix: ${data.data.unix}</div>
+                        <div>Timestamp: ${data.data.timestamp}</div>
+                    `;
+                }
+            } catch (error) {
+                displayEl.textContent = `Error: ${error.message}`;
+            }
+        }
+        
+        // Echo
+        async function testEcho() {
+            const outputEl = document.getElementById('echo-output');
+            outputEl.textContent = 'Sending request...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/echo`, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'X-Custom-Header': 'test-value'
+                    },
+                    body: JSON.stringify({ 
+                        message: 'Hello from UI test!',
+                        timestamp: Date.now()
+                    })
+                });
+                const data = await response.json();
+                outputEl.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                outputEl.textContent = `Error: ${error.message}`;
+            }
+        }
+        
+        // Initialize
+        checkHealth();
+    </script>
+</body>
+</html>

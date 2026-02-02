@@ -1,0 +1,18 @@
+{
+  "name": "keploy-stub-e2e-playwright",
+  "version": "1.0.0",
+  "description": "Playwright E2E tests for Keploy stub record/replay",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "server": "node server.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@types/node": "^20.10.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
