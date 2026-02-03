@@ -1423,18 +1423,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		// Determine the color for the Test Set Name
 		var testSetString string
-		if testSetStatus == models.TestSetStatusFailed {
-			testSetString = models.HighlightFailingString(testReport.TestSet)
-		} else {
-			testSetString = models.HighlightPassingString(testReport.TestSet)
-		}
+		testSetString = testReport.TestSet
 
 		// Determine the color for the Failure count (Red if > 0)
 		failedString := fmt.Sprintf("%d", testReport.Failure)
-		if testReport.Failure > 0 {
-			failedString = models.HighlightFailingString(testReport.Failure)
-		}
+		fmt.Println("got here")
+		if !r.config.DisableANSI {
+			fmt.Println("running this")
+			if testSetStatus == models.TestSetStatusFailed {
+				testSetString = models.HighlightFailingString(testReport.TestSet)
+			} else {
+				testSetString = models.HighlightPassingString(testReport.TestSet)
+			}
 
+			// Determine the color for the Failure count (Red if > 0)
+			if testReport.Failure > 0 {
+				failedString = models.HighlightFailingString(testReport.Failure)
+			}
+		}
 		var sb strings.Builder
 		sb.WriteString("\n <=========================================> \n")
 		sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testSetString))
@@ -1584,7 +1590,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		// 3. PRINT SUMMARY BLOCK (Replaced pp with fmt)
 		var summary strings.Builder
 		summary.WriteString("\n <=========================================> \n")
-		summary.WriteString("  COMPLETE TESTRUN SUMMARY.1 \n")
+		summary.WriteString("  COMPLETE TESTRUN SUMMARY. \n")
 		summary.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", totalTestsSnapshot))
 		summary.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", totalTestPassedSnapshot))
 		summary.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", totalTestFailedSnapshot))
@@ -1631,12 +1637,29 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 			testSetTimeTakenStr := timeWithUnits(report.duration)
 
+			displayName := testSuiteName
+			displayFailed := interface{}(report.failed)
+
+			// Apply ANSI colors to row elements if NOT disabled
+			if !r.config.DisableANSI {
+				fmt.Println("coloring the values")
+				if report.status {
+					displayName = models.HighlightPassingString(testSuiteName)
+				} else {
+					displayName = models.HighlightFailingString(testSuiteName)
+				}
+
+				if report.failed > 0 {
+					displayFailed = models.HighlightFailingString(report.failed)
+				}
+			}
+
 			// Collect args for this row
 			rowArgs := []interface{}{
-				testSuiteName,
+				displayName,
 				report.total,
 				report.passed,
-				report.failed,
+				displayFailed,
 			}
 
 			// Add Ignored column if needed

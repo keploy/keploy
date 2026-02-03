@@ -34,7 +34,39 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%.2f s", secs)
 }
 func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, dur time.Duration, failedCases []string) {
-	// Define Colors
+	// OLD LOGIC: Run this if ANSI is DISABLED
+	if models.IsAnsiDisabled {
+		fmt.Fprintln(w, "<=========================================>")
+		fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
+		fmt.Fprintf(w, "\tTotal tests: %d\n", total)
+		fmt.Fprintf(w, "\tTotal test passed: %d\n", pass)
+		fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
+		if dur > 0 {
+			fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
+		} else {
+			fmt.Fprintf(w, "\tTotal time taken: %q\n", "N/A")
+		}
+		fmt.Fprintln(w, "\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
+		tt := "N/A"
+		if dur > 0 {
+			tt = fmtDuration(dur)
+		}
+		// Note: Old logic used %q for quoting strings
+		fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
+
+		fmt.Fprintln(w, "\nFAILED TEST CASES:")
+		if fail == 0 || len(failedCases) == 0 {
+			fmt.Fprintln(w, "\t(none)")
+		} else {
+			for _, fc := range failedCases {
+				fmt.Fprintf(w, "\t- %s\n", fc)
+			}
+		}
+		fmt.Fprintln(w, "<=========================================>")
+		return
+	}
+
+	// NEW LOGIC: Run this if ANSI is ENABLED (Colors + Tabwriter)
 	const (
 		reset = "\x1b[0m"
 		blue  = "\x1b[34;1m" // Blue and Bold
@@ -45,19 +77,19 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 	timeStr := "N/A"
 	if dur > 0 {
 		// Use %s, not %q here to avoid quoted/escaped output
-		timeStr = fmtDuration(dur) 
+		timeStr = fmtDuration(dur)
 	}
 
 	// 1. HEADER
 	fmt.Fprintln(w, "<=========================================>")
-	fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.3")
-	
+	fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
+
 	// Note: We use %s for the values so we can inject the color codes manually.
 	// We convert the integers to strings inside the Printf using color variables.
 	fmt.Fprintf(w, "\tTotal tests:       %s%d%s\n", blue, total, reset)
 	fmt.Fprintf(w, "\tTotal test passed: %s%d%s\n", blue, pass, reset)
 	fmt.Fprintf(w, "\tTotal test failed: %s%d%s\n", blue, fail, reset)
-	
+
 	// FIX: Use %s for the time string, wrapped in Red color
 	fmt.Fprintf(w, "\tTotal time taken:  %s%s%s\n", red, timeStr, reset)
 
@@ -65,7 +97,7 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 	// Use tabwriter for alignment
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "\tTest Suite\tTotal\tPassed\tFailed\tTime Taken")
-	
+
 	// We formatting the row with %s (string) for name and time, %d (int) for numbers
 	// If you want color in the table too, apply it to the individual args
 	fmt.Fprintf(tw, "\t%s\t%d\t%d\t%d\t%s\n", name, total, pass, fail, timeStr)
@@ -93,6 +125,13 @@ func applyCliColorsToDiff(diff string) string {
 		return ""
 	}
 
+	// If ANSI is disabled, return the raw diff immediately.
+	// This ensures the new Scanner logic is only used when we actually want colors.
+	if models.IsAnsiDisabled {
+		fmt.Println("applied color but its disabled")
+		return diff
+	}
+
 	// ANSI Constants
 	const (
 		reset  = "\x1b[0m"
@@ -103,14 +142,14 @@ func applyCliColorsToDiff(diff string) string {
 
 	var sb strings.Builder
 	// Pre-allocate to avoid resizing. length of diff + some buffer for color codes
-	sb.Grow(len(diff) + 100) 
+	sb.Grow(len(diff) + 100)
 
 	scanner := bufio.NewScanner(strings.NewReader(diff))
 	first := true
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		// Manage newlines manually to avoid trailing newline issues
 		if !first {
 			sb.WriteByte('\n')
