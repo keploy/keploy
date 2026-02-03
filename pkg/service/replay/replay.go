@@ -127,6 +127,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
+
+		// Notify the agent that we are shutting down gracefully
+		// This will cause connection errors to be logged as debug instead of error
+		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		}
+
 		if hookCancel != nil {
 			hookCancel()
 		}

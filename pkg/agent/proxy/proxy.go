@@ -67,6 +67,11 @@ type Proxy struct {
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
 	IsDocker          bool
+
+	// isGracefulShutdown indicates the application is shutting down gracefully
+	// When set, connection errors should be logged as debug instead of error
+	isGracefulShutdown bool
+	shutdownMutex      sync.RWMutex
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
@@ -88,6 +93,23 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 	}
+}
+
+// SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
+// When this flag is set, connection errors will be logged as debug instead of error
+func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
+	p.shutdownMutex.Lock()
+	defer p.shutdownMutex.Unlock()
+	p.isGracefulShutdown = true
+	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
+	return nil
+}
+
+// IsGracefulShutdown returns whether the graceful shutdown flag is set
+func (p *Proxy) IsGracefulShutdown() bool {
+	p.shutdownMutex.RLock()
+	defer p.shutdownMutex.RUnlock()
+	return p.isGracefulShutdown
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -292,7 +314,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
-					utils.LogError(p.logger, err, "failed to handle the client connection")
+					if p.IsGracefulShutdown() {
+						p.logger.Debug("failed to handle the client connection (graceful shutdown)", zap.Error(err))
+					} else {
+						utils.LogError(p.logger, err, "failed to handle the client connection")
+					}
 				}
 				return nil
 			})
@@ -478,7 +504,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+		if p.IsGracefulShutdown() {
+			p.logger.Debug("failed to peek the request message in proxy (graceful shutdown)", zap.Uint32("proxy port", p.Port), zap.Error(err))
+		} else {
+			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+		}
 		return err
 	}
 

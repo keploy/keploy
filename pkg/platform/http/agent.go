@@ -1158,6 +1158,44 @@ func (a *AgentClient) GetErrorChannel() <-chan error {
 	return nil
 }
 
+// NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
+// This should be called before cancelling contexts during application shutdown.
+// When the flag is set, connection errors will be logged as debug instead of error.
+func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
+	if a.conf.Agent.AgentURI == "" {
+		a.logger.Debug("Agent URI is empty, skipping graceful shutdown notification")
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/graceful-shutdown", a.conf.Agent.AgentURI)
+
+	// Use a short timeout since this is a best-effort notification
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", url, nil)
+	if err != nil {
+		a.logger.Debug("failed to create graceful shutdown request", zap.Error(err))
+		return err
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		// Don't log as error since this might fail during shutdown
+		a.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		a.logger.Debug("agent returned non-200 status for graceful shutdown", zap.Int("status", resp.StatusCode))
+		return fmt.Errorf("graceful shutdown notification failed with status %d", resp.StatusCode)
+	}
+
+	a.logger.Debug("Successfully notified agent of graceful shutdown")
+	return nil
+}
+
 func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, agentReadyTimeout)
 	defer cancel()
