@@ -1045,6 +1045,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		var mocksToSend map[string]models.MockState
 		var isDiff bool
+		// isDiff is true after the first test case, Before the first test runs, the application might have already consumed mocks during its startup sequence.
+		// Sending the full totalConsumedMocks map ensures the agent starts with this complete baseline data
 		if idx > 0 {
 			isDiff = true
 			mocksToSend = lastDiffMap

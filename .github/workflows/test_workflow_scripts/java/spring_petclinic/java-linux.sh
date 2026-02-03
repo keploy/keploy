@@ -606,7 +606,7 @@ source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 section "Git branch"
 git fetch origin
-git checkout native-linux
+git checkout petclinic-script
 endsec
 
 section "Start Postgres"
@@ -668,6 +668,8 @@ for i in 1; do
   endsec
   echo "Recorded test case and mocks for iteration ${i}"
 done
+
+sleep 5
 
 section "Shutdown Postgres before test mode"
 # Stop Postgres container - Keploy should use mocks for database interactions
