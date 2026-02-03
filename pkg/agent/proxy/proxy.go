@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -71,8 +72,7 @@ type Proxy struct {
 
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
-	isGracefulShutdown bool
-	shutdownMutex      sync.RWMutex
+	isGracefulShutdown atomic.Bool
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
@@ -99,18 +99,14 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
 // When this flag is set, connection errors will be logged as debug instead of error
 func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
-	p.shutdownMutex.Lock()
-	defer p.shutdownMutex.Unlock()
-	p.isGracefulShutdown = true
+	p.isGracefulShutdown.Store(true)
 	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
 	return nil
 }
 
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
 func (p *Proxy) IsGracefulShutdown() bool {
-	p.shutdownMutex.RLock()
-	defer p.shutdownMutex.RUnlock()
-	return p.isGracefulShutdown
+	return p.isGracefulShutdown.Load()
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
