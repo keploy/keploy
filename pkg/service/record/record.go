@@ -92,11 +92,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 		// Notify the agent that we are shutting down gracefully
 		// This will cause connection errors to be logged as debug instead of error
-		go func() {
-			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
-				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
-			}
-		}()
+		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		}
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
