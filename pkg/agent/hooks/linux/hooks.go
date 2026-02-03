@@ -381,7 +381,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 			}
 		}
 	}
-	h.logger.Debug("eBPF resources released successfully...")
+	h.logger.Info("eBPF resources released successfully...")
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {

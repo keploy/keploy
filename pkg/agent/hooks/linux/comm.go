@@ -81,14 +81,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 }
 
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
-	// Acquire read lock to safely access h.BindEvents while it might be closed by unLoad()
-	h.objectsMutex.RLock()
-	if h.BindEvents == nil {
-		h.objectsMutex.RUnlock()
-		return nil, errors.New("BindEvents map is nil")
-	}
 	rb, err := ringbuf.NewReader(h.BindEvents) // Assuming h.BindEvents is the eBPF map
-	h.objectsMutex.RUnlock()
 	if err != nil {
 		return nil, err // Return error if we can't create the reader
 	}
@@ -96,13 +89,8 @@ func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent
 	eventChan := make(chan models.IngressEvent, 100) // A buffered channel can be useful
 
 	go func() {
+		defer rb.Close()
 		defer close(eventChan)
-
-		// Close the ringbuf reader when context is done to unblock rb.Read()
-		go func() {
-			<-ctx.Done()
-			rb.Close()
-		}()
 
 		for {
 			// Read raw data from the ring buffer

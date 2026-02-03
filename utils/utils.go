@@ -1265,14 +1265,6 @@ func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
 
-// PermissionError holds information about files/directories with permission issues
-type PermissionError struct {
-	Path     string
-	OwnerUID uint32
-	IsRead   bool // true if it's a read permission issue, false if write
-}
-
-// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"
 
@@ -1283,7 +1275,7 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 
 	defer func() {
 		if err := file.Close(); err != nil {
-			logger.Error("error closing .gitignore file", zap.Error(err))
+			logger.Error("error closing .gitignore file: %v", zap.Error(err))
 		}
 	}()
 
@@ -1300,6 +1292,7 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 		if _, err := file.WriteString("\n" + ignoreString + "\n"); err != nil {
 			return fmt.Errorf("error writing to .gitignore file: %v", err)
 		}
+		return nil
 	}
 
 	return nil

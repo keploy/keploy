@@ -81,7 +81,7 @@ run_templatize() {
 
   section "Templatize #$idx (args: ${extra_args:-<none>})"
   set +e
-  "$RECORD_BIN" templatize $extra_args \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" templatize $extra_args \
     > "$logfile" 2>&1
   local rc=$?
   set -e
@@ -107,7 +107,7 @@ run_rerecord() {
   
   # Start keploy rerecord in background, capture PID
   set +e
-  "$RECORD_BIN" rerecord -c 'npm start' --disable-mapping=false $extra_args \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" rerecord -c 'npm start' --disable-mapping=false $extra_args \
     > "$logfile" 2>&1 &
   local KEPLOY_PID=$!
 
@@ -169,7 +169,7 @@ for i in 1 2; do
   app_name="nodeApp_${i}"
 
   # Start keploy recording in background, capture PID
-  "$RECORD_BIN" record -c 'npm start' --global-passthrough \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c 'npm start' --global-passthrough \
     > "${app_name}.txt" 2>&1 &
   KEPLOY_PID=$!
 
@@ -223,7 +223,7 @@ run_replay() {
 
   section "Replay #$idx (args: ${extra_args:-<none>})"
   set +e
-  "$REPLAY_BIN" test -c 'npm start' --disable-mapping=false --delay 10 $extra_args 
+  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --disable-mapping=false --delay 10 $extra_args 
     # > "$logfile" 2>&1
   local rc=$?
   set -e

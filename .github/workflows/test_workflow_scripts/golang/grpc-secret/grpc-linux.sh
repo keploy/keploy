@@ -239,7 +239,7 @@ echo "🧪 Starting gRPC Secret Sanitize Testing"
 # Reset state before each run
 cleanup
 rm -rf ./keploy*
-"$RECORD_BIN" config --generate
+sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
 sleep 3
 
 go build -o grpc-secret .
@@ -255,7 +255,7 @@ for i in 1 2; do
     echo "Recording iteration $i..."
     
     # Start keploy record in background
-    "$RECORD_BIN" record -c "./grpc-secret" --generateGithubActions=false 2>&1 | tee ${app_name}.txt &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-secret" --generateGithubActions=false 2>&1 | tee ${app_name}.txt &
     
     # Send all 4 gRPC requests
     send_grpc_requests &
@@ -275,7 +275,7 @@ done
 
 # --- Run keploy test (before sanitize) ---
 echo "🧪 Phase 2: Running keploy test (before sanitize)..."
-"$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_before_sanitize.txt || true
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_before_sanitize.txt || true
 
 # Check for errors and race conditions
 check_for_errors test_before_sanitize.txt
@@ -289,7 +289,7 @@ fi
 
 # --- Run keploy sanitize ---
 echo "🧹 Phase 3: Running keploy sanitize..."
-"$RECORD_BIN" sanitize 2>&1 | tee sanitize_logs.txt
+sudo -E env PATH="$PATH" "$RECORD_BIN" sanitize 2>&1 | tee sanitize_logs.txt
 
 # Check for errors and race conditions
 check_for_errors sanitize_logs.txt
@@ -299,7 +299,7 @@ echo "✅ Sanitization complete"
 
 # --- Run keploy test (after sanitize) ---
 echo "🧪 Phase 4: Running keploy test (after sanitize)..."
-"$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_after_sanitize.txt || true
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_after_sanitize.txt || true
 
 # Check for errors and race conditions
 check_for_errors test_after_sanitize.txt

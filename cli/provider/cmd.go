@@ -51,24 +51,24 @@ Note: If installed keploy without One Click Install, use "keploy example --custo
 var Examples = `
 Golang Application
 	Record:
-	keploy record -c "/path/to/user/app/binary"
+	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
 
 	Test:
-	keploy test -c "/path/to/user/app/binary" --delay 10
+	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
-	keploy record -c “npm start --prefix /path/to/node/app"
+	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
 
 	Test:
-	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
-	keploy record -c "java -jar /path/to/java-project/target/jar"
+	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
+	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
 
 Docker
 	Alias:
@@ -81,7 +81,6 @@ Docker
 	Test:
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 10 --buildDelay 60
 
-Note: Keploy will automatically prompt for sudo password when elevated privileges are required for eBPF operations.
 `
 
 var ExampleOneClickInstall = `
@@ -643,10 +642,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	isMCP := isMCPStdioCommand(cmd)
-	disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
-	
 	if isMCP {
-		// MCP stdio mode: redirect logs to stderr to preserve stdout for JSON-RPC
 		utils.SetMCPStdio(true)
 		c.cfg.DisableANSI = true
 		models.IsAnsiDisabled = true
@@ -658,11 +654,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return err
 		}
 	} else {
-		// Skip printing logo for agent command to avoid duplicate logos in native mode
-		if cmd.Name() != "agent" {
-			PrintLogo(os.Stdout, disableAnsi)
-		}
-		// Configure debug logging if enabled
+		// NOTE: Logo is already printed in PersistentPreRun (root.go),
+		// so we don't print it again here to avoid duplicate logos.
 		if c.cfg.Debug {
 			logger, err := log.ChangeLogLevel(zap.DebugLevel)
 			*c.logger = *logger
@@ -685,21 +678,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.E2E = true
 	}
 
-	// Add mode to logger for agent command to differentiate agent logs from client logs
-	if cmd.Name() == "agent" {
-		logger, err := log.AddMode(cmd.Name())
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to add mode to logger"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-	}
-
 	if c.cfg.EnableTesting {
-		// Add mode to logger to debug keploy during testing
-		// Skip if already added for agent or if MCP mode (uses separate logger)
-		if cmd.Name() != "agent" && !isMCP { // Skip if already added for agent
+		// Add mode to logger to debug the keploy during testing
+		if !isMCP {
 			logger, err := log.AddMode(cmd.Name())
 			*c.logger = *logger
 			if err != nil {
@@ -1076,18 +1057,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New("failed to get the absolute path")
 		}
 		c.cfg.Path = absPath + "/keploy"
-
-		// Check and fix keploy folder permissions for native mode only
-		// (handles root-owned files from older sudo-based versions)
-		// Docker commands use sudo re-exec, so they run as root and don't need this
-		cmdType := utils.FindDockerCmd(c.cfg.Command)
-		if !utils.IsDockerCmd(cmdType) {
-			// Native mode: fix permissions immediately (this caches sudo credentials)
-			if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
-				utils.LogError(c.logger, err, "failed to ensure keploy folder permissions")
-				return err
-			}
-		}
 
 		// handle the app command
 		if c.cfg.Command == "" {
