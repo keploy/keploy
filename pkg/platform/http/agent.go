@@ -1185,7 +1185,10 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 		a.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		a.logger.Debug("agent returned non-200 status for graceful shutdown", zap.Int("status", resp.StatusCode))
