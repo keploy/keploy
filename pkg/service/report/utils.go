@@ -33,8 +33,9 @@ func fmtDuration(d time.Duration) string {
 	secs := float64(d) / float64(time.Second)
 	return fmt.Sprintf("%.2f s", secs)
 }
+
+// printSingleSummaryTo is the buffered variant used internally.
 func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, dur time.Duration, failedCases []string) {
-	// OLD LOGIC: Run this if ANSI is DISABLED
 	if models.IsAnsiDisabled {
 		fmt.Fprintln(w, "<=========================================>")
 		fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
@@ -51,7 +52,7 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 		if dur > 0 {
 			tt = fmtDuration(dur)
 		}
-		// Note: Old logic used %q for quoting strings
+
 		fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
 
 		fmt.Fprintln(w, "\nFAILED TEST CASES:")
@@ -72,10 +73,8 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 		red   = "\x1b[31;1m" // Red and Bold
 	)
 
-	// Format the duration string
 	timeStr := "N/A"
 	if dur > 0 {
-		// Use %s, not %q here to avoid quoted/escaped output
 		timeStr = fmtDuration(dur)
 	}
 
@@ -99,7 +98,6 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 		fmt.Fprintln(w, "\t(none)")
 	} else {
 		for _, fc := range failedCases {
-			// Using %s prevents quotes around the test names
 			fmt.Fprintf(w, "\t- %s\n", fc)
 		}
 	}

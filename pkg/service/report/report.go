@@ -699,14 +699,18 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 	}
 	return nil
 }
+
+// renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
 func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
 	// Header with risk level and categories
 	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
 
+	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
 		header += fmt.Sprintf(" [%s-RISK]", test.FailureInfo.Risk)
 	}
 
+	// Add categories if available
 	if len(test.FailureInfo.Category) > 0 {
 		categories := make([]string, len(test.FailureInfo.Category))
 		for i, cat := range test.FailureInfo.Category {
@@ -758,7 +762,6 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 		// Force the old compact format for non-JSON bodies (fast).
 		diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
 
-		// LOGIC CHANGE: Check config
 		if !r.config.DisableANSI {
 			sb.WriteString(applyCliColorsToDiff(diff))
 		} else {

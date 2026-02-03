@@ -1617,7 +1617,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			displayName := testSuiteName
 			displayFailed := interface{}(report.failed)
 
-			// Apply ANSI colors to row elements if NOT disabled
 			if !r.config.DisableANSI {
 				fmt.Println("coloring the values")
 				if report.status {

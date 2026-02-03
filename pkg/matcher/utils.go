@@ -1212,12 +1212,9 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 	exp, act = truncateStrings(exp, act)
 
 	if models.IsAnsiDisabled {
-		// CRITICAL FIX: Strip ANSI codes if coloring is disabled
 		exp = stripANSI(exp)
 		act = stripANSI(act)
 	} else {
-		// Apply colors: red for expected, green for actual
-		// Force color output even when piping to files
 		greenPaint := color.New(color.FgGreen)
 		greenPaint.EnableColor()
 		redPaint := color.New(color.FgRed)
