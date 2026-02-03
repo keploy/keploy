@@ -21,6 +21,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/spf13/cobra v1.9.1
+	go.mongodb.org/mongo-driver v1.17.6
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/sys v0.35.0

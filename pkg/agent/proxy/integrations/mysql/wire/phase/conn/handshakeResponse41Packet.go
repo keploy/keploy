@@ -84,7 +84,7 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 			packet.AuthResponse = data[:authLen]
 			data = data[authLen:]
 		}
-	} else {
+	} else if packet.CapabilityFlags&mysql.CLIENT_SECURE_CONNECTION != 0 {
 		if len(data) < 1 {
 			return nil, errors.New("handshake response packet too short for auth data length")
 		}
@@ -101,6 +101,15 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 			packet.AuthResponse = data[:authLen]
 			data = data[authLen:]
 		}
+	} else {
+		// Fix: Handle legacy null-terminated authentication data.
+		// Matches behavior for older clients or simpler auth plugins.
+		idx = bytes.IndexByte(data, 0x00)
+		if idx == -1 {
+			return nil, errors.New("malformed handshake response packet: missing null terminator for AuthResponse")
+		}
+		packet.AuthResponse = data[:idx]
+		data = data[idx+1:]
 	}
 
 	if packet.CapabilityFlags&mysql.CLIENT_CONNECT_WITH_DB != 0 {
