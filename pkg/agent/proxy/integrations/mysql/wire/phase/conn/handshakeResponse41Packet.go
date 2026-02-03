@@ -84,7 +84,7 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 			packet.AuthResponse = data[:authLen]
 			data = data[authLen:]
 		}
-	} else if packet.CapabilityFlags&mysql.CLIENT_SECURE_CONNECTION != 0 {
+	} else {
 		if len(data) < 1 {
 			return nil, errors.New("handshake response packet too short for auth data length")
 		}
@@ -101,15 +101,6 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 			packet.AuthResponse = data[:authLen]
 			data = data[authLen:]
 		}
-	} else {
-		// Fix: Handle legacy null-terminated authentication data.
-		// Matches behavior for older clients or simpler auth plugins.
-		idx = bytes.IndexByte(data, 0x00)
-		if idx == -1 {
-			return nil, errors.New("malformed handshake response packet: missing null terminator for AuthResponse")
-		}
-		packet.AuthResponse = data[:idx]
-		data = data[idx+1:]
 	}
 
 	if packet.CapabilityFlags&mysql.CLIENT_CONNECT_WITH_DB != 0 {
@@ -228,13 +219,6 @@ func EncodeHandshakeResponse41(_ context.Context, _ *zap.Logger, packet *mysql.H
 	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
 		// Fix: Use WriteLengthEncodedInteger to match the decoder's logic for variable-length data.
 		if err := utils.WriteLengthEncodedInteger(buf, uint64(len(packet.AuthResponse))); err != nil {
-			return nil, fmt.Errorf("failed to write length of AuthResponse for HandshakeResponse41Packet: %w", err)
-		}
-		if _, err := buf.Write(packet.AuthResponse); err != nil {
-			return nil, fmt.Errorf("failed to write AuthResponse for HandshakeResponse41Packet: %w", err)
-		}
-	} else if packet.CapabilityFlags&mysql.CLIENT_SECURE_CONNECTION != 0 {
-		if err := buf.WriteByte(byte(len(packet.AuthResponse))); err != nil {
 			return nil, fmt.Errorf("failed to write length of AuthResponse for HandshakeResponse41Packet: %w", err)
 		}
 		if _, err := buf.Write(packet.AuthResponse); err != nil {
