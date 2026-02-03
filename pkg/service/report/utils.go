@@ -114,7 +114,6 @@ func applyCliColorsToDiff(diff string) string {
 	}
 
 	if models.IsAnsiDisabled {
-		fmt.Println("applied color but its disabled")
 		return diff
 	}
 

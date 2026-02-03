@@ -1426,9 +1426,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetString = testReport.TestSet
 
 		failedString := fmt.Sprintf("%d", testReport.Failure)
-		fmt.Println("got here")
 		if !r.config.DisableANSI {
-			fmt.Println("running this")
 			if testSetStatus == models.TestSetStatusFailed {
 				testSetString = models.HighlightFailingString(testReport.TestSet)
 			} else {
@@ -1623,7 +1621,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			displayFailed := interface{}(report.failed)
 
 			if !r.config.DisableANSI {
-				fmt.Println("coloring the values")
 				if report.status {
 					displayName = models.HighlightPassingString(testSuiteName)
 				} else {
@@ -1667,7 +1664,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		}
 
 		fmt.Println("\n<=========================================>")
-		fmt.Println()
 	}
 }
 func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) models.AppError {
