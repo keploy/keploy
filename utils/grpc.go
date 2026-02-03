@@ -33,7 +33,7 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 	// Auto-derive protoDir from gRPC path when protoInclude is available.
 	// This enables multi-service scenarios where different requests need different proto directories.
 	if len(protoInclude) > 0 && grpcPath != "" {
-		derived, err := deriveProtoDirFromPath(grpcPath, protoInclude)
+		derived, err := deriveProtoDirFromPath(grpcPath, protoInclude, protoDir)
 		if err == nil {
 			protoDir = derived // Use derived directory, taking precedence over config
 		} else {
@@ -243,11 +243,12 @@ func relToAny(abs string, roots []string) string {
 // scenarios where a single protoDir config is insufficient.
 //
 // It uses a multi-strategy approach following protobuf conventions:
-//  1. Full package path: "keploy.v1.keploy" → "keploy/v1"
-//  2. First segment only: "keploy.v1.keploy" → "keploy"
+//  1. User-provided protoDir (if absolute, checked directly; if relative, joined with protoInclude roots)
+//  2. Full package path (minus service name): "keploy.v1.keploy" → joined as "<protoInclude>/keploy/v1"
+//  3. First segment only: "keploy.v1.keploy" → joined as "<protoInclude>/keploy"
 //
-// Returns the first matching directory path, or an error if none found.
-func deriveProtoDirFromPath(grpcPath string, protoIncludes []string) (string, error) {
+// Returns the first matching absolute directory path, or an error if none found.
+func deriveProtoDirFromPath(grpcPath string, protoIncludes []string, userProtoDir string) (string, error) {
 	if grpcPath == "" || len(protoIncludes) == 0 {
 		return "", fmt.Errorf("grpcPath and protoIncludes are required")
 	}
@@ -261,27 +262,44 @@ func deriveProtoDirFromPath(grpcPath string, protoIncludes []string) (string, er
 	parts := strings.Split(serviceFull, ".")
 
 	// Build search strategies in order of likelihood:
-	// 1. Full package path (minus service name): "keploy.v1.keploy" → "keploy/v1"
-	// 2. First segment only: "keploy"
+	// 1. User-provided protoDir (highest priority - user knows their structure)
+	// 2. Full package path (minus service name): "keploy.v1.keploy" → "keploy/v1"
+	// 3. First segment only: "keploy"
 	var strategies []string
 
-	// Strategy 1: Full package path (remove service name - last part)
+	// Strategy 1: User-provided protoDir
+	// If absolute: checked directly (must exist as a directory)
+	// If relative: joined with each protoInclude root and checked
+	if userProtoDir != "" {
+		strategies = append(strategies, userProtoDir)
+	}
+
+	// Strategy 2: Full package path (remove service name - last part)
 	if len(parts) > 1 {
 		packageParts := parts[:len(parts)-1] // ["keploy", "v1"]
 		strategies = append(strategies, filepath.Join(packageParts...))
 	}
 
-	// Strategy 2: First segment only
+	// Strategy 3: First segment only
 	strategies = append(strategies, parts[0])
 
 	// Search protoInclude roots for matching directory
-	for _, root := range protoIncludes {
-		absRoot, err := mustAbs(root)
-		if err != nil || absRoot == "" {
+	for _, strategy := range strategies {
+		// If strategy is an absolute path, check it directly
+		if filepath.IsAbs(strategy) {
+			if info, err := os.Stat(strategy); err == nil && info.IsDir() {
+				return strategy, nil
+			}
 			continue
 		}
 
-		for _, strategy := range strategies {
+		// For relative paths, search within protoInclude roots
+		for _, root := range protoIncludes {
+			absRoot, err := mustAbs(root)
+			if err != nil || absRoot == "" {
+				continue
+			}
+
 			candidateDir := filepath.Join(absRoot, strategy)
 			if info, err := os.Stat(candidateDir); err == nil && info.IsDir() {
 				return candidateDir, nil
