@@ -611,7 +611,7 @@ endsec
 
 section "Start Postgres"
 docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic \
-  -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
+  -e POSTGRES_DB=petclinic -p 5432:5432 postgres:latest
 wait_for_postgres
 # seed DB
 docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
