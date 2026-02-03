@@ -13,10 +13,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"facette.io/natsort"
+	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
@@ -1422,36 +1422,51 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	timeTakenStr := timeWithUnits(timeTaken)
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
-		var testSetString string
-		testSetString = testReport.TestSet
 
-		failedString := fmt.Sprintf("%d", testReport.Failure)
 		if !r.config.DisableANSI {
 			if testSetStatus == models.TestSetStatusFailed {
-				testSetString = models.HighlightFailingString(testReport.TestSet)
+				pp.SetColorScheme(models.GetFailingColorScheme())
 			} else {
-				testSetString = models.HighlightPassingString(testReport.TestSet)
+				pp.SetColorScheme(models.GetPassingColorScheme())
 			}
 
-			if testReport.Failure > 0 {
-				failedString = models.HighlightFailingString(testReport.Failure)
+			summaryFormat := "\n <=========================================> \n" +
+				"  TESTRUN SUMMARY. For test-set: %s\n" +
+				"\tTotal tests:        %s\n" +
+				"\tTotal test passed:  %s\n" +
+				"\tTotal test failed:  %s\n"
+
+			args := []interface{}{testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure}
+
+			if testReport.Ignored > 0 {
+				summaryFormat += "\tTotal test ignored: %d\n"
+				args = append(args, testReport.Ignored)
 			}
+
+			summaryFormat += "\tTime Taken:         %s\n <=========================================> \n\n"
+			args = append(args, timeTakenStr)
+
+			if _, err := pp.Printf(summaryFormat, args...); err != nil {
+				utils.LogError(r.logger, err, "failed to print testrun summary")
+			}
+
+		} else {
+			var sb strings.Builder
+			sb.WriteString("\n <=========================================> \n")
+			sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testReport.TestSet))
+			sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
+			sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
+			sb.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", testReport.Failure))
+
+			if testReport.Ignored > 0 {
+				sb.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", testReport.Ignored))
+			}
+
+			sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
+			sb.WriteString(" <=========================================> \n\n")
+
+			fmt.Print(sb.String())
 		}
-		var sb strings.Builder
-		sb.WriteString("\n <=========================================> \n")
-		sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testSetString))
-		sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
-		sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
-		sb.WriteString(fmt.Sprintf("\tTotal test failed:  %s\n", failedString))
-
-		if testReport.Ignored > 0 {
-			sb.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", testReport.Ignored))
-		}
-
-		sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
-		sb.WriteString(" <=========================================> \n\n")
-
-		fmt.Print(sb.String())
 	}
 
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
@@ -1580,90 +1595,128 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTakenSnapshot)
 
-		var summary strings.Builder
-		summary.WriteString("\n <=========================================> \n")
-		summary.WriteString("  COMPLETE TESTRUN SUMMARY. \n")
-		summary.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", totalTestsSnapshot))
-		summary.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", totalTestPassedSnapshot))
-		summary.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", totalTestFailedSnapshot))
+		if !r.config.DisableANSI {
+			if totalTestIgnoredSnapshot > 0 {
+				if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestIgnoredSnapshot, totalTestTimeTakenStr); err != nil {
+					utils.LogError(r.logger, err, "failed to print test run summary")
+					return
+				}
+			} else {
+				if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestTimeTakenStr); err != nil {
+					utils.LogError(r.logger, err, "failed to print test run summary")
+					return
+				}
+			}
 
-		if totalTestIgnoredSnapshot > 0 {
-			summary.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", totalTestIgnoredSnapshot))
-		}
+			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			if totalTestIgnoredSnapshot > 0 {
+				header += "\t\tIgnored"
+			}
+			header += "\t\tTime Taken"
+			if totalTestFailedSnapshot > 0 {
+				header += "\tFailed Testcases"
+			}
+			header += "\t\n"
 
-		summary.WriteString(fmt.Sprintf("\tTotal time taken:   %s\n", totalTestTimeTakenStr))
+			_, err := pp.Printf(header)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to print test suite summary header")
+				return
+			}
 
-		fmt.Print(summary.String())
-
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-
-		headers := []string{"Test Suite Name", "Total Test", "Passed", "Failed"}
-
-		if totalTestIgnoredSnapshot > 0 {
-			headers = append(headers, "Ignored")
-		}
-
-		headers = append(headers, "Time Taken")
-
-		if totalTestFailedSnapshot > 0 {
-			headers = append(headers, "Failed Testcases")
-		}
-
-		fmt.Fprintf(tw, "\n\t%s\n", strings.Join(headers, "\t"))
-		fmt.Fprintf(tw, "\t%s\n", strings.Repeat("----------\t", len(headers)))
-
-		for _, testSuiteName := range testSuiteNames {
-			report := reportSnapshot[testSuiteName]
-
-			testSetTimeTakenStr := timeWithUnits(report.duration)
-
-			displayName := testSuiteName
-			displayFailed := interface{}(report.failed)
-
-			if !r.config.DisableANSI {
+			for _, testSuiteName := range testSuiteNames {
+				report := reportSnapshot[testSuiteName]
 				if report.status {
-					displayName = models.HighlightPassingString(testSuiteName)
+					pp.SetColorScheme(models.GetPassingColorScheme())
 				} else {
-					displayName = models.HighlightFailingString(testSuiteName)
+					pp.SetColorScheme(models.GetFailingColorScheme())
 				}
 
-				if report.failed > 0 {
-					displayFailed = models.HighlightFailingString(report.failed)
+				testSetTimeTakenStr := timeWithUnits(report.duration)
+
+				var format strings.Builder
+				args := []interface{}{}
+
+				format.WriteString("\n\t%s\t\t%s\t\t%s\t\t%s")
+				args = append(args, testSuiteName, report.total, report.passed, report.failed)
+
+				if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
+					format.WriteString("\t\t%s")
+					args = append(args, report.ignored)
+				}
+
+				format.WriteString("\t\t%s") // Time Taken
+				args = append(args, testSetTimeTakenStr)
+
+				if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
+					failedCasesStr := "-"
+					if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+						failedCasesStr = strings.Join(failedCases, ", ")
+					}
+					format.WriteString("\t%s")
+					args = append(args, failedCasesStr)
+				}
+
+				if _, err := pp.Printf(format.String(), args...); err != nil {
+					utils.LogError(r.logger, err, "failed to print test suite details")
+					return
 				}
 			}
-
-			rowArgs := []interface{}{
-				displayName,
-				report.total,
-				report.passed,
-				displayFailed,
+			if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
+				utils.LogError(r.logger, err, "failed to print separator")
+				return
 			}
 
-			if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
-				rowArgs = append(rowArgs, report.ignored)
+		} else {
+			if totalTestIgnoredSnapshot > 0 {
+				fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n"+"\tTotal test ignored: %d\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestIgnoredSnapshot, totalTestTimeTakenStr)
+			} else {
+				fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestTimeTakenStr)
 			}
 
-			rowArgs = append(rowArgs, testSetTimeTakenStr)
+			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			if totalTestIgnoredSnapshot > 0 {
+				header += "\t\tIgnored"
+			}
+			header += "\t\tTime Taken"
+			if totalTestFailedSnapshot > 0 {
+				header += "\tFailed Testcases"
+			}
+			header += "\t\n"
 
-			if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
-				failedCasesStr := "-"
-				if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
-					failedCasesStr = strings.Join(failedCases, ", ")
+			fmt.Print(header)
+
+			for _, testSuiteName := range testSuiteNames {
+				report := reportSnapshot[testSuiteName]
+				testSetTimeTakenStr := timeWithUnits(report.duration)
+
+				var format strings.Builder
+				args := []interface{}{}
+
+				format.WriteString("\n\t%s\t\t%d\t\t%d\t\t%d")
+				args = append(args, testSuiteName, report.total, report.passed, report.failed)
+
+				if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
+					format.WriteString("\t\t%d")
+					args = append(args, report.ignored)
 				}
-				rowArgs = append(rowArgs, failedCasesStr)
+
+				format.WriteString("\t\t%s") // Time Taken
+				args = append(args, testSetTimeTakenStr)
+
+				if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
+					failedCasesStr := "-"
+					if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+						failedCasesStr = strings.Join(failedCases, ", ")
+					}
+					format.WriteString("\t\t%s")
+					args = append(args, failedCasesStr)
+				}
+				fmt.Printf(format.String(), args...)
 			}
 
-			rowFormat := "\t" + strings.TrimSuffix(strings.Repeat("%v\t", len(rowArgs)), "\t") + "\n"
-
-			fmt.Fprintf(tw, rowFormat, rowArgs...)
+			fmt.Print("\n<=========================================> \n\n")
 		}
-
-		if err := tw.Flush(); err != nil {
-			utils.LogError(r.logger, err, "failed to print test suite table")
-			return
-		}
-
-		fmt.Println("\n<=========================================>")
 	}
 }
 func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) models.AppError {
