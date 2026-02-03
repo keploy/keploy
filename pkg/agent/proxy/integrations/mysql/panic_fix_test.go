@@ -2,13 +2,11 @@ package mysql
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	modelmysql "go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 
@@ -87,15 +85,16 @@ func TestPanicFixes(t *testing.T) {
 
 				// Create a packet that would have caused a panic in connection attributes parsing
 				data := make([]byte, 32)
-				// Set CLIENT_PROTOCOL_41 + CLIENT_SECURE_CONNECTION + CLIENT_CONNECT_ATTRS
-				binary.LittleEndian.PutUint32(data[:4],
-					modelmysql.CLIENT_PROTOCOL_41|modelmysql.CLIENT_SECURE_CONNECTION|modelmysql.CLIENT_CONNECT_ATTRS,
-				)
+				// Set CLIENT_PROTOCOL_41 (0x200) + CLIENT_CONNECT_ATTRS (0x80000)
+				data[0] = 0x00
+				data[1] = 0x02
+				data[2] = 0x08 // CLIENT_CONNECT_ATTRS
+				data[3] = 0x00
 
 				// Add null terminator for username
 				data = append(data, 0x00)
-				// Add auth response length (empty)
-				data = append(data, 0x00)
+				// Add auth response
+				data = append(data, 0x00, 0x00) // length + filler
 				// Add connection attributes with insufficient data - this would have caused panic
 				data = append(data, 0x0A)                  // total length = 10
 				data = append(data, 0x05)                  // key length = 5
@@ -123,16 +122,17 @@ func TestPanicFixes(t *testing.T) {
 
 				// Create a packet that would have caused panic in auth response parsing
 				data := make([]byte, 32)
-				// CLIENT_PROTOCOL_41 + CLIENT_SECURE_CONNECTION
-				binary.LittleEndian.PutUint32(data[:4],
-					modelmysql.CLIENT_PROTOCOL_41|modelmysql.CLIENT_SECURE_CONNECTION,
-				)
+				// CLIENT_PROTOCOL_41 only (non-plugin auth)
+				data[0] = 0x00
+				data[1] = 0x02
+				data[2] = 0x00
+				data[3] = 0x00
 
 				// Add username
 				data = append(data, []byte("user")...)
 				data = append(data, 0x00) // null terminator
 				// Add auth response with overflow - this would have caused panic
-				data = append(data, 0x10)                        // auth length = 16
+				data = append(data, 0x10, 0x00)                  // auth length = 16 + filler
 				data = append(data, []byte{0x01, 0x02, 0x03}...) // Only 3 bytes (need 16)
 
 				// This should return an error, not panic
