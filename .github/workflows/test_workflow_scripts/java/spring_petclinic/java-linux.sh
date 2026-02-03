@@ -10,11 +10,11 @@ die() {
   rc=$?
   echo "::error::Pipeline failed (exit=$rc). Dumping context…"
   echo "== docker ps =="; docker ps || true
-  echo "== postgres logs (complete) =="; docker logs mypostgres || true
+  echo "== postgres logs (last 200 lines) =="; docker logs --tail 200 mypostgres || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
-  echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
-  echo "== *.txt logs (complete) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
-  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (complete) =="; cat test_logs.txt; }
+  echo "== keploy tree (depth 4 - first 20 lines) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort | head -n 20 || true; echo "... (truncated)"
+  echo "== *.txt logs (last 100 lines) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 100 "$f"; }; done
+  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (last 100 lines) =="; tail -n 100 test_logs.txt; }
   exit "$rc"
 }
 trap die ERR
@@ -683,11 +683,10 @@ set +e
 "$REPLAY_BIN" test \
   -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
   --delay 30 \
-  > test_logs.txt 2>&1
+  2>&1 | tee test_logs.txt
 REPLAY_RC=$?
 set -e
 echo "Replay exit code: $REPLAY_RC"
-cat test_logs.txt || true
 endsec
 
 # ✅ Extract and validate coverage percentage from log
