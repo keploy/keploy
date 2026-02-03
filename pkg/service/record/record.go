@@ -278,7 +278,7 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 		select {
 		case <-ctx.Done():
 			// Parent context cancelled (user pressed Ctrl+C)
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-agentCtx.Done():
 			return result, fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
