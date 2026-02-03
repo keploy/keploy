@@ -644,7 +644,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	isMCP := isMCPStdioCommand(cmd)
 	disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
-
+	
 	if isMCP {
 		// MCP stdio mode: redirect logs to stderr to preserve stdout for JSON-RPC
 		utils.SetMCPStdio(true)
