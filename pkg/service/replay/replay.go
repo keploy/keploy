@@ -107,8 +107,25 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
 
+	// Create a context that is not cancelled when ctx is cancelled.
+	// We will manually cancel it after notifying the agent.
+	gracefulCtx, gracefulCancel := context.WithCancel(context.WithoutCancel(ctx))
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Notify the agent that we are shutting down gracefully
+			// This will cause connection errors to be logged as debug instead of error
+			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			}
+			gracefulCancel()
+		case <-gracefulCtx.Done():
+		}
+	}()
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
-	g, ctx := errgroup.WithContext(ctx)
+	g, ctx := errgroup.WithContext(gracefulCtx)
 	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, g))
 
 	setupErrGrp, _ := errgroup.WithContext(ctx)
@@ -128,12 +145,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
 
-		// Notify the agent that we are shutting down gracefully
-		// This will cause connection errors to be logged as debug instead of error
-		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
-			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
-		}
-
 		if hookCancel != nil {
 			hookCancel()
 		}
@@ -148,6 +159,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
+		gracefulCancel()
 	}()
 
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
