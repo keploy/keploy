@@ -625,7 +625,7 @@ endsec
 # Clean once (keep artifacts across iterations)
 sudo rm -rf keploy/
 
-for i in 1 2; do
+for i in 1; do
   section "Record iteration $i"
 
   # Build app (captured to log)

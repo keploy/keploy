@@ -254,7 +254,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// Cache is valid if: 1) it exists, 2) no deleted mocks to filter out
 	// TotalConsumedMocks changes per test, so we still need to filter those
 	storage.mu.RLock()
-	cacheValid := storage.cacheValid && len(storage.cachedFilteredMocks) > 0
+	cacheValid := storage.cacheValid
 	mocksAlreadySet := storage.mocksAlreadySet
 	lastConsumed := storage.lastConsumedMocks
 	if cacheValid {
@@ -316,7 +316,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 			isIncremental = true
 			if len(params.TotalConsumedMocks) > 0 {
 				for _, m := range filteredMocks {
-					if _, isConsumed := params.TotalConsumedMocks[m.Name]; isConsumed {
+					if state, isConsumed := params.TotalConsumedMocks[m.Name]; isConsumed && state.Usage == models.Deleted {
 						mocksToDelete = append(mocksToDelete, m)
 					}
 				}
@@ -351,7 +351,7 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 
 				if isIncremental {
 					for _, m := range filteredMocks {
-						if _, isConsumed := params.TotalConsumedMocks[m.Name]; isConsumed {
+						if state, isConsumed := params.TotalConsumedMocks[m.Name]; isConsumed && state.Usage == models.Deleted {
 							if _, wasConsumed := lastConsumed[m.Name]; !wasConsumed {
 								mocksToDelete = append(mocksToDelete, m)
 							}
