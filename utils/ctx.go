@@ -35,6 +35,26 @@ func NewCtx() context.Context {
 	return ctx
 }
 
+// NewMCPCtx creates a context for the MCP server that only reacts to OS signals.
+// Rationale: MCP runs as a long-lived process and should not be torn down when
+// other components invoke Stop/ExecCancel. Use this to keep MCP alive across
+// mock record/replay runs unless the user sends a signal (Ctrl+C, SIGTERM).
+func NewMCPCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Listen for termination signals and cancel MCP context only on those.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigs
+		fmt.Printf("MCP server: signal received: %s, shutting down...\n", sig)
+		cancel()
+	}()
+
+	return ctx
+}
+
 // Stop requires a reason to stop the server.
 // this is to ensure that the server is not stopped accidentally.
 // and to trace back the stopper

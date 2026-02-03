@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func LogExample(example string) string {
@@ -156,6 +157,8 @@ type CmdConfigurator struct {
 	cfg    *config.Config
 }
 
+const MCPStdioAnnotationKey = "keploy.io/mcp-stdio"
+
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
 		logger: logger,
@@ -163,10 +166,25 @@ func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigura
 	}
 }
 
+func isMCPStdioCommand(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Annotations != nil && cmd.Annotations[MCPStdioAnnotationKey] == "true" {
+		return true
+	}
+	parent := cmd.Parent()
+	return cmd.Name() == "serve" && parent != nil && parent.Name() == "mcp"
+}
+
 func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
-	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if isMCPStdioCommand(cmd) {
+			_, _ = fmt.Fprintln(os.Stderr, "error:", err)
+			return err
+		}
 		PrintLogo(os.Stdout, true)
 		color.Red(fmt.Sprintf("❌ error: %v", err))
 		fmt.Println()
@@ -247,6 +265,35 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
 			return nil
 		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+			if cmd.Name() == "record" {
+				pathDefault := c.cfg.Path
+				if pathDefault == "" {
+					pathDefault = "./keploy"
+				}
+				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+				cmd.Flags().StringP("path", "p", pathDefault, "Path to store mock files")
+				cmd.Flags().Duration("duration", 0, "Recording duration (e.g., \"60s\")")
+				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
+				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+				return nil
+			}
+			if cmd.Name() == "test" {
+				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+				pathDefault := c.cfg.Path
+				if pathDefault == "" {
+					pathDefault = "./keploy"
+				}
+				cmd.Flags().StringP("path", "p", pathDefault, "Path to mock files")
+				cmd.Flags().String("mock-name", "", "Name of mock set to replay (defaults to latest)")
+				cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during replay")
+				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
+				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+				return nil
+			}
+		}
 
 		cmd.Flags().Bool("sync", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
@@ -312,6 +359,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+
+	case "serve":
+		if isMCPStdioCommand(cmd) {
+			return nil
+		}
 
 	default:
 		return errors.New("unknown command name")
@@ -381,6 +433,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"removeUnusedMocks":     "remove-unused-mocks",
 		"goCoverage":            "go-coverage",
 		"fallBackOnMiss":        "fallBack-on-miss",
+		"mockName":              "mock-name",
 		"basePath":              "base-path",
 		"updateTemplate":        "update-template",
 		"mocking":               "mocking",
@@ -435,6 +488,12 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	if isMCPStdioCommand(cmd) {
+		utils.SetMCPStdio(true)
+		if err := c.configureMCPLogger(zapcore.InfoLevel); err != nil {
+			return err
+		}
+	}
 	err := isCompatible(c.logger)
 	if err != nil {
 		return err
@@ -478,6 +537,16 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 			return err
 		}
 	}
+	return nil
+}
+
+func (c *CmdConfigurator) configureMCPLogger(level zapcore.Level) error {
+	logger, err := log.NewStderrLogger(level)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "failed to initialize stderr logger:", err)
+		return err
+	}
+	*c.logger = *logger
 	return nil
 }
 
@@ -578,13 +647,29 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	if cmd.Name() != "agent" {
 		PrintLogo(os.Stdout, disableAnsi)
 	}
-	if c.cfg.Debug {
-		logger, err := log.ChangeLogLevel(zap.DebugLevel)
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to change log level"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+	isMCP := isMCPStdioCommand(cmd)
+	if isMCP {
+		utils.SetMCPStdio(true)
+		c.cfg.DisableANSI = true
+		models.IsAnsiDisabled = true
+		level := zapcore.InfoLevel
+		if c.cfg.Debug {
+			level = zapcore.DebugLevel
+		}
+		if err := c.configureMCPLogger(level); err != nil {
+			return err
+		}
+	} else {
+		// NOTE: Logo is already printed in PersistentPreRun (root.go),
+		// so we don't print it again here to avoid duplicate logos.
+		if c.cfg.Debug {
+			logger, err := log.ChangeLogLevel(zap.DebugLevel)
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to change log level"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 	}
 
@@ -599,7 +684,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.E2E = true
 	}
 
-	// Add mode to logger for agent command to differentiate agent logs from client logs
 	if cmd.Name() == "agent" {
 		logger, err := log.AddMode(cmd.Name())
 		*c.logger = *logger
@@ -612,7 +696,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing
-		if cmd.Name() != "agent" { // Skip if already added for agent
+		if cmd.Name() != "agent" && !isMCP { // Skip if already added for agent
 			logger, err := log.AddMode(cmd.Name())
 			*c.logger = *logger
 			if err != nil {
@@ -624,7 +708,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.DisableTele = true
 	}
 
-	if c.cfg.DisableANSI {
+	if c.cfg.DisableANSI && !isMCP {
 		logger, err := log.ChangeColorEncoding()
 		models.IsAnsiDisabled = true
 		*c.logger = *logger
@@ -888,6 +972,41 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
+		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+			if c.cfg.Command == "" {
+				return c.noCommandError()
+			}
+
+			if cmd.Name() == "record" {
+				if c.cfg.Path == "" {
+					c.cfg.Path = "./keploy"
+				}
+
+				duration, err := cmd.Flags().GetDuration("duration")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get duration flag")
+					return errors.New("failed to get duration flag")
+				}
+				c.cfg.Record.RecordTimer = duration
+				return nil
+			}
+
+			if cmd.Name() == "test" {
+				path, err := cmd.Flags().GetString("path")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get path flag")
+					return errors.New("failed to get path flag")
+				}
+				if path == "" {
+					path = c.cfg.Path
+				}
+				if path == "" {
+					path = "./keploy"
+				}
+				c.cfg.Path = path
+				return nil
+			}
 		}
 
 		// set the command type

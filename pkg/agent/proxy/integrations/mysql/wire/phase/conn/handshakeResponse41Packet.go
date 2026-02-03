@@ -225,11 +225,11 @@ func EncodeHandshakeResponse41(_ context.Context, _ *zap.Logger, packet *mysql.H
 			return nil, fmt.Errorf("failed to write AuthResponse for HandshakeResponse41Packet: %w", err)
 		}
 	} else {
-		if err := buf.WriteByte(byte(len(packet.AuthResponse))); err != nil {
-			return nil, fmt.Errorf("failed to write length of AuthResponse for HandshakeResponse41Packet: %w", err)
-		}
 		if _, err := buf.Write(packet.AuthResponse); err != nil {
 			return nil, fmt.Errorf("failed to write AuthResponse for HandshakeResponse41Packet: %w", err)
+		}
+		if err := buf.WriteByte(0x00); err != nil {
+			return nil, fmt.Errorf("failed to write null terminator for AuthResponse for HandshakeResponse41Packet: %w", err)
 		}
 	}
 
