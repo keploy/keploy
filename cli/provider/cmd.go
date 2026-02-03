@@ -642,11 +642,6 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
-	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" {
-		PrintLogo(os.Stdout, disableAnsi)
-	}
 	isMCP := isMCPStdioCommand(cmd)
 	if isMCP {
 		utils.SetMCPStdio(true)

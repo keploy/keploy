@@ -27,7 +27,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 			}
 
 			// Don't print logo in MCP stdio mode - it corrupts JSON-RPC stream
-			if !utils.IsMCPStdio() {
+			if !utils.IsMCPStdio() && cmd.Name() != "agent" {
 				disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
 				provider.PrintLogo(os.Stdout, disableAnsi)
 			}
