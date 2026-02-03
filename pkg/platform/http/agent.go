@@ -1170,7 +1170,7 @@ func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
 	url := fmt.Sprintf("%s/graceful-shutdown", a.conf.Agent.AgentURI)
 
 	// Use a short timeout since this is a best-effort notification
-	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, "POST", url, nil)
