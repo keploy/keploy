@@ -652,7 +652,7 @@ for i in 1; do
 
   # Quick sanity: ensure something was written
   echo "== keploy artifacts after record =="
-  find ./keploy -maxdepth 3 -type f | sort || true
+  find ./keploy -maxdepth 3 -type f | wc -l || true
 
   # Surface issues from record logs
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
@@ -680,7 +680,7 @@ section "Replay"
 set +e
 "$REPLAY_BIN" test \
   -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
-  --delay 20 \
+  --delay 30 \
   > test_logs.txt 2>&1
 REPLAY_RC=$?
 set -e

@@ -352,12 +352,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
 
-	// Prevent proxy loop where destination is the proxy itself
-	if destInfo.Port == p.Port {
-		p.logger.Warn("Incoming connection destination is proxy port, ignoring to prevent loop", zap.Uint32("Port", destInfo.Port))
-		return nil
-	}
-
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
 	if err != nil {

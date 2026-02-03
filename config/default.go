@@ -49,7 +49,6 @@ test:
   fallBackOnMiss: false
   jacocoAgentPath: ""
   basePath: ""
-  pgBindParamMatch: "len"
   mocking: true
   disableLineCoverage: false
   disableMockUpload: true
