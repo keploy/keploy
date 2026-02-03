@@ -1114,7 +1114,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			getConsumedStart := time.Now()
 			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
 			if time.Since(getConsumedStart) > 50*time.Millisecond {
-				r.logger.Info("Slow GetConsumedMocks", zap.Duration("duration", time.Since(getConsumedStart)))
+				r.logger.Warn("Slow GetConsumedMocks", zap.Duration("duration", time.Since(getConsumedStart)))
 			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
