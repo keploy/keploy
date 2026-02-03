@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -85,11 +86,21 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}
 
+	hasBinaryFile := false
+	for _, fd := range formData {
+		if len(fd.Paths) > 0 {
+			hasBinaryFile = true
+			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Strings("paths", fd.Paths))
+			break
+		}
+	}
+
 	testCase := &models.TestCase{
-		Version: models.GetVersion(),
-		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
-		Kind:    models.HTTP,
-		Created: time.Now().Unix(),
+		Version:       models.GetVersion(),
+		Name:          pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
+		Kind:          models.HTTP,
+		Created:       time.Now().Unix(),
+		HasBinaryFile: hasBinaryFile,
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
 			ProtoMajor: req.ProtoMajor,
@@ -253,15 +264,42 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 			continue
 		}
 
-		value, err := io.ReadAll(part)
-		if err != nil {
-			utils.LogError(logger, err, "Error reading part value")
-			continue
+		fileName := part.FileName()
+		var fileNames []string
+		var values []string
+		var paths []string
+
+		if fileName != "" {
+			file, err := os.CreateTemp("", "keploy-multipart-*.bin")
+			if err != nil {
+				utils.LogError(logger, err, "Error creating temp file")
+				continue
+			}
+			_, err = io.Copy(file, part)
+			if err != nil {
+				utils.LogError(logger, err, "Error copying part to temp file")
+				file.Close()
+				continue
+			}
+			file.Close() // Ensure the file is closed after writing
+
+			paths = append(paths, file.Name())
+			fileNames = append(fileNames, fileName)
+		} else {
+
+			value, err := io.ReadAll(part)
+			if err != nil {
+				utils.LogError(logger, err, "Error reading part value")
+				continue
+			}
+			values = append(values, string(value))
 		}
 
 		formData = append(formData, models.FormData{
-			Key:    key,
-			Values: []string{string(value)},
+			Key:       key,
+			Values:    values,
+			FileNames: fileNames,
+			Paths:     paths,
 		})
 	}
 

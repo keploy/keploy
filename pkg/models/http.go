@@ -31,9 +31,10 @@ type HTTPSchema struct {
 }
 
 type FormData struct {
-	Key    string   `json:"key" bson:"key" yaml:"key"`
-	Values []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
-	Paths  []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
+	Key       string   `json:"key" bson:"key" yaml:"key"`
+	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
+	Paths     []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
+	FileNames []string `json:"file_names,omitempty" yaml:"-"`
 }
 
 type HTTPResp struct {

@@ -194,6 +194,12 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	} else {
 		tcsName = tc.Name
 	}
+
+	err := ts.saveAssets(testSetID, tc, tcsName)
+	if err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, err
+	}
+
 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
@@ -319,4 +325,68 @@ func extractTestNumber(name string) int {
 	}
 
 	return num
+}
+
+func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName string) error {
+	if tc.HTTPReq.Form == nil {
+		return nil
+	}
+
+	for i, form := range tc.HTTPReq.Form {
+		if len(form.FileNames) > 0 {
+			assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, form.Key)
+			if err := os.MkdirAll(assetDir, os.ModePerm); err != nil {
+				utils.LogError(ts.logger, err, "failed to create assets directory", zap.String("path", assetDir))
+				return err
+			}
+
+			// We need to rebuild Paths to point to assets
+			var newPaths []string
+
+			for j, fileName := range form.FileNames {
+				if fileName == "" {
+					continue
+				}
+				destPath := filepath.Join(assetDir, fileName)
+
+				// Case 1: File is in Paths (downloaded to local temp)
+				if j < len(form.Paths) && form.Paths[j] != "" {
+					srcPath := form.Paths[j]
+					// Check if srcPath exists
+					if _, err := os.Stat(srcPath); err == nil {
+						// Read from temp
+						input, err := os.ReadFile(srcPath)
+						if err != nil {
+							utils.LogError(ts.logger, err, "failed to read temp asset file", zap.String("path", srcPath))
+							return err
+						}
+						// Write to assets
+						if err := os.WriteFile(destPath, input, os.ModePerm); err != nil {
+							utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+							return err
+						}
+						// Cleanup temp
+						os.Remove(srcPath)
+					} else {
+						// If srcPath doesn't exist, we can't do much.
+						// Log warning?
+						ts.logger.Warn("asset source file not found", zap.String("path", srcPath))
+					}
+				} else if j < len(form.Values) {
+					// Case 2: File content is in Values (legacy/text fallback)
+					content := []byte(form.Values[j])
+					if err := os.WriteFile(destPath, content, os.ModePerm); err != nil {
+						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						return err
+					}
+				}
+
+				newPaths = append(newPaths, destPath)
+			}
+
+			tc.HTTPReq.Form[i].Paths = newPaths
+			tc.HTTPReq.Form[i].Values = nil
+		}
+	}
+	return nil
 }

@@ -6,8 +6,12 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -163,16 +167,17 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Received request to handle incoming test cases")
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("Cache-Control", "no-cache")
-
 	// Flush headers to ensure the client gets the response immediately
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
 		return
 	}
+
+	// Set up Multipart Writer
+	mw := multipart.NewWriter(w)
+	w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+	w.Header().Set("Cache-Control", "no-cache")
 
 	// Create a context with the request's context to manage cancellation
 	errGrp, _ := errgroup.WithContext(r.Context())
@@ -196,7 +201,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
-	// TODO: make a uniform implementation for both test and mock streaming channels
+	// Force send 200 OK headers immediately so the client establishes connection
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	a.logger.Info("Incoming stream connection established and headers flushed")
+
 	// Keep the connection alive and stream data
 	for t := range tc {
 		select {
@@ -207,10 +216,79 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		default:
 			// Stream each test case as JSON
 			a.logger.Debug("Sending test case", zap.Any("test_case", t))
-			render.JSON(w, r, t)
+			// 1. Write metadata (JSON)
+			header := textproto.MIMEHeader{}
+			header.Set("Content-Disposition", `form-data; name="metadata"`)
+			header.Set("Content-Type", "application/json")
+			part, err := mw.CreatePart(header)
+			if err != nil {
+				a.logger.Error("failed to create metadata part", zap.Error(err))
+				return
+			}
+			if err := json.NewEncoder(part).Encode(t); err != nil {
+				a.logger.Error("failed to encode metadata", zap.Error(err))
+				return
+			}
+
+			// 2. Write file part if exists
+			if t.HasBinaryFile {
+				a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+				for _, form := range t.HTTPReq.Form {
+					for i, path := range form.Paths {
+						if path == "" {
+							continue
+						}
+
+						// Get filename from FileNames if available, or base of path
+						fileName := "binary_file"
+						if i < len(form.FileNames) {
+							fileName = form.FileNames[i]
+						} else {
+							fileName = filepath.Base(path)
+						}
+
+						fileHeader := textproto.MIMEHeader{}
+						fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
+						filePart, err := mw.CreatePart(fileHeader)
+						if err != nil {
+							a.logger.Error("failed to create file part", zap.Error(err))
+							return
+						}
+
+						f, err := os.Open(path)
+						if err != nil {
+							a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+							return
+						}
+						if _, err := io.Copy(filePart, f); err != nil {
+							f.Close()
+							a.logger.Error("failed to copy file to stream", zap.Error(err))
+							return
+						}
+						f.Close()
+						a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+
+						// Cleanup temp file
+						os.Remove(path)
+					}
+				}
+			}
+
+			// 3. Write delimiter part to force closure of previous part (file)
+			// This is critical: The client reads the file part until it sees the *next* boundary.
+			// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
+			// causing a deadlock if testcases are infrequent.
+			delimiterHeader := textproto.MIMEHeader{}
+			delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+			if _, err := mw.CreatePart(delimiterHeader); err != nil {
+				a.logger.Error("failed to create delimiter part", zap.Error(err))
+				return
+			}
+
 			flusher.Flush() // Immediately send data to the client
 		}
 	}
+	mw.Close()
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
