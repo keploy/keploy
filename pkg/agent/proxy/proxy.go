@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -314,7 +315,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
-					if p.IsGracefulShutdown() {
+					if p.IsGracefulShutdown() && isShutdownError(err) {
 						p.logger.Debug("failed to handle the client connection (graceful shutdown)", zap.Error(err))
 					} else {
 						utils.LogError(p.logger, err, "failed to handle the client connection")
@@ -504,7 +505,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-		if p.IsGracefulShutdown() {
+		if p.IsGracefulShutdown() && isShutdownError(err) {
 			p.logger.Debug("failed to peek the request message in proxy (graceful shutdown)", zap.Uint32("proxy port", p.Port), zap.Error(err))
 		} else {
 			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
@@ -832,4 +833,23 @@ func (p *Proxy) SendError(err error) {
 // CloseErrorChannel closes the error channel
 func (p *Proxy) CloseErrorChannel() {
 	close(p.errChannel)
+}
+
+func isShutdownError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if strings.Contains(err.Error(), "use of closed network connection") {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+	if strings.Contains(err.Error(), "connection reset by peer") {
+		return true
+	}
+	return false
 }
