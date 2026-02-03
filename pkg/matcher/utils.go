@@ -1182,9 +1182,10 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	// Apply truncation logic
 	exp, act = truncateStrings(exp, act)
 
-	// CRITICAL FIX: Strip ANSI codes that might come from external libs (jsonDiff)
-	exp = stripANSI(exp)
-	act = stripANSI(act)
+	if models.IsAnsiDisabled {
+		exp = stripANSI(exp)
+		act = stripANSI(act)
+	}
 
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)

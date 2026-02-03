@@ -701,7 +701,6 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 }
 func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
 	// Header with risk level and categories
-	fmt.Println("GETTING HERE 1")
 	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
 
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
@@ -740,7 +739,6 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
 				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
 				if err == nil {
-					// LOGIC CHANGE: Check config
 					if !r.config.DisableANSI {
 						sb.WriteString(applyCliColorsToDiff(diff))
 					} else {

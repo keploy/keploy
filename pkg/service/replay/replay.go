@@ -1,8 +1,6 @@
 package replay
 
 import (
-	// "bytes"
-
 	"context"
 	"errors"
 	"fmt"
@@ -17,8 +15,6 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
-
-	// "github.com/k0kubun/pp"
 
 	"facette.io/natsort"
 	"go.keploy.io/server/v3/config"
@@ -1421,11 +1417,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	timeTakenStr := timeWithUnits(timeTaken)
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
-		// Determine the color for the Test Set Name
 		var testSetString string
 		testSetString = testReport.TestSet
 
-		// Determine the color for the Failure count (Red if > 0)
 		failedString := fmt.Sprintf("%d", testReport.Failure)
 		fmt.Println("got here")
 		if !r.config.DisableANSI {
@@ -1436,7 +1430,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetString = models.HighlightPassingString(testReport.TestSet)
 			}
 
-			// Determine the color for the Failure count (Red if > 0)
 			if testReport.Failure > 0 {
 				failedString = models.HighlightFailingString(testReport.Failure)
 			}
@@ -1455,7 +1448,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
 		sb.WriteString(" <=========================================> \n\n")
 
-		// Print directly to stdout to avoid logger timestamp prefixes on every line
 		fmt.Print(sb.String())
 	}
 
@@ -1552,7 +1544,6 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 
 }
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
-	// 1. SNAPSHOT DATA (Logic unchanged)
 	completeTestReportMu.RLock()
 	totalTestsSnapshot := totalTests
 	totalTestPassedSnapshot := totalTestPassed
@@ -1566,7 +1557,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	completeTestReportMu.RUnlock()
 
 	if totalTestsSnapshot > 0 {
-		// 2. SORTING (Logic unchanged)
 		testSuiteNames := make([]string, 0, len(reportSnapshot))
 		for testSuiteName := range reportSnapshot {
 			testSuiteNames = append(testSuiteNames, testSuiteName)
@@ -1587,7 +1577,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTakenSnapshot)
 
-		// 3. PRINT SUMMARY BLOCK (Replaced pp with fmt)
 		var summary strings.Builder
 		summary.WriteString("\n <=========================================> \n")
 		summary.WriteString("  COMPLETE TESTRUN SUMMARY. \n")
@@ -1599,20 +1588,12 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			summary.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", totalTestIgnoredSnapshot))
 		}
 
-		// Use %s (string) not %v or %q to avoid quotes around the time
 		summary.WriteString(fmt.Sprintf("\tTotal time taken:   %s\n", totalTestTimeTakenStr))
 
-		// Use fmt.Print to output clean text to stdout
 		fmt.Print(summary.String())
 
-		// ---------------------------------------------------------
-		// 4. PRINT TABLE (Header + Rows)
-		// ---------------------------------------------------------
-
-		// Initialize TabWriter ONCE for the whole table
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
-		// --- BUILD HEADER ---
 		headers := []string{"Test Suite Name", "Total Test", "Passed", "Failed"}
 
 		if totalTestIgnoredSnapshot > 0 {
@@ -1625,15 +1606,11 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			headers = append(headers, "Failed Testcases")
 		}
 
-		// Print Header to TabWriter
 		fmt.Fprintf(tw, "\n\t%s\n", strings.Join(headers, "\t"))
-		fmt.Fprintf(tw, "\t%s\n", strings.Repeat("----------\t", len(headers))) // Optional separator line
+		fmt.Fprintf(tw, "\t%s\n", strings.Repeat("----------\t", len(headers)))
 
-		// --- BUILD ROWS ---
 		for _, testSuiteName := range testSuiteNames {
 			report := reportSnapshot[testSuiteName]
-
-			// Removed pp.SetColorScheme (it only affects pp functions)
 
 			testSetTimeTakenStr := timeWithUnits(report.duration)
 
@@ -1654,7 +1631,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				}
 			}
 
-			// Collect args for this row
 			rowArgs := []interface{}{
 				displayName,
 				report.total,
@@ -1662,15 +1638,12 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				displayFailed,
 			}
 
-			// Add Ignored column if needed
 			if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
 				rowArgs = append(rowArgs, report.ignored)
 			}
 
-			// Add Time Taken
 			rowArgs = append(rowArgs, testSetTimeTakenStr)
 
-			// Add Failed Cases column if needed
 			if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
 				failedCasesStr := "-"
 				if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
@@ -1679,16 +1652,11 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				rowArgs = append(rowArgs, failedCasesStr)
 			}
 
-			// Create the format string dynamically based on the number of args
-			// We need a "\t%v" for every argument to match the header columns
 			rowFormat := "\t" + strings.TrimSuffix(strings.Repeat("%v\t", len(rowArgs)), "\t") + "\n"
 
-			// Print the row to the TabWriter (NOT pp)
 			fmt.Fprintf(tw, rowFormat, rowArgs...)
 		}
 
-		// 5. FLUSH TABLE
-		// We flush only AFTER headers AND rows are written to ensure perfect alignment
 		if err := tw.Flush(); err != nil {
 			utils.LogError(r.logger, err, "failed to print test suite table")
 			return

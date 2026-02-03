@@ -66,7 +66,6 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 		return
 	}
 
-	// NEW LOGIC: Run this if ANSI is ENABLED (Colors + Tabwriter)
 	const (
 		reset = "\x1b[0m"
 		blue  = "\x1b[34;1m" // Blue and Bold
@@ -80,30 +79,21 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 		timeStr = fmtDuration(dur)
 	}
 
-	// 1. HEADER
 	fmt.Fprintln(w, "<=========================================>")
 	fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
 
-	// Note: We use %s for the values so we can inject the color codes manually.
-	// We convert the integers to strings inside the Printf using color variables.
 	fmt.Fprintf(w, "\tTotal tests:       %s%d%s\n", blue, total, reset)
 	fmt.Fprintf(w, "\tTotal test passed: %s%d%s\n", blue, pass, reset)
 	fmt.Fprintf(w, "\tTotal test failed: %s%d%s\n", blue, fail, reset)
 
-	// FIX: Use %s for the time string, wrapped in Red color
 	fmt.Fprintf(w, "\tTotal time taken:  %s%s%s\n", red, timeStr, reset)
 
-	// 2. TABLE
-	// Use tabwriter for alignment
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "\tTest Suite\tTotal\tPassed\tFailed\tTime Taken")
 
-	// We formatting the row with %s (string) for name and time, %d (int) for numbers
-	// If you want color in the table too, apply it to the individual args
 	fmt.Fprintf(tw, "\t%s\t%d\t%d\t%d\t%s\n", name, total, pass, fail, timeStr)
 	tw.Flush()
 
-	// 3. FAILURES
 	fmt.Fprintln(w, "\nFAILED TEST CASES:")
 	if fail == 0 || len(failedCases) == 0 {
 		fmt.Fprintln(w, "\t(none)")
@@ -125,8 +115,6 @@ func applyCliColorsToDiff(diff string) string {
 		return ""
 	}
 
-	// If ANSI is disabled, return the raw diff immediately.
-	// This ensures the new Scanner logic is only used when we actually want colors.
 	if models.IsAnsiDisabled {
 		fmt.Println("applied color but its disabled")
 		return diff
@@ -141,7 +129,6 @@ func applyCliColorsToDiff(diff string) string {
 	)
 
 	var sb strings.Builder
-	// Pre-allocate to avoid resizing. length of diff + some buffer for color codes
 	sb.Grow(len(diff) + 100)
 
 	scanner := bufio.NewScanner(strings.NewReader(diff))
@@ -150,14 +137,11 @@ func applyCliColorsToDiff(diff string) string {
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// Manage newlines manually to avoid trailing newline issues
 		if !first {
 			sb.WriteByte('\n')
 		}
 		first = false
 
-		// Identify logic based on prefixes
-		// We use a switch with simple logic for readability
 		switch {
 		case strings.HasPrefix(line, "Path: "):
 			val := strings.TrimPrefix(line, "Path: ")
