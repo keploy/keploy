@@ -128,8 +128,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
 
-		// Notify the agent that we are shutting down gracefully
-		// This will cause connection errors to be logged as debug instead of error
+		// Notify the agent that we are shutting down gracefully. It covers early exits before RunTestSet runs
+		// and shutdown paths where the per‑test‑set defer doesn’t execute (or never starts)
 		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
 			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
 		}
@@ -587,6 +587,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
+		// Notify the agent before cancelling the app context so proxy logs shutdown errors as debug.
+		if r.instrument && !serveTest {
+			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			}
+		}
 		runTestSetCtxCancel()
 		err := runTestSetErrGrp.Wait()
 		if err != nil {

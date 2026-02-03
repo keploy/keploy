@@ -756,6 +756,8 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 }
 
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	// Reset graceful shutdown flag for a new recording session.
+	p.isGracefulShutdown.Store(false)
 	p.sessions.Set(uint64(0), &agent.Session{
 		ID:              uint64(0),
 		Mode:            models.MODE_RECORD,
@@ -769,6 +771,8 @@ func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models
 }
 
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	// Reset graceful shutdown flag for a new mocking session.
+	p.isGracefulShutdown.Store(false)
 	p.sessions.Set(uint64(0), &agent.Session{
 		ID:              uint64(0),
 		Mode:            models.MODE_TEST,
