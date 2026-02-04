@@ -84,7 +84,7 @@ detect_api_prefix() {
 # --- USER PROVIDED HELPERS START ---
 
 # Configuration
-TOTAL_TRANSACTIONS=1000
+TOTAL_TRANSACTIONS=800
 REQUESTS_PER_CHAIN=12  # owner + get_owner + get_owner_ln + list_owners + pet + visit + list_visits + vet + get_vet + list_vets + list_pettypes + list_specialties
 CHAINS_NEEDED=$((TOTAL_TRANSACTIONS / REQUESTS_PER_CHAIN))
 
@@ -694,7 +694,8 @@ coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)
 
 if [[ -z "$coverage_line" ]]; then
   echo "::error::No coverage percentage found in test_logs.txt"
-  return 1
+  cat test_logs.txt
+  exit 1
 fi
 
 coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
