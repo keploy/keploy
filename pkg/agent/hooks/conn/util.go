@@ -22,7 +22,7 @@ import (
 	"sync/atomic" // <--- Add this
 )
 
-var globalTestCounter int64
+var GlobalTestCounter int64
 
 type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16)
 
@@ -115,7 +115,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		AppPort: appPort,
 		// Mocks: mocks,
 	}
-	currentID := atomic.AddInt64(&globalTestCounter, 1)
+	currentID := atomic.AddInt64(&GlobalTestCounter, 1)
 	testName := fmt.Sprintf("test-%d", currentID)
 	testCase.Name = testName
 	if synchronous {
