@@ -28,6 +28,9 @@ type Instrumentation interface {
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
+	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
+	// When this is called, connection errors will be logged as debug instead of error.
+	NotifyGracefulShutdown(ctx context.Context) error
 }
 
 type Service interface {
