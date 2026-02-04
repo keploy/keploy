@@ -36,7 +36,7 @@ func TestSimulateHTTP_NewRequestError_303(t *testing.T) {
 	}
 
 	// Act
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10)
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0)
 
 	// Assert
 	require.Error(t, err)
@@ -134,7 +134,7 @@ func TestSimulateHTTP_MultipartRebuildWithPaths_314(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10)
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -219,7 +219,7 @@ func TestSimulateHTTP_MultipartRebuildWithFileNames_315(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10)
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)

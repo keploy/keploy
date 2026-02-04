@@ -87,7 +87,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		utils.LogError(a.logger, err, "error during agent setup")
 		return err
 	}
-	a.logger.Info("Context cancelled, stopping the agent")
+	a.logger.Debug("Context cancelled, stopping the agent")
 	return context.Canceled
 
 }
@@ -96,6 +96,13 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	tc := a.IncomingProxy.Start(ctx, opts)
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
+}
+
+// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+// When this flag is set, connection errors will be logged as debug instead of error.
+func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
+	a.logger.Debug("Setting graceful shutdown flag on proxy")
+	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {

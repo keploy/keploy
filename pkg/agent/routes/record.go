@@ -45,6 +45,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
+		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
 		r.Post("/hooks/after-simulate", a.HandleAfterSimulate)
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
@@ -369,4 +370,19 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
+}
+
+// HandleGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+// When this flag is set, connection errors will be logged as debug instead of error.
+func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
+	a.logger.Debug("Received graceful shutdown notification")
+
+	if err := a.svc.SetGracefulShutdown(r.Context()); err != nil {
+		a.logger.Error("failed to set graceful shutdown flag", zap.Error(err))
+		http.Error(w, "failed to set graceful shutdown", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("Graceful shutdown flag set\n"))
 }
