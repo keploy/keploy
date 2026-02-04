@@ -59,6 +59,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
 	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
+	// Propagate parent context cancellation to setupCtx
+	// This ensures that when Ctrl+C is pressed, setupCtx is cancelled immediately
+	go func() {
+		<-ctx.Done()
+		setupCtxCancel()
+	}()
+
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)
 	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
@@ -169,6 +176,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath})
 
 	if err != nil {
+		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
+		if ctx.Err() != nil {
+			return nil
+		}
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf("%s", stopReason)
@@ -366,7 +377,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	if err != nil {
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
-			// Return channels so caller doesn't panic on range, though they might be empty/unused if we error out
+			// Close channels to prevent callers from hanging when ranging over them
+			close(incomingChan)
+			close(outgoingChan)
 			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
 		}
 		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
@@ -396,12 +409,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// Create a cancelable child that we always cancel when ctx is done.
 	mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
-	// Cancel child as soon as parent is done
-	go func() {
-		<-ctx.Done()
-		cancel()
-	}()
-
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
@@ -411,6 +418,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		cancel()
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
+			// Close outgoingChan to prevent callers from hanging
+			// Note: incomingChan will be closed by the goroutine started above when ctx is done
+			close(outgoingChan)
 			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
 		}
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
@@ -419,6 +429,13 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	g.Go(func() error {
 		defer close(outgoingChan)
 		defer cancel()
+
+		// Also cancel mockCtx when parent ctx is done
+		// This is done inside the goroutine to avoid goroutine leaks
+		go func() {
+			<-ctx.Done()
+			cancel()
+		}()
 
 		for {
 			select {
