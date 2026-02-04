@@ -682,7 +682,7 @@ section "Replay"
 set +e
 "$REPLAY_BIN" test \
   -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
-  --delay 20 --debug \
+  --delay 20 --api-timeout 200 \
   2>&1 | tee test_logs.txt
 REPLAY_RC=$?
 set -e

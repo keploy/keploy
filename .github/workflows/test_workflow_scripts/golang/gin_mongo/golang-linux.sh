@@ -117,7 +117,7 @@ docker rm mongoDb || true
 echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
-"$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
+"$REPLAY_BIN" test -c "./ginApp" --delay 7   2>&1 | tee test_logs.txt
 
 cat test_logs.txt || true
 
