@@ -338,6 +338,12 @@ func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//If it does, remove it.
 	err = os.Remove(name)
 	if err != nil {
+		if runtime.GOOS == "windows" {
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.Errno(32)) { // ERROR_SHARING_VIOLATION
+				return nil
+			}
+		}
 		LogError(logger, err, "Error removing file")
 		return err
 	}
