@@ -797,7 +797,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
-
+		
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {

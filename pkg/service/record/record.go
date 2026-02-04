@@ -319,14 +319,15 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			// Write to mappings.yaml
 			if len(realMockNames) > 0 {
 				// StoreMappings expects map[TestID][]MockIDs
-				mappingToSave := map[string][]string{
-					mapping.TestName: realMockNames,
-				}
+				// mappingToSave := map[string][]string{
+				// 	mapping.TestName: realMockNames,
+				// }
 
 				// This function should be thread-safe (check your implementation of StoreMappings)
 				// If not, use a mutex here.
 
-				err := r.mappingDb.Insert(ctx, newTestSetID, mappingToSave)
+				// err := r.mappingDb.Insert(ctx, newTestSetID, mappingToSave)
+				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to save mapping")
 				}

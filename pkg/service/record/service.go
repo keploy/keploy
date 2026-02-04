@@ -38,6 +38,7 @@ type MockDB interface {
 
 type MappingDb interface {
 	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	Upsert(ctx context.Context, testSetID string, testID string, mockIDs []string) error
 }
 
 type TestSetConfig interface {
