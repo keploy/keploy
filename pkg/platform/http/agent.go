@@ -745,6 +745,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
+	if models.IsAnsiDisabled == true {
+		args = append(args, "--disable-ansi")
+	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
 		portStrings := make([]string, len(opts.PassThroughPorts))
