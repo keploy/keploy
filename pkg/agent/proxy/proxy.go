@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -67,6 +69,10 @@ type Proxy struct {
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
 	IsDocker          bool
+
+	// isGracefulShutdown indicates the application is shutting down gracefully
+	// When set, connection errors should be logged as debug instead of error
+	isGracefulShutdown atomic.Bool
 }
 
 func isBenignCloseError(err error) bool {
@@ -97,6 +103,19 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 	}
+}
+
+// SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
+// When this flag is set, connection errors will be logged as debug instead of error
+func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
+	p.isGracefulShutdown.Store(true)
+	p.logger.Debug("Graceful shutdown flag set - connection errors will be logged as debug")
+	return nil
+}
+
+// IsGracefulShutdown returns whether the graceful shutdown flag is set
+func (p *Proxy) IsGracefulShutdown() bool {
+	return p.isGracefulShutdown.Load()
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -301,7 +320,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
-					utils.LogError(p.logger, err, "failed to handle the client connection")
+					if p.IsGracefulShutdown() && isShutdownError(err) {
+						p.logger.Debug("failed to handle the client connection (graceful shutdown)", zap.Error(err))
+					} else {
+						utils.LogError(p.logger, err, "failed to handle the client connection")
+					}
 				}
 				return nil
 			})
@@ -485,7 +508,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+		if p.IsGracefulShutdown() && isShutdownError(err) {
+			p.logger.Debug("failed to peek the request message in proxy (graceful shutdown)", zap.Uint32("proxy port", p.Port), zap.Error(err))
+		} else {
+			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+		}
 		return err
 	}
 
@@ -736,6 +763,8 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 }
 
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	// Reset graceful shutdown flag for a new recording session.
+	p.isGracefulShutdown.Store(false)
 	p.sessions.Set(uint64(0), &agent.Session{
 		ID:              uint64(0),
 		Mode:            models.MODE_RECORD,
@@ -749,6 +778,8 @@ func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models
 }
 
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	// Reset graceful shutdown flag for a new mocking session.
+	p.isGracefulShutdown.Store(false)
 	p.sessions.Set(uint64(0), &agent.Session{
 		ID:              uint64(0),
 		Mode:            models.MODE_TEST,
@@ -809,4 +840,23 @@ func (p *Proxy) SendError(err error) {
 // CloseErrorChannel closes the error channel
 func (p *Proxy) CloseErrorChannel() {
 	close(p.errChannel)
+}
+
+func isShutdownError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if strings.Contains(err.Error(), "use of closed network connection") {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+	if strings.Contains(err.Error(), "connection reset by peer") {
+		return true
+	}
+	return false
 }
