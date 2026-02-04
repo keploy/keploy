@@ -76,11 +76,9 @@ func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappi
 }
 
 // Upsert updates a single test-mock mapping.
-// If the file exists, it appends or updates the specific test case.
 // If the file doesn't exist, it creates it.
 func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string, mockIDs []string) error {
 
-	// 1. Define File Path
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -89,7 +87,6 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 
 	var mapping *models.Mapping
 
-	// 2. Check if file exists
 	exists, err := yaml.FileExists(ctx, db.logger, mappingPath, fileName)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to check if mapping file exists",
@@ -99,7 +96,6 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 	}
 
 	if exists {
-		// 3. READ: Load existing mappings
 		yamlData, err := yaml.ReadFile(ctx, db.logger, mappingPath, fileName)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read mapping file for upsert",
@@ -114,7 +110,6 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 			return err
 		}
 	} else {
-		// 4. CREATE: Initialize new mapping structure if file doesn't exist
 		mapping = &models.Mapping{
 			Version:   string(models.V1Beta1),
 			Kind:      models.MappingKind,
@@ -123,7 +118,6 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 		}
 	}
 
-	// 5. MODIFY: Update or Append the specific test case
 	found := false
 	for i, t := range mapping.Tests {
 		if t.ID == testID {
@@ -143,7 +137,6 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 		mapping.Tests = append(mapping.Tests, newTest)
 	}
 
-	// 6. WRITE: Save back to disk
 	yamlData, err := EncodeMapping(mapping, db.logger)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping to yaml during upsert",

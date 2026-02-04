@@ -268,38 +268,37 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
-    a.logger.Debug("Received request to handle mappings stream")
-    w.Header().Set("Content-Type", "application/json")
-    flusher, ok := w.(http.Flusher)
-    if !ok {
-        http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-        return
-    }
+	a.logger.Debug("Received request to handle mappings stream")
+	w.Header().Set("Content-Type", "application/json")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
 
-    // Connect to the service to get the channel
-    mappingChan, err := a.svc.GetMappingStream(r.Context()) 
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
+	// Connect to the service to get the channel
+	mappingChan, err := a.svc.GetMappingStream(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-    enc := json.NewEncoder(w)
+	enc := json.NewEncoder(w)
 
-    for {
-        select {
-        case <-r.Context().Done():
-            return
-        case mapping, ok := <-mappingChan:
-            if !ok {
-                return
-            }
-            // Stream the lightweight JSON
-            if err := enc.Encode(mapping); err != nil {
-                return
-            }
-            flusher.Flush()
-        }
-    }
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case mapping, ok := <-mappingChan:
+			if !ok {
+				return
+			}
+			if err := enc.Encode(mapping); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 // MakeAgentReady marks the agent as ready by creating a readiness file.

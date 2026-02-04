@@ -19,7 +19,7 @@ type AgentResp struct {
 
 type TestMockMapping struct {
 	TestName string   `json:"test_name"`
-	MockIDs  []string `json:"mock_ids"` // These are temporary UUIDs/IDs assigned by Agent for correlation
+	MockIDs  []string `json:"mock_ids"`
 }
 
 type SetMocksReq struct {

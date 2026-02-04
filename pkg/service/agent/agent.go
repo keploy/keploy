@@ -120,21 +120,15 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 func (a *Agent) GetMappingStream(ctx context.Context) (<-chan models.TestMockMapping, error) {
 	a.logger.Debug("Initializing mapping stream for client")
 
-	// 1. Create the channel
-	// Buffer it slightly to prevent blocking the recording loop if network is jittery
 	mappingCh := make(chan models.TestMockMapping, 100)
 
-	// 2. Get the Singleton Manager
 	mgr := syncMock.Get()
 	if mgr == nil {
 		return nil, fmt.Errorf("sync mock manager is not initialized")
 	}
 
-	// 3. Register the channel with the Manager
-	// This tells the manager: "Start pushing mapping events here"
 	mgr.SetMappingChannel(mappingCh)
 
-	// 4. Handle Cleanup
 	// When the client disconnects (ctx.Done), we must ensure the manager
 	// stops writing to this channel to avoid panic on closed channel.
 	go func() {
@@ -144,7 +138,6 @@ func (a *Agent) GetMappingStream(ctx context.Context) (<-chan models.TestMockMap
 		// Reset the channel in manager to nil so it stops sending
 		mgr.SetMappingChannel(nil)
 
-		// Close the channel to signal any local listeners
 		close(mappingCh)
 	}()
 

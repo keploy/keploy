@@ -216,61 +216,59 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 
 func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptions) (<-chan models.TestMockMapping, error) {
 
-    a.logger.Debug("Connecting to mappings stream...")
+	a.logger.Debug("Connecting to mappings stream...")
 
-    // We can reuse IncomingOptions or create a specific MappingOptions struct if needed later
-    // For now, we just need to hit the endpoint.
-    req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/mappings", a.conf.Agent.AgentURI), nil)
-    if err != nil {
-        utils.LogError(a.logger, err, "failed to create request for mappings")
-        return nil, fmt.Errorf("error creating request for mappings: %s", err.Error())
-    }
-    req.Header.Set("Content-Type", "application/json")
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/mappings", a.conf.Agent.AgentURI), nil)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to create request for mappings")
+		return nil, fmt.Errorf("error creating request for mappings: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
 
-    // Make the HTTP request
-    res, err := a.client.Do(req)
-    if err != nil {
-        return nil, fmt.Errorf("failed to get mappings response: %s", err.Error())
-    }
+	// Make the HTTP request
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mappings response: %s", err.Error())
+	}
 
-    mappingChan := make(chan models.TestMockMapping)
+	mappingChan := make(chan models.TestMockMapping)
 
-    grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-    if !ok {
-        return nil, fmt.Errorf("failed to get errorgroup from the context")
-    }
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return nil, fmt.Errorf("failed to get errorgroup from the context")
+	}
 
-    grp.Go(func() error {
-        defer func() {
-            close(mappingChan)
-            if err := res.Body.Close(); err != nil {
-                utils.LogError(a.logger, err, "failed to close response body for getmappings")
-            }
-        }()
+	grp.Go(func() error {
+		defer func() {
+			close(mappingChan)
+			if err := res.Body.Close(); err != nil {
+				utils.LogError(a.logger, err, "failed to close response body for getmappings")
+			}
+		}()
 
-        decoder := json.NewDecoder(res.Body)
+		decoder := json.NewDecoder(res.Body)
 
-        for {
-            var mapping models.TestMockMapping
-            if err := decoder.Decode(&mapping); err != nil {
-                if utils.IsShutdownError(err) {
-                    break
-                }
-                utils.LogError(a.logger, err, "failed to decode mapping from stream")
-                break
-            }
+		for {
+			var mapping models.TestMockMapping
+			if err := decoder.Decode(&mapping); err != nil {
+				if utils.IsShutdownError(err) {
+					break
+				}
+				utils.LogError(a.logger, err, "failed to decode mapping from stream")
+				break
+			}
 
-            select {
-            case <-ctx.Done():
-                return nil
-            case mappingChan <- mapping:
-            }
-        }
-        return nil
-    })
+			select {
+			case <-ctx.Done():
+				return nil
+			case mappingChan <- mapping:
+			}
+		}
+		return nil
+	})
 
-    a.logger.Debug("Successfully connected to mappings stream.")
-    return mappingChan, nil
+	a.logger.Debug("Successfully connected to mappings stream.")
+	return mappingChan, nil
 }
 
 func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {

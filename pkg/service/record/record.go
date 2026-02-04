@@ -295,8 +295,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			var realMockNames []string
 
 			for _, tempID := range mapping.MockIDs {
-				// We need to resolve TempID -> RealID.
-				// Race Condition: Mapping might arrive slightly before the Mock Loop saves the mock.
 
 				var realName string
 				found := false
@@ -313,7 +311,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 				if found {
 					realMockNames = append(realMockNames, realName)
-					// Optional: Clean up map to save memory, assuming 1:1 mapping usage
 					correlationMap.Delete(tempID)
 				} else {
 					r.logger.Warn("Failed to correlate mock mapping",
