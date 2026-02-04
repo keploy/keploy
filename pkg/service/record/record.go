@@ -411,6 +411,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
+			MongoPasswords: r.config.Test.MongoPasswords,
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		})
 		if err != nil {

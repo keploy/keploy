@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -15,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
 	errCh := make(chan error, 1)
@@ -43,6 +44,35 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
 					logger.Debug("the timeout for the client read in generic or EOF")
 					break
+				}
+
+				payload := string(buffer)
+				if strings.Contains(payload, "saslStart") {
+					var username string
+					// SCRAM payloads usually contain "n=username,r=nonce"
+					if idx := strings.Index(payload, "n="); idx != -1 {
+						start := idx + 2
+						rest := payload[start:]
+						if end := strings.Index(rest, ","); end != -1 {
+							username = rest[:end]
+						} else {
+							username = rest
+						}
+					}
+
+					// Validate if we have the password in the config
+					if username != "" {
+						if _, ok := opts.MongoPasswords[username]; ok {
+							logger.Debug("Replay: Found configured password for MongoDB user", zap.String("user", username))
+						} else {
+							// Check fallback
+							if opts.MongoPassword != "" {
+								logger.Debug("Replay: Using default password for MongoDB user", zap.String("user", username))
+							} else {
+								logger.Warn("Replay: MongoDB login detected but NO password configured for user. Authentication may fail.", zap.String("user", username))
+							}
+						}
+					}
 				}
 				genericRequests = append(genericRequests, buffer)
 			}
