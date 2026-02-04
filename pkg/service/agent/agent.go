@@ -98,6 +98,13 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	return tc, nil
 }
 
+// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+// When this flag is set, connection errors will be logged as debug instead of error.
+func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
+	a.logger.Debug("Setting graceful shutdown flag on proxy")
+	return a.Proxy.SetGracefulShutdown(ctx)
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, 1000)
 
