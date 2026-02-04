@@ -7,7 +7,7 @@ import (
 )
 
 type Instrumentation interface {
-	//Setup prepares the environment for the recording
+	// Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 	GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
@@ -19,10 +19,18 @@ type Instrumentation interface {
 	NotifyGracefulShutdown(ctx context.Context) error
 }
 
+// ✅ NEW: Tools interface needed for persisting delay to keploy.yml
+type Tools interface {
+	UpdateTestDelayInConfig(ctx context.Context, configPath string, delay uint64) error
+}
+
 type Service interface {
 	Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error
 	SetGlobalMockChannel(mockCh chan<- *models.Mock)
 	GetNextTestSetID(ctx context.Context) (string, error)
+
+	// ✅ NEW: Inject tools service into record service
+	SetToolsService(toolsSvc Tools)
 }
 
 type TestDB interface {

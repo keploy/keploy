@@ -1,3 +1,4 @@
+// Package tools provides functionality for utilities and helpers like config generation, imports, exports etc.
 package tools
 
 import (
@@ -61,6 +62,78 @@ func (t *Tools) Export(ctx context.Context) error {
 func (t *Tools) Import(ctx context.Context, path, basePath string) error {
 	postmanImport := postmanimport.NewPostmanImporter(ctx, t.logger)
 	return postmanImport.Import(path, basePath)
+}
+
+// ✅ NEW: update delay in keploy.yml automatically
+// ✅ NEW: update delay in keploy.yml automatically
+func (t *Tools) UpdateTestDelayInConfig(ctx context.Context, configPath string, delay uint64) error {
+	configFile := filepath.Join(configPath, "keploy.yml")
+
+	b, err := os.ReadFile(configFile)
+	if err != nil {
+		return fmt.Errorf("failed to read config file %s: %w", configFile, err)
+	}
+
+	var node yamlLib.Node
+	if err := yamlLib.Unmarshal(b, &node); err != nil {
+		return fmt.Errorf("failed to unmarshal yaml: %w", err)
+	}
+
+	// ✅ update test.delay directly using yaml node traversal
+	updated := false
+
+	// root must exist
+	if len(node.Content) == 0 {
+		node.Content = []*yamlLib.Node{{
+			Kind: yamlLib.MappingNode,
+		}}
+	}
+
+	root := node.Content[0]
+
+	// find/create "test" mapping
+	var testNode *yamlLib.Node
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "test" {
+			testNode = root.Content[i+1]
+			break
+		}
+	}
+
+	if testNode == nil {
+		testNode = &yamlLib.Node{Kind: yamlLib.MappingNode}
+		root.Content = append(root.Content,
+			&yamlLib.Node{Kind: yamlLib.ScalarNode, Value: "test"},
+			testNode,
+		)
+	}
+
+	// set delay inside test node
+	for i := 0; i < len(testNode.Content); i += 2 {
+		if testNode.Content[i].Value == "delay" {
+			testNode.Content[i+1].Value = fmt.Sprintf("%d", delay)
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		testNode.Content = append(testNode.Content,
+			&yamlLib.Node{Kind: yamlLib.ScalarNode, Value: "delay"},
+			&yamlLib.Node{Kind: yamlLib.ScalarNode, Value: fmt.Sprintf("%d", delay)},
+		)
+	}
+
+	out, err := yamlLib.Marshal(&node)
+	if err != nil {
+		return fmt.Errorf("failed to marshal yaml: %w", err)
+	}
+
+	if err := os.WriteFile(configFile, out, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
 }
 
 // Update initiates the tools process for the Keploy binary file.
@@ -135,13 +208,11 @@ func (t *Tools) Update(ctx context.Context) error {
 }
 
 func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {
-	// Create a new request with context
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
 
-	// Create a HTTP client and execute the request
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -153,7 +224,6 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 		}
 	}()
 
-	// Create a temporary file to store the downloaded tar.gz
 	tmpFile, err := os.CreateTemp("", "keploy-download-*.tar.gz")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %v", err)
@@ -167,37 +237,31 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 		}
 	}()
 
-	// Write the downloaded content to the temporary file
 	_, err = io.Copy(tmpFile, resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to write to temporary file: %v", err)
 	}
 
-	// Extract the tar.gz file
 	if err := extractTarGz(tmpFile.Name(), "/tmp"); err != nil {
 		return fmt.Errorf("failed to extract tar.gz file: %v", err)
 	}
 
-	// Determine the path based on the alias "keploy"
-	aliasPath := "/usr/local/bin/keploy" // Default path
+	aliasPath := "/usr/local/bin/keploy"
 
 	keployPath, err := exec.LookPath("keploy")
 	if err == nil && keployPath != "" {
 		aliasPath = keployPath
 	}
 
-	// Check if the aliasPath is a valid path
 	_, err = os.Stat(aliasPath)
 	if os.IsNotExist(err) {
 		return fmt.Errorf("alias path %s does not exist", aliasPath)
 	}
 
-	// Check if the aliasPath is a directory
 	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
 		return fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
 	}
 
-	// Move the extracted binary to the alias path
 	if err := os.Rename("/tmp/keploy", aliasPath); err != nil {
 		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
 	}
@@ -295,7 +359,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		return nil
 	}
 
-	if len(node.Content) > 0 { // we don't need agent config in the config file. All the config of the agent will be managed internally
+	if len(node.Content) > 0 { // remove agent config
 		rootContent := node.Content[0].Content
 		for i := 0; i < len(rootContent)-1; i += 2 {
 			keyNode := rootContent[i]
@@ -305,6 +369,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 			}
 		}
 	}
+
 	results, err := yamlLib.Marshal(node.Content[0])
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to marshal the config")
@@ -320,7 +385,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		return nil
 	}
 
-	err = os.Chmod(filePath, 0777) // Set permissions to 777
+	err = os.Chmod(filePath, 0777)
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to set the permission of config file")
 		return nil
@@ -340,6 +405,7 @@ func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 func (t *Tools) Login(ctx context.Context) bool {
 	return t.auth.Login(ctx)
 }
+
 
 func (t *Tools) Templatize(ctx context.Context) error {
 
@@ -392,4 +458,154 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+
+
+// setYAMLValue updates YAML value at a given path like ["test","delay"]
+func setYAMLValue(root *yamlLib.Node, path []string, value uint64) bool {
+	if root == nil || len(root.Content) == 0 {
+		return false
+	}
+
+	// root.Content[0] should be Document->Mapping
+	curr := root.Content[0]
+	if curr.Kind != yamlLib.MappingNode {
+		return false
+	}
+
+	for i := 0; i < len(path)-1; i++ {
+		key := path[i]
+		nextKey := path[i+1]
+
+		// find key in mapping
+		found := false
+		for j := 0; j < len(curr.Content); j += 2 {
+			k := curr.Content[j]
+			v := curr.Content[j+1]
+
+			if k.Value == key {
+				// if v is not mapping, cannot continue
+				if v.Kind != yamlLib.MappingNode {
+					return false
+				}
+				curr = v
+				found = true
+				break
+			}
+		}
+
+		// path doesn't exist
+		if !found {
+			_ = nextKey
+			return false
+		}
+	}
+
+	// set final key
+	finalKey := path[len(path)-1]
+	for j := 0; j < len(curr.Content); j += 2 {
+		k := curr.Content[j]
+		v := curr.Content[j+1]
+
+		if k.Value == finalKey {
+			v.Kind = yamlLib.ScalarNode
+			v.Tag = "!!int"
+			v.Value = fmt.Sprintf("%d", value)
+			return true
+		}
+	}
+	return false
+}
+
+// createYAMLPath creates missing mapping nodes for path and sets value
+func createYAMLPath(root *yamlLib.Node, path []string, value uint64) {
+	if root == nil {
+		return
+	}
+
+	// if empty YAML, create document node
+	if len(root.Content) == 0 {
+		root.Kind = yamlLib.DocumentNode
+		root.Content = []*yamlLib.Node{
+			{
+				Kind: yamlLib.MappingNode,
+				Tag:  "!!map",
+			},
+		}
+	}
+
+	curr := root.Content[0]
+
+	// ensure curr is mapping
+	if curr.Kind != yamlLib.MappingNode {
+		curr.Kind = yamlLib.MappingNode
+		curr.Tag = "!!map"
+		curr.Content = []*yamlLib.Node{}
+	}
+
+	for i := 0; i < len(path)-1; i++ {
+		key := path[i]
+
+		// try to find key
+		var next *yamlLib.Node
+		for j := 0; j < len(curr.Content); j += 2 {
+			if curr.Content[j].Value == key {
+				next = curr.Content[j+1]
+				break
+			}
+		}
+
+		// create key if missing
+		if next == nil {
+			keyNode := &yamlLib.Node{
+				Kind:  yamlLib.ScalarNode,
+				Tag:   "!!str",
+				Value: key,
+			}
+			mapNode := &yamlLib.Node{
+				Kind:    yamlLib.MappingNode,
+				Tag:     "!!map",
+				Content: []*yamlLib.Node{},
+			}
+			curr.Content = append(curr.Content, keyNode, mapNode)
+			next = mapNode
+		}
+
+		// ensure mapping
+		if next.Kind != yamlLib.MappingNode {
+			next.Kind = yamlLib.MappingNode
+			next.Tag = "!!map"
+			next.Content = []*yamlLib.Node{}
+		}
+
+		curr = next
+	}
+
+	// set final key
+	finalKey := path[len(path)-1]
+
+	// check exists
+	for j := 0; j < len(curr.Content); j += 2 {
+		if curr.Content[j].Value == finalKey {
+			curr.Content[j+1].Kind = yamlLib.ScalarNode
+			curr.Content[j+1].Tag = "!!int"
+			curr.Content[j+1].Value = fmt.Sprintf("%d", value)
+			return
+		}
+	}
+
+	// create if missing
+	curr.Content = append(curr.Content,
+		&yamlLib.Node{
+			Kind:  yamlLib.ScalarNode,
+			Tag:   "!!str",
+			Value: finalKey,
+		},
+		&yamlLib.Node{
+			Kind:  yamlLib.ScalarNode,
+			Tag:   "!!int",
+			Value: fmt.Sprintf("%d", value),
+		},
+	)
 }

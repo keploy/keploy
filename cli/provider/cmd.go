@@ -993,6 +993,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
+			// ✅ NEW: Track if user explicitly passed --delay
+			// This is required so recorder doesn't override it.
+			if cmd.Flags().Changed("delay") {
+				c.cfg.Test.DelayExplicit = true
+			}
+
 			//check if the keploy folder exists
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
@@ -1084,8 +1090,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// enforce that the test-sets are provided when --must-pass is set to true
-			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
-			// and not due to flakiness or our internal issue.
 			mustPass, err := cmd.Flags().GetBool("must-pass")
 			if err != nil {
 				errMsg := "failed to get the must-pass flag"
@@ -1141,7 +1145,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.cfg.Test.SkipCoverage = true
 			}
 
-			if c.cfg.Test.Delay <= 5 {
+			if !cmd.Flags().Changed("delay") && c.cfg.Test.Delay <= 5 {
 				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
 					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
