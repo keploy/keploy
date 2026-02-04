@@ -207,7 +207,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
-	// Force send 200 OK headers immediately so the client establishes connection
+
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 	a.logger.Info("Incoming stream connection established and headers flushed")
@@ -328,6 +328,9 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.logger.Debug("Streaming outgoing mocks to client")
+
+	// Flush the headers to establish the connection immediately
+	flusher.Flush()
 
 	enc := gob.NewEncoder(w)
 

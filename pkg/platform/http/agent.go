@@ -800,6 +800,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
+	if models.IsAnsiDisabled == true {
+		args = append(args, "--disable-ansi")
+	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
 		portStrings := make([]string, len(opts.PassThroughPorts))
@@ -869,7 +872,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
 		if err := a.requestAgentStop(); err != nil {
-			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
 			// Fallback: forcefully stop the agent process
 			a.mu.Lock()
 			cmd := a.agentCmd
@@ -936,7 +939,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
 		if err := a.requestAgentStop(); err != nil {
-			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
 			// Fallback: forcefully stop the agent process
 			a.mu.Lock()
 			ptyHandle := a.agentPTY
@@ -997,6 +1000,14 @@ func (a *AgentClient) stopAgent() {
 	if a.agentCmd != nil && a.agentCmd.Process != nil {
 		pid := a.agentCmd.Process.Pid
 		a.logger.Debug("Stopping keploy agent", zap.Int("pid", pid))
+	}
+
+	// If PTY is active, close it to unblock stdin/stdout copies
+	if a.agentPTY != nil {
+		// Use the utils function to gracefully stop PTY
+		if err := agentUtils.StopPTYCommand(a.agentPTY, a.logger); err != nil {
+			a.logger.Warn("failed to stop PTY command", zap.Error(err))
+		}
 	}
 }
 
