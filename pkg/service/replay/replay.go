@@ -702,7 +702,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
 	var isMappingEnabled bool
-
+	isMappingEnabled = !r.config.DisableMapping
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
@@ -803,7 +803,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
