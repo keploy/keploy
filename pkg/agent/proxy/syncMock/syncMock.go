@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -97,11 +96,10 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// MATCHING LOGIC: Process mocks in the requested window
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
+				mock.Name = "mock-" + generateRandomString(8)
+				associatedMockIDs = append(associatedMockIDs, mock.Name)
 				m.outChan <- mock
 			}
-			mock.Name = "mock-" + generateRandomString(8)
-			fmt.Println("here is the mock name", mock.Name)
-			associatedMockIDs = append(associatedMockIDs, mock.Name)
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
 			continue

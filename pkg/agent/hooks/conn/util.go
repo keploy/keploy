@@ -14,12 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"sync/atomic"
+
 	"go.keploy.io/server/v3/pkg"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
-	"sync/atomic" // <--- Add this
 )
 
 var GlobalTestCounter int64
@@ -115,10 +116,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		AppPort: appPort,
 		// Mocks: mocks,
 	}
-	currentID := atomic.AddInt64(&GlobalTestCounter, 1)
-	testName := fmt.Sprintf("test-%d", currentID)
-	testCase.Name = testName
+
 	if synchronous {
+		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
+		testName := fmt.Sprintf("test-%d", currentID)
+		testCase.Name = testName
 		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
 			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true)
 		}
