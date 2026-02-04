@@ -137,6 +137,9 @@ jobs:
     needs: [docker-image-build]
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    permissions:
+      contents: read
+      packages: read
 
     steps:
 
