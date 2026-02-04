@@ -103,6 +103,13 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	}
 
 	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := strings.TrimSpace(params["boundary"])
+		if boundary == "" {
+			if res.Body != nil {
+				res.Body.Close()
+			}
+			return nil, fmt.Errorf("missing multipart boundary in content-type: %s", contentType)
+		}
 		go func() {
 			defer func() {
 				close(tcChan)
@@ -111,7 +118,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 				}
 			}()
 
-			mr := multipart.NewReader(res.Body, params["boundary"])
+			mr := multipart.NewReader(res.Body, boundary)
 			var pendingTestCase *models.TestCase
 
 			for {
@@ -151,12 +158,13 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 						continue
 					}
 					fileName := part.FileName()
-					a.logger.Debug("Received binary file part", zap.String("file_name", fileName))
-					if fileName == "" {
-						fileName = "testcase_blob"
+					sanitizedFileName := filepath.Base(fileName)
+					if sanitizedFileName == "." || sanitizedFileName == string(filepath.Separator) || sanitizedFileName == "" {
+						sanitizedFileName = "testcase_blob"
 					}
+					a.logger.Debug("Received binary file part", zap.String("file_name", fileName), zap.String("sanitized_name", sanitizedFileName))
 
-					savePath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy_%d_%s", time.Now().UnixNano(), fileName))
+					savePath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy_%d_%s", time.Now().UnixNano(), sanitizedFileName))
 					outFile, err := os.Create(savePath)
 					if err != nil {
 						utils.LogError(a.logger, err, "failed to create temp file for stream")
@@ -175,7 +183,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 					for i := range pendingTestCase.HTTPReq.Form {
 						form := &pendingTestCase.HTTPReq.Form[i]
 						for j, fname := range form.FileNames {
-							if fname == fileName && j < len(form.Paths) {
+							if (fname == fileName || fname == sanitizedFileName || filepath.Base(fname) == sanitizedFileName) && j < len(form.Paths) {
 								form.Paths[j] = savePath
 								updated = true
 							}
@@ -191,6 +199,10 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 						}
 					}
 
+				} else if part.FormName() == "delimiter" {
+					if pendingTestCase == nil {
+						continue
+					}
 					select {
 					case <-ctx.Done():
 						return

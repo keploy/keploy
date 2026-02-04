@@ -230,14 +230,32 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 					return nil, cerr
 				}
 			}
-			for _, value := range field.Values {
+			for valueIndex, value := range field.Values {
 				logger.Debug("multipart field value",
 					zap.String("field", field.Key),
 					zap.Int("value_len", len(value)),
 					zap.Bool("looks_binary", looksBinary(value)),
 				)
-				if field.Key == "file" && len(field.Paths) == 0 && looksBinary(value) {
-					part, perr := writer.CreateFormFile(field.Key, "upload.bin")
+				isFileValue := false
+				fileName := ""
+				if len(field.Paths) == 0 && len(field.FileNames) > 0 {
+					isFileValue = true
+				} else if len(field.Paths) == 0 && len(field.FileNames) == 0 && looksBinary(value) {
+					isFileValue = true
+				}
+
+				if isFileValue {
+					if len(field.FileNames) > 0 && valueIndex < len(field.FileNames) {
+						fileName = field.FileNames[valueIndex]
+					}
+					if fileName == "" {
+						fileName = "upload.bin"
+					}
+					fileName = filepath.Base(fileName)
+					if fileName == "." || fileName == string(filepath.Separator) || fileName == "" {
+						fileName = "upload.bin"
+					}
+					part, perr := writer.CreateFormFile(field.Key, fileName)
 					if perr != nil {
 						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
 						return nil, perr

@@ -275,15 +275,27 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 				utils.LogError(logger, err, "Error creating temp file")
 				continue
 			}
+			tempPath := file.Name()
 			_, err = io.Copy(file, part)
 			if err != nil {
 				utils.LogError(logger, err, "Error copying part to temp file")
-				file.Close()
+				if cerr := file.Close(); cerr != nil {
+					utils.LogError(logger, cerr, "Error closing temp file")
+				}
+				if rerr := os.Remove(tempPath); rerr != nil {
+					utils.LogError(logger, rerr, "Error removing temp file", zap.String("path", tempPath))
+				}
 				continue
 			}
-			file.Close() // Ensure the file is closed after writing
+			if err := file.Close(); err != nil {
+				utils.LogError(logger, err, "Error closing temp file")
+				if rerr := os.Remove(tempPath); rerr != nil {
+					utils.LogError(logger, rerr, "Error removing temp file", zap.String("path", tempPath))
+				}
+				continue
+			}
 
-			paths = append(paths, file.Name())
+			paths = append(paths, tempPath)
 			fileNames = append(fileNames, fileName)
 		} else {
 

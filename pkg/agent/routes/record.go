@@ -176,6 +176,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 	// Set up Multipart Writer
 	mw := multipart.NewWriter(w)
+	defer func() {
+		if err := mw.Close(); err != nil {
+			a.logger.Error("failed to close multipart writer", zap.Error(err))
+		}
+	}()
 	w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
 	w.Header().Set("Cache-Control", "no-cache")
 
@@ -288,7 +293,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush() // Immediately send data to the client
 		}
 	}
-	mw.Close()
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {

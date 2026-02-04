@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -334,37 +335,63 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 
 	for i, form := range tc.HTTPReq.Form {
 		if len(form.FileNames) > 0 {
-			assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, form.Key)
-			if err := os.MkdirAll(assetDir, os.ModePerm); err != nil {
+			formKey := filepath.Base(form.Key)
+			if formKey == "." || formKey == string(filepath.Separator) || formKey == "" {
+				formKey = "form"
+			}
+			assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
+			if err := os.MkdirAll(assetDir, 0o755); err != nil {
 				utils.LogError(ts.logger, err, "failed to create assets directory", zap.String("path", assetDir))
 				return err
 			}
 
 			// We need to rebuild Paths to point to assets
 			var newPaths []string
+			allFilesPersisted := true
 
 			for j, fileName := range form.FileNames {
 				if fileName == "" {
 					continue
 				}
-				destPath := filepath.Join(assetDir, fileName)
+				safeFileName := filepath.Base(fileName)
+				if safeFileName == "." || safeFileName == string(filepath.Separator) || safeFileName == "" {
+					safeFileName = "asset_file"
+				}
+				destPath := filepath.Join(assetDir, safeFileName)
+				wroteFile := false
 
 				// Case 1: File is in Paths (downloaded to local temp)
 				if j < len(form.Paths) && form.Paths[j] != "" {
 					srcPath := form.Paths[j]
 					// Check if srcPath exists
 					if _, err := os.Stat(srcPath); err == nil {
-						// Read from temp
-						input, err := os.ReadFile(srcPath)
+						input, err := os.Open(srcPath)
 						if err != nil {
-							utils.LogError(ts.logger, err, "failed to read temp asset file", zap.String("path", srcPath))
+							utils.LogError(ts.logger, err, "failed to open temp asset file", zap.String("path", srcPath))
 							return err
 						}
-						// Write to assets
-						if err := os.WriteFile(destPath, input, os.ModePerm); err != nil {
-							utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						output, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+						if err != nil {
+							input.Close()
+							utils.LogError(ts.logger, err, "failed to create asset file", zap.String("path", destPath))
 							return err
 						}
+						if _, err := io.Copy(output, input); err != nil {
+							output.Close()
+							input.Close()
+							utils.LogError(ts.logger, err, "failed to copy asset file", zap.String("path", destPath))
+							return err
+						}
+						if err := output.Close(); err != nil {
+							input.Close()
+							utils.LogError(ts.logger, err, "failed to close asset file", zap.String("path", destPath))
+							return err
+						}
+						if err := input.Close(); err != nil {
+							utils.LogError(ts.logger, err, "failed to close temp asset file", zap.String("path", srcPath))
+							return err
+						}
+						wroteFile = true
 						// Cleanup temp
 						os.Remove(srcPath)
 					} else {
@@ -375,17 +402,27 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				} else if j < len(form.Values) {
 					// Case 2: File content is in Values (legacy/text fallback)
 					content := []byte(form.Values[j])
-					if err := os.WriteFile(destPath, content, os.ModePerm); err != nil {
+					if err := os.WriteFile(destPath, content, 0o644); err != nil {
 						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
 						return err
 					}
+					wroteFile = true
 				}
 
-				newPaths = append(newPaths, destPath)
+				if wroteFile {
+					newPaths = append(newPaths, destPath)
+				} else {
+					allFilesPersisted = false
+					if j < len(form.Paths) && form.Paths[j] != "" {
+						newPaths = append(newPaths, form.Paths[j])
+					}
+				}
 			}
 
 			tc.HTTPReq.Form[i].Paths = newPaths
-			tc.HTTPReq.Form[i].Values = nil
+			if allFilesPersisted {
+				tc.HTTPReq.Form[i].Values = nil
+			}
 		}
 	}
 	return nil

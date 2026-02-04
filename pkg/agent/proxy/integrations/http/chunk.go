@@ -116,7 +116,11 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 
 		// 3. Read directly from connection
 		// This blocks only until *some* data is available or error occurs.
-		n, err := clientConn.Read(buf)
+		readBuf := buf
+		if contentLength < len(buf) {
+			readBuf = buf[:contentLength]
+		}
+		n, err := clientConn.Read(readBuf)
 
 		if n > 0 {
 			chunk := buf[:n]
