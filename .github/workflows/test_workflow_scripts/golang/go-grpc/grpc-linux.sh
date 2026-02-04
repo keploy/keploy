@@ -160,13 +160,13 @@ kill_keploy_process() {
 
 # Reset state before each run
 rm -rf ./keploy*
-"$RECORD_BIN" config --generate
+sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
 
 if [ "$MODE" = "incoming" ]; then
     echo "🧪 Testing incoming gRPC requests (testing grpc-server)"
     # Record: Keploy wraps the server to capture incoming gRPC calls. The client is just a driver.
     ./grpc-client &> client_incoming.log &
-    "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-server" --generateGithubActions=false 2>&1 | tee record_incoming.log &
     wait_for_port 50051
 
     sleep 5
@@ -181,7 +181,7 @@ if [ "$MODE" = "incoming" ]; then
     check_for_errors record_incoming.log
 
     # Test: Keploy replays the captured gRPC calls against the server.
-    "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
+    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-server" --generateGithubActions=false  --disableMockUpload 2>&1 | tee test_incoming.log || true
 
     check_for_errors test_incoming.log
     if ! check_test_report; then
@@ -196,7 +196,7 @@ elif [ "$MODE" = "outgoing" ]; then
     # Record: Keploy wraps the client to capture its outgoing gRPC calls. The server is a dependency.
     ./grpc-server &> server_outgoing.log &
     wait_for_port 50051
-    "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./grpc-client" --generateGithubActions=false 2>&1 | tee record_outgoing.log &
 
     send_requests
     sleep 15 # Allow time for traces to be recorded
@@ -208,7 +208,7 @@ elif [ "$MODE" = "outgoing" ]; then
     check_for_errors record_outgoing.log
 
     # Test: Keploy mocks the server's responses for the client. The real server is NOT run.
-    "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
+    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./grpc-client" --generateGithubActions=false --disableMockUpload 2>&1 | tee test_outgoing.log || true
 
     check_for_errors test_outgoing.log
     if ! check_test_report; then

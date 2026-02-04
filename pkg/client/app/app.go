@@ -290,7 +290,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 				// Force Kill using Docker API
 				// We tell the Docker Daemon explicitly to kill this container.
-				a.logger.Warn("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
+				a.logger.Warn("container did not stop gracefully, killing it forecfully", zap.String("containerID", a.container))
 
 				// "SIGKILL" string is standard for Docker API to force kill
 				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")

@@ -190,7 +190,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	if err == io.EOF && len(initialBuf) == 0 {
 		logger.Debug("received EOF, closing conn", zap.Error(err))
-		return nil, io.EOF
+		return nil, readErr
 	}
 
 	if err != nil && err != io.EOF {

@@ -55,7 +55,7 @@ sudo $RECORD_KEPLOY_BIN config --generate
 # --- 1. Record Phase ---
 section "Start Recording Server"
 # Start keploy record in the background using the RECORD binary
-$RECORD_KEPLOY_BIN record -c $RERECORD_SERVER_BIN > record.log 2>&1 | tee record.log &
+sudo -E env PATH="$PATH" $RECORD_KEPLOY_BIN record -c $RERECORD_SERVER_BIN > record.log 2>&1 | tee record.log &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec

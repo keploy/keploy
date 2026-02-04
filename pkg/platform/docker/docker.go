@@ -179,12 +179,12 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 
 		// Compare driver options
 		if idc.volumeOptionsMatch(existingVolume.Options, driverOpts) {
-			idc.logger.Debug("volume already exists with the same options", zap.String("volume", volumeName))
+			idc.logger.Info("volume already exists with the same options", zap.String("volume", volumeName))
 			return nil
 		}
 
 		if !recreate {
-			idc.logger.Debug("volume already exists but with different options", zap.String("volume", volumeName))
+			idc.logger.Info("volume already exists but with different options", zap.String("volume", volumeName))
 			return fmt.Errorf("volume %s exists with different options", volumeName)
 		}
 

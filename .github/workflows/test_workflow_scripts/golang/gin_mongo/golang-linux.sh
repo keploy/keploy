@@ -87,7 +87,7 @@ send_request(){
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    "$RECORD_BIN" record -c "./ginApp"  \
+    sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "./ginApp"  \
     > "${app_name}.txt" 2>&1 &
     
     KEPLOY_PID=$!
@@ -117,7 +117,7 @@ docker rm mongoDb || true
 echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
-"$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
 
 cat test_logs.txt || true
 

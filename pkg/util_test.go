@@ -31,7 +31,7 @@ func TestSimulateHTTP_NewRequestError_303(t *testing.T) {
 	}
 
 	// Act
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0)
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10)
 
 	// Assert
 	require.Error(t, err)
