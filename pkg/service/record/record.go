@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"time"
 
@@ -28,6 +29,12 @@ type Recorder struct {
 	testSetConf     TestSetConfig
 	config          *config.Config
 	globalMockCh    chan<- *models.Mock
+	// appStartTime records when the agent is ready and recording can begin
+	appStartTime time.Time
+	// firstHitTime records when the first incoming test case is received
+	firstHitTime time.Time
+	// protects access to the timestamp fields
+	mu sync.Mutex
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
@@ -118,6 +125,27 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+
+		// After all goroutines have stopped, compute automatic test delay if possible.
+		// This ensures timestamps are final and avoids races with in-flight frames.
+		r.mu.Lock()
+		start := r.appStartTime
+		first := r.firstHitTime
+		r.mu.Unlock()
+
+		if start.IsZero() == false && first.IsZero() == false {
+			dur := first.Sub(start) + 10*time.Second
+			if dur < 0 {
+				dur = 10 * time.Second
+			}
+			secs := uint64(dur.Seconds())
+			// Only set if user hasn't provided a delay
+			if r.config != nil && r.config.Test.Delay == 0 {
+				r.logger.Info("Auto-calculated test delay applied", zap.Uint64("delay_seconds", secs))
+				r.config.Test.Delay = secs
+			}
+		}
+
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
@@ -207,6 +235,11 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
+	// Record the application start time once agent is ready and before traffic begins
+	r.mu.Lock()
+	r.appStartTime = time.Now()
+	r.mu.Unlock()
+
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
@@ -233,6 +266,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			// Capture first incoming test case arrival time only once
+			r.mu.Lock()
+			if r.firstHitTime.IsZero() {
+				r.firstHitTime = time.Now()
+			}
+			r.mu.Unlock()
 			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
 			if reRecordCfg.TestSet == "" {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
