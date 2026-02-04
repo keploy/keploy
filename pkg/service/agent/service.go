@@ -16,5 +16,8 @@ type Service interface {
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
+	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+	// When this flag is set, connection errors will be logged as debug instead of error.
+	SetGracefulShutdown(ctx context.Context) error
 	// SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
 }
