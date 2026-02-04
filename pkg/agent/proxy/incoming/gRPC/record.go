@@ -109,14 +109,17 @@ func (p *grpcTestCaseProxy) getClientConn(ctx context.Context) (*grpc.ClientConn
 	if p.cc != nil {
 		s := p.cc.GetState()
 		p.logger.Debug("checking gRPC client connection state", zap.String("state", s.String()))
-		if s != connectivity.Ready && s != connectivity.Connecting {
+		// Only consider the connection unusable if it's in SHUTDOWN state
+		// IDLE and TRANSIENT_FAILURE states can still be used - gRPC will reconnect automatically
+		if s == connectivity.Shutdown {
+			p.logger.Debug("gRPC client connection is shutdown, will create new one")
 			_ = p.cc.Close()
-			return nil, io.EOF
+			p.cc = nil
+		} else {
+			// For READY, CONNECTING, IDLE, or TRANSIENT_FAILURE, return the existing connection
+			// gRPC will handle reconnection automatically for IDLE and TRANSIENT_FAILURE
+			return p.cc, nil
 		}
-	}
-
-	if p.cc != nil {
-		return p.cc, nil
 	}
 
 	p.logger.Debug("creating new gRPC client connection because p.cc is nil")
