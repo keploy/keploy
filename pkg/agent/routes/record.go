@@ -283,7 +283,7 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 
 	// Create or overwrite the readiness file with a timestamp
 	content := []byte(time.Now().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(readyFile, content, 0644); err != nil {
+	if err := os.WriteFile(readyFile, content, models.FilePermReadWrite); err != nil {
 		a.logger.Error("failed to create readiness file", zap.String("file", readyFile), zap.Error(err))
 		http.Error(w, "failed to mark agent as ready", http.StatusInternalServerError)
 		return

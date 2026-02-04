@@ -2141,7 +2141,7 @@ func (r *Replayer) createBackup(testSetID string) error {
 		return fmt.Errorf("source directory for backup does not exist: %s", srcPath)
 	}
 
-	if err := os.MkdirAll(backupDestPath, 0755); err != nil {
+	if err := os.MkdirAll(backupDestPath, models.DirPermDefault); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 

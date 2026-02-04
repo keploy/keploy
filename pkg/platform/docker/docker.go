@@ -111,7 +111,7 @@ func (idc *Impl) WriteComposeFile(compose *Compose, path string) error {
 
 	// write data to file
 
-	err = os.WriteFile(path, data, 0644)
+	err = os.WriteFile(path, data, models.FilePermReadWrite)
 	if err != nil {
 		return err
 	}

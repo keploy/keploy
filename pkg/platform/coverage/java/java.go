@@ -60,7 +60,7 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 	}
 	// downlaod jacoco cli
 	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
-	err = os.MkdirAll(jacocoPath, 0777)
+	err = os.MkdirAll(jacocoPath, models.DirPermPrivate)
 	if err != nil {
 		j.logger.Debug("failed to create jacoco directory", zap.Error(err))
 		return j.cmd, err

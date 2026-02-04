@@ -8,6 +8,7 @@ import (
 
 	"github.com/denisbrodbeck/machineid"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
@@ -54,7 +55,7 @@ func (db *Db) ReadKeployConfig() (*KeployConfig, error) {
 func (db *Db) WriteKeployConfig(data *KeployConfig) error {
 	// Open the keploy.yaml file
 	path := HomeDir() + "/keploy.yaml"
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, models.FilePermReadWrite)
 	if err != nil {
 		return err
 	}
