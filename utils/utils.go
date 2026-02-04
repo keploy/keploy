@@ -315,6 +315,36 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
+// SuggestProxyStartError enriches common errors encountered while starting the proxy
+// with actionable, user-facing hints to help debugging (e.g., permission denied,
+// address already in use, bind/address issues). It returns a new error that includes
+// the original error message plus a short hint.
+func SuggestProxyStartError(err error, port uint32) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+
+	hint := ""
+	lower := strings.ToLower(msg)
+
+	switch {
+	case strings.Contains(lower, "permission denied") || strings.Contains(lower, "access denied"):
+		hint = fmt.Sprintf("permission denied when binding to port %d — use a non-privileged port (>1024) or run with appropriate privileges (e.g. sudo), or adjust system capabilities.", port)
+	case strings.Contains(lower, "address already in use") || strings.Contains(lower, "bind: address already in use"):
+		hint = fmt.Sprintf("port %d is already in use — stop the process listening on that port or change Keploy's proxy port. Check with: `ss -ltnp | grep :%d` or `lsof -i :%d`.", port, port, port)
+	case strings.Contains(lower, "can't assign requested address") || strings.Contains(lower, "cannot assign requested address"):
+		hint = fmt.Sprintf("requested interface/address is not available on this host — verify the configured IP/DNS settings and container network (if running in Docker).")
+	case strings.Contains(lower, "network is unreachable") || strings.Contains(lower, "no route to host"):
+		hint = "network unreachable — check network interfaces, routing, and DNS configuration."
+	default:
+		hint = "check system logs, port availability, and network configuration for more details."
+	}
+
+	enhanced := fmt.Errorf("%s: %s. Hint: %s", "proxy startup error", msg, hint)
+	return enhanced
+}
+
 // RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
 // This function handles cases where the templating engine fails to parse values containing both single and double quotes.
 // For example:
