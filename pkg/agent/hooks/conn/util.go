@@ -118,7 +118,6 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	currentID := atomic.AddInt64(&globalTestCounter, 1)
 	testName := fmt.Sprintf("test-%d", currentID)
 	testCase.Name = testName
-	fmt.Println("here is the test name :", testCase.Name)
 	if synchronous {
 		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
 			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true)
