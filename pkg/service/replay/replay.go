@@ -1269,6 +1269,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if testCaseResult != nil {
+				if testStatus == models.TestStatusFailed {
+					expectedMocks := expectedTestMockMappings[testCase.Name]
+					actualMocks := actualTestMockMappings[testCase.Name]
+					switch testCase.Kind {
+					case models.HTTP:
+						httpResp := resp.(*models.HTTPResp)
+						testCaseResult.Diagnostic = buildHTTPDiagnostic(testCase, httpResp, expectedMocks, actualMocks)
+					case models.GRPC_EXPORT:
+						grpcResp := resp.(*models.GrpcResp)
+						testCaseResult.Diagnostic = buildGRPCDiagnostic(testCase, grpcResp, expectedMocks, actualMocks)
+					}
+				}
 				if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
 					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
