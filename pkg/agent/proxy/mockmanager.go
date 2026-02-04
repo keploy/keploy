@@ -180,7 +180,10 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 
 	// rebuild per-kind filtered maps from scratch to avoid stale entries
-	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
+	m.treesMu.RLock()
+	currentLen := len(m.filteredByKind)
+	m.treesMu.RUnlock()
+	newFilteredByKind := make(map[models.Kind]*TreeDb, currentLen)
 	touched := map[models.Kind]struct{}{}
 
 	for index, mock := range mocks {
@@ -216,7 +219,10 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 
 	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
-	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
+	m.treesMu.RLock()
+	currentLen := len(m.unfilteredByKind)
+	m.treesMu.RUnlock()
+	newUnfilteredByKind := make(map[models.Kind]*TreeDb, currentLen)
 	touched := map[models.Kind]struct{}{}
 
 	for index, mock := range mocks {
