@@ -59,7 +59,7 @@ type Proxy struct {
 	ipMutex   *sync.Mutex
 	// channel to mark client connection as closed
 	clientClose       chan bool
-	clientConnections []net.Conn
+	clientConnections map[net.Conn]struct{}
 
 	Listener net.Listener
 
@@ -93,6 +93,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
+		clientConnections: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -309,6 +310,17 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
 				defer util.Recover(p.logger, clientConn, nil)
+
+				p.connMutex.Lock()
+				p.clientConnections[clientConn] = struct{}{}
+				p.connMutex.Unlock()
+
+				defer func() {
+					p.connMutex.Lock()
+					delete(p.clientConnections, clientConn)
+					p.connMutex.Unlock()
+				}()
+
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
 					if p.IsGracefulShutdown() && isShutdownError(err) {
@@ -723,13 +735,13 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("stopping proxy server...")
 	var cleanupErrors []error
 	p.connMutex.Lock()
-	for _, clientConn := range p.clientConnections {
+	for clientConn := range p.clientConnections {
 		if err := clientConn.Close(); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close client connection: %w", err))
 
 		}
 	}
-	p.clientConnections = nil
+	p.clientConnections = make(map[net.Conn]struct{})
 	p.connMutex.Unlock()
 	if p.Listener != nil {
 		if err := p.Listener.Close(); err != nil {
