@@ -137,14 +137,23 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 
 // NEW: kind-scoped getters used by Redis matcher
 func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	// Fetch pointer safely; the tree itself is responsible for its own safety.
+	// Get pointer while holding lock to prevent TOCTOU race with SetFilteredMocks
 	m.treesMu.RLock()
 	flt := m.filteredByKind[kind]
 	m.treesMu.RUnlock()
+	
 	if flt == nil {
-		flt, _ = m.ensureKindTrees(kind)
+		// Tree doesn't exist, create it
+		_, _ = m.ensureKindTrees(kind)
+		// Unconditionally re-read from map to ensure we use the tree from current map state
+		// (another goroutine might have replaced the map or created the tree)
+		m.treesMu.RLock()
+		flt = m.filteredByKind[kind]
+		m.treesMu.RUnlock()
 	}
 
+	// Safe to use flt here: TreeDb.rangeValues() has its own RWMutex protection,
+	// and even if flt is a stale pointer (no longer in map), the tree itself is safe to read.
 	results := make([]*models.Mock, 0, 64)
 	flt.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -156,13 +165,23 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 }
 
 func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	// Get pointer while holding lock to prevent TOCTOU race with SetUnFilteredMocks
 	m.treesMu.RLock()
 	unf := m.unfilteredByKind[kind]
 	m.treesMu.RUnlock()
+	
 	if unf == nil {
-		_, unf = m.ensureKindTrees(kind)
+		// Tree doesn't exist, create it
+		_, _ = m.ensureKindTrees(kind)
+		// Unconditionally re-read from map to ensure we use the tree from current map state
+		// (another goroutine might have replaced the map or created the tree)
+		m.treesMu.RLock()
+		unf = m.unfilteredByKind[kind]
+		m.treesMu.RUnlock()
 	}
 
+	// Safe to use unf here: TreeDb.rangeValues() has its own RWMutex protection,
+	// and even if unf is a stale pointer (no longer in map), the tree itself is safe to read.
 	results := make([]*models.Mock, 0, 128)
 	unf.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -180,7 +199,8 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 
 	// rebuild per-kind filtered maps from scratch to avoid stale entries
-	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
+	// Use reasonable default capacity (len() is just a hint, not correctness-critical)
+	newFilteredByKind := make(map[models.Kind]*TreeDb, 8)
 	touched := map[models.Kind]struct{}{}
 
 	for index, mock := range mocks {
@@ -216,7 +236,8 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 
 	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
-	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
+	// Use reasonable default capacity (len() is just a hint, not correctness-critical)
+	newUnfilteredByKind := make(map[models.Kind]*TreeDb, 8)
 	touched := map[models.Kind]struct{}{}
 
 	for index, mock := range mocks {
