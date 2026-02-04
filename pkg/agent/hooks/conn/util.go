@@ -121,7 +121,6 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	case <-ctx.Done():
 		return
 	case t <- testCase:
-		// Successfully sent test case
 	}
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
