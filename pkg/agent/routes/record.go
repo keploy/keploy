@@ -161,7 +161,6 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
-
 	a.logger.Debug("Received request to handle incoming test cases")
 
 	w.Header().Set("Content-Type", "application/json")
