@@ -687,6 +687,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
+	if models.IsAnsiDisabled == true {
+		args = append(args, "--disable-ansi")
+	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
 		portStrings := make([]string, len(opts.PassThroughPorts))
@@ -756,7 +759,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
 		if err := a.requestAgentStop(); err != nil {
-			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
 			// Fallback: forcefully stop the agent process
 			a.mu.Lock()
 			cmd := a.agentCmd
@@ -823,7 +826,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
 		if err := a.requestAgentStop(); err != nil {
-			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
 			// Fallback: forcefully stop the agent process
 			a.mu.Lock()
 			ptyHandle := a.agentPTY
@@ -884,6 +887,14 @@ func (a *AgentClient) stopAgent() {
 	if a.agentCmd != nil && a.agentCmd.Process != nil {
 		pid := a.agentCmd.Process.Pid
 		a.logger.Debug("Stopping keploy agent", zap.Int("pid", pid))
+	}
+
+	// If PTY is active, close it to unblock stdin/stdout copies
+	if a.agentPTY != nil {
+		// Use the utils function to gracefully stop PTY
+		if err := agentUtils.StopPTYCommand(a.agentPTY, a.logger); err != nil {
+			a.logger.Warn("failed to stop PTY command", zap.Error(err))
+		}
 	}
 }
 
@@ -1154,6 +1165,47 @@ func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logg
 // This function should be implemented such that we listen to the mock not found errors on the proxy side and send it back to the client from agent
 // Currently, we are sending the nil chan and it is handled for the nil check in the monitorProxyErrors function
 func (a *AgentClient) GetErrorChannel() <-chan error {
+	return nil
+}
+
+// NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
+// This should be called before cancelling contexts during application shutdown.
+// When the flag is set, connection errors will be logged as debug instead of error.
+func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
+	if a.conf.Agent.AgentURI == "" {
+		a.logger.Debug("Agent URI is empty, skipping graceful shutdown notification")
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/graceful-shutdown", a.conf.Agent.AgentURI)
+
+	// Use a short timeout since this is a best-effort notification
+	reqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", url, nil)
+	if err != nil {
+		a.logger.Debug("failed to create graceful shutdown request", zap.Error(err))
+		return err
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		// Don't log as error since this might fail during shutdown
+		a.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		return err
+	}
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		a.logger.Debug("agent returned non-200 status for graceful shutdown", zap.Int("status", resp.StatusCode))
+		return fmt.Errorf("graceful shutdown notification failed with status %d", resp.StatusCode)
+	}
+
+	a.logger.Debug("Successfully notified agent of graceful shutdown")
 	return nil
 }
 

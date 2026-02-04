@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -35,22 +36,62 @@ func fmtDuration(d time.Duration) string {
 
 // printSingleSummaryTo is the buffered variant used internally.
 func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, dur time.Duration, failedCases []string) {
+	if models.IsAnsiDisabled {
+		fmt.Fprintln(w, "<=========================================>")
+		fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
+		fmt.Fprintf(w, "\tTotal tests: %d\n", total)
+		fmt.Fprintf(w, "\tTotal test passed: %d\n", pass)
+		fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
+		if dur > 0 {
+			fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
+		} else {
+			fmt.Fprintf(w, "\tTotal time taken: %q\n", "N/A")
+		}
+		fmt.Fprintln(w, "\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
+		tt := "N/A"
+		if dur > 0 {
+			tt = fmtDuration(dur)
+		}
+
+		fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
+
+		fmt.Fprintln(w, "\nFAILED TEST CASES:")
+		if fail == 0 || len(failedCases) == 0 {
+			fmt.Fprintln(w, "\t(none)")
+		} else {
+			for _, fc := range failedCases {
+				fmt.Fprintf(w, "\t- %s\n", fc)
+			}
+		}
+		fmt.Fprintln(w, "<=========================================>")
+		return
+	}
+
+	const (
+		reset = "\x1b[0m"
+		blue  = "\x1b[34;1m" // Blue and Bold
+		red   = "\x1b[31;1m" // Red and Bold
+	)
+
+	timeStr := "N/A"
+	if dur > 0 {
+		timeStr = fmtDuration(dur)
+	}
+
 	fmt.Fprintln(w, "<=========================================>")
 	fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
-	fmt.Fprintf(w, "\tTotal tests: %d\n", total)
-	fmt.Fprintf(w, "\tTotal test passed: %d\n", pass)
-	fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
-	if dur > 0 {
-		fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
-	} else {
-		fmt.Fprintf(w, "\tTotal time taken: %q\n", "N/A")
-	}
-	fmt.Fprintln(w, "\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
-	tt := "N/A"
-	if dur > 0 {
-		tt = fmtDuration(dur)
-	}
-	fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
+
+	fmt.Fprintf(w, "\tTotal tests:       %s%d%s\n", blue, total, reset)
+	fmt.Fprintf(w, "\tTotal test passed: %s%d%s\n", blue, pass, reset)
+	fmt.Fprintf(w, "\tTotal test failed: %s%d%s\n", blue, fail, reset)
+
+	fmt.Fprintf(w, "\tTotal time taken:  %s%s%s\n", red, timeStr, reset)
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "\tTest Suite\tTotal\tPassed\tFailed\tTime Taken")
+
+	fmt.Fprintf(tw, "\t%s\t%d\t%d\t%d\t%s\n", name, total, pass, fail, timeStr)
+	tw.Flush()
 
 	fmt.Fprintln(w, "\nFAILED TEST CASES:")
 	if fail == 0 || len(failedCases) == 0 {
@@ -69,47 +110,54 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 // - Value after "Actual:" is green
 func applyCliColorsToDiff(diff string) string {
 	if diff == "" {
+		return ""
+	}
+
+	if models.IsAnsiDisabled {
 		return diff
 	}
 
-	mustProcess := false
-	for _, prefix := range []string{"Path: ", "  Expected: ", "  Actual: "} {
-		if strings.Contains(diff, prefix) {
-			mustProcess = true
-			break
-		}
-	}
-
-	if !mustProcess {
-		return diff
-	}
-
+	// ANSI Constants
 	const (
-		ansiReset  = "\x1b[0m"
-		ansiYellow = "\x1b[33m"
-		ansiRed    = "\x1b[31m"
-		ansiGreen  = "\x1b[32m"
+		reset  = "\x1b[0m"
+		yellow = "\x1b[33m"
+		red    = "\x1b[31m"
+		green  = "\x1b[32m"
 	)
 
-	lines := strings.Split(diff, "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "Path: ") {
-			value := strings.TrimPrefix(line, "Path: ")
-			lines[i] = "Path: " + ansiYellow + value + ansiReset
-			continue
+	var sb strings.Builder
+	sb.Grow(len(diff) + 100)
+
+	scanner := bufio.NewScanner(strings.NewReader(diff))
+	first := true
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if !first {
+			sb.WriteByte('\n')
 		}
-		if strings.HasPrefix(line, "  Expected: ") {
-			value := strings.TrimPrefix(line, "  Expected: ")
-			lines[i] = "  Expected: " + ansiRed + value + ansiReset
-			continue
-		}
-		if strings.HasPrefix(line, "  Actual: ") {
-			value := strings.TrimPrefix(line, "  Actual: ")
-			lines[i] = "  Actual: " + ansiGreen + value + ansiReset
-			continue
+		first = false
+
+		switch {
+		case strings.HasPrefix(line, "Path: "):
+			val := strings.TrimPrefix(line, "Path: ")
+			sb.WriteString("Path: " + yellow + val + reset)
+
+		case strings.HasPrefix(line, "  Expected: "):
+			val := strings.TrimPrefix(line, "  Expected: ")
+			sb.WriteString("  Expected: " + red + val + reset)
+
+		case strings.HasPrefix(line, "  Actual: "):
+			val := strings.TrimPrefix(line, "  Actual: ")
+			sb.WriteString("  Actual: " + green + val + reset)
+
+		default:
+			sb.WriteString(line)
 		}
 	}
-	return strings.Join(lines, "\n")
+
+	return sb.String()
 }
 
 // GenerateStatusAndHeadersTableDiff builds a table-style diff for status code, headers,
