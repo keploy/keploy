@@ -355,32 +355,30 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.Mock)
-	errChan := make(chan error, 2)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
+	// INCOMING
+	incomingStream, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+	if err != nil {
+		if ctx.Err() != nil || utils.IsShutdownError(err) {
+			r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
+			// Return channels so caller doesn't panic on range, though they might be empty/unused if we error out
+			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+		}
+		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
+	}
+
 	g.Go(func() error {
 		defer close(incomingChan)
-
-		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
-		if err != nil {
-			// During shutdown, context cancellation or EOF errors are expected
-			if ctx.Err() != nil || utils.IsShutdownError(err) {
-				r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
-				return nil
-			}
-			errChan <- err
-			return fmt.Errorf("failed to get incoming test cases: %w", err)
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case tc, ok := <-ch:
+			case tc, ok := <-incomingStream:
 				if !ok {
 					return nil
 				}
@@ -395,38 +393,38 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	})
 
 	// OUTGOING
+	// Create a cancelable child that we always cancel when ctx is done.
+	mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+
+	// Cancel child as soon as parent is done
+	go func() {
+		<-ctx.Done()
+		cancel()
+	}()
+
+	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+	})
+	if err != nil {
+		cancel()
+		if ctx.Err() != nil || utils.IsShutdownError(err) {
+			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
+			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+		}
+		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
+	}
+
 	g.Go(func() error {
 		defer close(outgoingChan)
-
-		// Create a cancelable child that we always cancel when ctx is done.
-		mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
-
-		// Cancel child as soon as parent is done
-		go func() {
-			<-ctx.Done()
-			cancel()
-		}()
-
-		ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-		})
-		if err != nil {
-			// During shutdown, context cancellation or EOF errors are expected
-			if ctx.Err() != nil || utils.IsShutdownError(err) {
-				r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
-				return nil
-			}
-			return fmt.Errorf("failed to get outgoing mocks: %w", err)
-		}
 
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case m, ok := <-ch:
+			case m, ok := <-outgoingStream:
 				if !ok {
 					return nil
 				}
