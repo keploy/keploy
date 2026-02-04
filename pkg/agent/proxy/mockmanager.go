@@ -327,6 +327,85 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	return updatedGlobal
 }
 
+// UpdateFilteredMock updates a mock in the filtered tree without deleting it.
+// This is used to bump SortOrder after matching, so subsequent matches prefer
+// mocks with lower SortOrder while keeping this mock available as a fallback.
+func (m *MockManager) UpdateFilteredMock(old *models.Mock, new *models.Mock) bool {
+	// Update legacy/global filtered tree first
+	updatedGlobal := m.filtered.update(old.TestModeInfo, new.TestModeInfo, new)
+
+	oldK, newK := old.Kind, new.Kind
+	var updatedOldKind, updatedNewKind bool
+
+	if oldK == newK {
+		// Same kind: update the per-kind tree under lock
+		flt, _ := m.ensureKindTrees(newK)
+		m.treesMu.Lock()
+		updatedNewKind = flt.update(old.TestModeInfo, new.TestModeInfo, new)
+
+		// Self-heal if global updated but per-kind missed
+		if updatedGlobal && !updatedNewKind {
+			if m.logger != nil {
+				m.logger.Warn("self-healing per-kind filtered tree: global update succeeded but per-kind missed",
+					zap.String("kind", string(newK)),
+					zap.String("mockName", new.Name),
+					zap.Any("testModeInfo", new.TestModeInfo),
+				)
+			}
+			flt.insert(new.TestModeInfo, new)
+			updatedNewKind = true
+		}
+		m.treesMu.Unlock()
+	} else {
+		// Kind changed: remove from old kind tree, insert/update in new kind tree
+		fltOld, _ := m.ensureKindTrees(oldK)
+		fltNew, _ := m.ensureKindTrees(newK)
+		m.treesMu.Lock()
+		updatedOldKind = fltOld.delete(old.TestModeInfo)
+		updatedNewKind = fltNew.update(old.TestModeInfo, new.TestModeInfo, new)
+		if !updatedNewKind {
+			fltNew.insert(new.TestModeInfo, new)
+			updatedNewKind = true
+		}
+		m.treesMu.Unlock()
+		if m.logger != nil {
+			m.logger.Info("moved filtered mock across kinds",
+				zap.String("mockName", new.Name),
+				zap.String("fromKind", string(oldK)),
+				zap.String("toKind", string(newK)),
+			)
+		}
+	}
+
+	// Mark usage if global changed - flag as Updated (not Deleted)
+	if updatedGlobal {
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       new.Name,
+			Usage:      models.Updated,
+			IsFiltered: new.TestModeInfo.IsFiltered,
+			SortOrder:  new.TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+	}
+
+	// Bump revisions
+	if oldK != newK {
+		if updatedOldKind {
+			m.bumpRevisionKind(oldK)
+		}
+		if updatedNewKind {
+			m.bumpRevisionKind(newK)
+		}
+	} else if updatedNewKind {
+		m.bumpRevisionKind(newK)
+	}
+	if updatedGlobal {
+		m.bumpRevisionAll()
+	}
+	return updatedGlobal
+}
+
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	deletedGlobal := m.filtered.delete(mock.TestModeInfo)
 

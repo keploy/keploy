@@ -809,7 +809,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, false)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -877,7 +877,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, false)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -983,6 +983,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	for _, m := range consumedMocks {
 		totalConsumedMocks[m.Name] = m
 	}
+	var lastDiffMap map[string]models.MockState
 
 	for idx, testCase := range testCases {
 
@@ -1052,7 +1053,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			respTime = testCase.GrpcResp.Timestamp
 		}
 
-		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+		var mocksToSend map[string]models.MockState
+		var isDiff bool
+		// isDiff is true after the first test case, Before the first test runs, the application might have already consumed mocks during its startup sequence.
+		// Sending the full totalConsumedMocks map ensures the agent starts with this complete baseline data
+		if idx > 0 {
+			isDiff = true
+			mocksToSend = lastDiffMap
+		} else {
+			mocksToSend = totalConsumedMocks
+		}
+
+		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, mocksToSend, useMappingBased, isDiff)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 			break
@@ -1111,12 +1123,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if r.instrument {
+			getConsumedStart := time.Now()
 			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
+			if time.Since(getConsumedStart) > 50*time.Millisecond {
+				r.logger.Warn("Slow GetConsumedMocks", zap.Duration("duration", time.Since(getConsumedStart)))
+			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
+			lastDiffMap = make(map[string]models.MockState, len(consumedMocks))
 			for _, m := range consumedMocks {
 				totalConsumedMocks[m.Name] = m
+				lastDiffMap[m.Name] = m
 			}
 		}
 
@@ -1273,7 +1291,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
+				insertStart := time.Now()
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if time.Since(insertStart) > 50*time.Millisecond {
+					r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+				}
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
@@ -1516,7 +1538,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, isDiff bool) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -1529,6 +1551,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		MockMapping:        expectedMockMapping,
 		UseMappingBased:    useMappingBased,
 		TotalConsumedMocks: totalConsumedMocks,
+		IsDiff:             isDiff,
 	}
 
 	// Send parameters to agent for filtering and mock updates
@@ -1540,7 +1563,9 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 
 	r.logger.Debug("Successfully sent mock filter parameters to agent",
 		zap.Bool("useMappingBased", useMappingBased),
-		zap.Int("mockMappingCount", len(expectedMockMapping)))
+		zap.Bool("isDiff", isDiff),
+		zap.Int("mockMappingCount", len(expectedMockMapping)),
+		zap.Int("consumedMocksCount", len(totalConsumedMocks)))
 
 	return nil
 }

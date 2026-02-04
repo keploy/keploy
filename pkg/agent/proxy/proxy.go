@@ -64,6 +64,7 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
+	nsSwitchMutex     sync.Mutex
 	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
@@ -274,6 +275,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 
+		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
 			// reset the hosts config in nsswitch.conf of the system (in test mode)
 			err = p.resetNsSwitchConfig()
@@ -281,6 +283,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
 			}
 		}
+		p.nsSwitchMutex.Unlock()
 	}()
 
 	for {
@@ -353,8 +356,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
-		return err
+		// Gracefully handle untracked connections (eBPF lookup failed)
+		// This can happen when:
+		// 1. A new connection was opened after test completion (e.g., driver health check)
+		// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
+		// 3. The entry was already deleted before this lookup
+		//
+		// Instead of failing with an error (which causes the app to see a broken connection),
+		// we close the connection gracefully. The client will see "connection refused" or EOF,
+		// which is cleaner than a partial/broken connection that causes "already closed" errors.
+		p.logger.Warn("Untracked connection (eBPF lookup failed), closing gracefully",
+			zap.Int("Source port", sourcePort), zap.Error(err))
+		if srcConn != nil {
+			srcConn.Close()
+		}
+		return nil
 	}
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
@@ -784,6 +800,8 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
 	}
 
+	p.nsSwitchMutex.Lock()
+	defer p.nsSwitchMutex.Unlock()
 	if string(p.nsswitchData) == "" {
 		// setup the nsswitch config to redirect the DNS queries to the proxy
 		err := p.setupNsswitchConfig()
@@ -812,6 +830,24 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
+}
+
+// DeleteMocks removes the specified mocks from the filtered tree only.
+// This allows for efficient incremental updates (O(k log N)) instead of full rebuilds (O(N log N)).
+// Note: We only delete from filtered tree because unfiltered mocks are config/reusable mocks
+// (like HTTP external API calls) that should remain available across tests.
+func (p *Proxy) DeleteMocks(_ context.Context, mocks []*models.Mock) error {
+	m, ok := p.MockManagers.Load(uint64(0))
+	if ok {
+		mgr := m.(*MockManager)
+		for _, mock := range mocks {
+			if mock != nil {
+				// Only delete from filtered tree - unfiltered mocks are reusable
+				mgr.DeleteFilteredMock(*mock)
+			}
+		}
+	}
+	return nil
 }
 
 // GetErrorChannel returns the error channel for external monitoring
