@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -109,6 +110,39 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	return m, nil
 }
 
+func (a *Agent) GetMappingStream(ctx context.Context) (<-chan models.TestMockMapping, error) {
+	a.logger.Debug("Initializing mapping stream for client")
+
+	// 1. Create the channel
+	// Buffer it slightly to prevent blocking the recording loop if network is jittery
+	mappingCh := make(chan models.TestMockMapping, 100)
+
+	// 2. Get the Singleton Manager
+	mgr := syncMock.Get()
+	if mgr == nil {
+		return nil, fmt.Errorf("sync mock manager is not initialized")
+	}
+
+	// 3. Register the channel with the Manager
+	// This tells the manager: "Start pushing mapping events here"
+	mgr.SetMappingChannel(mappingCh)
+
+	// 4. Handle Cleanup
+	// When the client disconnects (ctx.Done), we must ensure the manager
+	// stops writing to this channel to avoid panic on closed channel.
+	go func() {
+		<-ctx.Done()
+		a.logger.Debug("Client disconnected from mapping stream, cleaning up")
+
+		// Reset the channel in manager to nil so it stops sending
+		mgr.SetMappingChannel(nil)
+
+		// Close the channel to signal any local listeners
+		close(mappingCh)
+	}()
+
+	return mappingCh, nil
+}
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
 	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
 

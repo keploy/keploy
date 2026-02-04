@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"time"
 
@@ -23,6 +24,7 @@ type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	mappingDb       MappingDb
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
@@ -30,11 +32,12 @@ type Recorder struct {
 	globalMockCh    chan<- *models.Mock
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
+		mappingDb:       mappingDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		testSetConf:     testSetConf,
@@ -201,6 +204,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
+	var correlationMap sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
@@ -248,6 +252,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			tempID := mock.Name
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
 				currMockID := r.mockDB.GetCurrMockID()
@@ -268,8 +273,63 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 				insertMockErrChan <- err
 			} else {
+				if tempID != "" && mock.Name != "" {
+					correlationMap.Store(tempID, mock.Name)
+				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+			}
+		}
+		return nil
+	})
+
+	errGrp.Go(func() error {
+		for mapping := range frames.Mappings {
+			fmt.Println("got a mapping :", mapping)
+			var realMockNames []string
+
+			for _, tempID := range mapping.MockIDs {
+				// We need to resolve TempID -> RealID.
+				// Race Condition: Mapping might arrive slightly before the Mock Loop saves the mock.
+
+				var realName string
+				found := false
+
+				// Simple retry loop (fast spin) to wait for the Mock Loop
+				for i := 0; i < 50; i++ { // Wait up to ~500ms
+					if val, ok := correlationMap.Load(tempID); ok {
+						realName = val.(string)
+						found = true
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+
+				if found {
+					realMockNames = append(realMockNames, realName)
+					// Optional: Clean up map to save memory, assuming 1:1 mapping usage
+					correlationMap.Delete(tempID)
+				} else {
+					r.logger.Warn("Failed to correlate mock mapping",
+						zap.String("test", mapping.TestName),
+						zap.String("tempMockID", tempID))
+				}
+			}
+
+			// Write to mappings.yaml
+			if len(realMockNames) > 0 {
+				// StoreMappings expects map[TestID][]MockIDs
+				mappingToSave := map[string][]string{
+					mapping.TestName: realMockNames,
+				}
+
+				// This function should be thread-safe (check your implementation of StoreMappings)
+				// If not, use a mutex here.
+
+				err := r.mappingDb.Insert(ctx, newTestSetID, mappingToSave)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to save mapping")
+				}
 			}
 		}
 		return nil
@@ -349,6 +409,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.Mock)
+	mappingChan := make(chan models.TestMockMapping) // New
 	errChan := make(chan error, 2)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -434,9 +495,48 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		}
 	})
 
+	// MAPPINGS
+	g.Go(func() error {
+		defer close(mappingChan)
+
+		// Create context that cancels with parent
+		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancel()
+		go func() {
+			<-ctx.Done()
+			cancel()
+		}()
+
+		// Call the new AgentClient method
+		ch, err := r.instrumentation.GetMappings(mapCtx, incomingOpts)
+		if err != nil {
+			if ctx.Err() != nil || utils.IsShutdownError(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get mappings: %w", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case m, ok := <-ch:
+				if !ok {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case mappingChan <- m:
+				}
+			}
+		}
+	})
+
 	return FrameChan{
 		Incoming: incomingChan,
 		Outgoing: outgoingChan,
+		Mappings: mappingChan,
 	}, nil
 
 }

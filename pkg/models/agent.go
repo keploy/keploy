@@ -17,6 +17,11 @@ type AgentResp struct {
 	IsSuccess bool  `json:"isSuccess"`
 }
 
+type TestMockMapping struct {
+	TestName string   `json:"test_name"`
+	MockIDs  []string `json:"mock_ids"` // These are temporary UUIDs/IDs assigned by Agent for correlation
+}
+
 type SetMocksReq struct {
 	Filtered   []*Mock `json:"filtered"`
 	UnFiltered []*Mock `json:"unFiltered"`
