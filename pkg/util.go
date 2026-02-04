@@ -1150,17 +1150,7 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 	return data, nil
 }
 
-// extractTemplateKeys parses the inner segment of a template placeholder and returns variable keys.
-// Supports patterns like:
-//
-//	token
-//	.token
-//	string .token
-//	int .id
-//	float .price
-//	.user.id  (returns last path segment id)
-//
-// Only the first pipeline segment is considered (text before |).
+
 func extractTemplateKeys(inner string) []string {
 	inner = strings.TrimSpace(inner)
 	if inner == "" {
