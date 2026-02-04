@@ -93,6 +93,9 @@ jobs:
   docker-image-build:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
     steps:
@@ -107,27 +110,28 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: false
 
-      - name: Set PR image tag
-        run: echo "PR_IMAGE_TAG=ttl.sh/keploy/keploy:${GITHUB_SHA::7}" >> $GITHUB_ENV
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image for PR
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
 
-      - name: Make unique tag for this run
+      - name: Tag and push to ghcr.io
         id: tag
         run: |
-          IMAGE_TAG="ttl.sh/keploy/keploy:${GITHUB_SHA}-1h"
+          IMAGE_TAG="ghcr.io/${{ github.repository_owner }}/keploy:${{ github.sha }}"
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           docker image inspect ttl.sh/keploy/keploy:1h > /dev/null
           docker tag ttl.sh/keploy/keploy:1h "$IMAGE_TAG"
-
-      - name: Push unique tag
-        run: |
-          docker push "${{ steps.tag.outputs.image_tag }}"
+          docker push "$IMAGE_TAG"
     
   pull-docker-image:
     needs: [docker-image-build]
@@ -145,7 +149,11 @@ jobs:
         $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
         if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
-    
+    - name: Log in to GitHub Container Registry
+      shell: powershell
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
     - name: Pull Docker image
       shell: powershell
       run: |
