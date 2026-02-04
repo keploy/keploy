@@ -186,7 +186,7 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -216,7 +216,56 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
-	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
+	// Determine which port to use for test execution
+	// Priority: 1. Config port (from flag/config file) 2. Test case AppPort 3. Original URL port (defaults to 80 for HTTP, 443 for HTTPS)
+	testURL := tc.HTTPReq.URL
+	parsedURL, parseErr := url.Parse(tc.HTTPReq.URL)
+	if parseErr != nil {
+		utils.LogError(logger, parseErr, "failed to parse test case URL")
+		return nil, parseErr
+	}
+
+	// Get the port from URL (returns empty string if not specified, meaning default 80/443)
+	urlPort := parsedURL.Port()
+
+	if configPort > 0 {
+		// Config port takes highest priority - use it for all test cases
+		host := parsedURL.Hostname()
+		parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
+		testURL = parsedURL.String()
+
+		// Warn if config port differs from recorded app_port (may cause test failures)
+		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
+			logger.Info("Using port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
+				zap.Uint32("config_port", configPort),
+				zap.Uint16("recorded_app_port", tc.AppPort),
+				zap.String("url", testURL))
+		} else {
+			logger.Debug("Using port from config/flag", zap.Uint32("port", configPort), zap.String("url", testURL))
+		}
+	} else if tc.AppPort > 0 {
+		// Use test case AppPort if no config port is provided
+		host := parsedURL.Hostname()
+		parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
+		testURL = parsedURL.String()
+		logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
+	} else {
+		// Neither configPort nor AppPort is set - use original URL
+		// If URL has no explicit port, Go's http.Client uses scheme defaults (80 for HTTP, 443 for HTTPS)
+		if urlPort == "" {
+			defaultPort := "80"
+			if parsedURL.Scheme == "https" {
+				defaultPort = "443"
+			}
+			logger.Debug("No port specified in config or test case. Using URL as-is with default port.",
+				zap.String("url", testURL),
+				zap.String("default_port", defaultPort))
+		} else {
+			logger.Debug("Using port from URL", zap.String("url", testURL), zap.String("port", urlPort))
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
