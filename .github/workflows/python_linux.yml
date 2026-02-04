@@ -40,10 +40,10 @@ jobs:
         with:
           repository: keploy/keploy
 
-      - name: Install Python
-        uses: deadsnakes/action@v3.2.0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -94,10 +94,10 @@ jobs:
         with:
           repository: keploy/keploy
       
-      - name: Install Python
-        uses: deadsnakes/action@v3.2.0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Setup docker-compose
         run: |
