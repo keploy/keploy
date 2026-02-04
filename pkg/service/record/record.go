@@ -283,58 +283,49 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return nil
 	})
 
-	// errGrp.Go(func() error {
-	// 	for mapping := range frames.Mappings {
-	// 		fmt.Println("got a mapping :", mapping)
-	// 		var realMockNames []string
+	errGrp.Go(func() error {
+		for mapping := range frames.Mappings {
+			fmt.Println("got a mapping :", mapping)
+			var realMockNames []string
 
-	// 		for _, tempID := range mapping.MockIDs {
-	// 			// We need to resolve TempID -> RealID.
-	// 			// Race Condition: Mapping might arrive slightly before the Mock Loop saves the mock.
+			for _, tempID := range mapping.MockIDs {
+				// We need to resolve TempID -> RealID.
+				// Race Condition: Mapping might arrive slightly before the Mock Loop saves the mock.
 
-	// 			var realName string
-	// 			found := false
+				var realName string
+				found := false
 
-	// 			// Simple retry loop (fast spin) to wait for the Mock Loop
-	// 			for i := 0; i < 50; i++ { // Wait up to ~500ms
-	// 				if val, ok := correlationMap.Load(tempID); ok {
-	// 					realName = val.(string)
-	// 					found = true
-	// 					break
-	// 				}
-	// 				time.Sleep(10 * time.Millisecond)
-	// 			}
+				// Simple retry loop (fast spin) to wait for the Mock Loop
+				for i := 0; i < 50; i++ { // Wait up to ~500ms
+					if val, ok := correlationMap.Load(tempID); ok {
+						realName = val.(string)
+						found = true
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
 
-	// 			if found {
-	// 				realMockNames = append(realMockNames, realName)
-	// 				// Optional: Clean up map to save memory, assuming 1:1 mapping usage
-	// 				correlationMap.Delete(tempID)
-	// 			} else {
-	// 				r.logger.Warn("Failed to correlate mock mapping",
-	// 					zap.String("test", mapping.TestName),
-	// 					zap.String("tempMockID", tempID))
-	// 			}
-	// 		}
+				if found {
+					realMockNames = append(realMockNames, realName)
+					// Optional: Clean up map to save memory, assuming 1:1 mapping usage
+					correlationMap.Delete(tempID)
+				} else {
+					r.logger.Warn("Failed to correlate mock mapping",
+						zap.String("test", mapping.TestName),
+						zap.String("tempMockID", tempID))
+				}
+			}
 
-	// 		// Write to mappings.yaml
-	// 		if len(realMockNames) > 0 {
-	// 			// StoreMappings expects map[TestID][]MockIDs
-	// 			// mappingToSave := map[string][]string{
-	// 			// 	mapping.TestName: realMockNames,
-	// 			// }
-
-	// 			// This function should be thread-safe (check your implementation of StoreMappings)
-	// 			// If not, use a mutex here.
-
-	// 			// err := r.mappingDb.Insert(ctx, newTestSetID, mappingToSave)
-	// 			err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
-	// 			if err != nil {
-	// 				utils.LogError(r.logger, err, "failed to save mapping")
-	// 			}
-	// 		}
-	// 	}
-	// 	return nil
-	// })
+			// Write to mappings.yaml
+			if len(realMockNames) > 0 {
+				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to save mapping")
+				}
+			}
+		}
+		return nil
+	})
 
 	if r.config.CommandType != string(utils.DockerCompose) {
 		runAppErrGrp.Go(func() error {
