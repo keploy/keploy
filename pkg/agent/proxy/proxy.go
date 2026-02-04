@@ -801,17 +801,18 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 	return m.(*MockManager).GetConsumedMocks(), nil
 }
 
-// DeleteMocks removes the specified mocks from both filtered and unfiltered trees.
+// DeleteMocks removes the specified mocks from the filtered tree only.
 // This allows for efficient incremental updates (O(k log N)) instead of full rebuilds (O(N log N)).
+// Note: We only delete from filtered tree because unfiltered mocks are config/reusable mocks
+// (like HTTP external API calls) that should remain available across tests.
 func (p *Proxy) DeleteMocks(_ context.Context, mocks []*models.Mock) error {
 	m, ok := p.MockManagers.Load(uint64(0))
 	if ok {
 		mgr := m.(*MockManager)
 		for _, mock := range mocks {
 			if mock != nil {
-				// Try to delete from both. It's safe if not found.
+				// Only delete from filtered tree - unfiltered mocks are reusable
 				mgr.DeleteFilteredMock(*mock)
-				mgr.DeleteUnFilteredMock(*mock)
 			}
 		}
 	}

@@ -85,7 +85,7 @@ detect_api_prefix() {
 
 # Configuration
 TOTAL_TRANSACTIONS=300
-REQUESTS_PER_CHAIN=5  # owner + get_owner + get_owner_ln + list_owners + pet + visit + list_visits + vet + get_vet + list_vets + list_pettypes + list_specialties
+REQUESTS_PER_CHAIN=12  # owner + get_owner + get_owner_ln + list_owners + pet + visit + list_visits + vet + get_vet + list_vets + list_pettypes + list_specialties
 CHAINS_NEEDED=$((TOTAL_TRANSACTIONS / REQUESTS_PER_CHAIN))
 
 # Counters - using temp files to persist across subshells

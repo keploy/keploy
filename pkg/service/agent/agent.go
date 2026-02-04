@@ -393,8 +393,10 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 
 	// Fallback to full Filter + SetMocks
 	if len(params.TotalConsumedMocks) > 0 {
+		// Only filter out consumed mocks from filteredMocks, not unfilteredMocks.
+		// Unfiltered mocks are config/reusable mocks (like HTTP external API calls)
+		// that should remain available across all tests.
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
-		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
 	}
 
 	// Set the filtered mocks to the proxy
