@@ -162,7 +162,6 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
-
 	a.logger.Debug("Received request to handle incoming test cases")
 
 	w.Header().Set("Content-Type", "application/json")
@@ -197,6 +196,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.logger.Debug("Streaming incoming test cases to client")
+
+	// Flush the headers to establish the connection immediately
+	flusher.Flush()
 
 	// TODO: make a uniform implementation for both test and mock streaming channels
 	// Keep the connection alive and stream data
@@ -247,6 +249,9 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.logger.Debug("Streaming outgoing mocks to client")
+
+	// Flush the headers to establish the connection immediately
+	flusher.Flush()
 
 	enc := gob.NewEncoder(w)
 

@@ -29,6 +29,7 @@ type Proxy interface {
 	Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
+	DeleteMocks(ctx context.Context, mocks []*models.Mock) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
