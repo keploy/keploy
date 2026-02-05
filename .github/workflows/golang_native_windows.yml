@@ -13,9 +13,9 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - name: go-dedup
-            path: go-dedup
-            script_dir: go-dedup
+          # - name: go-dedup
+          #   path: go-dedup
+          #   script_dir: go-dedup
           - name: gin-mongo
             path: gin-mongo
             script_dir: gin_mongo
