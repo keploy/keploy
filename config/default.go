@@ -66,6 +66,7 @@ record:
   sync: false
 configPath: ""
 bypassRules: []
+disableMapping: true
 contract:
   driven: "consumer"
   mappings:
