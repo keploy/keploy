@@ -436,9 +436,9 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 
 // Update the matched mock (delete or update)
 func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
-	originalMatchedMock := *matchedMock
-	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-	return updated
+	original := *matchedMock
+	updated := original
+	updated.TestModeInfo.IsFiltered = false
+	updated.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	return mockDb.UpdateUnFilteredMock(&original, &updated)
 }
