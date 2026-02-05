@@ -142,7 +142,7 @@ $dockerCmd = "go run main.go"
 $recArgs = @(
   'record',
   '-c', $dockerCmd,
-  '--generate-github-actions=false',
+  '--generate-github-actions=false'
 )
 
 Write-Host "Starting keploy record (expecting test-set-$expectedTestSetIndex)…"
