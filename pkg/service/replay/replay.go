@@ -100,6 +100,33 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
+// backdate extracts the timestamp from the first test case for mock backdating.
+// It handles HTTP and gRPC test cases, returning zero time if test cases are empty
+// or the kind is unrecognized.
+func (r *Replayer) backdate(testCases []*models.TestCase) time.Time {
+	if len(testCases) == 0 || testCases[0] == nil {
+		r.logger.Warn("no test cases available for backdate timestamp")
+		return time.Time{}
+	}
+
+	var backdate time.Time
+	switch testCases[0].Kind {
+	case models.HTTP:
+		backdate = testCases[0].HTTPReq.Timestamp
+	case models.GRPC_EXPORT:
+		backdate = testCases[0].GrpcReq.Timestamp
+	default:
+		r.logger.Warn("unknown test case kind for backdate", zap.String("kind", string(testCases[0].Kind)))
+		return time.Time{}
+	}
+
+	if backdate.IsZero() {
+		r.logger.Warn("backdate timestamp is zero", zap.String("testCase", testCases[0].Name), zap.String("kind", string(testCases[0].Kind)))
+	}
+
+	return backdate
+}
+
 func (r *Replayer) Start(ctx context.Context) error {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
@@ -769,13 +796,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
+		backdate := r.backdate(testCases)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
 			SQLDelay:       time.Duration(r.config.Test.Delay),
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
-			Backdate:       testCases[0].HTTPReq.Timestamp,
+			Backdate:       backdate,
 			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
@@ -860,13 +889,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
+		backdate := r.backdate(testCases)
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
 			SQLDelay:       time.Duration(r.config.Test.Delay),
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
 			Mocking:        r.config.Test.Mocking,
-			Backdate:       testCases[0].HTTPReq.Timestamp,
+			Backdate:       backdate,
 			NoiseConfig:    headerNoiseConfig,
 		})
 		if err != nil {
