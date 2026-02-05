@@ -138,7 +138,7 @@ $env:KEPLOY_DOCKER_IMAGE = if ($env:DOCKER_IMAGE_RECORD) { $env:DOCKER_IMAGE_REC
 
 # Build the command arguments
 $appCmd = "go run ."
-$recArgsString = "record -c `"$appCmd`" --generate-github-actions=false --debug"
+$recArgsString = "record -c `"$appCmd`" --generate-github-actions=false"
 
 Write-Host "Starting keploy record (expecting test-set-$expectedTestSetIndex)..."
 Write-Host "Executing: $env:RECORD_BIN $recArgsString"
@@ -280,7 +280,8 @@ $testArgs = @(
   'test',
   '-c', 'go run .',
   '--api-timeout', '60',
-  '--delay', '20',
+  '--delay', '30',
+  '--port', '8080',
   '--generate-github-actions=false'
 )
 

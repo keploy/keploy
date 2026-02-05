@@ -186,8 +186,7 @@ $recArgs = @(
   'record',
   '-c', '"docker compose up"',
   '--container-name', $containerName,
-  '--generate-github-actions=false',
-  '--debug'
+  '--generate-github-actions=false'
 )
 
 Write-Host "Starting keploy record (expecting test-set-$expectedTestIndex)…"
@@ -310,7 +309,7 @@ $testArgs = @(
   '-c', 'docker compose up',
   '--container-name', $testContainer,
   '--api-timeout', '60',
-  '--delay', '20',
+  '--delay', '30',
   '--generate-github-actions=false'
 )
 
