@@ -1761,6 +1761,10 @@ func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) m
 	return r.instrumentation.Run(ctx, opts)
 }
 
+func (r *Replayer) UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string) error {
+	return r.testDB.UpdateTestCase(ctx, testCase, testSetID, true)
+}
+
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
 	return r.testSetConf.Read(ctx, testSet)
 }

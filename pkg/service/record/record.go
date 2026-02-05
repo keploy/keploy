@@ -245,6 +245,19 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			if !reRecordCfg.Rerecord && testCase.Kind == models.HTTP {
+				detected := pkg.DetectNoiseFieldsInResp(&testCase.HTTPResp)
+				if len(detected) > 0 {
+					if testCase.Noise == nil {
+						testCase.Noise = map[string][]string{}
+					}
+					for k := range detected {
+						if _, ok := testCase.Noise[k]; !ok {
+							testCase.Noise[k] = []string{}
+						}
+					}
+				}
+			}
 			if reRecordCfg.TestSet == "" {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 				if err != nil {

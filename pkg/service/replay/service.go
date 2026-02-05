@@ -51,6 +51,7 @@ type Service interface {
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
+	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string) error
 
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context, testSets []string) error
