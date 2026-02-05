@@ -24,6 +24,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/mysqldetection"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -74,6 +75,9 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+
+	// MySQL detection strategy
+	mysqlDetectionStrategy mysqldetection.MySQLDetectionStrategy
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -94,6 +98,16 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
+	// Determine which MySQL detection strategy to use
+	var mysqlStrategy mysqldetection.MySQLDetectionStrategy
+	if opts.Agent.UseProtocolBasedMySQLDetection {
+		mysqlStrategy = mysqldetection.NewProtocolBasedDetection(logger)
+		logger.Info("Using protocol-based MySQL detection")
+	} else {
+		mysqlStrategy = mysqldetection.NewPortBasedDetection(logger)
+		logger.Debug("Using port-based MySQL detection (legacy)")
+	}
+
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
@@ -111,6 +125,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
+		mysqlDetectionStrategy: mysqlStrategy,
 	}
 }
 
@@ -482,51 +497,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		outgoingOpts.Synchronous = true
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
-		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-
-			dstCfg := &models.ConditionalDstCfg{
-				Port: uint(destInfo.Port),
-			}
-			outgoingOpts.DstCfg = dstCfg
-
-			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to record the outgoing message")
-				return err
-			}
-			return nil
-		}
-
-		// TODO: We have to remove the 0 key maps, since it was meant for appID keys maps for multiple clients-apps.
-		m, ok := p.MockManagers.Load(uint64(0))
-		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
-			return err
-		}
-
-		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), outgoingOpts)
-		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-			utils.LogError(p.logger, err, "failed to mock the outgoing message")
-			// Send specific error type to error channel for external monitoring
-			proxyErr := models.ParserError{
-				ParserErrorType: models.ErrMockNotFound,
-				Err:             err,
-			}
-			p.SendError(proxyErr)
-			return err
-		}
-		return nil
-	}
-
+	// Use strategy pattern for MySQL detection
 	reader := bufio.NewReader(srcConn)
 	initialData := make([]byte, 5)
 	// reading the initial data from the client connection to determine if the connection is a TLS handshake
@@ -544,6 +515,36 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		return err
 	}
+
+	// Check if MySQL detection strategy should handle this connection
+	if p.mysqlDetectionStrategy.ShouldHandle(ctx, destInfo, testBuffer) {
+		m, ok := p.MockManagers.Load(uint64(0))
+		if !ok {
+			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
+			return errors.New("failed to fetch mock manager")
+		}
+
+		err := p.mysqlDetectionStrategy.HandleConnection(
+			ctx,
+			parserCtx,
+			srcConn,
+			dstAddr,
+			destInfo,
+			rule,
+			outgoingOpts,
+			p.Integrations[integrations.MYSQL],
+			m,
+			p.logger,
+			p.SendError,
+		)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Continue with normal protocol detection flow
+	// testBuffer already contains the peeked data from above
 
 	multiReader := io.MultiReader(reader, srcConn)
 	srcConn = &util.Conn{

@@ -29,6 +29,8 @@ generateGithubActions: false
 containerName: ""
 networkName: ""
 buildDelay: 30
+agent:
+  useProtocolBasedMySQLDetection: true
 test:
   selectedTests: {}
   ignoredTests: {}
