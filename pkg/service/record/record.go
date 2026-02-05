@@ -302,7 +302,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mapping := range frames.Mappings {
-			fmt.Println("got a mapping :", mapping)
 			var realMockNames []string
 
 			for _, tempID := range mapping.MockIDs {
@@ -415,8 +414,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.Mock)
-	mappingChan := make(chan models.TestMockMapping) // New
-	errChan := make(chan error, 2)
+	mappingChan := make(chan models.TestMockMapping)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
