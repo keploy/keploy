@@ -76,23 +76,6 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 }
 
-// isNetworkClosedErr checks if the error is due to a closed network connection.
-// This includes broken pipe, connection reset by peer, and use of closed network connection errors.
-// These errors are expected during graceful shutdown and should not be logged as errors.
-func isNetworkClosedErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "connection reset by peer") ||
-		strings.Contains(errStr, "use of closed network connection") ||
-		// Windows-specific error patterns
-		strings.Contains(errStr, "wsarecv") ||
-		strings.Contains(errStr, "wsasend") ||
-		strings.Contains(errStr, "forcibly closed by the remote host")
-}
-
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:            logger,
@@ -331,10 +314,8 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
-					// Network closed errors are expected when client closes connection (e.g., app shutdown)
-					// Only log as error if it's not a shutdown/network closed error
-					if isShutdownError(err) || isNetworkClosedErr(err) {
-						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
+					if p.IsGracefulShutdown() && isShutdownError(err) {
+						p.logger.Debug("failed to handle the client connection (graceful shutdown)", zap.Error(err))
 					} else {
 						utils.LogError(p.logger, err, "failed to handle the client connection")
 					}
@@ -514,7 +495,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		//mock the outgoing message
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), outgoingOpts)
-		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			// Send specific error type to error channel for external monitoring
 			proxyErr := models.ParserError{
@@ -536,9 +517,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-		// Network closed errors are expected when client closes connection (e.g., app shutdown)
-		if isShutdownError(err) || isNetworkClosedErr(err) {
-			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(err))
+		if p.IsGracefulShutdown() && isShutdownError(err) {
+			p.logger.Debug("failed to peek the request message in proxy (graceful shutdown)", zap.Uint32("proxy port", p.Port), zap.Error(err))
 		} else {
 			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		}
@@ -715,7 +695,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
 				proxyErr := models.ParserError{
@@ -738,7 +718,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		} else {
 			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
 				proxyErr := models.ParserError{
@@ -898,19 +878,13 @@ func isShutdownError(err error) bool {
 	if errors.Is(err, net.ErrClosed) {
 		return true
 	}
-	errStr := err.Error()
-	if strings.Contains(errStr, "use of closed network connection") {
+	if strings.Contains(err.Error(), "use of closed network connection") {
 		return true
 	}
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
 		return true
 	}
-	if strings.Contains(errStr, "connection reset by peer") {
-		return true
-	}
-	// Windows-specific error patterns for connection close during shutdown
-	if strings.Contains(errStr, "wsarecv") || strings.Contains(errStr, "wsasend") ||
-		strings.Contains(errStr, "forcibly closed by the remote host") {
+	if strings.Contains(err.Error(), "connection reset by peer") {
 		return true
 	}
 	return false
