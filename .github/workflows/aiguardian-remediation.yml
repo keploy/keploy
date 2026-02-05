@@ -1,0 +1,27 @@
+name: PR Scan Remediation API Callback
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  call_external_api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Call External API
+        id: api_call
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          REPO_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # Replace YOUR_API_ENDPOINT_URL with your actual API endpoint URL
+          API_RESPONSE=$(curl -X POST -H "Content-Type: application/json" \
+               -d "{\"pr_number\": \"${PR_NUMBER}\", \"head_branch\": \"${HEAD_BRANCH}\", \"base_branch\": \"${BASE_BRANCH}\", \"repo_url\": \"${REPO_URL}\"}" \
+               https://ai-rem-demo-api.remediation.opsmx.net/webhooks/github/actions)
+
+          echo "API_RESPONSE=$API_RESPONSE" >> $GITHUB_OUTPUT
