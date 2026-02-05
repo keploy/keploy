@@ -247,7 +247,7 @@ Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
 $keployPath = (Get-Command $env:REPLAY_BIN).Source
 
-& $keployPath test -c ".\ginApp.exe" --delay 7 2>&1 | Tee-Object -FilePath $testLogFile
+& $keployPath test -c ".\ginApp.exe" --delay 15 --port 8080 2>&1 | Tee-Object -FilePath $testLogFile
 
 # =============================================================================
 # 4. Validation
