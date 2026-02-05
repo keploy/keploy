@@ -2,12 +2,15 @@ package mapdb
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 type MappingDb struct {
@@ -24,53 +27,69 @@ func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
 	}
 }
 
-// Insert saves test-mock mappings to a YAML file
 func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error {
-	// Create mapping structure from the test-mock mappings
-	mapping := CreateMappingStructure(testSetID, testMockMappings, db.logger)
-
-	// Encode mapping to YAML
-	yamlData, err := EncodeMapping(mapping, db.logger)
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to encode mapping to yaml", zap.String("testSetID", testSetID))
-		return err
-	}
-
-	// Create the file path
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
 		fileName = "mappings"
 	}
+	fullFilePath := filepath.Join(mappingPath, fileName+".yaml")
 
-	// Check if file exists to determine if we should append
+	finalMappings := make(map[string][]string)
+
+	// Check if file exists
 	exists, err := yaml.FileExists(ctx, db.logger, mappingPath, fileName)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to check if mapping file exists",
-			zap.String("path", mappingPath),
-			zap.String("fileName", fileName))
+		utils.LogError(db.logger, err, "failed to check if mapping file exists", zap.String("path", mappingPath))
 		return err
 	}
 
-	// Add version comment if file doesn't exist
-	if !exists {
-		yamlData = append([]byte(utils.GetVersionAsComment()), yamlData...)
+	if exists {
+		data, err := os.ReadFile(fullFilePath)
+		if err != nil {
+			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", fullFilePath))
+			return err
+		}
+
+		var existingConfig models.ExistingMappingConfig
+		if err := yamlLib.Unmarshal(data, &existingConfig); err != nil {
+			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", fullFilePath))
+			return err
+		}
+
+		// Convert existing struct data into our map for merging
+		for _, t := range existingConfig.Tests {
+			if t.Mocks != "" {
+				// Split the comma-separated string back into a slice
+				finalMappings[t.ID] = strings.Split(t.Mocks, ",")
+			} else {
+				finalMappings[t.ID] = []string{}
+			}
+		}
 	}
 
-	// Write to file
+	// Overwrite existing keys, add new ones
+	for testID, mocks := range testMockMappings {
+		finalMappings[testID] = mocks
+	}
+
+	mapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
+
+	yamlData, err := EncodeMapping(mapping, db.logger)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to encode mapping to yaml", zap.String("testSetID", testSetID))
+		return err
+	}
+	yamlData = append([]byte(utils.GetVersionAsComment()), yamlData...)
 	err = yaml.WriteFile(ctx, db.logger, mappingPath, fileName, yamlData, false)
 	if err != nil {
-		utils.LogError(db.logger, err, "failed to write mapping to yaml file",
-			zap.String("testSetID", testSetID),
-			zap.String("path", mappingPath),
-			zap.String("fileName", fileName))
+		utils.LogError(db.logger, err, "failed to write mapping to yaml file", zap.String("path", fullFilePath))
 		return err
 	}
 
-	db.logger.Info("Successfully saved test-mock mappings",
+	db.logger.Info("Successfully merged and saved test-mock mappings",
 		zap.String("testSetID", testSetID),
-		zap.String("filePath", filepath.Join(mappingPath, fileName+".yaml")),
-		zap.Int("numTests", len(testMockMappings)))
+		zap.Int("totalTests", len(finalMappings)))
 
 	return nil
 }

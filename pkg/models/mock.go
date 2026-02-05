@@ -91,6 +91,16 @@ type MockSpec struct {
 	ResTimestampMock time.Time        `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
 
+type ExistingMappingConfig struct {
+	Version   string `yaml:"version"`
+	Kind      string `yaml:"kind"`
+	TestSetID string `yaml:"test_set_id"`
+	Tests     []struct {
+		ID    string `yaml:"id"`
+		Mocks string `yaml:"mocks"` // Mocks are stored as a comma-separated string in YAML
+	} `yaml:"tests"`
+}
+
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
 type OutputBinary struct {
 	Type string `json:"type" bson:"type" yaml:"type"`
