@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -37,6 +42,187 @@ func TestSimulateHTTP_NewRequestError_303(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid method")
 	assert.Nil(t, resp)
+}
+
+func TestSimulateHTTP_MultipartRebuildWithPaths_314(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	tempFile, err := os.CreateTemp("", "keploy-multipart-test-*.txt")
+	require.NoError(t, err)
+	_, err = tempFile.WriteString("file-data")
+	require.NoError(t, err)
+	require.NoError(t, tempFile.Close())
+	defer os.Remove(tempFile.Name())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType := r.Header.Get("Content-Type")
+		mediaType, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			t.Errorf("failed to parse media type: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		assert.Equal(t, "multipart/form-data", mediaType)
+		if params["boundary"] == "" {
+			t.Errorf("missing multipart boundary")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		assert.NotEqual(t, "test-boundary", params["boundary"])
+
+		if cl := r.Header.Get("Content-Length"); cl != "" {
+			assert.NotEqual(t, "1", cl)
+		}
+
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		fields := map[string]string{}
+		files := map[string]string{}
+		fileNames := map[string]string{}
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("failed to read multipart part: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			name := part.FormName()
+			data, err := io.ReadAll(part)
+			if err != nil {
+				t.Errorf("failed to read multipart part data: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if part.FileName() != "" {
+				files[name] = string(data)
+				fileNames[name] = part.FileName()
+				continue
+			}
+			fields[name] = string(data)
+		}
+
+		assert.Equal(t, "text-value", fields["text"])
+		assert.Equal(t, "file-data", files["upload"])
+		assert.Equal(t, filepath.Base(tempFile.Name()), fileNames["upload"])
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "multipart-paths",
+		HTTPReq: models.HTTPReq{
+			Method: "POST",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Content-Type":   "multipart/form-data; boundary=test-boundary",
+				"Content-Length": "1",
+			},
+			Form: []models.FormData{
+				{
+					Key:    "text",
+					Values: []string{"text-value"},
+				},
+				{
+					Key:   "upload",
+					Paths: []string{tempFile.Name()},
+				},
+			},
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestSimulateHTTP_MultipartRebuildWithFileNames_315(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType := r.Header.Get("Content-Type")
+		mediaType, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			t.Errorf("failed to parse media type: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		assert.Equal(t, "multipart/form-data", mediaType)
+		if params["boundary"] == "" {
+			t.Errorf("missing multipart boundary")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		assert.NotEqual(t, "legacy-boundary", params["boundary"])
+
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		fields := map[string]string{}
+		files := map[string]string{}
+		fileNames := map[string]string{}
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("failed to read multipart part: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			name := part.FormName()
+			data, err := io.ReadAll(part)
+			if err != nil {
+				t.Errorf("failed to read multipart part data: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if part.FileName() != "" {
+				files[name] = string(data)
+				fileNames[name] = part.FileName()
+				continue
+			}
+			fields[name] = string(data)
+		}
+
+		assert.Equal(t, "text-value", fields["text"])
+		assert.Equal(t, "binary-content", files["payload"])
+		assert.Equal(t, "blob.bin", fileNames["payload"])
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "multipart-filenames",
+		HTTPReq: models.HTTPReq{
+			Method: "POST",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Content-Type": "multipart/form-data; boundary=legacy-boundary",
+			},
+			Form: []models.FormData{
+				{
+					Key:    "text",
+					Values: []string{"text-value"},
+				},
+				{
+					Key:       "payload",
+					Values:    []string{"binary-content"},
+					FileNames: []string{"blob.bin"},
+				},
+			},
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 // TestIsTime_VariousFormats_808 covers multiple scenarios for the IsTime function,

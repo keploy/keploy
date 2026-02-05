@@ -12,16 +12,19 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg/models"
@@ -189,6 +192,95 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
+
+	contentType := tc.HTTPReq.Header["Content-Type"]
+	if strings.HasPrefix(contentType, "multipart/form-data") && len(tc.HTTPReq.Form) > 0 {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		logger.Debug("building multipart body",
+			zap.Int("form_fields", len(tc.HTTPReq.Form)),
+			zap.String("content_type", contentType),
+		)
+		for _, field := range tc.HTTPReq.Form {
+			logger.Debug("multipart field",
+				zap.String("key", field.Key),
+				zap.Int("values", len(field.Values)),
+				zap.Int("paths", len(field.Paths)),
+			)
+			for _, path := range field.Paths {
+				logger.Debug("multipart file path", zap.String("path", path), zap.String("field", field.Key))
+				file, ferr := os.Open(path)
+				if ferr != nil {
+					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", path))
+					return nil, ferr
+				}
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(path))
+				if perr != nil {
+					file.Close()
+					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+					return nil, perr
+				}
+				if _, cerr := io.Copy(part, file); cerr != nil {
+					file.Close()
+					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", field.Key))
+					return nil, cerr
+				}
+				if cerr := file.Close(); cerr != nil {
+					utils.LogError(logger, cerr, "failed to close multipart file", zap.String("path", path))
+					return nil, cerr
+				}
+			}
+			for valueIndex, value := range field.Values {
+				logger.Debug("multipart field value",
+					zap.String("field", field.Key),
+					zap.Int("value_len", len(value)),
+					zap.Bool("looks_binary", looksBinary(value)),
+				)
+				isFileValue := false
+				fileName := ""
+				if len(field.Paths) == 0 && len(field.FileNames) > 0 {
+					isFileValue = true
+				} else if len(field.Paths) == 0 && len(field.FileNames) == 0 && looksBinary(value) {
+					isFileValue = true
+				}
+
+				if isFileValue {
+					if len(field.FileNames) > 0 && valueIndex < len(field.FileNames) {
+						fileName = field.FileNames[valueIndex]
+					}
+					if fileName == "" {
+						fileName = "upload.bin"
+					}
+					fileName = filepath.Base(fileName)
+					if fileName == "." || fileName == string(filepath.Separator) || fileName == "" {
+						fileName = "upload.bin"
+					}
+					part, perr := writer.CreateFormFile(field.Key, fileName)
+					if perr != nil {
+						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+						return nil, perr
+					}
+					if _, werr := part.Write([]byte(value)); werr != nil {
+						utils.LogError(logger, werr, "failed to write multipart file content", zap.String("field", field.Key))
+						return nil, werr
+					}
+					continue
+				}
+				if werr := writer.WriteField(field.Key, value); werr != nil {
+					utils.LogError(logger, werr, "failed to write multipart field", zap.String("field", field.Key))
+					return nil, werr
+				}
+			}
+		}
+		if cerr := writer.Close(); cerr != nil {
+			utils.LogError(logger, cerr, "failed to close multipart writer")
+			return nil, cerr
+		}
+		logger.Debug("multipart body built", zap.Int("body_len", body.Len()), zap.String("content_type", writer.FormDataContentType()))
+		reqBody = body.Bytes()
+		tc.HTTPReq.Header["Content-Type"] = writer.FormDataContentType()
+		delete(tc.HTTPReq.Header, "Content-Length")
+	}
 
 	if tc.HTTPReq.Header["Content-Encoding"] != "" {
 		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], reqBody)
@@ -372,6 +464,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 	return resp, errHTTPReq
+}
+
+func looksBinary(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateTemplateValuesFromHTTPResp checks the HTTP response body and the previous templatized response body

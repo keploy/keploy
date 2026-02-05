@@ -33,26 +33,27 @@ func GetVersion() (V1 Version) {
 }
 
 type TestCase struct {
-	Version     Version                       `json:"version" bson:"version"`
-	Kind        Kind                          `json:"kind" bson:"kind"`
-	Name        string                        `json:"name" bson:"name"`
-	Description string                        `json:"description" bson:"description"`
-	Created     int64                         `json:"created" bson:"created"`
-	Updated     int64                         `json:"updated" bson:"updated"`
-	Captured    int64                         `json:"captured" bson:"captured"`
-	HTTPReq     HTTPReq                       `json:"http_req" bson:"http_req"`
-	HTTPResp    HTTPResp                      `json:"http_resp" bson:"http_resp"`
-	AllKeys     map[string][]string           `json:"all_keys" bson:"all_keys"`
-	GrpcResp    GrpcResp                      `json:"grpcResp" bson:"grpcResp"`
-	GrpcReq     GrpcReq                       `json:"grpcReq" bson:"grpcReq"`
-	Anchors     map[string][]string           `json:"anchors" bson:"anchors"`
-	Noise       map[string][]string           `json:"noise" bson:"noise"`
-	Mocks       []*Mock                       `json:"mocks" bson:"mocks"`
-	Type        string                        `json:"type" bson:"type"`
-	Curl        string                        `json:"curl" bson:"curl"`
-	IsLast      bool                          `json:"is_last" bson:"is_last"`
-	Assertions  map[AssertionType]interface{} `json:"assertion" bson:"assertion"`
-	AppPort     uint16                        `json:"app_port" bson:"app_port"`
+	Version       Version                       `json:"version" bson:"version"`
+	Kind          Kind                          `json:"kind" bson:"kind"`
+	Name          string                        `json:"name" bson:"name"`
+	Description   string                        `json:"description" bson:"description"`
+	Created       int64                         `json:"created" bson:"created"`
+	Updated       int64                         `json:"updated" bson:"updated"`
+	Captured      int64                         `json:"captured" bson:"captured"`
+	HTTPReq       HTTPReq                       `json:"http_req" bson:"http_req"`
+	HTTPResp      HTTPResp                      `json:"http_resp" bson:"http_resp"`
+	AllKeys       map[string][]string           `json:"all_keys" bson:"all_keys"`
+	GrpcResp      GrpcResp                      `json:"grpcResp" bson:"grpcResp"`
+	GrpcReq       GrpcReq                       `json:"grpcReq" bson:"grpcReq"`
+	Anchors       map[string][]string           `json:"anchors" bson:"anchors"`
+	Noise         map[string][]string           `json:"noise" bson:"noise"`
+	Mocks         []*Mock                       `json:"mocks" bson:"mocks"`
+	Type          string                        `json:"type" bson:"type"`
+	Curl          string                        `json:"curl" bson:"curl"`
+	IsLast        bool                          `json:"is_last" bson:"is_last"`
+	Assertions    map[AssertionType]interface{} `json:"assertion" bson:"assertion"`
+	HasBinaryFile bool                          `json:"has_binary_file" bson:"has_binary_file"`
+	AppPort       uint16                        `json:"app_port" bson:"app_port"`
 }
 
 func (tc *TestCase) GetKind() string {
