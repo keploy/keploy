@@ -258,15 +258,7 @@ Write-Host "Verifying test reports..."
 # 1. Check for "ERROR" in logs (excluding harmless taskkill and shutdown errors)
 $logErrors = Select-String -Path $testLogFile -Pattern "ERROR"
 $realErrors = $logErrors | Where-Object { 
-    $_.Line -notmatch "The process .* not found" -and 
-    $_.Line -notmatch "wsarecv" -and
-    $_.Line -notmatch "wsasend" -and
-    $_.Line -notmatch "forcibly closed by the remote host" -and
-    $_.Line -notmatch "failed to read request from the mongo client" -and
-    $_.Line -notmatch "failed to decode the mongo message" -and
-    $_.Line -notmatch "failed to mock the outgoing message" -and
-    $_.Line -notmatch "failed to handle the client connection" -and
-    $_.Line -notmatch "Error removing file"
+    $_.Line -notmatch "The process .* not found"
 }
 
 if ($realErrors) {
