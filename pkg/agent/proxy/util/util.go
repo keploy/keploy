@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/sync/errgroup"
 
@@ -108,6 +109,8 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
+					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
+
 				}
 				errChannel <- err
 				return
@@ -187,7 +190,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	if err == io.EOF && len(initialBuf) == 0 {
 		logger.Debug("received EOF, closing conn", zap.Error(err))
-		return nil, readErr
+		return nil, io.EOF
 	}
 
 	if err != nil && err != io.EOF {
@@ -405,16 +408,15 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		}
 	}
 
-	// channels for writing messages from proxy to destination or client
 	destBufferChannel := make(chan []byte)
-	errChannel := make(chan error, 1)
+	clientBufferChannel := make(chan []byte)
+	errChannel := make(chan error, 2)
 	passthroughContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	go func() {
 		defer Recover(logger, clientConn, nil)
 		defer close(destBufferChannel)
-		defer close(errChannel)
 		defer func(destConn net.Conn) {
 			err := destConn.Close()
 			if err != nil {
@@ -425,32 +427,44 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
 	}()
 
-	select {
-	case buffer := <-destBufferChannel:
-		// Write the response message to the client
-		_, err := clientConn.Write(buffer)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+	go func() {
+		defer Recover(logger, clientConn, nil)
+		defer close(clientBufferChannel)
+		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+
+		case buffer := <-clientBufferChannel:
+			_, err := destConn.Write(buffer)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write subsequent request to destination")
+				return nil, err
 			}
-			utils.LogError(logger, err, "failed to write response to the client")
-			return nil, err
-		}
 
-		logger.Debug("the iteration for the generic response ends with responses:"+strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
-	case err := <-errChannel:
-		// Applied this nolint to ignore the staticcheck error here because of readability
-		// nolint:staticcheck
-		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-			return nil, err
-		}
-		return nil, nil
+		case buffer := <-destBufferChannel:
+			_, err := clientConn.Write(buffer)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				utils.LogError(logger, err, "failed to write response to the client")
+				return nil, err
+			}
 
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		case err := <-errChannel:
+			// nolint:staticcheck
+			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+				if err == io.EOF {
+					return nil, nil
+				}
+				return nil, err
+			}
+		}
 	}
-
-	return nil, nil
 }
 
 // ToIP4AddressStr converts the integer IP4 Address to the octet format

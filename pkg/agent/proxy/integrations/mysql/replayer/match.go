@@ -23,8 +23,9 @@ var querySigCache sync.Map // map[string]string
 
 // recorded PREP registry per recorded connection
 type prepEntry struct { // minimal, enough for lookup
-	StatementID uint32
-	Query       string
+	statementID uint32
+	query       string
+	mockName    string // for debugging purpose
 }
 
 // case-insensitive prefix check without allocation
@@ -184,14 +185,42 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		return nil, false, fmt.Errorf("no mysql mocks found")
 	}
 
+	// remove this block
+	// get all the mock names that has type com-exec
+	stmtMocks := []string{}
+	for _, mock := range unfiltered {
+		if mock.Kind != models.MySQL {
+			continue
+		}
+		if mock.Spec.Metadata["type"] == "config" {
+			continue // command-phase only wants data mocks
+		}
+		for _, mockReq := range mock.Spec.MySQLRequests {
+			if mockReq.PacketBundle.Header.Type == sCOM_STMT_EXEC {
+				stmtMocks = append(stmtMocks, mock.Name)
+			}
+		}
+	}
+
 	// Build recordedPrepByConn once (map[connID][]prepEntry) from recorded mocks
 	recordedPrepByConn := buildRecordedPrepIndex(unfiltered)
+
+	if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
+		var allEntries []string
+		for connID, prepEntries := range recordedPrepByConn {
+			for _, entry := range prepEntries {
+				allEntries = append(allEntries, fmt.Sprintf("connID=%s stmtID=%d query=%q mock=%s", connID, entry.statementID, entry.query, entry.mockName))
+			}
+		}
+		logger.Debug("recorded prepEntries", zap.String("entries", strings.Join(allEntries, " | ")))
+	}
 
 	var (
 		maxMatchedCount int
 		matchedResp     *mysql.Response
 		matchedMock     *models.Mock
 		queryMatched    bool
+		stmtMatched     bool
 	)
 
 	// Single pass: filter & match on the fly.
@@ -239,8 +268,20 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 			case sCOM_STMT_EXEC:
 				// query-aware EXEC matching via recordedPrepByConn + runtime map
-				expMsg, _ := mockReq.PacketBundle.Message.(*mysql.StmtExecutePacket)
-				actMsg, _ := req.PacketBundle.Message.(*mysql.StmtExecutePacket)
+				expMsg, eOk := mockReq.PacketBundle.Message.(*mysql.StmtExecutePacket)
+				actMsg, aOk := req.PacketBundle.Message.(*mysql.StmtExecutePacket)
+
+				if !eOk || !aOk {
+					//  Either mock or actual request is not of type StmtExecutePacket
+					continue
+				}
+
+				logger.Debug("List of com-stmt-execute mocks to match", zap.Strings("mocks", stmtMocks))
+
+				// remove this log and if block
+				if actMsg != nil {
+					logger.Debug("Trying to match the mock with com-stmt-execute request", zap.String("mock_name", mock.Name), zap.Any("Req", actMsg))
+				}
 
 				var expectedQuery, actualQuery string
 				if expMsg != nil {
@@ -250,7 +291,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					actualQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[actMsg.StatementID])
 				}
 
-				if c := matchStmtExecutePacketQueryAware(mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery); c > maxMatchedCount {
+				logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
+
+				if ok, c := matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, mock.Name); ok {
+					// Query-aware definitive match (exact or structural): pick and stop searching
+					matchedResp, matchedMock, stmtMatched = &mock.Spec.MySQLResponses[0], mock, true
+				} else if c > maxMatchedCount {
+					// fallback score-based candidate (used when no stmt info was available)
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 				}
 
@@ -276,7 +323,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 			}
 		}
-		if queryMatched {
+		if queryMatched || stmtMatched {
 			break
 		}
 	}
@@ -333,29 +380,56 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		return nil, false, nil
 	}
 
-	// Persist prepared-statement metadata
-	if req.Header.Type == sCOM_STMT_PREP {
-		if prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket); ok && prepareOkResp != nil {
-			decodeCtx.PreparedStatements[prepareOkResp.StatementID] = prepareOkResp
-			// also maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
-			if decodeCtx.StmtIDToQuery == nil {
-				decodeCtx.StmtIDToQuery = make(map[uint32]string)
-			}
-			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
-				decodeCtx.StmtIDToQuery[prepareOkResp.StatementID] = sp.Query
-				logger.Debug("Recorded runtime PREP mapping",
-					zap.Uint32("stmt_id", prepareOkResp.StatementID),
-					zap.String("query", strings.TrimSpace(sp.Query)))
-			}
-		}
-	}
-
+	// Update the mock in the database BEFORE modifying the response
+	// This ensures we update using the original mock state
 	if okk := updateMock(ctx, logger, matchedMock, mockDb); !okk {
 		logger.Debug("failed to update the matched mock")
 		// Re-fetch once to avoid spin
 		return nil, false, fmt.Errorf("failed to update matched mock")
 	}
-	return matchedResp, true, nil
+
+	// Create a copy of the response to avoid modifying the original mock
+	responseCopy := &mysql.Response{
+		PacketBundle: matchedResp.PacketBundle,
+		Payload:      matchedResp.Payload,
+	}
+
+	// Persist prepared-statement metadata
+	if req.Header.Type == sCOM_STMT_PREP {
+		if prepareOkResp, ok := responseCopy.Message.(*mysql.StmtPrepareOkPacket); ok && prepareOkResp != nil {
+			// Store original statement ID for logging
+			originalStmtID := prepareOkResp.StatementID
+
+			// Generate a new unique statement ID for this connection.
+			// During record mode, different connections can produce identical statement IDs
+			// for the same or different queries. However, during test mode, if both queries
+			// execute on the same connection and we reuse those IDs, they would collide.
+			// A single connection cannot have two different queries with the same statement ID.
+			// To avoid this, we assign a new incremental and unique statement ID for each query.
+
+			newStmtID := decodeCtx.NextStmtID
+			decodeCtx.NextStmtID++
+
+			// Create a copy of the StmtPrepareOkPacket and update the statement ID
+			prepareOkRespCopy := *prepareOkResp
+			prepareOkRespCopy.StatementID = newStmtID
+			responseCopy.Message = &prepareOkRespCopy
+
+			if sp, ok := req.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
+				// Store in the prepared statements map so that it can be used during EXEC/CLOSE
+				decodeCtx.PreparedStatements[prepareOkRespCopy.StatementID] = &prepareOkRespCopy
+				// maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
+				decodeCtx.StmtIDToQuery[prepareOkRespCopy.StatementID] = sp.Query
+				logger.Debug("Recorded runtime PREP mapping with new statement ID",
+					zap.Uint32("original_stmt_id from mock ", originalStmtID),
+					zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
+					zap.String("query", strings.TrimSpace(sp.Query)))
+			}
+		}
+	}
+
+	logger.Debug("matched command with the mock", zap.Any("mock", matchedMock.Name))
+	return responseCopy, true, nil
 }
 
 // func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
@@ -415,6 +489,19 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 
 	expectedQuery := getQuery(expected)
 	actualQuery := getQuery(actual)
+
+	// Count placeholders in both queries - this is crucial for PREPARE statements
+	// to ensure we match mocks with the same number of parameters
+	expectedPlaceholders := strings.Count(expectedQuery, "?")
+	actualPlaceholders := strings.Count(actualQuery, "?")
+	if expectedPlaceholders != actualPlaceholders {
+		// log.Debug("placeholder count mismatch",
+		// 	zap.String("expected_query", expectedQuery),
+		// 	zap.String("actual_query", actualQuery),
+		// 	zap.Int("expected_placeholders", expectedPlaceholders),
+		// 	zap.Int("actual_placeholders", actualPlaceholders))
+		return false, 0
+	}
 
 	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
 		matchCount++
@@ -497,15 +584,15 @@ func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual m
 // query-aware EXEC scoring.
 //   - Keep the existing header/flags/params scoring.
 //   - Do NOT reward raw StatementID equality.
-//   - Reward query equality (or structural equality) resolved via:
-//     recorded (expected) -> recordedPrepByConn[connID] -> query
-//     runtime  (actual)   -> decodeCtx.StmtIDToQuery(stmtID) set during COM_STMT_PREP
-func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expectedQuery, actualQuery string) int {
+//   - If both expectedQuery and actualQuery are present, require them to match (exact).
+//     If they don't match, return (false, 0) immediately.
+//   - If either query is missing, fall back to best-effort scoring (returns (false, score)).
+func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql.PacketBundle, expectedQuery, actualQuery string, mockName string) (bool, int) {
 	matchCount := 0
 
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
-		return 0
+		return false, 0
 	}
 	// Match the header
 	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
@@ -518,6 +605,7 @@ func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expec
 	if expectedMessage.Status == actualMessage.Status {
 		matchCount++
 	}
+
 	// DO NOT score StatementID equality (unstable across runs)
 	// if expectedMessage.StatementID == actualMessage.StatementID { matchCount++ }
 
@@ -540,33 +628,60 @@ func matchStmtExecutePacketQueryAware(expected, actual mysql.PacketBundle, expec
 	}
 
 	// Match the parameters
+	var totalMatchedParams int
+	var allParamsMatched bool
 	if len(expectedMessage.Parameters) == len(actualMessage.Parameters) {
 		for i := range expectedMessage.Parameters {
 			ep := expectedMessage.Parameters[i]
 			ap := actualMessage.Parameters[i]
-			if ep.Type == ap.Type &&
-				ep.Name == ap.Name &&
-				ep.Unsigned == ap.Unsigned &&
-				paramValueEqual(ep.Value, ap.Value) {
-				matchCount++
+
+			typeEqual := ep.Type == ap.Type
+			nameEqual := ep.Name == ap.Name
+			unsignedEqual := ep.Unsigned == ap.Unsigned
+			valueEqual := false
+			if unsignedEqual { // initial check to avoid comparing signed vs unsigned values
+				valueEqual = paramValueEqual(ep.Value, ap.Value)
 			}
+			if typeEqual && nameEqual && unsignedEqual && valueEqual {
+				matchCount++
+				totalMatchedParams++
+			}
+		}
+
+		// All parameters matched
+		if len(expectedMessage.Parameters) == totalMatchedParams {
+			allParamsMatched = true
+			logger.Debug("all parameters matched", zap.String("mock-name", mockName))
 		}
 	}
 
-	// Query bonus
+	// Query logic:
+	queryMatched := false
 	eq := strings.TrimSpace(expectedQuery)
 	aq := strings.TrimSpace(actualQuery)
+
+	// If both queries are present, require them to match (exact or structural) for a definitive match.
 	if eq != "" && aq != "" {
+		// If both queries are available, require an exact or structural match to treat this as a definitive match.
 		if strings.EqualFold(eq, aq) {
 			matchCount += 10
+			queryMatched = true
+			logger.Debug("query matched exactly", zap.String("related stmt-exec mock-name", mockName))
 		} else if sigE, errE := getQueryStructureCached(eq); errE == nil {
 			if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
 				matchCount += 6
+				queryMatched = false
+				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
 			}
 		}
 	}
 
-	return matchCount
+	if !queryMatched || !allParamsMatched {
+		return false, matchCount
+	}
+
+	// Both queryMatched and allParamsMatched must be true for a definitive match. Otherwise, return the best-effort score.
+	return (queryMatched && allParamsMatched), matchCount
 }
 
 func paramValueEqual(a, b interface{}) bool {
@@ -578,30 +693,100 @@ func paramValueEqual(a, b interface{}) bool {
 		bv, ok := b.(string)
 		return ok && av == bv
 	case int:
-		bv, ok := b.(int)
-		return ok && av == bv
+		switch bv := b.(type) {
+		case int:
+			return av == bv
+		case int64:
+			return int64(av) == bv
+		case int32:
+			return av == int(bv)
+		case float32:
+			return float32(av) == bv
+		case float64:
+			return float64(av) == bv
+		}
 	case int32:
-		bv, ok := b.(int32)
-		return ok && av == bv
+		switch bv := b.(type) {
+		case int32:
+			return av == bv
+		case int:
+			return int(av) == bv
+		case int64:
+			return int64(av) == bv
+		case float32:
+			return float32(av) == bv
+		case float64:
+			return float64(av) == bv
+		}
 	case int64:
 		switch bv := b.(type) {
 		case int64:
 			return av == bv
 		case int:
 			return av == int64(bv)
+		case int32:
+			return av == int64(bv)
+		case float32:
+			return float32(av) == bv
+		case float64:
+			return float64(av) == bv
 		}
 	case uint32:
-		bv, ok := b.(uint32)
-		return ok && av == bv
+		switch bv := b.(type) {
+		case uint32:
+			return av == bv
+		case uint64:
+			return uint64(av) == bv
+		case float32:
+			return float32(av) == bv
+		case float64:
+			return float64(av) == bv
+		}
 	case uint64:
-		bv, ok := b.(uint64)
-		return ok && av == bv
+		switch bv := b.(type) {
+		case uint64:
+			return av == bv
+		case uint32:
+			return av == uint64(bv)
+		case float32:
+			return float32(av) == bv
+		case float64:
+			return float64(av) == bv
+		}
 	case float32:
-		bv, ok := b.(float32)
-		return ok && av == bv
+		switch bv := b.(type) {
+		case float32:
+			return av == bv
+		case float64:
+			return float64(av) == bv
+		case int:
+			return av == float32(bv)
+		case int32:
+			return av == float32(bv)
+		case int64:
+			return av == float32(bv)
+		case uint32:
+			return av == float32(bv)
+		case uint64:
+			return av == float32(bv)
+		}
 	case float64:
-		bv, ok := b.(float64)
-		return ok && av == bv
+		switch bv := b.(type) {
+		case float64:
+			return av == bv
+		case float32:
+			return av == float64(bv)
+		case int:
+			return av == float64(bv)
+		case int32:
+			return av == float64(bv)
+		case int64:
+			return av == float64(bv)
+		case uint32:
+			return av == float64(bv)
+		case uint64:
+			return av == float64(bv)
+		}
 	case bool:
 		bv, ok := b.(bool)
 		return ok && av == bv
@@ -797,6 +982,7 @@ func pluginEqualCompat(exp, act string) bool {
 // Build recorded PREP index per connection from recorded mocks.
 // We map each connID to the list of (stmtID,query) pairs found by pairing
 // StmtPrepareOkPacket(stmtID) with the nearest COM_STMT_PREPARE query.
+// Assumes each mock has exactly one MySQLRequest and one MySQLResponse.
 func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 	out := make(map[string][]prepEntry)
 	for _, m := range unfiltered {
@@ -808,46 +994,68 @@ func buildRecordedPrepIndex(unfiltered []*models.Mock) map[string][]prepEntry {
 		}
 		connID := m.Spec.Metadata["connID"]
 
-		// collect all prepare OK stmtIDs in this mock
-		stmtIDs := make(map[uint32]struct{})
-		for _, r := range m.Spec.MySQLResponses {
-			if spok, ok := r.Message.(*mysql.StmtPrepareOkPacket); ok && spok != nil {
-				stmtIDs[spok.StatementID] = struct{}{}
-			}
-		}
-		if len(stmtIDs) == 0 {
+		// Check if we have at least one response
+		if len(m.Spec.MySQLResponses) == 0 {
 			continue
 		}
 
-		// try to find a (nearest) PREP query; fall back to the last PREP in the mock
-		// this is heuristic but robust across our recording layout
-		var lastPrepQuery string
-		for i := len(m.Spec.MySQLRequests) - 1; i >= 0; i-- {
-			if sp, ok := m.Spec.MySQLRequests[i].Message.(*mysql.StmtPreparePacket); ok && sp != nil {
-				lastPrepQuery = strings.TrimSpace(sp.Query)
-				break
-			}
+		// Get the statement ID from the first response (if it's a StmtPrepareOkPacket)
+		spok, ok := m.Spec.MySQLResponses[0].Message.(*mysql.StmtPrepareOkPacket)
+		if !ok || spok == nil {
+			continue
 		}
-		if lastPrepQuery == "" {
+		stmtID := spok.StatementID
+
+		// Check if we have at least one request
+		if len(m.Spec.MySQLRequests) == 0 {
 			continue
 		}
 
-		for stmtID := range stmtIDs {
-			out[connID] = append(out[connID], prepEntry{
-				StatementID: stmtID,
-				Query:       lastPrepQuery,
-			})
+		// Get the query from the first request (if it's a StmtPreparePacket)
+		sp, ok := m.Spec.MySQLRequests[0].Message.(*mysql.StmtPreparePacket)
+		if !ok || sp == nil {
+			continue
 		}
+		prepQuery := strings.TrimSpace(sp.Query)
+		if prepQuery == "" {
+			continue
+		}
+
+		out[connID] = append(out[connID], prepEntry{
+			statementID: stmtID,
+			query:       prepQuery,
+			mockName:    m.Name,
+		})
 	}
 	return out
 }
+
+// Caveat: There can be a condition where for the same connId, for the same query there can be different statementIds,
+// this can happen either when client closes the prepared statement and creates a new one for the same query
+// or if the client prepares the same query multiple times without closing it.
+
+//TODO: Conditions to handle
+
+// 1. On connection conn-1
+// -> preparedStatement with query-1 comes and returns statement-id=1
+// -> closeStmt for stmt-id=1
+// -> preparedStatement with query-1 comes and returns statement-id=2
+// -> closeStmt for stmt-id=2
+// -> preparedStatement with query-1 comes and returns statement-id=3
+// -> stmtExecute on stmt-id=3
+
+// 2. On connection conn-1
+// -> preparedStatement with query-1 comes and returns statement-id=1
+// -> preparedStatement with query-1 comes and returns statement-id=2
+// -> preparedStatement with query-1 comes and returns statement-id=3
+// -> Client will usually use stmt-id-3 but not necessary.
 
 // lookup helper on recordedPrepByConn
 func lookupRecordedQuery(index map[string][]prepEntry, connID string, stmtID uint32) string {
 	list := index[connID]
 	for _, e := range list {
-		if e.StatementID == stmtID {
-			return e.Query
+		if e.statementID == stmtID {
+			return e.query
 		}
 	}
 	return ""

@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -44,6 +46,25 @@ var TemplatizedValues = map[string]interface{}{}
 var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
+
+// IsShutdownError checks if the error is related to shutdown (EOF, connection closed, etc.)
+// This is useful for gracefully handling errors during application shutdown.
+func IsShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for EOF errors
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Check error message for common shutdown-related patterns
+	errStr := err.Error()
+	return strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "use of closed network connection")
+}
 
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
@@ -379,7 +400,7 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
-var VersionIdenitfier string
+var VersionIdentifier string
 var LogFile *os.File
 
 func GetVersionAsComment() string {
@@ -779,10 +800,86 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
-	// Find all descendant PIDs of the given PID & then signal them.
-	// Any shell doesn't signal its children when it receives a signal.
-	// Children may have their own process groups, so we need to signal them separately.
+	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
+	if runtime.GOOS == "windows" {
+		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
+		// List ALL descendant processes (recursively) before attempting to kill
+		listAllCmd := exec.Command("powershell", "-Command",
+			fmt.Sprintf(`$parent = %d
+$processes = Get-CimInstance Win32_Process
+function Get-ChildProcesses($parentId) {
+    $children = $processes | Where-Object {$_.ParentProcessId -eq $parentId}
+    foreach ($child in $children) {
+        $child
+        Get-ChildProcesses $child.ProcessId
+    }
+}
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List`, ppid))
+		if output, err := listAllCmd.CombinedOutput(); err == nil {
+			logger.Debug("ALL descendant processes before kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
+		} else {
+			logger.Debug("Failed to list descendant processes", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+		}
+
+		// Prefer a console Ctrl+Break event so the app can exit cleanly.
+		if sig == syscall.SIGINT {
+			if err := SendSignal(logger, -ppid, sig); err == nil {
+				if err := waitForProcessExit(ppid, 10*time.Second, logger); err != nil {
+					logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
+				}
+				if running, err := isProcessRunning(ppid); err == nil && !running {
+					return nil
+				}
+			} else {
+				logger.Debug("failed to send console ctrl event", zap.Int("pid", ppid), zap.Error(err))
+			}
+		}
+
+		// Try graceful taskkill as a fallback (without /F).
+		cmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			logger.Debug("taskkill graceful failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+		} else {
+			logger.Debug("taskkill graceful succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
+		}
+
+		// Force kill as the last resort if the process tree is still alive.
+		if running, err := isProcessRunning(ppid); err != nil {
+			logger.Debug("failed to check process state after graceful taskkill", zap.Int("pid", ppid), zap.Error(err))
+		} else if running {
+			forcedCmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T", "/F")
+			if output, err := forcedCmd.CombinedOutput(); err != nil {
+				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+			} else {
+				logger.Debug("taskkill forced succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
+			}
+		}
+
+		// Check for remaining descendant processes after kill
+		verifyAllCmd := exec.Command("powershell", "-Command",
+			fmt.Sprintf(`$parent = %d
+$processes = Get-CimInstance Win32_Process
+function Get-ChildProcesses($parentId) {
+    $children = $processes | Where-Object {$_.ParentProcessId -eq $parentId}
+    foreach ($child in $children) {
+        $child
+        Get-ChildProcesses $child.ProcessId
+    }
+}
+Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Format-List`, ppid))
+		if output, err := verifyAllCmd.CombinedOutput(); err == nil {
+			logger.Debug("ALL descendant processes after kill", zap.Int("parent_pid", ppid), zap.String("output", string(output)))
+		}
+
+		// Wait a short while for processes to exit (same helper used elsewhere)
+		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
+			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
+		}
+		return nil
+	}
+
+	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
 	children, err := findChildPIDs(ppid)
@@ -850,7 +947,26 @@ func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) erro
 
 // isProcessRunning checks if a particular process is still running using os.FindProcess
 func isProcessRunning(pid int) (bool, error) {
-	// Try to find the process
+	// On Windows use PowerShell to check PID presence because signalling with 0 fails.
+	if runtime.GOOS == "windows" {
+		// Use exit code instead of parsing output to avoid locale-dependent string matching.
+		// PowerShell exits with 0 when process exists, 1 when not found.
+		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("if (Get-Process -Id %d -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }", pid))
+		err := cmd.Run()
+		if err != nil {
+			// Non-zero exit code means process not found
+			if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() != 0 {
+				return false, nil
+			}
+			// Other errors (like command not found) are treated as errors
+			return false, err
+		}
+		// Exit code 0 means process was found
+		return true, nil
+	}
+
+	// POSIX: try to find the process and signal 0 to check existence
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false, err // Process lookup failed
@@ -860,10 +976,10 @@ func isProcessRunning(pid int) (bool, error) {
 	err = process.Signal(syscall.Signal(0))
 	if err != nil {
 		// If error occurs when signaling, it means the process is no longer running
+		// If there’s another error, consider the process as still running
 		if errors.Is(err, os.ErrProcessDone) || err == syscall.ESRCH {
 			return false, nil
 		}
-		// If there’s another error, consider the process as still running
 		return true, nil
 	}
 
@@ -1143,6 +1259,14 @@ func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
 
+// PermissionError holds information about files/directories with permission issues
+type PermissionError struct {
+	Path     string
+	OwnerUID uint32
+	IsRead   bool // true if it's a read permission issue, false if write
+}
+
+// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"
 
@@ -1153,7 +1277,7 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 
 	defer func() {
 		if err := file.Close(); err != nil {
-			logger.Error("error closing .gitignore file: %v", zap.Error(err))
+			logger.Error("error closing .gitignore file", zap.Error(err))
 		}
 	}()
 
@@ -1170,7 +1294,6 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 		if _, err := file.WriteString("\n" + ignoreString + "\n"); err != nil {
 			return fmt.Errorf("error writing to .gitignore file: %v", err)
 		}
-		return nil
 	}
 
 	return nil
@@ -1291,6 +1414,11 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 
 	var firstErr error
 
+	// Check if the entire input string is a single template placeholder.
+	// This is more efficient than using MatchString and FindString separately.
+	matchIndexes := re.FindStringIndex(input)
+	isExactPlaceholderMatch := matchIndexes != nil && matchIndexes[0] == 0 && matchIndexes[1] == len(input)
+
 	result := re.ReplaceAllStringFunc(input, func(match string) string {
 		// Only parse and execute the matched placeholder, not the entire string.
 		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
@@ -1309,10 +1437,45 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 			return match
 		}
 
-		return output.String()
+		if isExactPlaceholderMatch {
+			return output.String()
+		}
+
+		// Ensure the placeholder result is safe to embed inside JSON strings by
+		// escaping control characters like newlines, quotes, and backslashes.
+		// This prevents errors such as `invalid character '\n' in string literal`
+		// when we later json.Unmarshal the rendered testcase.
+		return jsonEscapeString(logger, output.String())
 	})
 
 	return result, firstErr
+}
+
+// jsonEscapeString returns a JSON-safe representation of s suitable for
+// embedding directly inside a JSON string literal. It escapes characters
+// that must not appear unescaped in JSON strings (newlines, quotes, etc.)
+// but does not add surrounding quotes.
+func jsonEscapeString(logger *zap.Logger, s string) string {
+	if s == "" {
+		return ""
+	}
+	b, err := json.Marshal(s)
+	// json.Marshal on a string should rarely fail, but if it does, log it
+	// and return the original string to avoid breaking the flow.
+	if err != nil {
+		LogError(logger, err, "failed to marshal string for JSON escaping, returning original unescaped string", zap.String("string", s))
+		return s
+	}
+
+	// The result of marshaling a string is a JSON string literal, which includes
+	// surrounding quotes. We need to strip them.
+	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		// This case is highly unlikely if json.Marshal succeeded without error.
+		LogError(logger, fmt.Errorf("json.Marshal returned unexpected format: %s", string(b)), "unexpected output from json.Marshal for a string", zap.String("string", s))
+		return s
+	}
+	// Strip the surrounding quotes added by json.Marshal.
+	return string(b[1 : len(b)-1])
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
@@ -1464,4 +1627,25 @@ func GetContainerIPv4() (string, error) {
 	}
 
 	return "", fmt.Errorf("could not find a non-loopback IP for the container")
+}
+
+// GetFullCommandUsed returns the full command-line used to run the current process.
+// It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
+func GetFullCommandUsed() string {
+	args := os.Args
+
+	// Build the command string with proper quoting for arguments containing spaces
+	var parts []string
+	for _, arg := range args {
+		if strings.Contains(arg, " ") || strings.Contains(arg, "\"") {
+			// Quote the argument if it contains spaces or quotes
+			parts = append(parts, fmt.Sprintf("%q", arg))
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+
+	cmdStr := strings.Join(parts, " ")
+
+	return cmdStr
 }

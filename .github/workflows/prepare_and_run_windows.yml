@@ -42,13 +42,39 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           clean: true
+      
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          go-cache: false
+
+      - name: Add MinGW gcc to PATH
+        shell: pwsh
+        run: |
+          $gccBin = "C:\msys64\mingw64\bin"
+          if (!(Test-Path "$gccBin\gcc.exe")) { throw "gcc.exe not found at $gccBin" }
+          echo $gccBin >> $env:GITHUB_PATH
+          $env:Path = "$gccBin;$env:Path"
+          where.exe gcc
+          gcc --version
+
+
+      - name: CGO toolchain sanity
+        shell: pwsh
+        run: |
+          Write-Host "PATH=$env:PATH"
+          where.exe gcc
+          gcc --version
+          go env CGO_ENABLED CC CXX GOOS GOARCH
+
 
       - name: Build Keploy (PR) - Windows (windows/amd64)
         shell: powershell
         run: |
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
-          $env:CGO_ENABLED = "0"
+          $env:CGO_ENABLED = "1"
           go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy.exe ./main.go
 
       - name: Upload build artifact (Windows CLI)
@@ -79,7 +105,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: true
+          go-cache: false
 
       - name: Set PR image tag
         run: echo "PR_IMAGE_TAG=ttl.sh/keploy/keploy:${GITHUB_SHA::7}" >> $GITHUB_ENV
@@ -119,6 +145,28 @@ jobs:
         $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
         if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
+    - name: Wait for Docker to be ready
+      shell: powershell
+      run: |
+        $maxAttempts = 30
+        $attempt = 0
+        while ($attempt -lt $maxAttempts) {
+          $attempt++
+          try {
+            $result = docker info 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Docker is ready after $attempt attempts"
+              break
+            }
+          } catch {}
+          Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
+          Start-Sleep -Seconds 2
+        }
+        if ($attempt -eq $maxAttempts) {
+          Write-Error "Docker did not become ready in time"
+          exit 1
+        }
+    
     - name: Pull Docker image
       shell: powershell
       run: |
@@ -129,11 +177,15 @@ jobs:
     uses: ./.github/workflows/golang_docker_windows.yml
     with:
       image_tag: ${{ needs.docker-image-build.outputs.image_tag }}
+    
+  run_golang_native_windows:
+    needs: [build-and-upload]
+    uses: ./.github/workflows/golang_native_windows.yml
 
   cleanup:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: [self-hosted, Windows, X64]
-    needs: [run_golang_docker_windows]
+    needs: [run_golang_docker_windows, run_golang_native_windows]
     steps:
 
       - name: Checkout repository
@@ -159,4 +211,3 @@ jobs:
             exit 1
           }
       
-

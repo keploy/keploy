@@ -23,6 +23,7 @@ type Config struct {
 	E2E                   bool                `json:"e2e" yaml:"e2e" mapstructure:"e2e"`
 	DNSPort               uint32              `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	IncomingProxyPort     uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
@@ -84,6 +85,7 @@ type Record struct {
 	BasePath          string          `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer       time.Duration   `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 
@@ -148,6 +150,7 @@ type Test struct {
 	ProtoFile           string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
 	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
+	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
 }
 
 type Report struct {

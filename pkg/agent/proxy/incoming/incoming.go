@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
 
 	"go.keploy.io/server/v3/pkg/agent"
@@ -19,23 +21,23 @@ import (
 )
 
 type proxyStop func() error
-
 type IngressProxyManager struct {
-	mu     sync.Mutex
-	active map[uint16]proxyStop
-	logger *zap.Logger
-	// deps         models.ProxyDependencies // Use the new dependency struct
+	mu           sync.Mutex
+	active       map[uint16]proxyStop
+	logger       *zap.Logger
 	hooks        agent.Hooks
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
+	synchronous  bool
 }
 
-func New(logger *zap.Logger, h agent.Hooks) *IngressProxyManager {
+func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
 	pm := &IngressProxyManager{
-		logger: logger,
-		hooks:  h,
-		tcChan: make(chan *models.TestCase, 100),
-		active: make(map[uint16]proxyStop),
+		logger:      logger,
+		hooks:       h,
+		tcChan:      make(chan *models.TestCase, 100),
+		active:      make(map[uint16]proxyStop),
+		synchronous: cfg.Agent.Synchronous,
 	}
 	return pm
 }
@@ -59,7 +61,7 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origAppPort))
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newAppPort))
 	// Start the basic TCP forwarder
-	stop := runTCPForwarder(ctx, pm.logger, origAppAddr, newAppAddr, pm, pm.incomingOpts)
+	stop := pm.runTCPForwarder(ctx, pm.logger, origAppAddr, newAppAddr, origAppPort)
 	pm.mu.Lock()
 	pm.active[origAppPort] = stop
 	pm.mu.Unlock()
@@ -79,7 +81,6 @@ func (pm *IngressProxyManager) StopAll() {
 }
 
 func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
-
 	eventChan, err := pm.hooks.WatchBindEvents(ctx)
 	if err != nil {
 		pm.logger.Error("Failed to start watching for ingress events", zap.Error(err))
@@ -97,12 +98,12 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
-	pm.logger.Info("Stopping ingress event listener as the event channel was closed.")
+	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")
 	pm.StopAll()
 }
 
 // runTCPForwarder starts a basic proxy that forwards traffic and logs data.
-func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAppAddr string, pm *IngressProxyManager, opts models.IncomingOptions) func() error {
+func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAppAddr string, appPort uint16) func() error {
 	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
 		logger.Error("Ingress proxy failed to listen", zap.String("original_addr", origAppAddr), zap.Error(err))
@@ -121,6 +122,7 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		sem := make(chan struct{}, 1)
 		for {
 			select {
 			case <-ctx.Done():
@@ -140,7 +142,10 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-			go handleConnection(ctx, clientConn, newAppAddr, logger, pm.tcChan, opts)
+
+			go func(cc net.Conn) {
+				pm.handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, sem, appPort)
+			}(clientConn)
 		}
 	}()
 	return func() error {
@@ -153,30 +158,37 @@ func runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAp
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, opts models.IncomingOptions) {
+func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
 	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
-		utils.LogError(logger, err, "error reading initial bytes from client connection")
+		//if not EOF then log
+		if err != io.EOF {
+			utils.LogError(logger, err, "error reading initial bytes from client connection")
+		}
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		logger.Debug("Detected HTTP/2 connection")
-		upConn, err := net.DialTimeout("tcp4", newAppAddr, 3*time.Second)
+
+		// Get the actual destination for gRPC on Windows
+		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+
+		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server",
-				zap.String("New_App_Address", newAppAddr),
+				zap.String("Final_App_Address", finalAppAddr),
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
 		}
 
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, appPort)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
-		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, opts)
+		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
 }
 

@@ -7,11 +7,11 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
-
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -64,7 +64,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	}
 
 	// Preserves the alias generation
-	keployalias, err := getAlias(ctx, logger, opts)
+	keployalias, err := getAlias(ctx, logger, opts, conf.Debug)
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +72,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
-func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) (string, error) {
+func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
@@ -94,6 +94,8 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 	}
 
+	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
+
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
 		if i != 0 {
@@ -106,6 +108,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 		}
 	}
 
+	Volumes = Volumes + tlsVolumeMount
+
+	extraArgs := opts.ExtraArgs
+
 	switch osName {
 	case "linux":
 
@@ -114,17 +120,43 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 			" --privileged " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
+		if opts.Synchronous {
+			alias += " --sync"
+		}
 
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
+		}
 		return alias, nil
 	case "windows":
 
@@ -151,15 +183,42 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				" --privileged " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
+			if opts.BuildDelay > 0 {
+				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if models.IsAnsiDisabled {
+				alias += " --disable-ansi"
+			}
+			if len(opts.PassThroughPorts) > 0 {
+				portStrings := make([]string, len(opts.PassThroughPorts))
+				for i, port := range opts.PassThroughPorts {
+					portStrings[i] = strconv.Itoa(int(port))
+				}
+				// Note the "=" sign, which is good practice for docker run
+				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+			}
+			if debug {
+				alias += " --debug"
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
+			}
+			if opts.Synchronous {
+				alias += " --sync"
+			}
+			if len(extraArgs) > 0 {
+				alias += " " + strings.Join(extraArgs, " ")
 			}
 			return alias, nil
 		}
@@ -172,17 +231,45 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			" --privileged " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
 		}
+		if opts.Synchronous {
+			alias += " --sync"
+		}
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
+		}
 		return alias, nil
+
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
@@ -207,15 +294,42 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 				" --privileged " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
 			}
 			alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 			alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+			if opts.GlobalPassthrough {
+				alias += " --global-passthrough"
+			}
+			if opts.BuildDelay > 0 {
+				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if models.IsAnsiDisabled {
+				alias += " --disable-ansi"
+			}
+			if len(opts.PassThroughPorts) > 0 {
+				portStrings := make([]string, len(opts.PassThroughPorts))
+				for i, port := range opts.PassThroughPorts {
+					portStrings[i] = strconv.Itoa(int(port))
+				}
+				// Note the "=" sign, which is good practice for docker run
+				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+			}
+			if debug {
+				alias += " --debug"
+			}
 			if opts.ConfigPath != "" && opts.ConfigPath != "." {
 				alias += " --config-path " + opts.ConfigPath
+			}
+			if opts.Synchronous {
+				alias += " --sync"
+			}
+			if len(extraArgs) > 0 {
+				alias += " " + strings.Join(extraArgs, " ")
 			}
 			return alias, nil
 		}
@@ -229,29 +343,46 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions)
 			" --privileged " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort)
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
+		if opts.GlobalPassthrough {
+			alias += " --global-passthrough"
+		}
+		if opts.BuildDelay > 0 {
+			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
+		}
+		if len(opts.PassThroughPorts) > 0 {
+			portStrings := make([]string, len(opts.PassThroughPorts))
+			for i, port := range opts.PassThroughPorts {
+				portStrings[i] = strconv.Itoa(int(port))
+			}
+			// Note the "=" sign, which is good practice for docker run
+			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
+		}
+		if debug {
+			alias += " --debug"
+		}
 		if opts.ConfigPath != "" && opts.ConfigPath != "." {
 			alias += " --config-path " + opts.ConfigPath
+		}
+		if opts.Synchronous {
+			alias += " --sync"
+		}
+		if len(extraArgs) > 0 {
+			alias += " " + strings.Join(extraArgs, " ")
 		}
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
-}
-
-func convertPathToUnixStyle(path string) string {
-	// Replace backslashes with forward slashes
-	unixPath := strings.ReplaceAll(path, "\\", "/")
-	// Remove 'C:'
-	if len(unixPath) > 1 && unixPath[1] == ':' {
-		unixPath = unixPath[2:]
-	}
-	return unixPath
 }
 
 func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string, error) {
