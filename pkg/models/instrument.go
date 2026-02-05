@@ -46,6 +46,7 @@ type IngressEvent struct {
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
+	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay       time.Duration // This is the same as Application delay.
 	FallBackOnMiss bool          // this enables to pass the request to the actual server if no mock is found during test mode.
@@ -71,18 +72,25 @@ type SetupOptions struct {
 	Container       string
 	KeployContainer string
 	DockerDelay     uint64
+	Synchronous     bool
 	// Cmd               string
 	AgentURI          string
 	IsDocker          bool
 	CommandType       string
 	EnableTesting     bool
 	ProxyPort         uint32
+	IncomingProxyPort uint16
 	DnsPort           uint32
 	Mode              Mode
 	GlobalPassthrough bool
 	AgentPort         uint32
 	AppPorts          []string
 	AppNetworks       []string
+	NetworkAliases    map[string][]string
+	BuildDelay        uint64
+	PassThroughPorts  []uint
+	ConfigPath        string
+	ExtraArgs         []string
 }
 
 type RunOptions struct {

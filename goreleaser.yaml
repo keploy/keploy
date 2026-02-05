@@ -9,8 +9,15 @@ release:
   draft: false
 
 archives:
- -
+  - id: default
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    builds:
+      - keploy
+      - keploy-windows
+      - keploy-mac-universal
+    format_overrides:
+      - goos: windows
+        format: binary
 
 builds:
   - binary: keploy
@@ -30,6 +37,28 @@ builds:
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: windows
+        goarch: amd64
+    tags:
+      - viper_bind_struct
+
+  - binary: keploy
+    id: keploy-windows
+    main: ./main.go
+    ldflags:
+      - -s -w -X main.dsn={{.Env.SENTRY_DSN_BINARY}}
+      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
+      - -s -w -X main.gitHubClientID={{.Env.GITTHUB_APP_CLIENT_ID}}
+    env:
+      - CGO_ENABLED=1
+      - CC=x86_64-w64-mingw32-gcc
+      - CXX=x86_64-w64-mingw32-g++
+    goos:
+      - windows
+    goarch:
+      - amd64
     tags:
       - viper_bind_struct
 

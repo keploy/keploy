@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/service/agent"
 
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
@@ -42,7 +43,7 @@ type App struct {
 	Mode            models.Mode
 }
 
-func (a *App) Setup(_ context.Context) error {
+func (a *App) Setup(ctx context.Context) error {
 
 	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
@@ -55,7 +56,8 @@ func (a *App) Setup(_ context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
-		err := a.SetupCompose()
+		extraArgs := agent.StartupAgentHook.GetArgs(ctx)
+		err := a.SetupCompose(extraArgs)
 		if err != nil {
 			return err
 		}
@@ -91,7 +93,7 @@ func (a *App) SetupDocker() error {
 	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
 	// attaching the init container's PID namespace to the app container
-	err := a.attachInitPid(context.Background())
+	err := a.modifyDockerRun(context.Background())
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to attach init pid")
 		return err
@@ -99,8 +101,8 @@ func (a *App) SetupDocker() error {
 	return nil
 }
 
-// AttachInitPid modifies the existing Docker command to attach the init container's PID namespace
-func (a *App) attachInitPid(_ context.Context) error {
+// ModifyDockerRun modifies the existing Docker command to attach the init container's PID namespace
+func (a *App) modifyDockerRun(_ context.Context) error {
 	if a.cmd == "" {
 		return fmt.Errorf("no command provided to modify")
 	}
@@ -110,19 +112,37 @@ func (a *App) attachInitPid(_ context.Context) error {
 	pidMode := fmt.Sprintf("--pid=container:%s", a.keployContainer)
 	networkMode := fmt.Sprintf("--network=container:%s", a.keployContainer)
 
+	keployTLSVolumeName := "keploy-tls-certs"
+	keployTLSMountPath := "/tmp/keploy-tls"
+	certPath := fmt.Sprintf("%s/ca.crt", keployTLSMountPath)
+	trustStorePath := fmt.Sprintf("%s/truststore.jks", keployTLSMountPath)
+
+	tlsFlags := fmt.Sprintf("-v %s:%s:ro ", keployTLSVolumeName, keployTLSMountPath)
+	tlsFlags += fmt.Sprintf("-e NODE_EXTRA_CA_CERTS=%s ", certPath)
+	tlsFlags += fmt.Sprintf("-e REQUESTS_CA_BUNDLE=%s ", certPath)
+	tlsFlags += fmt.Sprintf("-e SSL_CERT_FILE=%s ", certPath)
+	tlsFlags += fmt.Sprintf("-e CARGO_HTTP_CAINFO=%s ", certPath)
+	// For Java, we append to existing options if possible, or just set it.
+	// In CLI args, setting it blindly is usually safe as it overrides or adds.
+	// Ideally we would check if -e JAVA_TOOL_OPTIONS exists, but for now:
+	javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
+	tlsFlags += fmt.Sprintf("-e JAVA_TOOL_OPTIONS='%s' ", javaOpts)
+
 	// Inject the pidMode flag after 'docker run' in the command
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
 	if len(parts) < 3 {
 		return fmt.Errorf("invalid command structure: %s", a.cmd)
 	}
 
-	// Modify the command to insert the pidMode
-	a.cmd = fmt.Sprintf("%s %s %s %s %s", parts[0], parts[1], pidMode, networkMode, parts[2])
+	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
+
+	// Modify the command to insert the pidMode and environment variables
+	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], injection, parts[2])
 	a.logger.Debug("added network namespace and pid to docker command", zap.String("cmd", a.cmd))
 	return nil
 }
 
-func (a *App) SetupCompose() error {
+func (a *App) SetupCompose(extraArgs []string) error {
 	if a.container == "" {
 		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
 		return errors.New("container name not found")
@@ -138,7 +158,7 @@ func (a *App) SetupCompose() error {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
 
-	a.logger.Info(fmt.Sprintf("Found docker compose file paths: %v", paths))
+	a.logger.Debug(fmt.Sprintf("Found docker compose file paths: %v", paths))
 
 	newPath := "docker-compose-tmp.yaml"
 
@@ -155,6 +175,7 @@ func (a *App) SetupCompose() error {
 
 	a.opts.AppPorts = serviceInfo.Ports
 	a.opts.AppNetworks = serviceInfo.Networks
+	a.opts.ExtraArgs = extraArgs
 	compose := serviceInfo.Compose
 
 	err = a.docker.ModifyComposeForAgent(compose, a.opts, a.container)
@@ -162,17 +183,30 @@ func (a *App) SetupCompose() error {
 		utils.LogError(a.logger, err, "failed to modify compose for keploy integration")
 		return err
 	}
-
+	if HookImpl != nil {
+		changed, err := HookImpl.BeforeDockerComposeSetup(context.Background(), compose, a.container)
+		if err != nil {
+			utils.LogError(a.logger, err, "hook failed during docker compose setup")
+			return err
+		}
+		if changed {
+			a.logger.Debug("Successfully ran BeforeDockerComposeSetup hook and modified volumes")
+		}
+	}
 	err = a.docker.WriteComposeFile(compose, newPath)
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
-	a.logger.Info("Created new docker-compose for keploy internal use", zap.String("path", newPath))
+	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
 	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
-	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath)
+	a.cmd = modifyDockerComposeCommand(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
 
-	a.logger.Info("Modified docker compose command to run keploy compose file", zap.String("cmd", a.cmd))
+	a.logger.Info(
+		"Running application using a temporary Keploy-generated Docker Compose file (will be cleaned up automatically)",
+		zap.String("cmd", a.cmd),
+		zap.String("composePath", newPath),
+	)
 
 	return nil
 }
@@ -235,7 +269,34 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				gracePeriod := 5
+				for i := 0; i < gracePeriod; i++ {
+					time.Sleep(1 * time.Second)
 
+					// Check if the 'docker run' command has exited
+					if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+						a.logger.Debug("docker client process exited")
+						return nil
+					}
+
+					// Check the actual container status via Docker API
+					// This handles cases where 'docker run' is dead but container is alive
+					info, err := a.docker.ContainerInspect(context.Background(), a.container)
+					if err == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
+						a.logger.Debug("container stopped gracefully")
+						return nil
+					}
+				}
+
+				// Force Kill using Docker API
+				// We tell the Docker Daemon explicitly to kill this container.
+				a.logger.Warn("container did not stop gracefully, killing it forcefully", zap.String("containerID", a.container))
+
+				// "SIGKILL" string is standard for Docker API to force kill
+				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
+
+				// Clean up the CLI process as well
+				err = utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				return err
 			}
 			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)

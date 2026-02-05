@@ -16,7 +16,7 @@ func init() {
 	Register("agent", Agent)
 }
 
-func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
 		Short: "starts keploy agent for hooking and starting proxy",
@@ -37,17 +37,20 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
 				return nil
 			}
-
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
-			routes.New(router, a, logger)
+			routes.ActiveHooks.New(router, a, logger)
 			go func() {
 				select {
 				case <-ctx.Done():
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case p := <-startAgentCh:
+					if err := agent.SetupAgentHook.AfterSetup(ctx); err != nil {
+						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
+						return
+					}
 					routes.StartAgentServer(logger, p, router)
 				}
 			}()

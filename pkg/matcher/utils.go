@@ -104,13 +104,29 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 	return nil, false
 }
 
+// JSONDiffWithNoiseControl compares JSON with support for both Path-based noise (e.g. "body.user.id")
+// and Global noise (e.g. "timestamp") to be ignored everywhere.
 func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
-	idx := buildNoiseIndex(noise)
-	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, ignoreOrdering)
+	// Split noise into Path-based (contains dots) and Global (no dots)
+	pathNoise := make(map[string][]string)
+	globalKeys := make(map[string]bool)
+
+	for k, v := range noise {
+		// If a key has no dots, treat it as a Global Key to be ignored everywhere.
+		if !strings.Contains(k, ".") {
+			globalKeys[strings.ToLower(k)] = true
+		} else {
+			// Otherwise, it's a path-specific noise (e.g. "body.data.timestamp")
+			pathNoise[k] = v
+		}
+	}
+
+	idx := buildNoiseIndex(pathNoise)
+	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering)
 }
 
-// New optimized implementation.
-func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, ignoreOrdering bool) (JSONComparisonResult, error) {
+// matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth.
+func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string]bool, ignoreOrdering bool) (JSONComparisonResult, error) {
 	var out JSONComparisonResult
 	// Type check fast-path (JSON unmarshal produces these concrete types).
 	switch e := expected.(type) {
@@ -184,18 +200,22 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 		// 1) All expected keys must be present & match.
 		for k, v := range e {
+			if globalKeys[strings.ToLower(k)] {
+				continue
+			}
+
 			val, ok := a[k]
 			if !ok {
 				return out, nil
 			}
 			childKeyLower := prefixLower + strings.ToLower(k)
 
-			// If child subtree is entirely noisy, skip deep compare.
+			// If child subtree is entirely noisy via path, skip deep compare.
 			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
 				continue
 			}
 
-			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, ignoreOrdering)
+			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering)
 			if err != nil || !res.matches {
 				return out, nil
 			}
@@ -208,6 +228,10 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 
 		// 2) No unexpected non-noisy keys in actual.
 		for k := range a {
+			if globalKeys[strings.ToLower(k)] {
+				continue
+			}
+
 			if _, ok := e[k]; ok {
 				continue
 			}
@@ -240,7 +264,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ignoreOrdering {
 			isExact := true
 			for i := 0; i < len(e); i++ {
-				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, ignoreOrdering)
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering)
 				if err != nil || !res.matches {
 					return out, nil
 				}
@@ -269,7 +293,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 						continue
 					}
 					childKey := key
-					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, ignoreOrdering)
+					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering)
 					if err == nil && res.matches {
 						if !res.isExact {
 							isExact = false
@@ -778,7 +802,6 @@ func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]s
 func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) {
 	d.bodyExp, d.bodyAct, d.bodyNoise = exp, act, noise
 }
-
 func (d *DiffsPrinter) Render() error {
 	diffs := []string{}
 
@@ -824,7 +847,10 @@ func (d *DiffsPrinter) Render() error {
 	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+
+	if !models.IsAnsiDisabled {
+		table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+	}
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
 
 	for _, e := range diffs {
@@ -834,16 +860,27 @@ func (d *DiffsPrinter) Render() error {
 	}
 
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
 		startPart := " Expected and actual value"
 		var midPartpaint string
+
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			if !models.IsAnsiDisabled {
+				midPartpaint = color.New(color.FgRed).SprintFunc()(d.text)
+			} else {
+				midPartpaint = d.text
+			}
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
-		endPaint := yellowPaint(" are in different order but have the same objects")
+
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
+
+		if !models.IsAnsiDisabled {
+			yellowPaint := color.New(color.FgYellow).SprintFunc()
+			initalPart = yellowPaint(initalPart)
+			endPaint = yellowPaint(endPaint)
+		}
+
 		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
 		table.Append([]string{initalPart + midPartpaint + endPaint})
@@ -852,30 +889,42 @@ func (d *DiffsPrinter) Render() error {
 	table.Render()
 	return nil
 }
-
 func (d *DiffsPrinter) TableWriter(diffs []string) error {
 
 	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+
+	if !models.IsAnsiDisabled {
+		table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+	}
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
 
 	for _, e := range diffs {
 		table.Append([]string{e})
 	}
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
 		startPart := " Expected and actual value"
 		var midPartpaint string
+
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			if !models.IsAnsiDisabled {
+				midPartpaint = color.New(color.FgRed).SprintFunc()(d.text)
+			} else {
+				midPartpaint = d.text
+			}
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
 
-		endPaint := yellowPaint(" are in different order but have the same objects")
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
+
+		if !models.IsAnsiDisabled {
+			yellowPaint := color.New(color.FgYellow).SprintFunc()
+			initalPart = yellowPaint(initalPart)
+			endPaint = yellowPaint(endPaint)
+		}
+
 		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
 		table.Append([]string{initalPart + midPartpaint + endPaint})
@@ -883,6 +932,7 @@ func (d *DiffsPrinter) TableWriter(diffs []string) error {
 	table.Render()
 	return nil
 }
+
 func (d *DiffsPrinter) RenderAppender() error {
 	//Only show difference for the response body
 	diffs := []string{}
@@ -1119,7 +1169,6 @@ func truncateStrings(exp, act string) (string, string) {
 
 	return exp, act
 }
-
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
@@ -1130,12 +1179,14 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
 
-	// Apply truncation logic before processing
+	// Apply truncation logic
 	exp, act = truncateStrings(exp, act)
 
-	// jsonDiff.JsonDiff()
-	exp = wrapTextWithAnsi(exp)
-	act = wrapTextWithAnsi(act)
+	if models.IsAnsiDisabled {
+		exp = stripANSI(exp)
+		act = stripANSI(act)
+	}
+
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
@@ -1160,29 +1211,31 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 	// Apply truncation logic before processing
 	exp, act = truncateStrings(exp, act)
 
-	// Apply colors: red for expected, green for actual
-	// Force color output even when piping to files
-	greenPaint := color.New(color.FgGreen)
-	greenPaint.EnableColor()
-	redPaint := color.New(color.FgRed)
-	redPaint.EnableColor()
+	if models.IsAnsiDisabled {
+		exp = stripANSI(exp)
+		act = stripANSI(act)
+	} else {
+		greenPaint := color.New(color.FgGreen)
+		greenPaint.EnableColor()
+		redPaint := color.New(color.FgRed)
+		redPaint.EnableColor()
 
-	coloredExp := redPaint.SprintFunc()(exp)
-	coloredAct := greenPaint.SprintFunc()(act)
+		exp = redPaint.SprintFunc()(exp)
+		act = greenPaint.SprintFunc()(act)
+	}
 
-	coloredExp = wrapTextWithAnsi(coloredExp)
-	coloredAct = wrapTextWithAnsi(coloredAct)
+	exp = wrapTextWithAnsi(exp)
+	act = wrapTextWithAnsi(act)
 
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
 	table.SetColMinWidth(0, maxLineLength)
 	table.SetColMinWidth(1, maxLineLength)
-	table.Append([]string{coloredExp, coloredAct})
+	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
 }
-
 func Contains(elems []string, v string) bool {
 	for _, s := range elems {
 		if v == s {

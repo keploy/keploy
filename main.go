@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"go.keploy.io/server/v3/cli"
@@ -14,9 +15,9 @@ import (
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
-	//pprof for debugging
-	// "net/http"
-	// _ "net/http/pprof"
+	"go.uber.org/zap"
+
+	"runtime/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -28,15 +29,6 @@ var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
-	// Uncomment the following code to enable pprof for debugging
-	// go func() {
-	// 	fmt.Println("Starting pprof server for debugging...")
-	// 	err := http.ListenAndServe("localhost:6060", nil)
-	// 	if err != nil {
-	// 		fmt.Println("Failed to start the pprof server for debugging", err)
-	// 		return
-	// 	}
-	// }()
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
@@ -45,10 +37,10 @@ func main() {
 
 func setVersion() {
 	if version == "" {
-		version = "2-dev"
+		version = "3-dev"
 	}
 	utils.Version = version
-	utils.VersionIdenitfier = "version"
+	utils.VersionIdentifier = "version"
 }
 
 func start(ctx context.Context) {
@@ -58,6 +50,52 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+
+	// Early check: If Docker command detected and not running as root, re-exec with sudo
+	// This must happen before any other initialization to ensure clean process handoff
+	if utils.ShouldReexecWithSudo() {
+		utils.ReexecWithSudo(logger)
+		// ReexecWithSudo calls syscall.Exec which replaces the process, so this line
+		// is only reached if there's an error (which is handled inside ReexecWithSudo)
+		return
+	}
+
+	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
+		f, err := os.Create(cpuProfile)
+		if err != nil {
+			logger.Error("could not create CPU profile", zap.Error(err))
+		} else {
+			if err := pprof.StartCPUProfile(f); err != nil {
+				logger.Error("could not start CPU profile", zap.Error(err))
+				f.Close()
+			} else {
+				logger.Info("CPU profiling enabled", zap.String("file", cpuProfile))
+				defer func() {
+					pprof.StopCPUProfile()
+					f.Close()
+					logger.Info("CPU profiling stopped", zap.String("file", cpuProfile))
+				}()
+			}
+		}
+	}
+
+	if heapProfile := os.Getenv("HEAP_PROFILE"); heapProfile != "" {
+		logger.Info("Heap profiling enabled", zap.String("file", heapProfile))
+		defer func() {
+			f, err := os.Create(heapProfile)
+			if err != nil {
+				logger.Error("could not create Heap profile", zap.Error(err))
+				return
+			}
+			defer f.Close()
+			runtime.GC() // get up-to-date statistics
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				logger.Error("could not write Heap profile", zap.Error(err))
+			} else {
+				logger.Info("Heap profile written", zap.String("file", heapProfile))
+			}
+		}()
+	}
 
 	defer func() {
 		inDocker := os.Getenv("KEPLOY_INDOCKER")
@@ -95,6 +133,9 @@ func start(ctx context.Context) {
 	conf := config.New()
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
+
+	// Capture the full command used for test runs (to be stored in report)
+	conf.Test.CmdUsed = utils.GetFullCommandUsed()
 	userDb := userDb.New(logger, conf)
 	conf.InstallationID, err = userDb.GetInstallationID(ctx)
 	if err != nil {
@@ -113,5 +154,11 @@ func start(ctx context.Context) {
 			fmt.Println("Run 'keploy --help' for usage.")
 			os.Exit(1)
 		}
+	}
+
+	// Restore keploy folder ownership if running under sudo (for Docker mode)
+	// This ensures the next native run doesn't hit permission issues
+	if conf.Path != "" {
+		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
 }
