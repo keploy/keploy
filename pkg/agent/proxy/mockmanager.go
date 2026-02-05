@@ -114,8 +114,13 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 // ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	// Hold read lock to ensure we get a consistent snapshot of the tree pointer
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
+
 	results := make([]*models.Mock, 0, 64)
-	m.filtered.rangeValues(func(v interface{}) bool {
+	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
@@ -125,8 +130,13 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	// Hold read lock to ensure we get a consistent snapshot of the tree pointer
+	m.treesMu.RLock()
+	tree := m.unfiltered
+	m.treesMu.RUnlock()
+
 	results := make([]*models.Mock, 0, 128)
-	m.unfiltered.rangeValues(func(v interface{}) bool {
+	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
@@ -176,8 +186,8 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.filtered.deleteAll()
+	// Build new legacy tree (instead of modifying in-place to avoid race conditions)
+	newFiltered := NewTreeDb(customComparator)
 
 	// rebuild per-kind filtered maps from scratch to avoid stale entries
 	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
@@ -188,7 +198,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
 		mock.TestModeInfo.ID = index
-		m.filtered.insert(mock.TestModeInfo, mock)
+		newFiltered.insert(mock.TestModeInfo, mock)
 
 		k := mock.Kind
 		td := newFilteredByKind[k]
@@ -200,8 +210,9 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		touched[k] = struct{}{}
 	}
 
-	// atomically swap the per-kind map
+	// atomically swap both the legacy tree and per-kind map
 	m.treesMu.Lock()
+	m.filtered = newFiltered
 	m.filteredByKind = newFilteredByKind
 	m.treesMu.Unlock()
 
@@ -212,8 +223,8 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.unfiltered.deleteAll()
+	// Build new legacy tree (instead of modifying in-place to avoid race conditions)
+	newUnfiltered := NewTreeDb(customComparator)
 
 	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
 	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
@@ -224,7 +235,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
 		mock.TestModeInfo.ID = index
-		m.unfiltered.insert(mock.TestModeInfo, mock)
+		newUnfiltered.insert(mock.TestModeInfo, mock)
 
 		k := mock.Kind
 		td := newUnfilteredByKind[k]
@@ -236,8 +247,9 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		touched[k] = struct{}{}
 	}
 
-	// atomically swap the per-kind map
+	// atomically swap both the legacy tree and per-kind map
 	m.treesMu.Lock()
+	m.unfiltered = newUnfiltered
 	m.unfilteredByKind = newUnfilteredByKind
 	m.treesMu.Unlock()
 
@@ -551,13 +563,14 @@ func (m *MockManager) GetConsumedMocks() []models.MockState {
 // Uses the per-kind unfiltered tree if available, otherwise falls back
 // to scanning the legacy unfiltered tree.
 func (m *MockManager) GetMySQLCounts() (total, config, data int) {
-	// Fast path: snapshot the per-kind tree pointer under lock
+	// Snapshot tree pointers under lock
 	m.treesMu.RLock()
-	tree := m.unfilteredByKind[models.MySQL]
+	perKindTree := m.unfilteredByKind[models.MySQL]
+	legacyTree := m.unfiltered
 	m.treesMu.RUnlock()
 
-	if tree != nil {
-		tree.rangeValues(func(v interface{}) bool {
+	if perKindTree != nil {
+		perKindTree.rangeValues(func(v interface{}) bool {
 			mock, ok := v.(*models.Mock)
 			if !ok || mock == nil {
 				return true
@@ -574,7 +587,7 @@ func (m *MockManager) GetMySQLCounts() (total, config, data int) {
 	}
 
 	// Fallback: legacy scan of the combined tree
-	m.unfiltered.rangeValues(func(v interface{}) bool {
+	legacyTree.rangeValues(func(v interface{}) bool {
 		mock, ok := v.(*models.Mock)
 		if !ok || mock == nil || mock.Kind != models.MySQL {
 			return true
