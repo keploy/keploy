@@ -14,6 +14,9 @@ type Instrumentation interface {
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
+	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
+	// When this is called, connection errors will be logged as debug instead of error.
+	NotifyGracefulShutdown(ctx context.Context) error
 }
 
 type Service interface {

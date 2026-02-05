@@ -87,8 +87,7 @@ send_request(){
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    "$RECORD_BIN" record -c "./ginApp"  \
-    > "${app_name}.txt" 2>&1 &
+    "$RECORD_BIN" record -c "./ginApp" 2>&1 | tee "${app_name}.txt" &
     
     KEPLOY_PID=$!
 
@@ -117,7 +116,7 @@ docker rm mongoDb || true
 echo "MongoDB stopped - Keploy should now use mocks for database interactions"
 
 # Start the gin-mongo app in test mode.
-"$REPLAY_BIN" test -c "./ginApp" --delay 7    &> test_logs.txt
+"$REPLAY_BIN" test -c "./ginApp" --delay 7   2>&1 | tee test_logs.txt
 
 cat test_logs.txt || true
 
@@ -126,7 +125,8 @@ coverage_line=$(grep -Eo "Total Coverage Percentage:[[:space:]]+[0-9]+(\.[0-9]+)
 
 if [[ -z "$coverage_line" ]]; then
   echo "::error::No coverage percentage found in test_logs.txt"
-  return 1
+  cat test_logs.txt
+  exit 1
 fi
 
 coverage_percent=$(echo "$coverage_line" | grep -Eo "[0-9]+(\.[0-9]+)?" || echo "0")
@@ -135,7 +135,8 @@ echo "📊 Extracted coverage: ${coverage_percent}%"
 # Compare coverage with threshold (50%)
 if (( $(echo "$coverage_percent < 50" | bc -l) )); then
   echo "::error::Coverage below threshold (50%). Found: ${coverage_percent}%"
-  return 1
+  cat test_logs.txt
+  exit 1
 else
   echo "✅ Coverage meets threshold (>= 50%)"
 fi
