@@ -258,8 +258,7 @@ Write-Host "Verifying test reports..."
 # 1. Check for "ERROR" in logs (excluding harmless taskkill and shutdown errors)
 $logErrors = Select-String -Path $testLogFile -Pattern "ERROR"
 $realErrors = $logErrors | Where-Object { 
-    $_.Line -notmatch "The process .* not found" -and
-    $_.Line -notmatch "Error removing file.*keploy-logs.txt: The process cannot access the file because it is being used by another process."
+    $_.Line -notmatch "The process .* not found"
 }
 
 if ($realErrors) {
