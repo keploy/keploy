@@ -35,6 +35,7 @@ func (r *replayer) mockReplay(ctx context.Context, opts models.ReplayOptions) (*
 		return nil, errors.New("mock name must be a test set id, not a path")
 	}
 
+	var mocks []*models.Mock
 	if mockName == "" {
 		mockSetIDs, err := mockDB.GetAllMockSetIDs(ctx)
 		if err != nil {
@@ -43,13 +44,23 @@ func (r *replayer) mockReplay(ctx context.Context, opts models.ReplayOptions) (*
 		if len(mockSetIDs) == 0 {
 			return nil, errors.New("no mock sets found; record mocks first")
 		}
-		mockName = mockSetIDs[0]
-		r.logger.Info("Using latest mock set", zap.String("mockSet", mockName))
-	}
-
-	mocks, err := mockDB.GetMocks(ctx, mockName)
-	if err != nil {
-		return nil, err
+		for _, setID := range mockSetIDs {
+			setMocks, err := mockDB.GetMocks(ctx, setID)
+			if err != nil {
+				return nil, err
+			}
+			mocks = append(mocks, setMocks...)
+		}
+		r.logger.Info("Loading all mock sets",
+			zap.Int("mockSets", len(mockSetIDs)),
+			zap.Int("mockCount", len(mocks)),
+		)
+	} else {
+		var err error
+		mocks, err = mockDB.GetMocks(ctx, mockName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	command, commandType, cleanup, err := r.prepareMockReplayConfig(opts)
@@ -261,7 +272,7 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 		mocksMissed = 0
 	}
 
-	success := appExitCode == 0 && mocksMissed == 0
+	success := appExitCode == 0
 	return &models.ReplayResult{
 		Success:       success,
 		MocksReplayed: mocksReplayed,

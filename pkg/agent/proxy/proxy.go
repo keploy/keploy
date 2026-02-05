@@ -118,6 +118,24 @@ func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
 }
 
+func (p *Proxy) StartMockSession(ctx context.Context, name string) error {
+	p.logger.Debug("Updating session name in proxy", zap.String("name", name))
+	// Get current session
+	session, ok := p.sessions.Get(uint64(0))
+	if !ok {
+		return fmt.Errorf("no active session found")
+	}
+
+	// Create a new session with updated name
+	// We shallow copy the struct first
+	newSession := *session
+	newSession.OutgoingOptions.Name = name
+
+	// Update the map
+	p.sessions.Set(uint64(0), &newSession)
+	return nil
+}
+
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {

@@ -359,7 +359,13 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 					}
 				}
 
-				if err := mockDB.InsertMock(ctx, mock, newTestSetID); err != nil {
+				// Determine test set ID for this mock
+				targetTestSetID := newTestSetID
+				if mock.Spec.Metadata != nil && mock.Spec.Metadata["session_name"] != "" {
+					targetTestSetID = mock.Spec.Metadata["session_name"]
+				}
+
+				if err := mockDB.InsertMock(ctx, mock, targetTestSetID); err != nil {
 					if ctx.Err() == context.Canceled {
 						return nil
 					}

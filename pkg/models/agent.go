@@ -50,6 +50,10 @@ type AfterSimulateRequest struct {
 	TestCaseName string `json:"testCaseName"`
 }
 
+type StartSessionRequest struct {
+	Name string `json:"name"`
+}
+
 type BeforeTestRunReq struct {
 	TestRunID string `json:"testRunID"`
 }

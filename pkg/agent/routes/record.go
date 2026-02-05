@@ -47,6 +47,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+		r.Post("/hooks/start-session", a.HandleStartSession)
 	})
 }
 
@@ -62,6 +63,21 @@ var (
 
 func RegisterHooks(h RouteHook) {
 	ActiveHooks = h
+}
+
+func (a *Agent) HandleStartSession(w http.ResponseWriter, r *http.Request) {
+	var req models.StartSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := a.svc.StartMockSession(r.Context(), req.Name); err != nil {
+		a.logger.Error("failed to start mock session", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {

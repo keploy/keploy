@@ -35,6 +35,7 @@ type Proxy interface {
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
+	StartMockSession(ctx context.Context, name string) error
 }
 
 type IncomingProxy interface {

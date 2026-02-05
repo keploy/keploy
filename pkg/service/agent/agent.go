@@ -105,6 +105,12 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
+// StartMockSession starts a new recording/replay session with the given name
+func (a *Agent) StartMockSession(ctx context.Context, name string) error {
+	a.logger.Debug("Starting new mock session", zap.String("name", name))
+	return a.Proxy.StartMockSession(ctx, name)
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, 1000)
 

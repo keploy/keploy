@@ -26,7 +26,7 @@ type req struct {
 	raw    []byte
 }
 
-func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string) (bool, *models.Mock, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, opts models.OutgoingOptions) (bool, *models.Mock, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, ctx.Err()
@@ -38,7 +38,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			utils.LogError(h.Logger, err, "failed to get unfilteredMocks mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
 		}
-		unfilteredMocks := FilterHTTPMocks(mocks)
+		unfilteredMocks := FilterHTTPMocks(mocks, opts.Name)
 
 		// Log all mock names in a single line for better readability
 		mockNames := make([]string, len(unfilteredMocks))
@@ -109,11 +109,16 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 }
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
-func FilterHTTPMocks(mocks []*models.Mock) []*models.Mock {
+func FilterHTTPMocks(mocks []*models.Mock, sessionName string) []*models.Mock {
 	var httpMocks []*models.Mock
 	for _, mock := range mocks {
 		if mock.Kind != models.Kind(models.HTTP) {
 			continue
+		}
+		if sessionName != "" {
+			if mock.Spec.Metadata == nil || mock.Spec.Metadata["session_name"] != sessionName {
+				continue
+			}
 		}
 		httpMocks = append(httpMocks, mock)
 	}

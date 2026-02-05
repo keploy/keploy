@@ -51,6 +51,24 @@ type AgentClient struct {
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 }
 
+func appendPassThroughPort(ports []uint, port uint) []uint {
+	for _, p := range ports {
+		if p == port {
+			return ports
+		}
+	}
+	return append(ports, port)
+}
+
+func hasBypassPort(rules []models.BypassRule, port uint) bool {
+	for _, rule := range rules {
+		if rule.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
 // var initStopScript []byte
 
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
@@ -940,6 +958,17 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.ProxyPort = proxyPort
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
+
+	// Expose the agent endpoint to the app process for in-test calls.
+	_ = os.Setenv("KEPLOY_AGENT_PORT", strconv.Itoa(int(agentPort)))
+	_ = os.Setenv("KEPLOY_AGENT_URI", opts.AgentURI)
+
+	// Always bypass the agent's own HTTP port to avoid proxying control-plane calls.
+	agentPortUint := uint(agentPort)
+	opts.PassThroughPorts = appendPassThroughPort(opts.PassThroughPorts, agentPortUint)
+	if !hasBypassPort(a.conf.BypassRules, agentPortUint) {
+		a.conf.BypassRules = append(a.conf.BypassRules, models.BypassRule{Port: agentPortUint})
+	}
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),

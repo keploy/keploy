@@ -121,10 +121,13 @@ func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, servi
 				fmt.Fprintln(cmd.OutOrStdout(), output)
 			}
 
+			mocksLoaded := result.MocksReplayed + result.MocksMissed
+			mocksUnused := result.MocksMissed
 			logger.Info("Mock replay completed",
 				zap.Bool("success", result.Success),
 				zap.Int("mocksReplayed", result.MocksReplayed),
-				zap.Int("mocksMissed", result.MocksMissed),
+				zap.Int("mocksLoaded", mocksLoaded),
+				zap.Int("mocksUnused", mocksUnused),
 				zap.Int("exitCode", result.AppExitCode),
 			)
 			return nil

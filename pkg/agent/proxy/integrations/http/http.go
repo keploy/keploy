@@ -173,6 +173,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"operation": req.Method,
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
+	if opts.Name != "" {
+		meta["session_name"] = opts.Name
+	}
 
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {

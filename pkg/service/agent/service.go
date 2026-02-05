@@ -18,5 +18,7 @@ type Service interface {
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
+	// StartSession starts a new recording/replay session with the given name
+	StartMockSession(ctx context.Context, name string) error
 	// SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
 }

@@ -369,10 +369,12 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 
 	// Build result message
 	var messageParts []string
+	mocksLoaded := result.MocksReplayed + result.MocksMissed
+	mocksUnused := result.MocksMissed
+	messageParts = append(messageParts, fmt.Sprintf("Loaded %d mock(s)", mocksLoaded))
 	messageParts = append(messageParts, fmt.Sprintf("Replayed %d mock(s)", result.MocksReplayed))
-
-	if result.MocksMissed > 0 {
-		messageParts = append(messageParts, fmt.Sprintf("%d mock(s) missed", result.MocksMissed))
+	if mocksUnused > 0 {
+		messageParts = append(messageParts, fmt.Sprintf("%d mock(s) unused", mocksUnused))
 	}
 
 	if result.AppExitCode != 0 {
@@ -391,7 +393,8 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	s.logger.Info("Mock replay completed",
 		zap.Bool("success", result.Success),
 		zap.Int("mocksReplayed", result.MocksReplayed),
-		zap.Int("mocksMissed", result.MocksMissed),
+		zap.Int("mocksLoaded", mocksLoaded),
+		zap.Int("mocksUnused", mocksUnused),
 		zap.Int("exitCode", result.AppExitCode),
 	)
 

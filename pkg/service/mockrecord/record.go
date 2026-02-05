@@ -58,6 +58,11 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		}
 	}
 
+	runID := fmt.Sprintf("run-%d", time.Now().Unix())
+	if !strings.HasPrefix(filepath.Base(basePath), "run-") {
+		basePath = filepath.Join(basePath, runID)
+	}
+
 	sessionID := fmt.Sprintf("mock-%d", time.Now().Unix())
 	mockFilePath := filepath.Join(basePath, sessionID, "mocks.yaml")
 

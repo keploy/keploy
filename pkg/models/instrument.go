@@ -54,6 +54,7 @@ type OutgoingOptions struct {
 	DstCfg         *ConditionalDstCfg
 	Backdate       time.Time                      // used to set backdate in cacert request
 	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	Name           string                         // Name of the session
 }
 
 type ConditionalDstCfg struct {
