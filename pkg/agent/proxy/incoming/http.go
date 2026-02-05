@@ -43,6 +43,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// Get the actual destination address (handles Windows vs others platform logic)
 	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
+	// Extract the actual port from the final destination address
+	// This is important for Windows where the port is obtained dynamically
+	actualPort := extractPortFromAddr(finalAppAddr, 0)
+
 	// 1. Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	if err != nil {
@@ -150,7 +154,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		go func() {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, appPort)
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
 		}()
 
 		if pm.synchronous {
