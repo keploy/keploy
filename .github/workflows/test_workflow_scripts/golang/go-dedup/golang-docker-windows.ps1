@@ -310,7 +310,7 @@ $testArgs = @(
   '-c', 'docker compose up',
   '--container-name', $testContainer,
   '--api-timeout', '60',
-  '--delay', '20',
+  '--delay', '30',
   '--generate-github-actions=false'
 )
 
