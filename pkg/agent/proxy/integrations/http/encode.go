@@ -7,9 +7,12 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
+
+	"os"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -17,9 +20,15 @@ import (
 	"go.uber.org/zap"
 )
 
-// encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+// In-flight request queue scoped to a single TCP connection.
+// Responses are matched using FIFO ordering, as mandated by HTTP/1.1.
 
+func isHTTPPipeliningEnabled() bool {
+	return os.Getenv("KEPLOY_HTTP_PIPELINING_ENABLED") == "true"
+}
+
+// encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks in Sync mode.
+func (h *HTTP) encodeHTTPSync(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
 
@@ -257,4 +266,127 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		}
 		return err
 	}
+
+}
+
+// encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
+func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	if !isHTTPPipeliningEnabled() {
+		return h.encodeHTTPSync(ctx, reqBuf, clientConn, destConn, mocks, opts)
+	}
+
+	return h.encodeHTTPPipelined(ctx, reqBuf, clientConn, destConn, mocks, opts)
+}
+
+func (h *HTTP) encodeHTTPPipelined(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
+	destPort := uint(remoteAddr.Port)
+
+	var (
+		inflight []*FinalHTTP
+		mu       sync.Mutex
+	)
+	h.Logger.Warn("HTTP pipelining path enabled")
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context")
+
+	}
+
+	firstReq := &FinalHTTP{
+		Req:              append([]byte{}, reqBuf...),
+		ReqTimestampMock: time.Now(),
+	}
+	mu.Lock()
+	inflight = append(inflight, firstReq)
+	h.Logger.Warn("enqueue request")
+	mu.Unlock()
+
+	if _, err := destConn.Write(reqBuf); err != nil {
+		return err
+	}
+
+	// Separate goroutines for request ingestion and response handling.
+	// This allows pipelined requests without blocking on responses.
+
+	g.Go(func() error {
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
+
+		for {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			req, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
+			if err != nil {
+				if err == io.EOF {
+					destConn.Close()
+				}
+				return err
+			}
+
+			mock := &FinalHTTP{
+				Req:              append([]byte{}, req...),
+				ReqTimestampMock: time.Now(),
+			}
+			mu.Lock()
+			inflight = append(inflight, mock)
+			mu.Unlock()
+
+			if _, err := destConn.Write(req); err != nil {
+				return err
+			}
+		}
+	})
+
+	g.Go(func() error {
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
+
+		for {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
+			if err != nil {
+				return err
+			}
+
+			mu.Lock()
+			if len(inflight) == 0 {
+				mu.Unlock()
+				return errors.New("received response without matching request")
+			}
+
+			mock := inflight[0]
+			inflight = inflight[1:]
+			mu.Unlock()
+
+			mock.Resp = append([]byte{}, resp...)
+			mock.ResTimestampMock = time.Now()
+			h.Logger.Warn("dequeue request")
+
+			if err := h.parseFinalHTTP(ctx, mock, destPort, mocks, opts); err != nil {
+				utils.LogError(h.Logger, err, "failed to parse final http mock")
+			}
+			if _, err := clientConn.Write(resp); err != nil {
+				return err
+			}
+
+		}
+
+	})
+
+	err := g.Wait()
+
+	mu.Lock()
+	if len(inflight) > 0 {
+		h.Logger.Warn("connection closed with unfilled http requests", zap.Int("count", len(inflight)))
+	}
+	mu.Unlock()
+
+	if err == io.EOF {
+		return nil
+	}
+	return err
 }
