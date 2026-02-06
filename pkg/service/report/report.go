@@ -276,7 +276,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 			var failedList []string
 			for _, t := range rep.Tests {
 				if t.Status == models.TestStatusFailed {
-					label := fmt.Sprintf("%s", t.TestCaseID)
+					label := t.TestCaseID
 
 					// Add risk level if available and not NONE
 					if t.FailureInfo.Risk != "" && t.FailureInfo.Risk != models.None {
