@@ -105,11 +105,14 @@ endsec
 send_request
 
 section "Stop Recording"
-echo "Stopping Recording..."
-sudo kill $KEPLOY_PID || true
-wait $KEPLOY_PID || true
+echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
+REC_PID="$(pgrep -n -f 'keploy record' || true)"
+echo "$REC_PID Keploy PID"
+echo "Killing keploy"
+sudo kill -INT "$REC_PID" 2>/dev/null || true
 sleep 5
 check_for_errors "record.txt"
+echo "Recording stopped."
 endsec
 
 # Replay
