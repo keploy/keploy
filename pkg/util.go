@@ -42,6 +42,18 @@ func GetNextSortNum() int64 {
 	return atomic.AddInt64(&SortCounter, 1)
 }
 
+func UpdateSortCounterIfHigher(val int64) {
+	for {
+		curr := atomic.LoadInt64(&SortCounter)
+		if val <= curr {
+			return
+		}
+		if atomic.CompareAndSwapInt64(&SortCounter, curr, val) {
+			return
+		}
+	}
+}
+
 // URLParams returns the Url and Query parameters from the request url.
 func URLParams(r *http.Request) map[string]string {
 	qp := r.URL.Query()

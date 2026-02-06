@@ -25,6 +25,9 @@ type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.Te
 
 var CaptureHook CaptureFunc = Capture
 
+// MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
+const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
 	var reqBody []byte
 	if req.Body != nil { // Read
