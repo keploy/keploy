@@ -50,6 +50,13 @@ type TestModeInfo struct {
 	mu sync.RWMutex `json:"-" bson:"-"`
 }
 
+// Snapshot returns a consistent view of test mode fields.
+func (t *TestModeInfo) Snapshot() (id int, isFiltered bool, sortOrder int64) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.ID, t.IsFiltered, t.SortOrder
+}
+
 // SetIsFiltered safely sets the IsFiltered field
 func (t *TestModeInfo) SetIsFiltered(val bool) {
 	t.mu.Lock()
@@ -132,11 +139,20 @@ func (m *Mock) DeepCopy() *Mock {
 		return nil
 	}
 
-	// 1. Perform a shallow copy of the main struct and its nested structs.
-	// This handles all simple value types (string, int, bool, etc.).
-	c := *m
-	c.Spec = m.Spec
-	c.TestModeInfo = m.TestModeInfo
+	// Copy top-level fields explicitly to avoid copying embedded lock fields.
+	id, isFiltered, sortOrder := m.TestModeInfo.Snapshot()
+	c := Mock{
+		Version: m.Version,
+		Name:    m.Name,
+		Kind:    m.Kind,
+		Spec:    m.Spec,
+		TestModeInfo: TestModeInfo{
+			ID:         id,
+			IsFiltered: isFiltered,
+			SortOrder:  sortOrder,
+		},
+		ConnectionID: m.ConnectionID,
+	}
 
 	// 2. Deep copy the map by creating a new one and copying key-value pairs.
 	if m.Spec.Metadata != nil {

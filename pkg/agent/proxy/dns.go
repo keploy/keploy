@@ -321,10 +321,33 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 	if mgr == nil || matchedMock == nil {
 		return false
 	}
-	originalMatchedMock := *matchedMock
-	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-	return mgr.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
+	id, isFiltered, sortOrder := matchedMock.TestModeInfo.Snapshot()
+
+	originalMatchedMock := &models.Mock{
+		Name: matchedMock.Name,
+		Kind: matchedMock.Kind,
+		TestModeInfo: models.TestModeInfo{
+			ID:         id,
+			IsFiltered: isFiltered,
+			SortOrder:  sortOrder,
+		},
+	}
+
+	updatedMock := &models.Mock{
+		Version:      matchedMock.Version,
+		Name:         matchedMock.Name,
+		Kind:         matchedMock.Kind,
+		Spec:         matchedMock.Spec,
+		ConnectionID: matchedMock.ConnectionID,
+		TestModeInfo: models.TestModeInfo{
+			ID:         id,
+			IsFiltered: false,
+			SortOrder:  pkg.GetNextSortNum(),
+		},
+	}
+
+	return mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, answers []dns.RR, reqTime, resTime time.Time, session *agent.Session) {
