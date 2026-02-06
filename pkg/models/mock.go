@@ -2,20 +2,21 @@ package models
 
 import (
 	"encoding/gob"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/models/postgres"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func init() {
-	gob.Register(primitive.D{})
-	gob.Register(primitive.E{})
-	gob.Register(primitive.A{})
-	gob.Register(primitive.Binary{})
-	gob.Register(primitive.M{})
-	gob.Register(primitive.ObjectID{})
+	gob.Register(bson.D{})
+	gob.Register(bson.E{})
+	gob.Register(bson.A{})
+	gob.Register(bson.Binary{})
+	gob.Register(bson.M{})
+	gob.Register(bson.ObjectID{})
 }
 
 type Kind string
@@ -44,6 +45,22 @@ type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
 	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	// mu protects concurrent access to IsFiltered
+	mu sync.RWMutex `json:"-" bson:"-"`
+}
+
+// SetIsFiltered safely sets the IsFiltered field
+func (t *TestModeInfo) SetIsFiltered(val bool) {
+	t.mu.Lock()
+	t.IsFiltered = val
+	t.mu.Unlock()
+}
+
+// GetIsFiltered safely gets the IsFiltered field
+func (t *TestModeInfo) GetIsFiltered() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.IsFiltered
 }
 
 func (m *Mock) GetKind() string {

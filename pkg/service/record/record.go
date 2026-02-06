@@ -59,6 +59,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
 	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
 
+	// Propagate parent context cancellation to setupCtx
+	// This ensures that when Ctrl+C is pressed, setupCtx is cancelled immediately
+	go func() {
+		<-ctx.Done()
+		setupCtxCancel()
+	}()
+
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)
 	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
@@ -89,6 +96,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 
 		r.logger.Info("Stopping Keploy recording...")
+
+		// Notify the agent that we are shutting down gracefully
+		// This will cause connection errors to be logged as debug instead of error
+		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		}
 
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
@@ -163,6 +176,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath})
 
 	if err != nil {
+		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
+		if ctx.Err() != nil {
+			return nil
+		}
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf("%s", stopReason)
@@ -183,13 +200,16 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		agentCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
 		go pkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
 
 		select {
+		case <-ctx.Done():
+			// Parent context cancelled (user pressed Ctrl+C)
+			return ctx.Err()
 		case <-agentCtx.Done():
 			return fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
@@ -346,32 +366,32 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.Mock)
-	errChan := make(chan error, 2)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
+	// INCOMING
+	incomingStream, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+	if err != nil {
+		if ctx.Err() != nil || utils.IsShutdownError(err) {
+			r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
+			// Close channels to prevent callers from hanging when ranging over them
+			close(incomingChan)
+			close(outgoingChan)
+			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+		}
+		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
+	}
+
 	g.Go(func() error {
 		defer close(incomingChan)
-
-		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
-		if err != nil {
-			// During shutdown, context cancellation or EOF errors are expected
-			if ctx.Err() != nil || utils.IsShutdownError(err) {
-				r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
-				return nil
-			}
-			errChan <- err
-			return fmt.Errorf("failed to get incoming test cases: %w", err)
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case tc, ok := <-ch:
+			case tc, ok := <-incomingStream:
 				if !ok {
 					return nil
 				}
@@ -386,38 +406,42 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	})
 
 	// OUTGOING
+	// Create a cancelable child that we always cancel when ctx is done.
+	mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+
+	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+	})
+	if err != nil {
+		cancel()
+		if ctx.Err() != nil || utils.IsShutdownError(err) {
+			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
+			// Close outgoingChan to prevent callers from hanging
+			// Note: incomingChan will be closed by the goroutine started above when ctx is done
+			close(outgoingChan)
+			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+		}
+		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
+	}
+
 	g.Go(func() error {
 		defer close(outgoingChan)
-
-		// Create a cancelable child that we always cancel when ctx is done.
-		mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
 
-		// Cancel child as soon as parent is done
+		// Also cancel mockCtx when parent ctx is done
+		// This is done inside the goroutine to avoid goroutine leaks
 		go func() {
 			<-ctx.Done()
 			cancel()
 		}()
 
-		ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-		})
-		if err != nil {
-			// During shutdown, context cancellation or EOF errors are expected
-			if ctx.Err() != nil || utils.IsShutdownError(err) {
-				r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
-				return nil
-			}
-			return fmt.Errorf("failed to get outgoing mocks: %w", err)
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case m, ok := <-ch:
+			case m, ok := <-outgoingStream:
 				if !ok {
 					return nil
 				}
