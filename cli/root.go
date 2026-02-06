@@ -19,17 +19,32 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 		Short:   "Keploy CLI",
 		Example: provider.RootExamples,
 		Version: utils.Version,
-		PreRun: func(cmd *cobra.Command, _ []string) {
-			disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
-			provider.PrintLogo(os.Stdout, disableAnsi)
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Check if we're running an MCP command by looking at os.Args
+			if len(os.Args) > 1 && os.Args[1] == "mcp" {
+				utils.SetMCPStdio(true)
+				return
+			}
+
+			// Don't print logo in MCP stdio mode - it corrupts JSON-RPC stream
+			if !utils.IsMCPStdio() && cmd.Name() != "agent" {
+				disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
+				provider.PrintLogo(os.Stdout, disableAnsi)
+			}
 		},
 	}
 
 	defaultHelpFunc := rootCmd.HelpFunc()
 
 	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
-		provider.PrintLogo(os.Stdout, disableAnsi)
+		// Check if we're in an MCP context by looking at os.Args
+		isMCP := len(os.Args) > 1 && os.Args[1] == "mcp"
+		
+		// Don't print logo in MCP stdio mode - it corrupts JSON-RPC stream
+		if !isMCP && !utils.IsMCPStdio() {
+			disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
+			provider.PrintLogo(os.Stdout, disableAnsi)
+		}
 
 		// Use the default help function instead of calling the parent's HelpFunc
 		defaultHelpFunc(cmd, args)
