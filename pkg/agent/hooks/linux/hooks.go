@@ -62,19 +62,19 @@ type Hooks struct {
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
-	socket     link.Link
-	connect4   link.Link
+	socket      link.Link
+	connect4    link.Link
 	udp4Sendmsg link.Link
-	gp4        link.Link
-	connect6   link.Link
+	gp4         link.Link
+	connect6    link.Link
 	udp6Sendmsg link.Link
-	gp6        link.Link
-	objects    bpfObjects
-	cgBind4    link.Link
-	cgBind6    link.Link
-	bindEnter  link.Link
-	BindEvents *ebpf.Map
-	sockops    link.Link
+	gp6         link.Link
+	objects     bpfObjects
+	cgBind4     link.Link
+	cgBind6     link.Link
+	bindEnter   link.Link
+	BindEvents  *ebpf.Map
+	sockops     link.Link
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
