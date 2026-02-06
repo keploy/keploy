@@ -209,6 +209,20 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, parseErr
 	}
 
+	// Replace 'localhost' with '127.0.0.1' to force IPv4
+	// On Windows, Go resolves 'localhost' to IPv6 [::1] first, but Docker containers
+	// and many apps only listen on IPv4, causing connection failures
+	if parsedURL.Hostname() == "localhost" {
+		port := parsedURL.Port()
+		if port != "" {
+			parsedURL.Host = "127.0.0.1:" + port
+		} else {
+			parsedURL.Host = "127.0.0.1"
+		}
+		testURL = parsedURL.String()
+		logger.Debug("Replaced 'localhost' with '127.0.0.1' to force IPv4", zap.String("url", testURL))
+	}
+
 	// Get the port from URL (returns empty string if not specified, meaning default 80/443)
 	urlPort := parsedURL.Port()
 
