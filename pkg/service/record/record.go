@@ -264,7 +264,7 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
 		if ctx.Err() != nil {
-			return nil
+			return result, nil
 		}
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
