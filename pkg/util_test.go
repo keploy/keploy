@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -244,4 +246,43 @@ func TestFilterMocks_678(t *testing.T) {
 		assert.Equal(t, "mock1", result[3].Name)
 		assert.Equal(t, "mock3", result[4].Name)
 	})
+}
+
+func TestSimulateHTTP_UsesSharedTemplateRenderer(t *testing.T) {
+	// --- setup ---
+	defer func() {
+		utils.TemplatizedValues = map[string]interface{}{}
+		utils.SecretValues = map[string]interface{}{}
+	}()
+
+	utils.TemplatizedValues = map[string]interface{}{
+		"id": "123",
+	}
+
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// mock HTTP server
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/user/123", r.URL.Path) // 🔴 THIS is the key assertion
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tc := &models.TestCase{
+		Name: "template-test",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    srv.URL + "/user/{{.id}}",
+		},
+	}
+
+	// --- act ---
+	resp, err := SimulateHTTP(ctx, tc, "ts", logger, 5)
+
+	// --- assert ---
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

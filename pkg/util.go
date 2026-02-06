@@ -153,38 +153,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			tc.HTTPReq.URL = decoded
 		}
 	}
-	//TODO: adjust this logic in the render function in order to remove the redundant code
-	// convert testcase to string and render the template values.
-	// Render any template values in the test case before simulation.
-	// Render any template values in the test case before simulation.
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
-		testCaseBytes, err := json.Marshal(tc)
+		renderedTC, err := RenderTestCaseWithTemplates(tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase for templating")
+			utils.LogError(logger, err, "failed to render testcase templates")
 			return nil, err
 		}
-
-		// Build the template data
-		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
-		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
-		}
-		if len(utils.SecretValues) > 0 {
-			templateData["secret"] = utils.SecretValues
-		}
-
-		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
-		// ignoring LaTeX/HTML like {{\pi}}.
-		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
-		if rerr != nil {
-			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
-		}
-
-		err = json.Unmarshal([]byte(renderedStr), &tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
-			return nil, err
-		}
+		tc = renderedTC
 	}
 
 	reqBody := []byte(tc.HTTPReq.Body)
