@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -408,13 +409,25 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// OUTGOING
 	// Create a cancelable child that we always cancel when ctx is done.
 	mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	var tlsPrivateKey string
+	if r.config.Record.TLSPrivateKeyPath != "" {
+		keyBytes, err := os.ReadFile(r.config.Record.TLSPrivateKeyPath)
+		if err != nil {
+			r.logger.Error("failed to read tls private key", zap.Error(err))
+			cancel()
+			return FrameChan{}, err
+		}
+		tlsPrivateKey = string(keyBytes)
+	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
+		TLSPrivateKey:  tlsPrivateKey,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 	})
 	if err != nil {
+
 		cancel()
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
@@ -425,7 +438,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		}
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}
-
 	g.Go(func() error {
 		defer close(outgoingChan)
 		defer cancel()

@@ -3,6 +3,7 @@ package tls
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"time"
 
@@ -18,39 +19,68 @@ func IsTLSHandshake(data []byte) bool {
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
-func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, error) {
-	//Load the CA certificate and private key
-
+func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
+	// 1. Load the Proxy's Signing CA (Used to generate server certs)
 	caPrivKey, err := helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to parse CA private key")
-		return nil, err
+		return nil, false, err
 	}
 	caCertParsed, err := helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to parse CA certificate")
-		return nil, err
+		return nil, false, err
 	}
 
-	// Create a TLS configuration
+	// 3. Create TLS Configuration
 	config := &tls.Config{
+		// A. Server Identity: Present the Proxy's certificate to the client
 		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if clientHello.ServerName == "" {
+				clientHello.ServerName = "127.0.0.1"
+			}
 			return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
 		},
+
+		// B. Client Identity: OPTIONAL TRUST ALL MODE
+		// RequestClientCert:
+		// - Request a certificate from the client.
+		// - If client sends one, we accept it (and skip verification via VerifyPeerCertificate).
+		// - If client sends NONE, we continue (Standard TLS).
+		ClientAuth: tls.RequestClientCert,
+
+		// Custom verification validation to skip verifying the client's certificate chain.
+		// This effectively trusts ANY certificate the client sends.
+		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			return nil
+		},
+
+		// C. Trusted Authorities
+		// Set to nil so we don't send a restrictive list of accepted CAs to the client.
+		// This encourages the client to send its certificate regardless of who signed it.
+		ClientCAs: nil,
 	}
 
 	// Wrap the TCP conn with TLS
 	tlsConn := tls.Server(conn, config)
+
 	// Perform the handshake
 	err = tlsConn.Handshake()
-
 	if err != nil {
-		utils.LogError(logger, err, "failed to complete TLS handshake with the client")
-		return nil, err
+		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
+		return nil, false, err
 	}
-	// Use the tlsConn for further communication
-	// For example, you can read and write data using tlsConn.Read() and tlsConn.Write()
 
-	// Here, we simply close the conn
-	return tlsConn, nil
+	// 4. (Optional) Check what kind of connection happened
+	// You can log this to verify if the client actually used mTLS or just standard TLS
+	isMTLS := false
+	state := tlsConn.ConnectionState()
+	if len(state.PeerCertificates) > 0 {
+		logger.Debug("mTLS Handshake Success", zap.String("client_subject", state.PeerCertificates[0].Subject.CommonName))
+		isMTLS = true
+	} else {
+		logger.Debug("Standard TLS Handshake Success (No Client Cert Provided)")
+	}
+
+	return tlsConn, isMTLS, nil
 }
