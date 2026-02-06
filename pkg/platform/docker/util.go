@@ -133,6 +133,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
+		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
 			for i, port := range opts.PassThroughPorts {
@@ -194,6 +197,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
+			if models.IsAnsiDisabled {
+				alias += " --disable-ansi"
+			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
 				for i, port := range opts.PassThroughPorts {
@@ -238,6 +244,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
@@ -299,6 +308,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
+			if models.IsAnsiDisabled {
+				alias += " --disable-ansi"
+			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
 				for i, port := range opts.PassThroughPorts {
@@ -344,6 +356,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))

@@ -33,6 +33,7 @@ type MockFilterParams struct {
 	MockMapping        []string             `json:"mockMapping,omitempty"`
 	UseMappingBased    bool                 `json:"useMappingBased"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	IsDiff             bool                 `json:"isDiff"`
 }
 
 type UpdateMockParamsReq struct {
