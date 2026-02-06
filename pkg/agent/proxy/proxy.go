@@ -637,7 +637,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		nextProtos := []string{"http/1.1"} // default safe
 
-		if !util.IsHTTPReq(initialBuf) {
+		// Allow H2 if:
+		// 1. It's not an HTTP/1.x request (could be gRPC/HTTP2 frames), OR
+		// 2. It's a CONNECT request (used by gRPC parser for tunneling, ALB requires H2)
+		if !util.IsHTTPReq(initialBuf) || bytes.HasPrefix(initialBuf, []byte("CONNECT ")) {
 			// not an HTTP/1.x request line; could be HTTP/2 (gRPC) frames
 			nextProtos = []string{"h2", "http/1.1"}
 		}
