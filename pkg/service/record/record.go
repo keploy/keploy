@@ -259,7 +259,7 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: commandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath})
+	err := r.instrumentation.Setup(setupCtx, command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: commandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, Path: r.config.Path})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -360,10 +360,12 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 			count, counts, err := consumeOutgoing(reqCtx, frames.Outgoing, func(mock *models.Mock) error {
 				if r.globalMockCh != nil {
 					currMockID := mockDB.GetCurrMockID()
-					mockCopy := *mock
-					mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
+					mockCopy := mock.DeepCopy()
+					if mockCopy != nil {
+						mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
+					}
 					select {
-					case r.globalMockCh <- &mockCopy:
+					case r.globalMockCh <- mockCopy:
 						r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
 					default:
 						r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
@@ -372,6 +374,9 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 
 				// Determine test set ID for this mock
 				targetTestSetID := newTestSetID
+				if opts.RootMocksUntilSession {
+					targetTestSetID = ""
+				}
 				if mock.Spec.Metadata != nil && mock.Spec.Metadata["session_name"] != "" {
 					targetTestSetID = mock.Spec.Metadata["session_name"]
 				}

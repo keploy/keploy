@@ -43,9 +43,6 @@ type ManagerInput struct {
 	// Path is the base path for mock storage (default: ./keploy).
 	Path string `json:"path,omitempty" jsonschema:"Path for mock storage (default: ./keploy)"`
 
-	// MockName is the name of the mock set (for mock_test action).
-	MockName string `json:"mockName,omitempty" jsonschema:"Name of the mock set to use (for keploy_mock_test action)"`
-
 	// FallBackOnMiss indicates whether to fall back to real calls (for mock_test action).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when mock not found (default: false)"`
 

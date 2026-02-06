@@ -64,7 +64,7 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 	}
 
 	sessionID := fmt.Sprintf("mock-%d", time.Now().Unix())
-	mockFilePath := filepath.Join(basePath, sessionID, "mocks.yaml")
+	mockFilePath := filepath.Join(basePath, "mocks.yaml")
 
 	db := r.mockDB
 	if db == nil || opts.Path != "" {
@@ -82,18 +82,19 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 
 	enableIncomingProxy := runtime.GOOS == "windows"
 	result, err := r.runner.StartWithOptions(ctx, models.ReRecordCfg{}, record.StartOptions{
-		Command:             opts.Command,
-		TestSetID:           sessionID,
-		RecordTimer:         recordTimer,
-		UseRecordTimer:      useTimer,
-		ProxyPort:           opts.ProxyPort,
-		DNSPort:             opts.DNSPort,
-		CaptureIncoming:     false,
-		EnableIncomingProxy: enableIncomingProxy,
-		CaptureOutgoing:     true,
-		WriteTestSetConfig:  false,
-		IgnoreAppError:      true,
-		MockDB:              db,
+		Command:               opts.Command,
+		TestSetID:             sessionID,
+		RecordTimer:           recordTimer,
+		UseRecordTimer:        useTimer,
+		ProxyPort:             opts.ProxyPort,
+		DNSPort:               opts.DNSPort,
+		CaptureIncoming:       false,
+		EnableIncomingProxy:   enableIncomingProxy,
+		CaptureOutgoing:       true,
+		RootMocksUntilSession: true,
+		WriteTestSetConfig:    false,
+		IgnoreAppError:        true,
+		MockDB:                db,
 		OnMock: func(mock *models.Mock) error {
 			collector.addMock(mock)
 			return nil

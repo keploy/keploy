@@ -723,6 +723,10 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
+	if opts.Path != "" && opts.Path != "." {
+		args = append(args, "--path", opts.Path)
+	}
+
 	// Check if sudo credentials are already cached (e.g., from permission fix)
 	// If cached, we can use sudo -n (non-interactive) and skip PTY
 	sudoCached := utils.AreSudoCredentialsCached()

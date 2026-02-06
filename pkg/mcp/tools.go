@@ -68,8 +68,6 @@ type RecordConfiguration struct {
 type MockReplayInput struct {
 	// Command is the command to run with mocks.
 	Command string `json:"command" jsonschema:"Command to run with mocks (e.g. 'go test -v', 'npm test', 'go run main.go', or any other command)."`
-	// MockName is the name of the mock set to replay (optional, uses latest if not provided).
-	MockName string `json:"mockName,omitempty" jsonschema:"Name of the mock set to replay. Use keploy_list_mocks to see available mocks. If not provided, the latest mock set will be used."`
 	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches (optional, default: false).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
 }
@@ -93,7 +91,6 @@ type MockReplayOutput struct {
 // ReplayConfiguration shows the configuration used for replay.
 type ReplayConfiguration struct {
 	Command        string `json:"command"`
-	MockName       string `json:"mockName"`
 	FallBackOnMiss bool   `json:"fallBackOnMiss"`
 }
 
@@ -130,9 +127,6 @@ func (s *Server) handleListMocks(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 
 	message := fmt.Sprintf("Found %d mock set(s). The latest is '%s'.", len(mockSets), mockSets[0])
-	if len(mockSets) > 1 {
-		message += " You can specify any of these with the mockName parameter in keploy_mock_test."
-	}
 
 	return nil, ListMocksOutput{
 		Success:  true,
@@ -298,7 +292,6 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolRequest, in MockReplayInput) (*sdkmcp.CallToolResult, MockReplayOutput, error) {
 	s.logger.Info("Mock replay tool invoked",
 		zap.String("command", in.Command),
-		zap.String("mockName", in.MockName),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
@@ -319,43 +312,19 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		}, nil
 	}
 
-	mockName := strings.TrimSpace(in.MockName)
-
-	// If no mock name provided, get the latest
-	if mockName == "" {
-		mockSets, err := s.mockReplayer.ListMockSets(ctx)
-		if err != nil {
-			return nil, MockReplayOutput{
-				Success: false,
-				Message: fmt.Sprintf("Failed to get available mock sets: %s. Please specify mockName explicitly.", err.Error()),
-			}, nil
-		}
-		if len(mockSets) == 0 {
-			return nil, MockReplayOutput{
-				Success: false,
-				Message: "No mock sets found. Use keploy_mock_record to create mocks first.",
-			}, nil
-		}
-		mockName = mockSets[0]
-		s.logger.Info("Using latest mock set", zap.String("mockName", mockName))
-	}
-
 	config := &ReplayConfiguration{
 		Command:        command,
-		MockName:       mockName,
 		FallBackOnMiss: in.FallBackOnMiss,
 	}
 
 	s.logger.Info("Starting mock replay with configuration",
 		zap.String("command", command),
-		zap.String("mockName", mockName),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
 	// Execute replay
 	result, err := s.mockReplayer.Replay(ctx, models.ReplayOptions{
 		Command:        command,
-		MockName:       mockName,
 		FallBackOnMiss: in.FallBackOnMiss,
 	})
 	if err != nil {

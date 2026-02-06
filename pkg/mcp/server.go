@@ -212,12 +212,10 @@ enabling isolated testing without external dependencies.
 
 IMPORTANT workflow:
 1. First use keploy_list_mocks to show available mocks to the user
-2. If no mockName specified, the latest mock set will be used
-3. Show configuration to user and confirm before starting
+2. Show configuration to user and confirm before starting
 
 Parameters:
 - command (required): Any command to run with mocks (e.g., 'go test -v', 'npm test', 'go run main.go', './my-app')
-- mockName (optional): Name of the mock set to use. If not provided, uses the latest available mock.
 - fallBackOnMiss (optional): Whether to make real calls when mock not found (default: false)`,
 	}, s.handleMockReplay)
 
@@ -234,7 +232,7 @@ This is the RECOMMENDED tool for interacting with Keploy. It supports three acti
 
 2. **keploy_mock_test** - Replay recorded mocks during testing
    - Required: command (e.g., 'go test -v', 'npm test')
-   - Optional: mockName, fallBackOnMiss, path
+   - Optional: fallBackOnMiss, path
 
 3. **pipeline** - Generate CI/CD pipeline for Keploy mock testing
    - Optional: appCommand, defaultBranch (default: main), mockPath (default: ./keploy), cicdTool
@@ -243,7 +241,7 @@ This is the RECOMMENDED tool for interacting with Keploy. It supports three acti
 
 Usage examples:
 - Record: {"action": "keploy_mock_record", "command": "go run main.go"}
-- Test: {"action": "keploy_mock_test", "command": "go test -v", "mockName": "my-mocks"}
+- Test: {"action": "keploy_mock_test", "command": "go test -v"}
 - Pipeline: {"action": "pipeline", "appCommand": "go run main.go", "cicdTool": "github-actions"}
 
 For pipeline action with missing parameters, the tool will use MCP Elicitation to gather required configuration.`,

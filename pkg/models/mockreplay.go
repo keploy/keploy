@@ -6,10 +6,6 @@ import "time"
 type ReplayOptions struct {
 	// Command is the application command to execute.
 	Command string
-	// MockName is the name of the mock set to replay.
-	MockName string
-	// MockFilePath is deprecated; use MockName instead.
-	MockFilePath string
 	// ProxyPort is the proxy port (optional, uses default if 0).
 	ProxyPort uint32
 	// DNSPort is the DNS port (optional, uses default if 0).

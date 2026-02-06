@@ -26,41 +26,20 @@ func (r *replayer) mockReplay(ctx context.Context, opts models.ReplayOptions) (*
 	if mockDB == nil {
 		return nil, errors.New("mock database is not configured")
 	}
-
-	mockName := strings.TrimSpace(opts.MockName)
-	if mockName == "" {
-		mockName = strings.TrimSpace(opts.MockFilePath)
+	beforeTime := time.Now()
+	rootFiltered, err := mockDB.GetFilteredMocks(ctx, "", models.BaseTime, beforeTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load root filtered mocks: %w", err)
 	}
-	if strings.ContainsAny(mockName, `/\`) {
-		return nil, errors.New("mock name must be a test set id, not a path")
+	rootUnfiltered, err := mockDB.GetUnFilteredMocks(ctx, "", models.BaseTime, beforeTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load root config mocks: %w", err)
 	}
-
 	var mocks []*models.Mock
-	if mockName == "" {
-		mockSetIDs, err := mockDB.GetAllMockSetIDs(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(mockSetIDs) == 0 {
-			return nil, errors.New("no mock sets found; record mocks first")
-		}
-		for _, setID := range mockSetIDs {
-			setMocks, err := mockDB.GetMocks(ctx, setID)
-			if err != nil {
-				return nil, err
-			}
-			mocks = append(mocks, setMocks...)
-		}
-		r.logger.Info("Loading all mock sets",
-			zap.Int("mockSets", len(mockSetIDs)),
-			zap.Int("mockCount", len(mocks)),
-		)
-	} else {
-		var err error
-		mocks, err = mockDB.GetMocks(ctx, mockName)
-		if err != nil {
-			return nil, err
-		}
+	mocks = append(mocks, rootFiltered...)
+	mocks = append(mocks, rootUnfiltered...)
+	if len(mocks) > 0 {
+		r.logger.Info("Loaded root mocks before session start", zap.Int("mockCount", len(mocks)))
 	}
 
 	command, commandType, cleanup, err := r.prepareMockReplayConfig(opts)
@@ -71,7 +50,7 @@ func (r *replayer) mockReplay(ctx context.Context, opts models.ReplayOptions) (*
 		return nil, err
 	}
 
-	return r.runMockReplay(ctx, command, commandType, mocks, opts)
+	return r.runMockReplay(ctx, command, commandType, rootFiltered, rootUnfiltered, mocks, opts)
 }
 
 func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, string, func(), error) {
@@ -126,7 +105,7 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 	return command, commandType, cleanup, nil
 }
 
-func (r *replayer) runMockReplay(ctx context.Context, command, commandType string, mocks []*models.Mock, opts models.ReplayOptions) (*models.ReplayResult, error) {
+func (r *replayer) runMockReplay(ctx context.Context, command, commandType string, rootFiltered []*models.Mock, rootUnfiltered []*models.Mock, mocks []*models.Mock, opts models.ReplayOptions) (*models.ReplayResult, error) {
 	if r.runtime == nil {
 		return nil, errors.New("mock replay runtime is not configured")
 	}
@@ -161,6 +140,7 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 		EnableTesting:     true,
 		GlobalPassthrough: r.cfg.Record.GlobalPassthrough,
 		ConfigPath:        r.cfg.ConfigPath,
+		Path:              r.cfg.Path,
 		PassThroughPorts:  passPortsUint,
 	})
 	if err != nil {
@@ -218,19 +198,18 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 		return nil, err
 	}
 
-	err = instrumentation.StoreMocks(grpCtx, nil, mocks)
-	if err != nil {
+	if err := instrumentation.StoreMocks(grpCtx, rootFiltered, rootUnfiltered); err != nil {
+		return nil, err
+	}
+	pkg.InitSortCounter(int64(max(len(rootFiltered), len(rootUnfiltered))))
+	if err := instrumentation.UpdateMockParams(grpCtx, models.MockFilterParams{
+		AfterTime:  models.BaseTime,
+		BeforeTime: time.Now(),
+	}); err != nil {
 		return nil, err
 	}
 
-	pkg.InitSortCounter(int64(len(mocks)))
-	err = instrumentation.UpdateMockParams(grpCtx, models.MockFilterParams{
-		AfterTime:  models.BaseTime,
-		BeforeTime: time.Now(),
-	})
-	if err != nil {
-		return nil, err
-	}
+	r.logger.Info("Mock replay will load mocks on start-session; ensure your tests call /agent/hooks/start-session before any outbound calls")
 
 	if cmdType == utils.DockerCompose {
 		err = instrumentation.MakeAgentReadyForDockerCompose(grpCtx)

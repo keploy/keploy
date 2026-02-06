@@ -81,17 +81,11 @@ func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, servi
 	var cmd = &cobra.Command{
 		Use:     "test",
 		Short:   "replay recorded mocks during testing",
-		Example: `keploy mock test -c "go test ./..." --mock-name mock-123`,
+		Example: `keploy mock test -c "go test ./..." -p ./keploy/run-<timestamp>`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			mockName, err := cmd.Flags().GetString("mock-name")
-			if err != nil {
-				utils.LogError(logger, err, "failed to read mock-name flag")
-				return nil
-			}
-
 			replaySvc, err := serviceFactory.GetService(ctx, "test")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get replay service")
@@ -107,7 +101,6 @@ func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, servi
 			replayer := mockreplay.New(logger, cfg, runtime)
 			result, err := replayer.Replay(ctx, models.ReplayOptions{
 				Command:        cfg.Command,
-				MockName:       mockName,
 				FallBackOnMiss: cfg.Test.FallBackOnMiss,
 				ProxyPort:      cfg.ProxyPort,
 				DNSPort:        cfg.DNSPort,

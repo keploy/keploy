@@ -286,7 +286,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 					pathDefault = "./keploy"
 				}
 				cmd.Flags().StringP("path", "p", pathDefault, "Path to mock files")
-				cmd.Flags().String("mock-name", "", "Name of mock set to replay (defaults to latest)")
 				cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during replay")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -355,6 +354,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
+		cmd.Flags().String("path", c.cfg.Path, "Path to local directory where generated mocks are stored")
 
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
@@ -433,7 +433,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"removeUnusedMocks":     "remove-unused-mocks",
 		"goCoverage":            "go-coverage",
 		"fallBackOnMiss":        "fallBack-on-miss",
-		"mockName":              "mock-name",
 		"basePath":              "base-path",
 		"updateTemplate":        "update-template",
 		"mocking":               "mocking",

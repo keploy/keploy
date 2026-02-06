@@ -91,7 +91,6 @@ func (s *Server) handleManagerMockRecord(ctx context.Context, in ManagerInput) (
 func (s *Server) handleManagerMockTest(ctx context.Context, in ManagerInput) (*sdkmcp.CallToolResult, ManagerOutput, error) {
 	s.logger.Info("Manager: Executing mock_test action",
 		zap.String("command", in.Command),
-		zap.String("mockName", in.MockName),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
@@ -108,7 +107,6 @@ func (s *Server) handleManagerMockTest(ctx context.Context, in ManagerInput) (*s
 	// Create input for the mock replay handler
 	replayInput := MockReplayInput{
 		Command:        command,
-		MockName:       in.MockName,
 		FallBackOnMiss: in.FallBackOnMiss,
 	}
 

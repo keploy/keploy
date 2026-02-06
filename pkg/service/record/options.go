@@ -20,10 +20,12 @@ type StartOptions struct {
 	// EnableIncomingProxy starts the incoming proxy without persisting test cases.
 	EnableIncomingProxy bool
 	CaptureOutgoing     bool
-	WriteTestSetConfig  bool
-	IgnoreAppError      bool
-	MockDB              MockDB
-	OnMock              func(*models.Mock) error
+	// RootMocksUntilSession writes mocks to run-root until session_name is provided.
+	RootMocksUntilSession bool
+	WriteTestSetConfig    bool
+	IgnoreAppError        bool
+	MockDB                MockDB
+	OnMock                func(*models.Mock) error
 }
 
 // StartResult summarizes the recording session.
