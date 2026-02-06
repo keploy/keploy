@@ -328,7 +328,7 @@ section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout origin/risk-profile-v2
 go build -o my-app
-$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee test.log || true
+$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 --compare-all | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles
 endsec
@@ -349,7 +349,7 @@ endsec
 
 section "Run Final Validation Test"
 echo "Running final test run to confirm all tests now pass..."
-$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee final_test.log || true
+$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 --compare-all | tee final_test.log || true
 check_for_errors "final_test.log"
 endsec
 

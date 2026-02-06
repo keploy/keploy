@@ -263,6 +263,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 		GRPCReq:  grpcReq,
 		GRPCResp: grpcResp,
 	}
+
 	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, p.appPort)
 
 	if s, ok := status.FromError(respErr); ok && respErr != nil {
