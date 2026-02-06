@@ -69,6 +69,7 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 
 	oldCommand := r.cfg.Command
 	oldCommandType := r.cfg.CommandType
+	oldPath := r.cfg.Path
 	oldProxyPort := r.cfg.ProxyPort
 	oldDNSPort := r.cfg.DNSPort
 	oldContainerName := r.cfg.ContainerName
@@ -82,6 +83,9 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 	if opts.DNSPort != 0 {
 		r.cfg.DNSPort = opts.DNSPort
 	}
+	if strings.TrimSpace(opts.Path) != "" {
+		r.cfg.Path = strings.TrimSpace(opts.Path)
+	}
 	if r.cfg.ContainerName == "" {
 		if inferred := inferContainerName(command, utils.CmdType(commandType)); inferred != "" {
 			r.cfg.ContainerName = inferred
@@ -92,6 +96,7 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 	cleanup := func() {
 		r.cfg.Command = oldCommand
 		r.cfg.CommandType = oldCommandType
+		r.cfg.Path = oldPath
 		r.cfg.ProxyPort = oldProxyPort
 		r.cfg.DNSPort = oldDNSPort
 		if containerNameChanged {

@@ -40,8 +40,9 @@ type ManagerInput struct {
 	// Command is the application or test command (for mock_record and mock_test actions).
 	Command string `json:"command,omitempty" jsonschema:"Application or test command to run (required for keploy_mock_record and keploy_mock_test actions)"`
 
-	// Path is the base path for mock storage (default: ./keploy).
-	Path string `json:"path,omitempty" jsonschema:"Path for mock storage (default: ./keploy)"`
+	// Path is the base path for mock storage.
+	// Required for keploy_mock_test action. Optional for keploy_mock_record.
+	Path string `json:"path,omitempty" jsonschema:"Path for mock storage. Required for keploy_mock_test, optional for keploy_mock_record."`
 
 	// FallBackOnMiss indicates whether to fall back to real calls (for mock_test action).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when mock not found (default: false)"`

@@ -6,6 +6,8 @@ import "time"
 type ReplayOptions struct {
 	// Command is the application command to execute.
 	Command string
+	// Path is the base path where mocks are stored.
+	Path string
 	// ProxyPort is the proxy port (optional, uses default if 0).
 	ProxyPort uint32
 	// DNSPort is the DNS port (optional, uses default if 0).

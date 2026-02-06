@@ -281,15 +281,16 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			}
 			if cmd.Name() == "test" {
 				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-				pathDefault := c.cfg.Path
-				if pathDefault == "" {
-					pathDefault = "./keploy"
-				}
-				cmd.Flags().StringP("path", "p", pathDefault, "Path to mock files")
+				cmd.Flags().StringP("path", "p", "", "Path to mock files")
 				cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during replay")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+				if err := cmd.MarkFlagRequired("path"); err != nil {
+					errMsg := "failed to mark path as required flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 				return nil
 			}
 		}
@@ -992,11 +993,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					utils.LogError(c.logger, err, "failed to get path flag")
 					return errors.New("failed to get path flag")
 				}
+				path = strings.TrimSpace(path)
 				if path == "" {
-					path = c.cfg.Path
-				}
-				if path == "" {
-					path = "./keploy"
+					return errors.New("missing required --path flag")
 				}
 				c.cfg.Path = path
 				return nil

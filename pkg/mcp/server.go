@@ -216,6 +216,7 @@ IMPORTANT workflow:
 
 Parameters:
 - command (required): Any command to run with mocks (e.g., 'go test -v', 'npm test', 'go run main.go', './my-app')
+- path (required): Path to the mock directory to replay (e.g., './keploy/run-1234567890')
 - fallBackOnMiss (optional): Whether to make real calls when mock not found (default: false)`,
 	}, s.handleMockReplay)
 
@@ -232,7 +233,8 @@ This is the RECOMMENDED tool for interacting with Keploy. It supports three acti
 
 2. **keploy_mock_test** - Replay recorded mocks during testing
    - Required: command (e.g., 'go test -v', 'npm test')
-   - Optional: fallBackOnMiss, path
+   - Required: path (mock directory to replay)
+   - Optional: fallBackOnMiss
 
 3. **pipeline** - Generate CI/CD pipeline for Keploy mock testing
    - Optional: appCommand, defaultBranch (default: main), mockPath (default: ./keploy), cicdTool

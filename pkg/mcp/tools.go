@@ -68,6 +68,8 @@ type RecordConfiguration struct {
 type MockReplayInput struct {
 	// Command is the command to run with mocks.
 	Command string `json:"command" jsonschema:"Command to run with mocks (e.g. 'go test -v', 'npm test', 'go run main.go', or any other command)."`
+	// Path is the path to load mock files from.
+	Path string `json:"path" jsonschema:"Path to load mock files from (required). Example: './keploy/run-1234567890'"`
 	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches (optional, default: false).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
 }
@@ -91,6 +93,7 @@ type MockReplayOutput struct {
 // ReplayConfiguration shows the configuration used for replay.
 type ReplayConfiguration struct {
 	Command        string `json:"command"`
+	Path           string `json:"path"`
 	FallBackOnMiss bool   `json:"fallBackOnMiss"`
 }
 
@@ -292,6 +295,7 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolRequest, in MockReplayInput) (*sdkmcp.CallToolResult, MockReplayOutput, error) {
 	s.logger.Info("Mock replay tool invoked",
 		zap.String("command", in.Command),
+		zap.String("path", in.Path),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
@@ -301,6 +305,13 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		return nil, MockReplayOutput{
 			Success: false,
 			Message: "Error: 'command' is required. Please provide the test command to run (e.g., 'go test -v', 'npm test').",
+		}, nil
+	}
+	path := strings.TrimSpace(in.Path)
+	if path == "" {
+		return nil, MockReplayOutput{
+			Success: false,
+			Message: "Error: 'path' is required. Please provide the run/mock directory path (e.g., './keploy/run-1234567890').",
 		}, nil
 	}
 
@@ -314,17 +325,20 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 
 	config := &ReplayConfiguration{
 		Command:        command,
+		Path:           path,
 		FallBackOnMiss: in.FallBackOnMiss,
 	}
 
 	s.logger.Info("Starting mock replay with configuration",
 		zap.String("command", command),
+		zap.String("path", path),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
 	// Execute replay
 	result, err := s.mockReplayer.Replay(ctx, models.ReplayOptions{
 		Command:        command,
+		Path:           path,
 		FallBackOnMiss: in.FallBackOnMiss,
 	})
 	if err != nil {

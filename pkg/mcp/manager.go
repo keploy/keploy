@@ -91,6 +91,7 @@ func (s *Server) handleManagerMockRecord(ctx context.Context, in ManagerInput) (
 func (s *Server) handleManagerMockTest(ctx context.Context, in ManagerInput) (*sdkmcp.CallToolResult, ManagerOutput, error) {
 	s.logger.Info("Manager: Executing mock_test action",
 		zap.String("command", in.Command),
+		zap.String("path", in.Path),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
@@ -103,10 +104,19 @@ func (s *Server) handleManagerMockTest(ctx context.Context, in ManagerInput) (*s
 			Message: "Error: 'command' is required for mock_test action. Please provide the test command to run.",
 		}, nil
 	}
+	path := strings.TrimSpace(in.Path)
+	if path == "" {
+		return nil, ManagerOutput{
+			Success: false,
+			Action:  ActionMockTest,
+			Message: "Error: 'path' is required for mock_test action. Please provide the run/mock directory path.",
+		}, nil
+	}
 
 	// Create input for the mock replay handler
 	replayInput := MockReplayInput{
 		Command:        command,
+		Path:           path,
 		FallBackOnMiss: in.FallBackOnMiss,
 	}
 
