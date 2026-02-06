@@ -147,6 +147,9 @@ func TestMatch_RedirectToAssertionMatch_567(t *testing.T) {
 
 // TestMatch_InvalidJSONBody_321 ensures that when the actual response body is not valid JSON,
 // it is treated as plain text and compared directly, leading to a mismatch if different.
+// TestMatch_InvalidJSONBody_321 ensures that when the actual response body is not valid JSON,
+// it is treated as plain text and compared directly, leading to a mismatch if different.
+// This test uses compareAll=true to ensure body comparison happens.
 func TestMatch_InvalidJSONBody_321(t *testing.T) {
 	logger := zap.NewNop()
 	tc := &models.TestCase{
@@ -161,7 +164,8 @@ func TestMatch_InvalidJSONBody_321(t *testing.T) {
 	}
 	noiseConfig := map[string]map[string][]string{}
 
-	pass, res := Match(tc, actualResponse, noiseConfig, false, false, logger)
+	// compareAll=true ensures non-JSON bodies are compared
+	pass, res := Match(tc, actualResponse, noiseConfig, false, true, logger)
 
 	assert.False(t, pass)
 	assert.False(t, res.BodyResult[0].Normal)
