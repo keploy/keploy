@@ -21,7 +21,7 @@ type Instrumentation interface {
 
 type Service interface {
 	Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error
-	SetGlobalMockChannel(mockCh chan<- *models.Mock)
+	SetGlobalMockQueue(mockQueue *models.MockQueue)
 	GetNextTestSetID(ctx context.Context) (string, error)
 }
 

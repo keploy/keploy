@@ -27,7 +27,7 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
-	globalMockCh    chan<- *models.Mock
+	globalMockQueue *models.MockQueue
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
@@ -265,18 +265,15 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
-			// Send a copy to global mock channel for correlation manager if available
-			if r.globalMockCh != nil {
+			// Send a copy to global mock queue for correlation manager if available
+			if r.globalMockQueue != nil {
 				currMockID := r.mockDB.GetCurrMockID()
 				// Create a deep copy of the mock to avoid race conditions
 				mockCopy := *mock
 				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
-				select {
-				case r.globalMockCh <- &mockCopy:
-					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
-				default:
-					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
-				}
+				// Push to unbounded queue - never blocks, never drops
+				r.globalMockQueue.Push(&mockCopy)
+				r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
 			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
@@ -542,8 +539,8 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	r.logger.Info("Created test-set config file with metadata")
 }
 
-// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
-func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
-	r.globalMockCh = mockCh
-	r.logger.Info("Global mock channel set for record service")
+// SetGlobalMockQueue sets the global mock queue for sending mocks to correlation manager
+func (r *Recorder) SetGlobalMockQueue(mockQueue *models.MockQueue) {
+	r.globalMockQueue = mockQueue
+	r.logger.Info("Global mock queue set for record service")
 }
