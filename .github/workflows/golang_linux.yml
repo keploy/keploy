@@ -149,6 +149,17 @@ jobs:
       fail-fast: false
       matrix:
         branch: [main, udp-without-connect]
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: dns_mock (${{ matrix.branch }}) - ${{ matrix.config.job }}
     steps:
       - name: Checkout Keploy
         uses: actions/checkout@v4
@@ -160,11 +171,15 @@ jobs:
         with:
           go-version: '1.24.x'
 
-      - name: Download Keploy Binary
-        id: keploy
+      - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: build
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout DNS Mock App
         uses: actions/checkout@v4
@@ -175,8 +190,8 @@ jobs:
 
       - name: Run Test
         env:
-          RECORD_BIN: ${{ steps.keploy.outputs.path }}
-          REPLAY_BIN: ${{ steps.keploy.outputs.path }}
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd dns-mock-test
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/dns_mock/golang-linux.sh
