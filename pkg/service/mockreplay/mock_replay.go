@@ -214,7 +214,7 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 		return nil, err
 	}
 
-	r.logger.Info("Mock replay will load mocks on start-session; ensure your tests call /agent/hooks/start-session before any outbound calls")
+	r.logger.Info("Mock replay will load mocks on start-session; call /agent/hooks/start-session before outbound calls if you need per-session mock segregation")
 
 	if cmdType == utils.DockerCompose {
 		err = instrumentation.MakeAgentReadyForDockerCompose(grpCtx)

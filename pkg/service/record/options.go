@@ -20,7 +20,7 @@ type StartOptions struct {
 	// EnableIncomingProxy starts the incoming proxy without persisting test cases.
 	EnableIncomingProxy bool
 	CaptureOutgoing     bool
-	// RootMocksUntilSession writes mocks to run-root until session_name is provided.
+	// RootMocksUntilSession writes mocks to run-root until a session name is received in outgoing frames.
 	RootMocksUntilSession bool
 	WriteTestSetConfig    bool
 	IgnoreAppError        bool

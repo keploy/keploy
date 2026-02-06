@@ -156,6 +156,13 @@ func (a *Agent) StartMockSession(ctx context.Context, name string) error {
 	})
 }
 
+func (a *Agent) GetCurrentMockSessionName(ctx context.Context) string {
+	if a.Proxy == nil {
+		return ""
+	}
+	return a.Proxy.GetCurrentSessionName(ctx)
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, 1000)
 

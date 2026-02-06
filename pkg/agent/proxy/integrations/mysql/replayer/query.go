@@ -95,7 +95,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Match the request with the mock
-			resp, ok, err := matchCommand(ctx, logger, req, mockDb, decodeCtx, opts)
+			resp, ok, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",

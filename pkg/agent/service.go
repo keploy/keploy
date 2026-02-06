@@ -37,6 +37,7 @@ type Proxy interface {
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
 	StartMockSession(ctx context.Context, name string) error
+	GetCurrentSessionName(ctx context.Context) string
 }
 
 type IncomingProxy interface {

@@ -278,7 +278,11 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if err := enc.Encode(m); err != nil {
+			frame := &models.MockFrame{
+				SessionName: a.svc.GetCurrentMockSessionName(r.Context()),
+				Mock:        m,
+			}
+			if err := enc.Encode(frame); err != nil {
 				a.logger.Error("gob encode failed", zap.Error(err))
 				return
 			}

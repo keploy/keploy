@@ -151,7 +151,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	return nil
 }
 
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (*mysql.Response, bool, error) {
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -180,18 +180,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		utils.LogError(logger, err, "failed to get unfiltered mocks")
 		return nil, false, err
 	}
-
-	// Filter by session if name is provided
-	if opts.Name != "" {
-		var filtered []*models.Mock
-		for _, m := range unfiltered {
-			if m.Spec.Metadata != nil && m.Spec.Metadata["session_name"] == opts.Name {
-				filtered = append(filtered, m)
-			}
-		}
-		unfiltered = filtered
-	}
-
 	if len(unfiltered) == 0 {
 		utils.LogError(logger, nil, "no mysql mocks found")
 		return nil, false, fmt.Errorf("no mysql mocks found")

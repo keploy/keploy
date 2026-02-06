@@ -159,7 +159,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	return tcChan, nil
 }
 
-func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.MockFrame, error) {
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
 
@@ -186,7 +186,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	mockChan := make(chan *models.Mock)
+	mockChan := make(chan *models.MockFrame)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -206,22 +206,25 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		decoder := gob.NewDecoder(res.Body)
 
 		for {
-			var mock models.Mock
-			if err := decoder.Decode(&mock); err != nil {
+			var frame models.MockFrame
+			if err := decoder.Decode(&frame); err != nil {
 				if utils.IsShutdownError(err) {
 					// End of the stream or connection closed during shutdown
 					break
 				}
-				utils.LogError(a.logger, err, "failed to decode mock from stream")
+				utils.LogError(a.logger, err, "failed to decode mock frame from stream")
 				break
+			}
+			if frame.Mock == nil {
+				continue
 			}
 
 			select {
 			case <-ctx.Done():
 				// If the context is done, exit the loop
 				return nil
-			case mockChan <- &mock:
-				// Send the decoded mock to the channel
+			case mockChan <- &frame:
+				// Send the decoded frame to the channel
 			}
 		}
 		return nil

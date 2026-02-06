@@ -26,17 +26,6 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 		return err
 	}
 
-	// Filter by session if name is provided
-	if opts.Name != "" {
-		var filtered []*models.Mock
-		for _, m := range unfiltered {
-			if m.Spec.Metadata != nil && m.Spec.Metadata["session_name"] == opts.Name {
-				filtered = append(filtered, m)
-			}
-		}
-		unfiltered = filtered
-	}
-
 	var configMocks []*models.Mock
 	var hasMySQLMocks bool
 	var totalMySQLMocks int

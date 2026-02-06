@@ -19,7 +19,7 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
-func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb, opts models.OutgoingOptions) (bool, []models.Payload, error) {
+func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -36,11 +36,6 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 			for _, mock := range mocks {
 				if mock.Kind != "Generic" {
 					continue
-				}
-				if opts.Name != "" {
-					if mock.Spec.Metadata == nil || mock.Spec.Metadata["session_name"] != opts.Name {
-						continue
-					}
 				}
 				if mock.TestModeInfo.IsFiltered {
 					filteredMocks = append(filteredMocks, mock)

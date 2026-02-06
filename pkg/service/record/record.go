@@ -357,7 +357,11 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 
 	if opts.CaptureOutgoing {
 		errGrp.Go(func() error {
-			count, counts, err := consumeOutgoing(reqCtx, frames.Outgoing, func(mock *models.Mock) error {
+			count, counts, err := consumeOutgoing(reqCtx, frames.Outgoing, func(frame *models.MockFrame) error {
+				if frame == nil || frame.Mock == nil {
+					return nil
+				}
+				mock := frame.Mock
 				if r.globalMockCh != nil {
 					currMockID := mockDB.GetCurrMockID()
 					mockCopy := mock.DeepCopy()
@@ -377,8 +381,8 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 				if opts.RootMocksUntilSession {
 					targetTestSetID = ""
 				}
-				if mock.Spec.Metadata != nil && mock.Spec.Metadata["session_name"] != "" {
-					targetTestSetID = mock.Spec.Metadata["session_name"]
+				if frame.SessionName != "" {
+					targetTestSetID = frame.SessionName
 				}
 
 				if err := mockDB.InsertMock(ctx, mock, targetTestSetID); err != nil {
@@ -495,7 +499,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
-	outgoingChan := make(chan *models.Mock)
+	outgoingChan := make(chan *models.MockFrame)
 
 	incomingEnabled := opts.CaptureIncoming || opts.EnableIncomingProxy
 	if !incomingEnabled {
@@ -697,19 +701,20 @@ func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
 	r.logger.Info("Global mock channel set for record service")
 }
 
-func consumeOutgoing(ctx context.Context, outgoing <-chan *models.Mock, onMock func(*models.Mock) error) (int, map[string]int, error) {
+func consumeOutgoing(ctx context.Context, outgoing <-chan *models.MockFrame, onMock func(*models.MockFrame) error) (int, map[string]int, error) {
 	counts := make(map[string]int)
 	total := 0
 
-	for mock := range outgoing {
-		if mock == nil {
+	for frame := range outgoing {
+		if frame == nil || frame.Mock == nil {
 			continue
 		}
 		if onMock != nil {
-			if err := onMock(mock); err != nil {
+			if err := onMock(frame); err != nil {
 				return total, counts, err
 			}
 		}
+		mock := frame.Mock
 		if kind := mock.GetKind(); kind != "" {
 			counts[kind]++
 		}

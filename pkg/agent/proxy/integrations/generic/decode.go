@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
 	errCh := make(chan error, 1)
@@ -54,7 +54,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb, opts)
+			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
 			}

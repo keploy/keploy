@@ -145,6 +145,14 @@ func (p *Proxy) StartMockSession(ctx context.Context, name string) error {
 	return nil
 }
 
+func (p *Proxy) GetCurrentSessionName(_ context.Context) string {
+	session, ok := p.sessions.Get(uint64(0))
+	if !ok || session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.OutgoingOptions.Name)
+}
+
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {

@@ -20,5 +20,7 @@ type Service interface {
 	SetGracefulShutdown(ctx context.Context) error
 	// StartSession starts a new recording/replay session with the given name
 	StartMockSession(ctx context.Context, name string) error
+	// GetCurrentMockSessionName returns the currently active mock session name.
+	GetCurrentMockSessionName(ctx context.Context) string
 	// SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
 }

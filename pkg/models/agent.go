@@ -8,6 +8,13 @@ type OutgoingReq struct {
 	OutgoingOptions OutgoingOptions `json:"outgoingOptions"`
 }
 
+// MockFrame carries a recorded mock with its active session context.
+// SessionName is transient stream metadata and is not persisted into mock files.
+type MockFrame struct {
+	SessionName string `json:"sessionName,omitempty"`
+	Mock        *Mock  `json:"mock"`
+}
+
 type IncomingReq struct {
 	IncomingOptions IncomingOptions `json:"incomingOptions"`
 }

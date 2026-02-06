@@ -112,9 +112,6 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		"responseOperation": responseOperation,
 		"connID":            ctx.Value(models.ClientConnectionIDKey).(string),
 	}
-	if opts.Name != "" {
-		meta["session_name"] = opts.Name
-	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,

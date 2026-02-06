@@ -83,9 +83,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
 				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-				if opts.Name != "" {
-					metadata["session_name"] = opts.Name
-				}
 				// Save the mock
 				mock := &models.Mock{
 					Version: models.GetVersion(),
@@ -128,9 +125,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
 					metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
-					if opts.Name != "" {
-						metadata["session_name"] = opts.Name
-					}
 					// create the mock
 					mock := &models.Mock{
 						Version: models.GetVersion(),
