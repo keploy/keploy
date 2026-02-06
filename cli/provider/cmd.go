@@ -231,6 +231,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
 		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
 		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
+		cmd.Flags().Float32("temperature", 0.0, "Temperature parameter for the AI model (0.0-2.0). Lower values are more deterministic, higher values more creative.")
+		cmd.Flags().String("reasoning-effort", "", "Reasoning effort for the AI model (low, medium, high). Controls the depth of reasoning.")
 		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"
@@ -395,6 +397,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"model":                 "model",
 		"llmApiVersion":         "llm-api-version",
 		"configPath":            "config-path",
+		"temperature":           "temperature",
+		"reasoningEffort":       "reasoning-effort",
 		"path":                  "path",
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
@@ -1186,6 +1190,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if os.Getenv("API_KEY") == "" {
 			utils.LogError(c.logger, nil, "API_KEY is not set")
 			return errors.New("API_KEY is not set")
+		}
+		// Validate temperature range (0.0-2.0)
+		if c.cfg.Gen.Temperature != nil {
+			temp := *c.cfg.Gen.Temperature
+			if temp < 0.0 || temp > 2.0 {
+				errMsg := "temperature must be between 0.0 and 2.0"
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+		}
+		// Validate reasoning effort values
+		if c.cfg.Gen.ReasoningEffort != "" {
+			validEfforts := map[string]bool{"low": true, "medium": true, "high": true}
+			if !validEfforts[c.cfg.Gen.ReasoningEffort] {
+				errMsg := "reasoning-effort must be one of: low, medium, high"
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
 			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
