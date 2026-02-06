@@ -787,7 +787,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		}
 		p.logger.Warn("proxy stopped with cleanup errors", zap.Int("error_count", len(cleanupErrors)))
 	} else {
-		p.logger.Debug("proxy stopped cleanly...")
+		p.logger.Info("proxy stopped cleanly...")
 	}
 }
 
