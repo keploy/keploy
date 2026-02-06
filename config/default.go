@@ -60,7 +60,7 @@ test:
   protoFile: ""
   protoDir: ""
   protoInclude: []
-  skipNonJsonBody: true
+  compareAll: false
 record:
   recordTimer: 0s
   filters: []

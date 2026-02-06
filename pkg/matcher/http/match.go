@@ -102,7 +102,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	} else {
 		// Skip body comparison for non-JSON responses unless compareAll is enabled
 		if !compareAll && bodyType != models.JSON {
-			logger.Info("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
+			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
 		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
