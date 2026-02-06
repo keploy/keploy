@@ -11,6 +11,15 @@ set -Eeuo pipefail
 
 MODE=${1:-incoming}
 
+# TODO: remove it after v3 latest release 
+BIG_PAYLOAD=${2:-false}
+
+BIG_PAYLOAD_FLAG=""
+if [ "$BIG_PAYLOAD" = "true" ]; then
+  echo "🚀 Big payload mode enabled."
+  BIG_PAYLOAD_FLAG="--bigPayload"
+fi
+
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 if [ -n "${KEPLOY_CI_API_KEY:-}" ]; then
   echo "📌 Setting up Keploy API Key..."
@@ -32,7 +41,7 @@ command -v curl >/dev/null 2>&1 || { echo "curl not found"; exit 1; }
 
 # Generate keploy config and add duration_ms noise to avoid timing diffs
 rm -f ./keploy.yml keploy
-sudo -E env PATH="$PATH" "$RECORD_BIN" config --generate
+"$RECORD_BIN" config --generate
 config_file="./keploy.yml"
 if [ -f "$config_file" ]; then
   sed -i 's/global: {}/global: {"body": {"duration_ms":[]}}/' "$config_file"
@@ -123,9 +132,9 @@ if [ "$MODE" = "incoming" ]; then
 
   # Start server with keploy in record mode
   if [[ "$RECORD_SRC" == "latest" ]]; then
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+    "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
   else
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
+    "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" 2>&1 | tee record_incoming.txt &
   fi
  
  sleep 10
@@ -135,7 +144,14 @@ if [ "$MODE" = "incoming" ]; then
  "$FUZZER_CLIENT_BIN" --http :18080 2>&1 | tee client_incoming.txt &
  sleep 10
 
-
+ echo "Waiting for client to listen on 18080..."
+ for i in {1..60}; do
+  if nc -z localhost 18080; then
+   echo "Client is up!"
+   break
+  fi
+  sleep 1
+ done
  # Kick off 1000 unary RPC fuzz calls
  curl -sS -X POST http://localhost:18080/run \
    -H 'Content-Type: application/json' \
@@ -177,7 +193,7 @@ if [ "$MODE" = "incoming" ]; then
 
 
  # Replay
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true --disableMockUpload 2>&1 | tee test_incoming.txt
+ "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" --api-timeout=200 --skip-coverage=true --disableMockUpload 2>&1 | tee test_incoming.txt
  echo "checking for errors"
  check_for_errors test_incoming.txt
  check_test_report
@@ -226,10 +242,17 @@ elif [ "$MODE" = "outgoing" ]; then
 
 
  # Record the client (it makes outgoing RPCs)
- sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
+ "$RECORD_BIN" record -c "$FUZZER_CLIENT_BIN --http :18080" 2>&1 | tee record_outgoing.txt &
  sleep 10
 
-
+ echo "Waiting for client to listen on 18080..."
+ for i in {1..60}; do
+  if nc -z localhost 18080; then
+   echo "Client is up!"
+   break
+  fi
+  sleep 1
+ done
  curl -sS -X POST http://localhost:18080/run \
    -H 'Content-Type: application/json' \
    -d '{
@@ -261,7 +284,7 @@ elif [ "$MODE" = "outgoing" ]; then
 
 
  # Replay the client (relying on mocks)
- sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true --disableMockUpload 2>&1 | tee test_outgoing.txt
+ "$REPLAY_BIN" test -c "$FUZZER_CLIENT_BIN --http :18080" --skip-coverage=true --disableMockUpload 2>&1 | tee test_outgoing.txt
  echo "checking for errors"
  check_for_errors test_outgoing.txt
  check_test_report

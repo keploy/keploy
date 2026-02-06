@@ -50,24 +50,24 @@ Note: If installed keploy without One Click Install, use "keploy example --custo
 var Examples = `
 Golang Application
 	Record:
-	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
+	keploy record -c "/path/to/user/app/binary"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
+	keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
-	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
+	keploy record -c “npm start --prefix /path/to/node/app"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
-	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
+	keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
+	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
 
 Docker
 	Alias:
@@ -80,6 +80,7 @@ Docker
 	Test:
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 10 --buildDelay 60
 
+Note: Keploy will automatically prompt for sudo password when elevated privileges are required for eBPF operations.
 `
 
 var ExampleOneClickInstall = `
@@ -251,6 +252,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
@@ -301,6 +303,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pgid of the keploy client)")
 		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.Agent.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.Agent.DnsPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
@@ -396,6 +399,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
 		"proxyPort":             "proxy-port",
+		"incomingProxyPort":     "incoming-proxy-port",
 		"dnsPort":               "dns-port",
 		"command":               "command",
 		"cmdType":               "cmd-type",
@@ -461,7 +465,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 
 	if c.cfg.AppName == "" {
-		c.logger.Info("Using the last directory name as appName : " + appName)
+		c.logger.Debug("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	} else if c.cfg.AppName != appName {
 		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + ")")
@@ -528,7 +532,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 		IsConfigFileFound = false
-		c.logger.Info("config file not found; proceeding with flags only")
+		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
 		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
 		lastDir, err := utils.GetLastDirectory()
@@ -570,7 +574,10 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-	PrintLogo(os.Stdout, disableAnsi)
+	// Skip printing logo for agent command to avoid duplicate logos in native mode
+	if cmd.Name() != "agent" {
+		PrintLogo(os.Stdout, disableAnsi)
+	}
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
@@ -592,14 +599,27 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.E2E = true
 	}
 
-	if c.cfg.EnableTesting {
-		// Add mode to logger to debug the keploy during testing
+	// Add mode to logger for agent command to differentiate agent logs from client logs
+	if cmd.Name() == "agent" {
 		logger, err := log.AddMode(cmd.Name())
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to add mode to logger"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
+		}
+	}
+
+	if c.cfg.EnableTesting {
+		// Add mode to logger to debug the keploy during testing
+		if cmd.Name() != "agent" { // Skip if already added for agent
+			logger, err := log.AddMode(cmd.Name())
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to add mode to logger"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 		c.cfg.DisableTele = true
 	}
@@ -872,8 +892,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
-		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && runtime.GOOS != "linux" { // need to check this one
-			return errors.New("non docker command not supported for os : " + runtime.GOOS)
+		if (c.cfg.CommandType == string(utils.Native) || c.cfg.CommandType == string(utils.Empty)) && !(runtime.GOOS == "linux" || (runtime.GOOS == "windows" && runtime.GOARCH == "amd64")) {
+			return fmt.Errorf("non docker command not supported for OS: %s , Arch: %s", runtime.GOOS, runtime.GOARCH)
 		}
 
 		// empty the command if base path is provided, because no need of command even if provided
@@ -935,6 +955,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Path = absPath + "/keploy"
 
+		// Check and fix keploy folder permissions for native mode only
+		// (handles root-owned files from older sudo-based versions)
+		// Docker commands use sudo re-exec, so they run as root and don't need this
+		cmdType := utils.FindDockerCmd(c.cfg.Command)
+		if !utils.IsDockerCmd(cmdType) {
+			// Native mode: fix permissions immediately (this caches sudo credentials)
+			if err := utils.EnsureKeployFolderPermissions(cmd.Context(), c.logger, c.cfg.Path); err != nil {
+				utils.LogError(c.logger, err, "failed to ensure keploy folder permissions")
+				return err
+			}
+		}
+
 		// handle the app command
 		if c.cfg.Command == "" {
 			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
@@ -958,16 +990,21 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
-
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
 			//check if the keploy folder exists
+			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
 				recordCmd := models.HighlightGrayString("keploy record")
-				errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
-				utils.LogError(c.logger, nil, errMsg)
-				return errors.New(errMsg)
+				c.logger.Info(fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd))
+				cmdType := utils.CmdType(c.cfg.CommandType)
+				if cmdType == utils.DockerRun || cmdType == utils.DockerStart || cmdType == utils.DockerCompose {
+					c.logger.Info(`Example: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+				} else {
+					c.logger.Info(`Example: keploy record -c "./myApp serve" --delay 6`)
+				}
+				os.Exit(1)
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
@@ -1210,6 +1247,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ProxyPort = proxyPort
+
+		incomingProxyPort, err := cmd.Flags().GetUint16("incoming-proxy-port")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get incomingProxyPort flag")
+			return nil
+		}
+		c.cfg.Agent.IncomingProxyPort = incomingProxyPort
 
 		dnsPort, err := cmd.Flags().GetUint32("dns-port")
 		if err != nil {

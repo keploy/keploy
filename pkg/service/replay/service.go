@@ -28,6 +28,9 @@ type Instrumentation interface {
 	StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	UpdateMockParams(ctx context.Context, params models.MockFilterParams) error
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
+	// NotifyGracefulShutdown notifies the agent that the application is shutting down gracefully.
+	// When this is called, connection errors will be logged as debug instead of error.
+	NotifyGracefulShutdown(ctx context.Context) error
 }
 
 type Service interface {
@@ -102,7 +105,7 @@ type TestHooks interface {
 	BeforeTestRun(ctx context.Context, testRunID string) error
 	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
-	BeforeTestResult(ctx context.Context) error
+	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
 }

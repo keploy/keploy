@@ -65,18 +65,14 @@ type Hooks struct {
 	socket     link.Link
 	connect4   link.Link
 	gp4        link.Link
-	udpp4      link.Link
-	tcpv4      link.Link
-	tcpv4Ret   link.Link
 	connect6   link.Link
 	gp6        link.Link
-	tcpv6      link.Link
-	tcpv6Ret   link.Link
 	objects    bpfObjects
 	cgBind4    link.Link
 	cgBind6    link.Link
 	bindEnter  link.Link
 	BindEvents *ebpf.Map
+	sockops    link.Link
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -116,20 +112,48 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
-	if err := loadBpfObjects(&objs, nil); err != nil {
-		var ve *ebpf.VerifierError
-		if errors.As(err, &ve) {
-			errString := strings.Join(ve.Log, "\n")
-			h.logger.Debug("verifier log: ", zap.String("err", errString))
-		}
-		utils.LogError(h.logger, err, "failed to load eBPF objects")
+	bpfopts := &ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
+			LogSizeStart: 1 * 1024 * 1024,
+		},
+	}
+
+	spec, err := loadBpf()
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to load BPF spec")
 		return err
 	}
 
+	programs := []struct {
+		name  string
+		pType ebpf.ProgramType
+		aType ebpf.AttachType
+	}{
+		{"k_sockops", ebpf.SockOps, ebpf.AttachCGroupSockOps},
+	}
+
+	for _, p := range programs {
+		if prog, ok := spec.Programs[p.name]; ok {
+			prog.Type = p.pType
+			prog.AttachType = p.aType
+		}
+	}
+
+	// Now load and assign into the kernel with the corrected spec
+	if err := spec.LoadAndAssign(&objs, bpfopts); err != nil {
+		var ve *ebpf.VerifierError
+		if errors.As(err, &ve) {
+			fmt.Printf("VERIFIER FAILURE:\n%s\n", strings.Join(ve.Log, "\n"))
+		} else {
+			fmt.Printf("SYSCALL FAILURE: %v\n", err)
+		}
+		return err
+	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.KeployClientRegistrationMap
-	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	h.clientRegistrationMap = objs.M_1770033571001
+	h.agentRegistartionMap = objs.M_1770033571002
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -145,26 +169,24 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
 
-	tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_connect")
-		return err
-	}
-	h.tcpv4 = tcpC4
-
-	tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
-		return err
-	}
-	h.tcpv4Ret = tcpRC4
-
 	// Get the first-mounted cgroupv2 path.
 	cGroupPath, err := agent.DetectCgroupPath(h.logger)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to detect the cgroup path")
 		return err
 	}
+	h.logger.Debug("Attaching SockOps...")
+	sockops, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cGroupPath,
+		Attach:  ebpf.AttachCGroupSockOps,
+		Program: objs.K_sockops,
+	})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach SockOps")
+		return err
+	}
+	h.sockops = sockops
+
 	if opts.Mode == models.MODE_RECORD {
 
 		h.BindEvents = objs.BindEvents
@@ -216,20 +238,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.gp4 = gp4
 
-	tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
-		return err
-	}
-	h.tcpv6 = tcpC6
-
-	tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{})
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
-		return err
-	}
-	h.tcpv6Ret = tcpRC6
-
 	c6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCGroupInet6Connect,
@@ -241,7 +249,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 	h.connect6 = c6
-
 	gp6, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cGroupPath,
 		Attach:  ebpf.AttachCgroupInet6GetPeername,
@@ -306,42 +313,37 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
-	if err := h.socket.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the socket")
+	if h.socket != nil {
+		if err := h.socket.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the socket")
+		}
 	}
 
-	if err := h.udpp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the udpp4")
+	if h.connect4 != nil {
+		if err := h.connect4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect4")
+		}
 	}
 
-	if err := h.connect4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect4")
+	if h.gp4 != nil {
+		if err := h.gp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp4")
+		}
 	}
 
-	if err := h.gp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp4")
+	if h.connect6 != nil {
+		if err := h.connect6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect6")
+		}
+	}
+	if h.gp6 != nil {
+		if err := h.gp6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp6")
+		}
 	}
 
-	if err := h.tcpv4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4")
-	}
-
-	if err := h.tcpv4Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
-	}
-
-	if err := h.connect6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect6")
-	}
-	if err := h.gp6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp6")
-	}
-
-	if err := h.tcpv6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6")
-	}
-	if err := h.tcpv6Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+	if h.sockops != nil {
+		h.sockops.Close()
 	}
 
 	// Close eBPF objects with proper synchronization
@@ -368,11 +370,11 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 			}
 		}
 	}
-	h.logger.Info("eBPF resources released successfully...")
+	h.logger.Debug("eBPF resources released successfully...")
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
-	h.logger.Info("Registering the client Info with keploy")
+	h.logger.Debug("Registering the client Info with keploy")
 	// Register the client and start processing
 
 	clientInfo := structs.ClientInfo{}

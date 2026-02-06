@@ -101,17 +101,12 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
-sudo "$RECORD_BIN" agent \
- > keploy_agent_record.log 2>&1 &
-AGENT_PID=$!
-echo "Keploy Agent PID: $AGENT_PID"
-
 for i in 1 2; do
   section "Record iteration $i"
   app_name="nodeApp_${i}"
 
   # Start keploy recording in background, capture PID
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c 'npm start' \
+  "$RECORD_BIN" record -c 'npm start' \
     > "${app_name}.txt" 2>&1 &
   KEPLOY_PID=$!
 
@@ -181,7 +176,7 @@ run_replay() {
 
   section "Replay #$idx (args: ${extra_args:-<none>})"
   set +e
-  sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c 'npm start' --delay 10 $extra_args \
+  "$REPLAY_BIN" test -c 'npm start' --delay 10 $extra_args \
     > "$logfile" 2>&1
   local rc=$?
   set -e

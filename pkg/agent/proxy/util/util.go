@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/sync/errgroup"
 
@@ -108,6 +109,8 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
+					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
+
 				}
 				errChannel <- err
 				return
@@ -187,7 +190,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 
 	if err == io.EOF && len(initialBuf) == 0 {
 		logger.Debug("received EOF, closing conn", zap.Error(err))
-		return nil, readErr
+		return nil, io.EOF
 	}
 
 	if err != nil && err != io.EOF {
