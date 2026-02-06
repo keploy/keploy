@@ -79,6 +79,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
 			return nil, err
 		}
+	case models.DNS:
+		dnsSpec := models.DNSSchema{
+			Metadata:         mock.Spec.Metadata,
+			Request:          *mock.Spec.DNSReq,
+			Response:         *mock.Spec.DNSResp,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(dnsSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the dns input-output as yaml")
+			return nil, err
+		}
 	case models.GENERIC:
 		genericSpec := models.GenericSchema{
 			Metadata:         mock.Spec.Metadata,
@@ -250,6 +263,24 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				Created:          httpSpec.Created,
 				ReqTimestampMock: httpSpec.ReqTimestampMock,
 				ResTimestampMock: httpSpec.ResTimestampMock,
+			}
+		case models.DNS:
+			dnsSpec := models.DNSSchema{}
+			err := m.Spec.Decode(&dnsSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into dns mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			metadata := dnsSpec.Metadata
+			if metadata == nil {
+				metadata = map[string]string{}
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         metadata,
+				DNSReq:           &dnsSpec.Request,
+				DNSResp:          &dnsSpec.Response,
+				ReqTimestampMock: dnsSpec.ReqTimestampMock,
+				ResTimestampMock: dnsSpec.ResTimestampMock,
 			}
 		case models.Mongo:
 			mongoSpec := models.MongoSpec{}

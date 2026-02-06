@@ -30,6 +30,7 @@ const (
 	PostgresV2  Kind = "PostgresV2"
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
+	DNS         Kind = "DNS"
 )
 
 type Mock struct {
@@ -87,6 +88,8 @@ type MockSpec struct {
 	GRPCResp         *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
 	MySQLRequests    []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
 	MySQLResponses   []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	DNSReq           *DNSReq          `json:"dnsReq,omitempty" bson:"dns_req,omitempty"`
+	DNSResp          *DNSResp         `json:"dnsResp,omitempty" bson:"dns_resp,omitempty"`
 	ReqTimestampMock time.Time        `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock time.Time        `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
@@ -191,6 +194,14 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.GRPCResp != nil {
 		grpcRespCopy := *m.Spec.GRPCResp
 		c.Spec.GRPCResp = &grpcRespCopy
+	}
+	if m.Spec.DNSReq != nil {
+		dnsReqCopy := *m.Spec.DNSReq
+		c.Spec.DNSReq = &dnsReqCopy
+	}
+	if m.Spec.DNSResp != nil {
+		dnsRespCopy := *m.Spec.DNSResp
+		c.Spec.DNSResp = &dnsRespCopy
 	}
 
 	return &c
