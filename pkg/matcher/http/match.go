@@ -27,7 +27,7 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger) (bool, *models.Result) {
 	bodyType := models.Plain
 	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
@@ -100,7 +100,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
-		if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
+		// Skip body comparison for non-JSON responses unless compareAll is enabled
+		if !compareAll && bodyType != models.JSON {
+			logger.Info("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
+			// Mark body as passing when compareAll is false and body is not JSON
+		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
 		}
 	}

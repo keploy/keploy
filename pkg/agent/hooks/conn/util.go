@@ -25,6 +25,9 @@ type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.Te
 
 var CaptureHook CaptureFunc = Capture
 
+// MaxTestCaseSize is the maximum combined size of HTTP request and response (5MB)
+const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
 	var reqBody []byte
 	if req.Body != nil { // Read
@@ -53,6 +56,18 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http response body")
+		return
+	}
+
+	// Check if combined request and response size exceeds 5MB limit
+	totalSize := len(reqBody) + len(respBody)
+	if totalSize > MaxTestCaseSize {
+		logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
+			zap.Int("totalSize", totalSize),
+			zap.Int("reqBodySize", len(reqBody)),
+			zap.Int("respBodySize", len(respBody)),
+			zap.String("url", req.URL.String()),
+			zap.String("method", req.Method))
 		return
 	}
 
