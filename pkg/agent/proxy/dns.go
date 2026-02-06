@@ -8,8 +8,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -80,11 +84,19 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
+	session, hasSession := p.sessions.Get(uint64(0))
+	mode := models.GetMode()
+	mockingEnabled := true
+	if hasSession && session != nil {
+		mode = session.Mode
+		mockingEnabled = session.Mocking
+	}
 	p.logger.Debug("Got some Dns queries")
 	for _, question := range r.Question {
 		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
 
 		key := generateCacheKey(question.Name, question.Qtype)
+		reqTimestamp := time.Now().UTC()
 
 		// Clear cache for MongoDB SRV queries to ensure fresh resolution
 		if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
@@ -99,13 +111,18 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		cache.RUnlock()
 
 		if !found {
+			mocked := false
+			if mode == models.MODE_TEST && mockingEnabled {
+				answers, mocked = p.getMockedDNSAnswers(question)
+			}
+
 			// If not found in cache, resolve the DNS query only in case of record mode
 			//TODO: Add support for passThrough here using the src<->dst mapping
-			if models.GetMode() == models.MODE_RECORD {
+			if !mocked && mode == models.MODE_RECORD {
 				answers = resolveDNSQuery(p.logger, question.Name, question.Qtype)
 			}
 
-			if len(answers) == 0 {
+			if !mocked && len(answers) == 0 {
 				switch question.Qtype {
 				// If the resolution failed, return a default A record with Proxy IP
 				// or AAAA record with Proxy IP6
@@ -160,6 +177,9 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				}
 
 			}
+			if mode == models.MODE_RECORD {
+				p.recordDNSMock(question, answers, reqTimestamp, time.Now().UTC(), session)
+			}
 			p.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
 
 			// Cache the answer
@@ -181,6 +201,196 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to write dns info back to the client")
 	}
+}
+
+func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
+	mgrIface, ok := p.MockManagers.Load(uint64(0))
+	if !ok {
+		return nil, false
+	}
+	mgr, ok := mgrIface.(*MockManager)
+	if !ok || mgr == nil {
+		return nil, false
+	}
+
+	for {
+		mocks, err := mgr.GetUnFilteredMocksByKind(models.DNS)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to get dns mocks")
+			return nil, false
+		}
+		if len(mocks) == 0 {
+			return nil, false
+		}
+
+		var filteredMocks []*models.Mock
+		var unfilteredMocks []*models.Mock
+
+		for _, mock := range mocks {
+			if mock == nil {
+				continue
+			}
+			if mock.TestModeInfo.IsFiltered {
+				filteredMocks = append(filteredMocks, mock)
+			} else {
+				unfilteredMocks = append(unfilteredMocks, mock)
+			}
+		}
+
+		if matchedMock, answers := findDNSMock(filteredMocks, question, p.logger); matchedMock != nil {
+			if p.updateDNSMock(mgr, matchedMock) {
+				return answers, true
+			}
+			continue
+		}
+
+		if matchedMock, answers := findDNSMock(unfilteredMocks, question, p.logger); matchedMock != nil {
+			if p.updateDNSMock(mgr, matchedMock) {
+				return answers, true
+			}
+			continue
+		}
+
+		return nil, false
+	}
+}
+
+func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, []dns.RR) {
+	for _, mock := range mocks {
+		if mock == nil || mock.Spec.DNSReq == nil {
+			continue
+		}
+		if !dnsRequestMatches(mock.Spec.DNSReq, question) {
+			continue
+		}
+		var answers []dns.RR
+		if mock.Spec.DNSResp != nil {
+			answers = decodeDNSAnswers(logger, mock.Spec.DNSResp.Answers)
+		}
+		return mock, answers
+	}
+	return nil, nil
+}
+
+func dnsRequestMatches(recorded *models.DNSReq, question dns.Question) bool {
+	if recorded == nil {
+		return false
+	}
+	if recorded.Qtype != 0 && recorded.Qtype != question.Qtype {
+		return false
+	}
+	if recorded.Qclass != 0 && recorded.Qclass != question.Qclass {
+		return false
+	}
+	return strings.EqualFold(dns.Fqdn(recorded.Name), dns.Fqdn(question.Name))
+}
+
+func decodeDNSAnswers(logger *zap.Logger, answers []string) []dns.RR {
+	if len(answers) == 0 {
+		return nil
+	}
+	decoded := make([]dns.RR, 0, len(answers))
+	for _, raw := range answers {
+		rr, err := dns.NewRR(raw)
+		if err != nil {
+			if logger != nil {
+				logger.Debug("failed to parse dns answer", zap.String("answer", raw), zap.Error(err))
+			}
+			continue
+		}
+		decoded = append(decoded, rr)
+	}
+	return decoded
+}
+
+func encodeDNSAnswers(answers []dns.RR) []string {
+	if len(answers) == 0 {
+		return nil
+	}
+	encoded := make([]string, 0, len(answers))
+	for _, rr := range answers {
+		if rr == nil {
+			continue
+		}
+		encoded = append(encoded, rr.String())
+	}
+	return encoded
+}
+
+func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
+	if mgr == nil || matchedMock == nil {
+		return false
+	}
+	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
+	id, isFiltered, sortOrder := matchedMock.TestModeInfo.Snapshot()
+
+	originalMatchedMock := &models.Mock{
+		Name: matchedMock.Name,
+		Kind: matchedMock.Kind,
+		TestModeInfo: models.TestModeInfo{
+			ID:         id,
+			IsFiltered: isFiltered,
+			SortOrder:  sortOrder,
+		},
+	}
+
+	updatedMock := &models.Mock{
+		Version:      matchedMock.Version,
+		Name:         matchedMock.Name,
+		Kind:         matchedMock.Kind,
+		Spec:         matchedMock.Spec,
+		ConnectionID: matchedMock.ConnectionID,
+		TestModeInfo: models.TestModeInfo{
+			ID:         id,
+			IsFiltered: false,
+			SortOrder:  pkg.GetNextSortNum(),
+		},
+	}
+
+	return mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
+}
+
+func (p *Proxy) recordDNSMock(question dns.Question, answers []dns.RR, reqTime, resTime time.Time, session *agent.Session) {
+	if session == nil || session.MC == nil {
+		return
+	}
+
+	mock := &models.Mock{
+		Version: models.GetVersion(),
+		Name:    "mocks",
+		Kind:    models.DNS,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{
+				"name":  "DNS",
+				"qtype": dns.TypeToString[question.Qtype],
+			},
+			DNSReq: &models.DNSReq{
+				Name:   dns.Fqdn(question.Name),
+				Qtype:  question.Qtype,
+				Qclass: question.Qclass,
+			},
+			DNSResp: &models.DNSResp{
+				Answers: encodeDNSAnswers(answers),
+			},
+			ReqTimestampMock: reqTime,
+			ResTimestampMock: resTime,
+		},
+	}
+
+	if session.Synchronous {
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.SetOutputChannel(session.MC)
+			mgr.AddMock(mock)
+			return
+		}
+	}
+	session.MC <- mock
+}
+
+func clearDNSCache() {
+	cache.Lock()
+	cache.m = make(map[string][]dns.RR)
+	cache.Unlock()
 }
 
 // TODO: passThrough the dns queries rather than resolving them.
