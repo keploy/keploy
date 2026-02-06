@@ -148,7 +148,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: [main, udp-without-connect]
+        branch: [udp-with-connect, udp-without-connect]
         config:
           - job: record_latest_replay_build
             record_src: latest
