@@ -264,19 +264,6 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 		GRPCResp: grpcResp,
 	}
 
-	// Check if combined request and response size exceeds 5MB limit
-	totalSize := len(reqBuf.Bytes()) + len(respBuf.Bytes())
-	if totalSize > Utils.MaxTestCaseSize {
-		p.logger.Error("gRPC test case data exceeds 5MB limit, skipping capture",
-			zap.Int("totalSize", totalSize),
-			zap.Int("reqSize", len(reqBuf.Bytes())),
-			zap.Int("respSize", len(respBuf.Bytes())),
-			zap.String("method", fullMethod))
-		if s, ok := status.FromError(respErr); ok && respErr != nil {
-			return s.Err()
-		}
-		return nil
-	}
 
 	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, p.appPort)
 
