@@ -124,8 +124,7 @@ func (p *grpcTestCaseProxy) getClientConn(ctx context.Context) (*grpc.ClientConn
 	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
 
 	target := p.destConn.RemoteAddr().String()
-	cc, err := grpc.DialContext(
-		ctx,
+	cc, err := grpc.NewClient(
 		target,
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
