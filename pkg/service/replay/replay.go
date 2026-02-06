@@ -1455,6 +1455,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	fmt.Println("here is the actual mapping", actualTestMockMappings)
 	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
 		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
 		if err != nil {
