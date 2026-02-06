@@ -128,3 +128,6 @@ jobs:
   run_grpc_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/grpc_linux.yml
+  run_robust_e2e_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/robust_e2e_linux.yml
