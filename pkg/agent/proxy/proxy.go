@@ -637,12 +637,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		nextProtos := []string{"http/1.1"} // default safe
 
+		isHTTP := util.IsHTTPReq(initialBuf)
+		isCONNECT := bytes.HasPrefix(initialBuf, []byte("CONNECT "))
+		logger.Debug("ALPN decision debug",
+			zap.Bool("isHTTPReq", isHTTP),
+			zap.Bool("isCONNECT", isCONNECT),
+			zap.Int("initialBufLen", len(initialBuf)),
+			zap.String("initialBufPrefix", string(initialBuf[:min(20, len(initialBuf))])),
+		)
+
 		// Allow H2 if:
 		// 1. It's not an HTTP/1.x request (could be gRPC/HTTP2 frames), OR
 		// 2. It's a CONNECT request (used by gRPC parser for tunneling, ALB requires H2)
-		if !util.IsHTTPReq(initialBuf) || bytes.HasPrefix(initialBuf, []byte("CONNECT ")) {
+		if !isHTTP || isCONNECT {
 			// not an HTTP/1.x request line; could be HTTP/2 (gRPC) frames
 			nextProtos = []string{"h2", "http/1.1"}
+			logger.Debug("Offering H2 for ALPN", zap.Strings("nextProtos", nextProtos))
+		} else {
+			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
 		}
 
 		cfg := &tls.Config{

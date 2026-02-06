@@ -33,7 +33,10 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 	}
 
 	// Create a TLS configuration
+	// IMPORTANT: NextProtos must include "h2" and "http/1.1" to support gRPC clients
+	// (grpc-go 1.67+ enforces ALPN and requires H2 negotiation)
 	config := &tls.Config{
+		NextProtos: []string{"h2", "http/1.1"},
 		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
 		},
