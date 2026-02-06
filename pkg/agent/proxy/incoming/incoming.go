@@ -176,6 +176,18 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// Get the actual destination for gRPC on Windows
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
+		// Determine the correct port for the test case:
+		// On Windows, getActualDestination resolves the real destination dynamically,
+		// so we extract the port from the resolved address.
+		// On non-Windows (Linux/Docker), getActualDestination returns the fallback (newAppAddr)
+		// which contains the eBPF-redirected port, NOT the original app port.
+		// In that case, we use the passed-in appPort which carries the correct OrigAppPort.
+		actualPort := appPort
+		if finalAppAddr != newAppAddr {
+			// Destination was dynamically resolved (Windows) — extract port from resolved address
+			actualPort = extractPortFromAddr(finalAppAddr, appPort)
+		}
+
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server",
@@ -185,7 +197,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 			return
 		}
 
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, appPort)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
@@ -209,4 +221,20 @@ func (r *replayConn) Read(p []byte) (int, error) {
 		return r.buf.Read(p)
 	}
 	return r.Conn.Read(p)
+}
+
+// extractPortFromAddr extracts the port from an address string (host:port).
+// If extraction fails, it returns the fallback port.
+// This is needed because on Windows, the actual destination port is obtained
+// dynamically and may differ from the originally passed appPort.
+func extractPortFromAddr(addr string, fallback uint16) uint16 {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fallback
+	}
+	port64, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return fallback
+	}
+	return uint16(port64)
 }
