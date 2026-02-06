@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -552,12 +554,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	var clientPeerCert *x509.Certificate
+	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
+		}
+		if tlsConn, ok := srcConn.(*tls.Conn); ok {
+			state := tlsConn.ConnectionState()
+			if len(state.PeerCertificates) > 0 {
+				clientPeerCert = state.PeerCertificates[0]
+			}
 		}
 	}
 
@@ -646,6 +656,41 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
 			NextProtos:         nextProtos,
+		}
+
+		if isMTLS && clientPeerCert != nil {
+			var keyBytes []byte
+			if outgoingOpts.TLSPrivateKey != "" {
+				keyBytes = []byte(outgoingOpts.TLSPrivateKey)
+			} else {
+				p.logger.Warn("Failed to read private key from outgoing options")
+			}
+
+			if len(keyBytes) > 0 {
+				block, _ := pem.Decode(keyBytes)
+				if block == nil {
+					p.logger.Warn("Failed to decode PEM block containing private key")
+				} else {
+					var privKey any
+					if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+						privKey = key
+					} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+						privKey = key
+					} else if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+						privKey = key
+					}
+
+					if privKey != nil {
+						cfg.Certificates = []tls.Certificate{{
+							Certificate: [][]byte{clientPeerCert.Raw},
+							PrivateKey:  privKey,
+						}}
+						p.logger.Debug("Successfully constructed mTLS certificate using client peer cert and local key")
+					} else {
+						p.logger.Warn("Failed to parse private key from PEM")
+					}
+				}
+			}
 		}
 
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)

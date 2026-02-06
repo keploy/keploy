@@ -46,6 +46,7 @@ type IngressEvent struct {
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
+	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay       time.Duration // This is the same as Application delay.
