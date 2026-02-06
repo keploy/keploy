@@ -6,7 +6,7 @@ on:
         description: 'The git ref (branch, tag, or commit) of the integrations repo to use.'
         required: false
         type: string
-        default: 'fix/multi-cluster' # Use main branch if nothing is sent**
+        default: 'main' # Use main branch if nothing is sent**
       runner:
         description: 'The type of runner to use'
         type: string
