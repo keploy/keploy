@@ -112,7 +112,7 @@ if (Test-Path $dcFile) {
 }
 
 # Update APP_BASE_URL to use the chosen port
-$env:APP_BASE_URL = "http://127.0.0.1:$appPort"
+$env:APP_BASE_URL = "http://localhost:$appPort"
 Write-Host "Chosen app port: $appPort"
 Write-Host "Chosen container name: $containerName"
 

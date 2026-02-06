@@ -1,0 +1,352 @@
+diff --git a/go.mod b/go.mod
+index cd97eba6..d2a41399 100755
+--- a/go.mod
++++ b/go.mod
+@@ -109,6 +109,7 @@ require (
+ 	github.com/google/uuid v1.6.0
+ 	github.com/jackc/pgproto3/v2 v2.3.2
+ 	github.com/keploy/jsonDiff v1.0.8
++	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
+ 	github.com/spf13/viper v1.19.0
+ 	github.com/stretchr/testify v1.10.0
+ 	github.com/wI2L/jsondiff v0.5.0
+@@ -158,7 +159,6 @@ require (
+ 	github.com/moby/docker-image-spec v1.3.1 // indirect
+ 	github.com/moby/sys/atomicwriter v0.1.0 // indirect
+ 	github.com/nwaples/rardecode/v2 v2.1.0 // indirect
+-	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0 // indirect
+ 	github.com/perimeterx/marshmallow v1.1.5 // indirect
+ 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
+ 	github.com/planetscale/vtprotobuf v0.6.1-0.20241121165744-79df5c4772f2 // indirect
+diff --git a/main.go b/main.go
+index 718cbb1f..4350113b 100755
+--- a/main.go
++++ b/main.go
+@@ -5,6 +5,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"os"
++	"runtime"
+ 	"strings"
+ 
+ 	"go.keploy.io/server/v3/cli"
+@@ -14,9 +15,9 @@ import (
+ 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
+ 	"go.keploy.io/server/v3/utils"
+ 	"go.keploy.io/server/v3/utils/log"
+-	//pprof for debugging
+-	// "net/http"
+-	// _ "net/http/pprof"
++	"go.uber.org/zap"
++
++	"runtime/pprof"
+ )
+ 
+ // version is the version of the server and will be injected during build by ldflags, same with dsn
+@@ -28,15 +29,6 @@ var apiServerURI = "http://localhost:8083"
+ var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
+ 
+ func main() {
+-	// Uncomment the following code to enable pprof for debugging
+-	// go func() {
+-	// 	fmt.Println("Starting pprof server for debugging...")
+-	// 	err := http.ListenAndServe("localhost:6060", nil)
+-	// 	if err != nil {
+-	// 		fmt.Println("Failed to start the pprof server for debugging", err)
+-	// 		return
+-	// 	}
+-	// }()
+ 	setVersion()
+ 	ctx := utils.NewCtx()
+ 	start(ctx)
+@@ -59,6 +51,43 @@ func start(ctx context.Context) {
+ 	}
+ 	utils.LogFile = logFile
+ 
++	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
++		f, err := os.Create(cpuProfile)
++		if err != nil {
++			logger.Error("could not create CPU profile", zap.Error(err))
++		} else {
++			if err := pprof.StartCPUProfile(f); err != nil {
++				logger.Error("could not start CPU profile", zap.Error(err))
++				f.Close()
++			} else {
++				logger.Info("CPU profiling enabled", zap.String("file", cpuProfile))
++				defer func() {
++					pprof.StopCPUProfile()
++					f.Close()
++					logger.Info("CPU profiling stopped", zap.String("file", cpuProfile))
++				}()
++			}
++		}
++	}
++
++	if heapProfile := os.Getenv("HEAP_PROFILE"); heapProfile != "" {
++		logger.Info("Heap profiling enabled", zap.String("file", heapProfile))
++		defer func() {
++			f, err := os.Create(heapProfile)
++			if err != nil {
++				logger.Error("could not create Heap profile", zap.Error(err))
++				return
++			}
++			defer f.Close()
++			runtime.GC() // get up-to-date statistics
++			if err := pprof.WriteHeapProfile(f); err != nil {
++				logger.Error("could not write Heap profile", zap.Error(err))
++			} else {
++				logger.Info("Heap profile written", zap.String("file", heapProfile))
++			}
++		}()
++	}
++
+ 	defer func() {
+ 		inDocker := os.Getenv("KEPLOY_INDOCKER")
+ 		if inDocker != "true" {
+diff --git a/pkg/agent/proxy/options.go b/pkg/agent/proxy/options.go
+deleted file mode 100755
+index 91f9b023..00000000
+--- a/pkg/agent/proxy/options.go
++++ /dev/null
+@@ -1,10 +0,0 @@
+-package proxy
+-
+-// TODO: what is the need of this? currently it is not being used anywhere.
+-
+-// Option provides a means to initiate the proxy based on user input.
+-type Option struct {
+-	Port          uint32
+-	DNSPort       uint32
+-	MongoPassword string
+-}
+diff --git a/pkg/agent/proxy/proxy.go b/pkg/agent/proxy/proxy.go
+index 06c06acf..25502ea5 100755
+--- a/pkg/agent/proxy/proxy.go
++++ b/pkg/agent/proxy/proxy.go
+@@ -634,7 +634,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
+ 	}
+ 
+ 	if !generic {
+-		p.logger.Info("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
++		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+ 		switch rule.Mode {
+ 		case models.MODE_RECORD:
+ 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+diff --git a/pkg/client/app/app.go b/pkg/client/app/app.go
+index f9e5fba9..728dee71 100644
+--- a/pkg/client/app/app.go
++++ b/pkg/client/app/app.go
+@@ -269,7 +269,34 @@ func (a *App) run(ctx context.Context) models.AppError {
+ 			if utils.IsDockerCmd(a.kind) {
+ 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+ 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+-
++				gracePeriod := 5
++				for i := 0; i < gracePeriod; i++ {
++					time.Sleep(1 * time.Second)
++
++					// Check if the 'docker run' command has exited
++					if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
++						a.logger.Debug("docker client process exited")
++						return nil
++					}
++
++					// Check the actual container status via Docker API
++					// This handles cases where 'docker run' is dead but container is alive
++					info, err := a.docker.ContainerInspect(context.Background(), a.container)
++					if err == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
++						a.logger.Debug("container stopped gracefully")
++						return nil
++					}
++				}
++
++				// Force Kill using Docker API
++				// We tell the Docker Daemon explicitly to kill this container.
++				a.logger.Warn("container did not stop gracefully, killing it forecfully", zap.String("containerID", a.container))
++
++				// "SIGKILL" string is standard for Docker API to force kill
++				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
++
++				// Clean up the CLI process as well
++				err = utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
+ 				return err
+ 			}
+ 			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
+diff --git a/pkg/platform/docker/docker.go b/pkg/platform/docker/docker.go
+index 7371831d..4d4bb2a2 100644
+--- a/pkg/platform/docker/docker.go
++++ b/pkg/platform/docker/docker.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
++	"path/filepath"
+ 	"runtime"
+ 	"strconv"
+ 	"strings"
+@@ -667,7 +668,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
+ 		)
+ 	}
+ 
+-	// Add command
++	// Add command ... existed code
+ 	if len(command) > 0 {
+ 		commandNode := &yaml.Node{Kind: yaml.SequenceNode}
+ 		for _, cmd := range command {
+@@ -683,7 +684,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
+ 		)
+ 	}
+ 
+-	// Add healthcheck
++	// Add healthcheck ... existed code
+ 	healthcheckNode := &yaml.Node{
+ 		Kind: yaml.MappingNode,
+ 		Content: []*yaml.Node{
+@@ -717,6 +718,75 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
+ 		healthcheckNode,
+ 	)
+ 
++	// Inject Pprof Environment Variables and Mounts if enabled on host
++	// This logic has been automated to support offline profiling via file dumps.
++	var pprofEnv []string
++	var pprofMount string
++
++	// Check for CPU_PROFILE
++	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
++		// We want the docker container to write to a specific file that is synced to host.
++		// We use a fixed directory /tmp/pprof_output in the container and map PWD to it.
++		// For the filename, we prepend "docker-" to avoid conflict if the user runs it in the same dir.
++		baseName := filepath.Base(cpuProfile)
++		dockerCpuProfile := fmt.Sprintf("/tmp/pprof_output/docker-%s", baseName)
++		pprofEnv = append(pprofEnv, fmt.Sprintf("CPU_PROFILE=%s", dockerCpuProfile))
++		pprofMount = "/tmp/pprof_output"
++	}
++
++	// Check for HEAP_PROFILE
++	if heapProfile := os.Getenv("HEAP_PROFILE"); heapProfile != "" {
++		baseName := filepath.Base(heapProfile)
++		dockerHeapProfile := fmt.Sprintf("/tmp/pprof_output/docker-%s", baseName)
++		pprofEnv = append(pprofEnv, fmt.Sprintf("HEAP_PROFILE=%s", dockerHeapProfile))
++		pprofMount = "/tmp/pprof_output"
++	}
++
++	// If either profiling is enabled, updated environment and volumes
++	if len(pprofEnv) > 0 {
++		// 1. Append Env Vars
++		// Find environment node
++		var envNode *yaml.Node
++		for i := 0; i < len(serviceNode.Content); i += 2 {
++			if serviceNode.Content[i].Value == "environment" {
++				envNode = serviceNode.Content[i+1]
++				break
++			}
++		}
++		// If environment node doesn't exist (unlikely given previous logic, but safe to check), create it?
++		// The previous logic guarantees environment node creation because BINARY_TO_DOCKER is always added.
++		if envNode != nil {
++			for _, env := range pprofEnv {
++				envNode.Content = append(envNode.Content, &yaml.Node{
++					Kind: yaml.ScalarNode, Value: env,
++				})
++			}
++		}
++
++		// 2. Append Volume
++		// Mount current working directory to /tmp/pprof_output
++		cwd, err := os.Getwd()
++		if err == nil && pprofMount != "" {
++			mount := fmt.Sprintf("%s:%s", cwd, pprofMount)
++			// Find volume node
++			var volNode *yaml.Node
++			for i := 0; i < len(serviceNode.Content); i += 2 {
++				if serviceNode.Content[i].Value == "volumes" {
++					volNode = serviceNode.Content[i+1]
++					break
++				}
++			}
++			// Volumes node also guaranteed to exist
++			if volNode != nil {
++				volNode.Content = append(volNode.Content, &yaml.Node{
++					Kind: yaml.ScalarNode, Value: mount,
++				})
++			}
++		} else {
++			idc.logger.Warn("Failed to get current working directory for pprof mount", zap.Error(err))
++		}
++	}
++
+ 	return serviceNode, nil
+ }
+ 
+diff --git a/pkg/platform/yaml/mockdb/db.go b/pkg/platform/yaml/mockdb/db.go
+index ea84e837..2bf7007c 100644
+--- a/pkg/platform/yaml/mockdb/db.go
++++ b/pkg/platform/yaml/mockdb/db.go
+@@ -217,6 +217,8 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
+ 	}
+ 
+ 	filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime)
++	ys.Logger.Debug("filtered mocks count", zap.Int("count", len(filtered)))
++
+ 	return filtered, nil
+ }
+ 
+@@ -272,7 +274,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
+ 					isUnFilteredMock = true
+ 				case "Redis":
+ 					isUnFilteredMock = true
+-				case "MySQL":
++				case "MySQL", "PostgresV2":
+ 					isUnFilteredMock = true
+ 				}
+ 				if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
+diff --git a/pkg/service/agent/agent.go b/pkg/service/agent/agent.go
+index b099374e..65728b51 100644
+--- a/pkg/service/agent/agent.go
++++ b/pkg/service/agent/agent.go
+@@ -226,6 +226,12 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
+ // UpdateMockParams applies filtering parameters and updates the agent's mock manager
+ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+ 
++	a.logger.Debug("UpdateMockParams called",
++		zap.Time("afterTime", params.AfterTime),
++		zap.Time("beforeTime", params.BeforeTime),
++		zap.Bool("useMappingBased", params.UseMappingBased),
++		zap.Int("mockMappingCount", len(params.MockMapping)))
++
+ 	// Get stored mocks for the
+ 	storageInterface, exists := a.clientMocks.Load(uint64(0))
+ 	if !exists {
+@@ -239,6 +245,10 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
+ 	copy(originalUnfiltered, storage.unfiltered)
+ 	storage.mu.RUnlock()
+ 
++	a.logger.Debug("Original mocks before filtering",
++		zap.Int("originalFiltered", len(originalFiltered)),
++		zap.Int("originalUnfiltered", len(originalUnfiltered)))
++
+ 	var filteredMocks, unfilteredMocks []*models.Mock
+ 
+ 	// Apply filtering based on parameters
+@@ -250,6 +260,21 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
+ 		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
+ 	}
+ 
++	// Count IsFiltered distribution for debugging
++	var filteredCount, unfilteredCount int
++	for _, m := range unfilteredMocks {
++		if m.TestModeInfo.IsFiltered {
++			filteredCount++
++		} else {
++			unfilteredCount++
++		}
++	}
++	a.logger.Debug("After filtering",
++		zap.Int("filteredMocks", len(filteredMocks)),
++		zap.Int("unfilteredMocks", len(unfilteredMocks)),
++		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
++		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
++
+ 	// Filter out deleted mocks if totalConsumedMocks is provided
+ 	if params.TotalConsumedMocks != nil {
+ 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
