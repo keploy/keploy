@@ -23,17 +23,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16) error {
-	return recordIncomingTestCase(ctx, logger, clientConn, destConn, t, appPort)
+func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, destAddr string) error {
+	return recordIncomingTestCase(ctx, logger, clientConn, destConn, t, appPort, destAddr)
 }
 
-func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16) error {
+func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, destAddr string) error {
 	proxy := &grpcTestCaseProxy{
 		logger:    logger,
 		destConn:  destConn,
 		testCases: t,
 		ctx:       ctx,
 		appPort:   appPort,
+		destAddr:  destAddr,
 	}
 
 	// Defer connection closures with nil checks
@@ -42,9 +43,12 @@ func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn,
 			!strings.Contains(err.Error(), "use of closed network connection") {
 			logger.Error("failed to close client connection in test case mode", zap.Error(err))
 		}
-		if err := destConn.Close(); err != nil &&
-			!strings.Contains(err.Error(), "use of closed network connection") {
-			logger.Error("failed to close destination connection in test case mode", zap.Error(err))
+		// Close the proxy's destConn (which may have been replaced with a new connection)
+		if proxy.destConn != nil {
+			if err := proxy.destConn.Close(); err != nil &&
+				!strings.Contains(err.Error(), "use of closed network connection") {
+				logger.Error("failed to close destination connection in test case mode", zap.Error(err))
+			}
 		}
 
 		if proxy.cc != nil {
@@ -100,6 +104,7 @@ type grpcTestCaseProxy struct {
 	ccMu      sync.Mutex
 	cc        *grpc.ClientConn
 	appPort   uint16
+	destAddr  string // destination address for creating new connections
 }
 
 func (p *grpcTestCaseProxy) getClientConn(ctx context.Context) (*grpc.ClientConn, error) {
@@ -109,20 +114,30 @@ func (p *grpcTestCaseProxy) getClientConn(ctx context.Context) (*grpc.ClientConn
 	if p.cc != nil {
 		s := p.cc.GetState()
 		p.logger.Debug("checking gRPC client connection state", zap.String("state", s.String()))
-		// Only consider the connection unusable if it's in SHUTDOWN state
-		// IDLE and TRANSIENT_FAILURE states can still be used - gRPC will reconnect automatically
-		if s == connectivity.Shutdown {
-			p.logger.Debug("gRPC client connection is shutdown, will create new one")
+		// If connection is not READY or CONNECTING, the underlying TCP connection may be closed.
+		// We need to create a new connection to the destination.
+		if s != connectivity.Ready && s != connectivity.Connecting {
+			p.logger.Debug("gRPC client connection is not usable, will create new one", zap.String("state", s.String()))
 			_ = p.cc.Close()
 			p.cc = nil
+			// Close the old destConn and create a new one
+			if p.destConn != nil {
+				_ = p.destConn.Close()
+			}
+			newConn, err := net.DialTimeout("tcp4", p.destAddr, 3*time.Second)
+			if err != nil {
+				p.logger.Error("failed to create new destination connection", zap.Error(err))
+				return nil, err
+			}
+			p.destConn = newConn
+			p.logger.Debug("created new destination connection", zap.String("destAddr", p.destAddr))
 		} else {
-			// For READY, CONNECTING, IDLE, or TRANSIENT_FAILURE, return the existing connection
-			// gRPC will handle reconnection automatically for IDLE and TRANSIENT_FAILURE
+			// Connection is READY or CONNECTING, reuse it
 			return p.cc, nil
 		}
 	}
 
-	p.logger.Debug("creating new gRPC client connection because p.cc is nil")
+	p.logger.Debug("creating new gRPC client connection")
 
 	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
 
