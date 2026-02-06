@@ -43,9 +43,17 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// Get the actual destination address (handles Windows vs others platform logic)
 	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
-	// Extract the actual port from the final destination address
-	// This is important for Windows where the port is obtained dynamically
-	actualPort := extractPortFromAddr(finalAppAddr, 0)
+	// Determine the correct port for the test case:
+	// On Windows, getActualDestination resolves the real destination dynamically,
+	// so we extract the port from the resolved address.
+	// On non-Windows (Linux/Docker), getActualDestination returns the fallback (newAppAddr)
+	// which contains the eBPF-redirected port, NOT the original app port.
+	// In that case, we use the passed-in appPort which carries the correct OrigAppPort.
+	actualPort := appPort
+	if finalAppAddr != newAppAddr {
+		// Destination was dynamically resolved (Windows) — extract port from resolved address
+		actualPort = extractPortFromAddr(finalAppAddr, appPort)
+	}
 
 	// 1. Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
