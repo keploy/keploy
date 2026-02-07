@@ -88,6 +88,18 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}
 
+	// Check if combined request and response size exceeds 5MB limit (after decompression)
+	totalSize := len(reqBody) + len(respBody)
+	if totalSize > MaxTestCaseSize {
+		logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
+			zap.Int("totalSize", totalSize),
+			zap.Int("reqBodySize", len(reqBody)),
+			zap.Int("respBodySize", len(respBody)),
+			zap.String("url", req.URL.String()),
+			zap.String("method", req.Method))
+		return
+	}
+
 	testCase := &models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
