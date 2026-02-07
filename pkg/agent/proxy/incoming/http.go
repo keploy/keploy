@@ -150,20 +150,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
-		// Check if combined request and response size exceeds 5MB limit
-		totalSize := len(reqData) + len(respData)
-		if totalSize > hooksUtils.MaxTestCaseSize {
-			logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
-				zap.Int("totalSize", totalSize),
-				zap.Int("reqDataSize", len(reqData)),
-				zap.Int("respDataSize", len(respData)),
-				zap.String("url", req.URL.String()),
-				zap.String("method", req.Method))
-			if pm.synchronous {
-				return
-			}
-			continue
-		}
 
 		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 		if err != nil {
