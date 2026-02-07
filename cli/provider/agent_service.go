@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, _ service.Auth) (interface{}, error) {
+func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, _ service.Auth) (any, error) {
 
 	var client docker.Client
 	var err error
