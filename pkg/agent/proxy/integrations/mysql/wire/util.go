@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -11,6 +12,137 @@ import (
 )
 
 const RESET = 0x00
+
+// PreparedStmtEntry tracks the lifecycle of a single prepared statement
+type PreparedStmtEntry struct {
+	StmtID     uint32 // Statement ID assigned during replay
+	Query      string // The prepared SQL query (stored as-is, normalized during lookups)
+	PreparedAt uint32 // Cycle number when prepared
+	ClosedAt   int32  // Cycle number when closed (-1 if still active)
+}
+
+// MaxPreparedStmtHistorySize is the threshold at which old closed entries are pruned
+// to prevent unbounded memory growth during long-lived connections
+const MaxPreparedStmtHistorySize = 1000
+
+// PreparedStmtHistory maintains full history of prepared statements
+// to handle ID reuse scenarios (prepare→close→prepare cycles).
+// When the history exceeds MaxPreparedStmtHistorySize, old closed entries are pruned.
+type PreparedStmtHistory struct {
+	Entries      []PreparedStmtEntry // Append-only history of all preparations
+	QueryIndex   map[string][]int    // normalized query -> indices in Entries
+	CurrentCycle uint32              // Monotonically increasing prepare counter
+}
+
+// NewPreparedStmtHistory creates a new history tracker
+func NewPreparedStmtHistory() *PreparedStmtHistory {
+	return &PreparedStmtHistory{
+		Entries:      make([]PreparedStmtEntry, 0),
+		QueryIndex:   make(map[string][]int),
+		CurrentCycle: 0,
+	}
+}
+
+// RecordPrepare logs a new prepared statement
+func (h *PreparedStmtHistory) RecordPrepare(stmtID uint32, query string) {
+	h.CurrentCycle++
+	entry := PreparedStmtEntry{
+		StmtID:     stmtID,
+		Query:      query,
+		PreparedAt: h.CurrentCycle,
+		ClosedAt:   -1, // Still active
+	}
+	idx := len(h.Entries)
+	h.Entries = append(h.Entries, entry)
+
+	// Update query index (case-insensitive, trimmed)
+	normalizedQuery := strings.TrimSpace(strings.ToLower(query))
+	h.QueryIndex[normalizedQuery] = append(h.QueryIndex[normalizedQuery], idx)
+
+	// Prune old closed entries if history grows too large
+	if len(h.Entries) > MaxPreparedStmtHistorySize {
+		h.pruneClosedEntries()
+	}
+}
+
+// pruneClosedEntries removes old closed entries to prevent unbounded memory growth.
+// It keeps all active entries and the most recent half of closed entries.
+func (h *PreparedStmtHistory) pruneClosedEntries() {
+	// Separate active and closed entries
+	var activeEntries []PreparedStmtEntry
+	var closedEntries []PreparedStmtEntry
+
+	for _, e := range h.Entries {
+		if e.ClosedAt == -1 {
+			activeEntries = append(activeEntries, e)
+		} else {
+			closedEntries = append(closedEntries, e)
+		}
+	}
+
+	// Keep only the most recent half of closed entries
+	keepCount := len(closedEntries) / 2
+	if keepCount < len(closedEntries) {
+		closedEntries = closedEntries[len(closedEntries)-keepCount:]
+	}
+
+	// Rebuild entries and index
+	h.Entries = make([]PreparedStmtEntry, 0, len(activeEntries)+len(closedEntries))
+	h.QueryIndex = make(map[string][]int)
+
+	// Add closed entries first (older), then active entries (newer)
+	for _, e := range closedEntries {
+		idx := len(h.Entries)
+		h.Entries = append(h.Entries, e)
+		normalizedQuery := strings.TrimSpace(strings.ToLower(e.Query))
+		h.QueryIndex[normalizedQuery] = append(h.QueryIndex[normalizedQuery], idx)
+	}
+	for _, e := range activeEntries {
+		idx := len(h.Entries)
+		h.Entries = append(h.Entries, e)
+		normalizedQuery := strings.TrimSpace(strings.ToLower(e.Query))
+		h.QueryIndex[normalizedQuery] = append(h.QueryIndex[normalizedQuery], idx)
+	}
+}
+
+// RecordClose marks a prepared statement as closed at the current cycle
+func (h *PreparedStmtHistory) RecordClose(stmtID uint32) {
+	// Find the most recent active entry with this stmtID and mark it closed at current cycle
+	for i := len(h.Entries) - 1; i >= 0; i-- {
+		if h.Entries[i].StmtID == stmtID && h.Entries[i].ClosedAt == -1 {
+			h.Entries[i].ClosedAt = int32(h.CurrentCycle)
+			break
+		}
+	}
+}
+
+// GetActiveEntryByQuery returns the most recent active entry for a query
+func (h *PreparedStmtHistory) GetActiveEntryByQuery(query string) *PreparedStmtEntry {
+	normalizedQuery := strings.TrimSpace(strings.ToLower(query))
+	indices, ok := h.QueryIndex[normalizedQuery]
+	if !ok {
+		return nil
+	}
+	// Return the most recent active entry
+	for i := len(indices) - 1; i >= 0; i-- {
+		entry := &h.Entries[indices[i]]
+		if entry.ClosedAt == -1 {
+			return entry
+		}
+	}
+	return nil
+}
+
+// GetPrepareCountForQuery returns how many times a query has been prepared
+func (h *PreparedStmtHistory) GetPrepareCountForQuery(query string) int {
+	normalizedQuery := strings.TrimSpace(strings.ToLower(query))
+	return len(h.QueryIndex[normalizedQuery])
+}
+
+// GetCurrentCycle returns the current prepare cycle number
+func (h *PreparedStmtHistory) GetCurrentCycle() uint32 {
+	return h.CurrentCycle
+}
 
 type DecodeContext struct {
 	Mode               models.Mode
@@ -30,6 +162,8 @@ type DecodeContext struct {
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
+	// StmtHistory tracks full prepared statement lifecycle for ID reuse handling
+	StmtHistory *PreparedStmtHistory
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
