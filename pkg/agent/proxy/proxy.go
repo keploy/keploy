@@ -674,7 +674,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			conn := dstConn.(*tls.Conn)
 			state := conn.ConnectionState()
 
-			p.logger.Info("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
+			p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg
