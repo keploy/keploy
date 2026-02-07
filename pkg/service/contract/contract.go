@@ -47,27 +47,42 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, 
 func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (models.OpenAPI, error) {
 
 	var err error
-	// Convert response body to an object
+
+	// Helper function to check if content is JSON
+	isJSONContent := func(contentType string) bool {
+		return strings.Contains(contentType, "application/json") ||
+			strings.Contains(contentType, "application/ld+json")
+	}
+
+	// Parse response body - only for JSON content
 	var responseBodyObject map[string]interface{}
 	if custom.Spec.Response.Body != "" {
-		err := json.Unmarshal([]byte(custom.Spec.Response.Body), &responseBodyObject)
-		if err != nil {
-			return models.OpenAPI{}, err
+		contentType, exists := custom.Spec.Response.Header["Content-Type"]
+		if exists && isJSONContent(contentType) {
+			err := json.Unmarshal([]byte(custom.Spec.Response.Body), &responseBodyObject)
+			if err != nil {
+				return models.OpenAPI{}, err
+			}
 		}
-
+		// For non-JSON content (HTML, text, etc.) - skip parsing
+		// responseBodyObject remains nil
 	}
 
 	// Get the type of each value in the response body object
 	responseTypes := ExtractVariableTypes(responseBodyObject)
 
-	// Convert request body to an object
+	// Parse request body - only for JSON content
 	var requestBodyObject map[string]interface{}
 	if custom.Spec.Request.Body != "" {
-		err := json.Unmarshal([]byte(custom.Spec.Request.Body), &requestBodyObject)
-		if err != nil {
-			return models.OpenAPI{}, err
+		contentType, exists := custom.Spec.Request.Header["Content-Type"]
+		if exists && isJSONContent(contentType) {
+			err := json.Unmarshal([]byte(custom.Spec.Request.Body), &requestBodyObject)
+			if err != nil {
+				return models.OpenAPI{}, err
+			}
 		}
-
+		// For non-JSON content - skip parsing
+		// requestBodyObject remains nil
 	}
 
 	// Get the type of each value in the request body object
@@ -185,6 +200,14 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 		pathItem.Delete = &models.Operation{
 			Summary:     "Delete an employee by ID",
 			Description: "Delete an employee by ID",
+			OperationID: operationID,
+			Parameters:  parameters,
+			Responses:   byCode,
+		}
+	case "OPTIONS":
+		pathItem.Options = &models.Operation{
+			Summary:     "CORS preflight request",
+			Description: "Auto-generated CORS preflight operation",
 			OperationID: operationID,
 			Parameters:  parameters,
 			Responses:   byCode,
