@@ -34,6 +34,49 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 var SortCounter int64 = -1
 
+// RenderTestCaseTemplates renders template placeholders in a test case.
+// It handles both TemplatizedValues and SecretValues from the utils package.
+// Returns nil if there are no templates to render.
+func RenderTestCaseTemplates(tc *models.TestCase, logger *zap.Logger) error {
+	if len(utils.TemplatizedValues) == 0 && len(utils.SecretValues) == 0 {
+		return nil
+	}
+
+	testCaseBytes, err := json.Marshal(tc)
+	if err != nil {
+		utils.LogError(logger, err, "failed to marshal the testcase for templating")
+		return err
+	}
+
+	// Build the template data map
+	// Secrets are stored under a single "secret" key, regardless of their count
+	capacity := len(utils.TemplatizedValues)
+	if len(utils.SecretValues) > 0 {
+		capacity++
+	}
+	templateData := make(map[string]interface{}, capacity)
+	for k, v := range utils.TemplatizedValues {
+		templateData[k] = v
+	}
+	if len(utils.SecretValues) > 0 {
+		templateData["secret"] = utils.SecretValues
+	}
+
+	// Render Keploy placeholders ({{ .x }}, {{ string .y }}, etc.)
+	renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
+	if rerr != nil {
+		logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
+	}
+
+	err = json.Unmarshal([]byte(renderedStr), tc)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
+		return err
+	}
+
+	return nil
+}
+
 func InitSortCounter(counter int64) {
 	atomic.StoreInt64(&SortCounter, counter)
 }
@@ -159,44 +202,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
-	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
+	// Decode URL-encoded template placeholders (e.g., %7B becomes {)
+	if strings.Contains(tc.HTTPReq.URL, "%7B") {
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
 			tc.HTTPReq.URL = decoded
 		}
 	}
-	//TODO: adjust this logic in the render function in order to remove the redundant code
-	// convert testcase to string and render the template values.
-	// Render any template values in the test case before simulation.
-	// Render any template values in the test case before simulation.
-	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
-		testCaseBytes, err := json.Marshal(tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase for templating")
-			return nil, err
-		}
 
-		// Build the template data
-		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
-		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
-		}
-		if len(utils.SecretValues) > 0 {
-			templateData["secret"] = utils.SecretValues
-		}
-
-		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
-		// ignoring LaTeX/HTML like {{\pi}}.
-		renderedStr, rerr := utils.RenderTemplatesInString(logger, string(testCaseBytes), templateData)
-		if rerr != nil {
-			logger.Debug("template rendering had recoverable errors", zap.Error(rerr))
-		}
-
-		err = json.Unmarshal([]byte(renderedStr), &tc)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase")
-			return nil, err
-		}
+	// Render template values in the test case before simulation
+	if err := RenderTestCaseTemplates(tc, logger); err != nil {
+		return nil, err
 	}
 
 	reqBody := []byte(tc.HTTPReq.Body)
