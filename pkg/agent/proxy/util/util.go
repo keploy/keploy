@@ -9,10 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -23,11 +27,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 
 	"go.uber.org/zap"
-
 	// "math/rand"
-	"net"
-	"strconv"
-	"strings"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -88,6 +88,33 @@ func IsHTTPReq(buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("CONNECT "))
 
 	return isHTTP
+}
+
+// IsExpectedCloseError checks if the error is an expected connection close error
+// that should not be logged as an error. This includes:
+// - "use of closed network connection": Connection already closed
+// - "closeNotify alert": TLS graceful shutdown after remote closed
+// - "broken pipe": Remote peer closed connection before graceful shutdown
+// - "connection reset by peer": TCP connection reset during close
+// - syscall.EPIPE: Broken pipe at syscall level
+// - syscall.ECONNRESET: Connection reset by peer at syscall level
+// - "remote error: tls:": TLS errors from remote peer during connection close
+func IsExpectedCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for syscall-level connection close errors
+	if errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+
+	errStr := err.Error()
+	return strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "closeNotify alert") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "remote error: tls:")
 }
 
 // ReadBuffConn is used to read the buffer from the connection
@@ -640,8 +667,7 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		if client != nil {
 			err := client.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				if !IsExpectedCloseError(err) {
 					// Log other errors
 					utils.LogError(logger, err, "failed to close the client connection")
 				}
@@ -651,8 +677,7 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		if dest != nil {
 			err := dest.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				if !IsExpectedCloseError(err) {
 					// Log other errors
 					utils.LogError(logger, err, "failed to close the destination connection")
 				}
