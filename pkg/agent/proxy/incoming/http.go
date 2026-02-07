@@ -150,7 +150,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
-
 		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 		if err != nil {
 			return
