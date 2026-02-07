@@ -32,10 +32,38 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 		return nil, err
 	}
 
-	// Create a TLS configuration
+	// Create a TLS configuration with dynamic ALPN selection
+	// We use GetConfigForClient to inspect what the client offers:
+	// - gRPC clients typically only offer "h2" (no http/1.1), so we MUST offer h2
+	// - HTTP clients offer both "h2" and "http/1.1", so we prefer http/1.1 (safer, since Keploy's HTTP parser doesn't handle H2)
 	config := &tls.Config{
-		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			// Check if client supports http/1.1
+			clientSupportsHTTP1 := false
+			for _, proto := range hello.SupportedProtos {
+				if proto == "http/1.1" {
+					clientSupportsHTTP1 = true
+					break
+				}
+			}
+
+			var nextProtos []string
+			if clientSupportsHTTP1 {
+				// Client supports HTTP/1.1, prefer it (safer for HTTP traffic)
+				nextProtos = []string{"http/1.1"}
+				logger.Debug("Client supports http/1.1, using http/1.1 only", zap.Strings("clientProtos", hello.SupportedProtos))
+			} else {
+				// Client only supports H2 (likely gRPC), must offer H2
+				nextProtos = []string{"h2", "http/1.1"}
+				logger.Debug("Client requires H2 (likely gRPC), offering H2", zap.Strings("clientProtos", hello.SupportedProtos))
+			}
+
+			return &tls.Config{
+				NextProtos: nextProtos,
+				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+				},
+			}, nil
 		},
 	}
 
