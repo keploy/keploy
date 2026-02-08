@@ -37,12 +37,16 @@ type ManagerInput struct {
 	// Action is the action to perform: "keploy_mock_record", "keploy_mock_test", or "pipeline".
 	Action string `json:"action" jsonschema:"Action to perform: keploy_mock_record (record mocks), keploy_mock_test (replay mocks), or pipeline (generate CI/CD)"`
 
-	// Command is the application or test command (for mock_record and mock_test actions).
-	Command string `json:"command,omitempty" jsonschema:"Application or test command to run (required for keploy_mock_record and keploy_mock_test actions)"`
+	// Command is the application or test command.
+	// For keploy_mock_record this can be empty (server will use elicitation).
+	// For keploy_mock_test this is required.
+	Command string `json:"command,omitempty" jsonschema:"Application or test command to run. Optional for keploy_mock_record (elicitation fallback), required for keploy_mock_test."`
 
 	// Path is the base path for mock storage.
-	// Required for keploy_mock_test action. Optional for keploy_mock_record.
-	Path string `json:"path,omitempty" jsonschema:"Path for mock storage. Required for keploy_mock_test, optional for keploy_mock_record."`
+	// Optional for both keploy_mock_record and keploy_mock_test.
+	// For mock_test, omit unless user explicitly asks for a specific path.
+	// If omitted, latest run is selected automatically by replay service.
+	Path string `json:"path,omitempty" jsonschema:"Path for mock storage. Optional for mock_record/mock_test. For mock_test, omit unless user explicitly asks for a specific path; when omitted, latest run is used."`
 
 	// FallBackOnMiss indicates whether to fall back to real calls (for mock_test action).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when mock not found (default: false)"`

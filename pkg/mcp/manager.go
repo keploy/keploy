@@ -53,19 +53,9 @@ func (s *Server) handleManagerMockRecord(ctx context.Context, in ManagerInput) (
 		zap.String("path", in.Path),
 	)
 
-	// Validate command
-	command := strings.TrimSpace(in.Command)
-	if command == "" {
-		return nil, ManagerOutput{
-			Success: false,
-			Action:  ActionMockRecord,
-			Message: "Error: 'command' is required for mock_record action. Please provide the command to run your application.",
-		}, nil
-	}
-
 	// Create input for the mock record handler
 	recordInput := MockRecordInput{
-		Command: command,
+		Command: strings.TrimSpace(in.Command),
 		Path:    in.Path,
 	}
 
@@ -104,19 +94,11 @@ func (s *Server) handleManagerMockTest(ctx context.Context, in ManagerInput) (*s
 			Message: "Error: 'command' is required for mock_test action. Please provide the test command to run.",
 		}, nil
 	}
-	path := strings.TrimSpace(in.Path)
-	if path == "" {
-		return nil, ManagerOutput{
-			Success: false,
-			Action:  ActionMockTest,
-			Message: "Error: 'path' is required for mock_test action. Please provide the run/mock directory path.",
-		}, nil
-	}
 
 	// Create input for the mock replay handler
 	replayInput := MockReplayInput{
 		Command:        command,
-		Path:           path,
+		Path:           strings.TrimSpace(in.Path),
 		FallBackOnMiss: in.FallBackOnMiss,
 	}
 

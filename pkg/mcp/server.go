@@ -135,6 +135,20 @@ Recommended Workflow (using keploy_manager):
 - For testing: First use keploy_list_mocks, then keploy_manager with action="keploy_mock_test"
 - For CI/CD: keploy_manager with action="pipeline" (will prompt for missing config)
 
+Command selection policy for recording:
+- Prefer test commands over run commands.
+- For Go projects, default to go test commands unless there is a strong reason not to.
+- Do not default to 'go run main.go' for recording. Treat long-running server commands as disallowed defaults.
+- Use repository signals to choose commands: go.mod, *_test.go, Makefile, CI workflows, README scripts, and known test names.
+- Go-specific decision order:
+  - If user provided explicit tests/patterns, use them directly (for example 'go test -v -run "TestA|TestB"').
+  - Else if integration/e2e style tests exist, prefer a focused -run pattern over full suite.
+  - Else if tests exist but no target, use 'go test -v ./...'.
+  - Only if no useful tests exist, use an app run command as last resort.
+- Disallowed by default: watch/dev servers, interactive/manual-step commands, commands that do not terminate, and overly broad commands when focused tests are available.
+- If command cannot be decided confidently, leave command empty and use elicitation to ask the user.
+- Prefer stable, deterministic, terminating commands that trigger the intended outbound interactions.
+
 Important: Always confirm configuration with user before starting record/test operations.`,
 		InitializedHandler: func(ctx context.Context, req *sdkmcp.InitializedRequest) {
 			s.mu.Lock()
@@ -192,13 +206,17 @@ This tool captures all external dependencies while running the provided command,
 creating mock files that can be replayed during testing.
 
 IMPORTANT: Before calling this tool, confirm the following with the user:
-- The command to run (typically the command to start your application, like 'go run main.go', 'npm start', './my-app', etc.)
+- The command to run. Prefer deterministic test commands over app run commands.
+- For Go projects, default to go test commands first (for example 'go test -v -run "TestA|TestB"' or 'go test -v ./...').
+- Never default to 'go run main.go' for recording.
+- Avoid long-running/watch-mode/interactive commands and commands that do not terminate.
+- If command is unknown, pass command as empty and the server will elicit it from the user.
 - The path to store mocks (default: ./keploy)
 
 The tool will show the configuration and ask for confirmation before starting.
 
 Parameters:
-- command (required): Any command to run (e.g., 'go run main.go', 'npm start', './my-app', 'python app.py')
+- command (optional): Command to run (prefer test commands like 'go test -v ./...' or 'npm test'). If empty, server elicits command.
 - path (optional): Path to store mock files (default: ./keploy)`,
 	}, s.handleMockRecord)
 
@@ -216,7 +234,7 @@ IMPORTANT workflow:
 
 Parameters:
 - command (required): Any command to run with mocks (e.g., 'go test -v', 'npm test', 'go run main.go', './my-app')
-- path (required): Path to the mock directory to replay (e.g., './keploy/run-1234567890')
+- path (optional): Path to the mock directory to replay (e.g., './keploy/run-1234567890'). Omit (send empty) unless user explicitly asks for a specific path. If omitted, latest run is used.
 - fallBackOnMiss (optional): Whether to make real calls when mock not found (default: false)`,
 	}, s.handleMockReplay)
 
@@ -228,12 +246,15 @@ Parameters:
 This is the RECOMMENDED tool for interacting with Keploy. It supports three actions:
 
 1. **keploy_mock_record** - Record outgoing calls from your application
-   - Required: command (e.g., 'go run main.go', 'npm start')
+   - Optional: command (prefer test commands, e.g., 'go test -v ./...', 'go test -v -run "TestA|TestB"', 'npm test')
+   - If command is empty, server uses elicitation to ask user for command
+   - Never default to 'go run main.go' for recording
+   - Avoid long-running or non-terminating commands
    - Optional: path (default: ./keploy)
 
 2. **keploy_mock_test** - Replay recorded mocks during testing
    - Required: command (e.g., 'go test -v', 'npm test')
-   - Required: path (mock directory to replay)
+   - Optional: path (mock directory to replay). Omit unless user explicitly asks for a specific path. If omitted, latest run is used.
    - Optional: fallBackOnMiss
 
 3. **pipeline** - Generate CI/CD pipeline for Keploy mock testing
@@ -242,7 +263,8 @@ This is the RECOMMENDED tool for interacting with Keploy. It supports three acti
    - Auto-detects CI/CD platform from project files (GitHub Actions, GitLab CI, Jenkins, etc.)
 
 Usage examples:
-- Record: {"action": "keploy_mock_record", "command": "go run main.go"}
+- Record: {"action": "keploy_mock_record", "command": "go test -v -run \"TestExternalHTTPSCall|TestMySQLHealth|TestMongoHealth\""}
+- Record with elicitation: {"action": "keploy_mock_record", "command": ""}
 - Test: {"action": "keploy_mock_test", "command": "go test -v"}
 - Pipeline: {"action": "pipeline", "appCommand": "go run main.go", "cicdTool": "github-actions"}
 

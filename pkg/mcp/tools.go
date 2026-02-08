@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,8 +37,8 @@ type ListMocksOutput struct {
 
 // MockRecordInput defines the input parameters for the mock record tool.
 type MockRecordInput struct {
-	// Command is the command to run (e.g., "go run main.go", "npm start", "./my-app").
-	Command string `json:"command" jsonschema:"Command to run (e.g. 'go run main.go', 'go test', 'npm run test', 'npm start', './my-app', or any other command)."`
+	// Command is the command to run. If empty, server attempts elicitation.
+	Command string `json:"command,omitempty" jsonschema:"Command to run (prefer test commands like 'go test -v ./...'). If empty, server will elicit it from user."`
 	// Path is the path to store mock files (default: ./keploy).
 	Path string `json:"path,omitempty" jsonschema:"Path to store mock files (default: ./keploy)"`
 }
@@ -68,8 +69,8 @@ type RecordConfiguration struct {
 type MockReplayInput struct {
 	// Command is the command to run with mocks.
 	Command string `json:"command" jsonschema:"Command to run with mocks (e.g. 'go test -v', 'npm test', 'go run main.go', or any other command)."`
-	// Path is the path to load mock files from.
-	Path string `json:"path" jsonschema:"Path to load mock files from (required). Example: './keploy/run-1234567890'"`
+	// Path is the path to load mock files from. If omitted, replay resolves latest run automatically.
+	Path string `json:"path,omitempty" jsonschema:"Path to load mock files from (optional). Omit unless user explicitly wants a specific path. If omitted, replay service selects latest run automatically."`
 	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches (optional, default: false).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
 }
@@ -202,13 +203,22 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		zap.String("path", in.Path),
 	)
 
-	// Validate input
 	command := strings.TrimSpace(in.Command)
 	if command == "" {
-		return nil, MockRecordOutput{
-			Success: false,
-			Message: "Error: 'command' is required. Please provide a command to run (e.g., 'go run main.go', 'npm start', './my-app').",
-		}, nil
+		elictedCommand, err := s.elicitRecordCommand(ctx)
+		if err != nil {
+			return nil, MockRecordOutput{
+				Success: false,
+				Message: fmt.Sprintf("Error: failed to get command via elicitation: %s", err.Error()),
+			}, nil
+		}
+		command = strings.TrimSpace(elictedCommand)
+		if command == "" {
+			return nil, MockRecordOutput{
+				Success: false,
+				Message: "Mock recording cancelled: no command provided.",
+			}, nil
+		}
 	}
 
 	// Parse and validate configuration
@@ -253,22 +263,6 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		}, nil
 	}
 
-	// Generate contextual name using LLM callback
-	// NOTE: Disabled LLM naming to prevent crashes when MCP connection is unstable during shutdown
-	// contextualName, err := s.generateContextualName(ctx, result.Metadata)
-	// if err != nil {
-	// 	s.logger.Warn("Failed to generate contextual name, using fallback",
-	// 		zap.Error(err),
-	// 	)
-	// 	contextualName = s.fallbackName(result.Metadata)
-	// }
-
-	// Use fallback naming directly (deterministic based on metadata)
-	contextualName := s.fallbackName(result.Metadata)
-
-	// Rename mock file with contextual name
-	newPath := s.renameMockFile(result.MockFilePath, contextualName)
-
 	// Ensure protocols is never nil for JSON schema validation (must be array, not null)
 	protocols := []string{}
 	if result.Metadata != nil && result.Metadata.Protocols != nil {
@@ -276,19 +270,65 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	}
 
 	s.logger.Info("Mock recording completed successfully",
-		zap.String("mockFilePath", newPath),
+		zap.String("mockFilePath", result.MockFilePath),
 		zap.Int("mockCount", result.MockCount),
 		zap.Strings("protocols", protocols),
 	)
 
 	return nil, MockRecordOutput{
 		Success:       true,
-		MockFilePath:  newPath,
+		MockFilePath:  result.MockFilePath,
 		MockCount:     result.MockCount,
 		Protocols:     protocols,
 		Configuration: config,
-		Message:       fmt.Sprintf("Successfully recorded %d mock(s) to '%s'. Detected protocols: %v", result.MockCount, newPath, protocols),
+		Message:       fmt.Sprintf("Successfully recorded %d mock(s) to '%s'. Detected protocols: %v", result.MockCount, result.MockFilePath, protocols),
 	}, nil
+}
+
+func (s *Server) elicitRecordCommand(ctx context.Context) (string, error) {
+	session := s.getActiveSession()
+	if session == nil {
+		return "", fmt.Errorf("no active session for elicitation")
+	}
+
+	s.logger.Info("Eliciting mock record command from user")
+	result, err := session.Elicit(ctx, &sdkmcp.ElicitParams{
+		Mode: "form",
+		Message: "Please provide the command for `keploy mock record`.\n\n" +
+			"Policy:\n" +
+			"- Prefer test commands over run commands.\n" +
+			"- For Go projects, prefer `go test` commands (for example `go test -v -run \"TestA|TestB\"` or `go test -v ./...`).\n" +
+			"- Do not default to `go run main.go` when tests exist.\n" +
+			"- Avoid long-running/watch/interactive commands.\n",
+		RequestedSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"command": map[string]any{
+					"type":        "string",
+					"description": "Command to execute for mock recording",
+				},
+			},
+			"required":             []string{"command"},
+			"additionalProperties": false,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("elicitation failed: %w", err)
+	}
+
+	if result == nil {
+		return "", nil
+	}
+	if result.Action != "accept" {
+		return "", nil
+	}
+
+	rawCommand, ok := result.Content["command"]
+	if !ok {
+		return "", nil
+	}
+	command, _ := rawCommand.(string)
+	return strings.TrimSpace(command), nil
 }
 
 // handleMockReplay handles the keploy_mock_test tool invocation.
@@ -308,11 +348,9 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		}, nil
 	}
 	path := strings.TrimSpace(in.Path)
-	if path == "" {
-		return nil, MockReplayOutput{
-			Success: false,
-			Message: "Error: 'path' is required. Please provide the run/mock directory path (e.g., './keploy/run-1234567890').",
-		}, nil
+	if req != nil && !hasArgument(req, "path") {
+		// If caller omitted "path", keep it empty so replay service resolves latest run.
+		path = ""
 	}
 
 	// Check if mock replayer is available
@@ -389,4 +427,18 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		Configuration: config,
 		Message:       message,
 	}, nil
+}
+
+func hasArgument(req *sdkmcp.CallToolRequest, key string) bool {
+	if req == nil || req.Params == nil || len(req.Params.Arguments) == 0 {
+		return false
+	}
+
+	args := map[string]json.RawMessage{}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return false
+	}
+
+	_, ok := args[key]
+	return ok
 }

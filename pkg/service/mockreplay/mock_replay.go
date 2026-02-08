@@ -4,15 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -22,30 +26,16 @@ func (r *replayer) mockReplay(ctx context.Context, opts models.ReplayOptions) (*
 	if r.runtime == nil {
 		return nil, errors.New("mock replay runtime is not configured")
 	}
-	mockDB := r.runtime.MockDB()
-	if mockDB == nil {
-		return nil, errors.New("mock database is not configured")
-	}
-	beforeTime := time.Now()
-	rootFiltered, err := mockDB.GetFilteredMocks(ctx, "", models.BaseTime, beforeTime)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load root filtered mocks: %w", err)
-	}
-	rootUnfiltered, err := mockDB.GetUnFilteredMocks(ctx, "", models.BaseTime, beforeTime)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load root config mocks: %w", err)
-	}
-	var mocks []*models.Mock
-	mocks = append(mocks, rootFiltered...)
-	mocks = append(mocks, rootUnfiltered...)
-	if len(mocks) > 0 {
-		r.logger.Info("Loaded root mocks before session start", zap.Int("mockCount", len(mocks)))
-	}
 
 	command, commandType, cleanup, err := r.prepareMockReplayConfig(opts)
 	if cleanup != nil {
 		defer cleanup()
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	rootFiltered, rootUnfiltered, mocks, err := r.loadRootMocks(ctx, r.cfg.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +65,11 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 	oldContainerName := r.cfg.ContainerName
 	containerNameChanged := false
 
+	resolvedPath, err := r.resolveReplayPath(strings.TrimSpace(opts.Path))
+	if err != nil {
+		return "", "", nil, err
+	}
+
 	r.cfg.Command = command
 	r.cfg.CommandType = commandType
 	if opts.ProxyPort != 0 {
@@ -83,9 +78,7 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 	if opts.DNSPort != 0 {
 		r.cfg.DNSPort = opts.DNSPort
 	}
-	if strings.TrimSpace(opts.Path) != "" {
-		r.cfg.Path = strings.TrimSpace(opts.Path)
-	}
+	r.cfg.Path = resolvedPath
 	if r.cfg.ContainerName == "" {
 		if inferred := inferContainerName(command, utils.CmdType(commandType)); inferred != "" {
 			r.cfg.ContainerName = inferred
@@ -108,6 +101,80 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 		return command, commandType, cleanup, errors.New("missing required container name for docker compose command")
 	}
 	return command, commandType, cleanup, nil
+}
+
+func (r *replayer) loadRootMocks(ctx context.Context, basePath string) ([]*models.Mock, []*models.Mock, []*models.Mock, error) {
+	db := mockdb.New(r.logger, basePath, "")
+	beforeTime := time.Now()
+	rootFiltered, err := db.GetFilteredMocks(ctx, "", models.BaseTime, beforeTime)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load root filtered mocks: %w", err)
+	}
+	rootUnfiltered, err := db.GetUnFilteredMocks(ctx, "", models.BaseTime, beforeTime)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load root config mocks: %w", err)
+	}
+	var mocks []*models.Mock
+	mocks = append(mocks, rootFiltered...)
+	mocks = append(mocks, rootUnfiltered...)
+	if len(mocks) > 0 {
+		r.logger.Info("Loaded root mocks before session start", zap.Int("mockCount", len(mocks)))
+	}
+	return rootFiltered, rootUnfiltered, mocks, nil
+}
+
+func (r *replayer) resolveReplayPath(path string) (string, error) {
+	if strings.TrimSpace(path) != "" {
+		return strings.TrimSpace(path), nil
+	}
+
+	basePath := strings.TrimSpace(r.cfg.Path)
+	if basePath == "" {
+		basePath = "./keploy"
+	}
+	basePath = filepath.Clean(basePath)
+
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("mock base path %q does not exist; pass --path or record mocks first", basePath)
+		}
+		return "", fmt.Errorf("failed to resolve latest mock run in %q: %w", basePath, err)
+	}
+
+	type runInfo struct {
+		name    string
+		modTime time.Time
+	}
+
+	var runs []runInfo
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "run-") {
+			continue
+		}
+
+		run := runInfo{name: entry.Name()}
+		if info, statErr := entry.Info(); statErr == nil {
+			run.modTime = info.ModTime()
+		}
+		runs = append(runs, run)
+	}
+
+	if len(runs) == 0 {
+		r.logger.Info("No run-* directories found; using base path for replay", zap.String("path", basePath))
+		return basePath, nil
+	}
+
+	sort.SliceStable(runs, func(i, j int) bool {
+		if !runs[i].modTime.Equal(runs[j].modTime) {
+			return runs[i].modTime.After(runs[j].modTime)
+		}
+		return runs[i].name > runs[j].name
+	})
+
+	resolvedPath := filepath.Join(basePath, runs[0].name)
+	r.logger.Info("Resolved latest mock run for replay", zap.String("basePath", basePath), zap.String("path", resolvedPath))
+	return resolvedPath, nil
 }
 
 func (r *replayer) runMockReplay(ctx context.Context, command, commandType string, rootFiltered []*models.Mock, rootUnfiltered []*models.Mock, mocks []*models.Mock, opts models.ReplayOptions) (*models.ReplayResult, error) {
