@@ -166,22 +166,19 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err
 			}
-		}
 
-		// Upgrade both connections to TLS using centralized helper
-		if isTLS {
+			// Upgrade server connection to TLS using centralized helper
+			// Note: Client is already upgraded above, only need to upgrade server side
 			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 			sourcePort := remoteAddr.Port
 			serverAddr := destConn.RemoteAddr().String()
 
-			// Use the centralized TLS upgrade from proto_tls.go
-			upgradedClient, upgradedDest, tlsErr := pTls.UpgradeMySQLConnections(
-				ctx, logger, clientConn, destConn, sourcePort, serverAddr, opts.Backdate)
+			upgradedDest, tlsErr := pTls.UpgradeMySQLServerToTLS(
+				ctx, logger, destConn, sourcePort, serverAddr)
 			if tlsErr != nil {
-				utils.LogError(logger, tlsErr, "failed to upgrade MySQL connections to TLS")
+				utils.LogError(logger, tlsErr, "failed to upgrade MySQL server connection to TLS")
 				return res, tlsErr
 			}
-			clientConn = upgradedClient
 			destConn = upgradedDest
 		}
 
