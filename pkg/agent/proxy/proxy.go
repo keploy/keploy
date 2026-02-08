@@ -733,7 +733,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
 	} else {
-		if rule.Mode != models.MODE_TEST {
+		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
+		if rule.Mode != models.MODE_TEST && dstConn == nil {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))

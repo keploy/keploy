@@ -72,8 +72,9 @@ func (s *StreamConn) LocalAddr() net.Addr {
 }
 
 // Integrations interface for protocol parsers.
-// Parsers receive StreamConn which provides plaintext byte streams.
-// TLS handling is done at the proxy layer before calling these methods.
+// Parsers receive net.Conn values that represent plaintext byte streams.
+// Any TLS termination or connection wrapping (e.g., to prepend buffered bytes)
+// is handled at the proxy layer before calling these methods.
 type Integrations interface {
 	// MatchType checks if the initial bytes match this protocol
 	MatchType(ctx context.Context, reqBuf []byte) bool
