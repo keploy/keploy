@@ -38,17 +38,24 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 	// - HTTP clients offer both "h2" and "http/1.1", so we prefer http/1.1 (safer, since Keploy's HTTP parser doesn't handle H2)
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			// Check if client supports http/1.1
+			// Check what protocols client supports
 			clientSupportsHTTP1 := false
+			clientSupportsPostgres := false
 			for _, proto := range hello.SupportedProtos {
 				if proto == "http/1.1" {
 					clientSupportsHTTP1 = true
-					break
+				}
+				if proto == "postgresql" {
+					clientSupportsPostgres = true
 				}
 			}
 
 			var nextProtos []string
-			if clientSupportsHTTP1 {
+			if clientSupportsPostgres {
+				// PostgreSQL client - use postgresql protocol
+				nextProtos = []string{"postgresql"}
+				logger.Debug("Client supports postgresql ALPN, using postgresql", zap.Strings("clientProtos", hello.SupportedProtos))
+			} else if clientSupportsHTTP1 {
 				// Client supports HTTP/1.1, prefer it (safer for HTTP traffic)
 				nextProtos = []string{"http/1.1"}
 				logger.Debug("Client supports http/1.1, using http/1.1 only", zap.Strings("clientProtos", hello.SupportedProtos))
