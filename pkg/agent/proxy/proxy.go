@@ -613,6 +613,59 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	// Handle PostgreSQL in-protocol SSL at proxy level (Record mode only)
+	// PostgreSQL SSLRequest is sent after TCP connection, not before (unlike HTTPS).
+	// We detect it here and handle the SSL negotiation at proxy level so parsers
+	// receive plaintext connections.
+	if rule.Mode == models.MODE_RECORD && pTls.IsPostgresSSLRequest(initialBuf) {
+		logger.Debug("Detected PostgreSQL SSLRequest, handling SSL at proxy level")
+
+		// Dial the destination server first
+		dstConn, err = net.Dial("tcp", dstAddr)
+		if err != nil {
+			utils.LogError(logger, err, "failed to dial PostgreSQL server for SSL negotiation")
+			return err
+		}
+
+		// Extract the underlying connection from the util.Conn wrapper
+		underlyingConn := srcConn
+		if uc, ok := srcConn.(*util.Conn); ok {
+			underlyingConn = uc.Conn
+		}
+
+		// Handle the SSL negotiation - this will:
+		// 1. Forward SSLRequest to server
+		// 2. Get server response ('S' or 'N')
+		// 3. Forward response to client
+		// 4. If 'S', upgrade both connections to TLS
+		srcConn, dstConn, err = pTls.HandlePostgresSSL(
+			ctx, logger, underlyingConn, dstConn,
+			initialBuf, sourcePort, rule.Backdate,
+		)
+		if err != nil {
+			utils.LogError(logger, err, "failed to handle PostgreSQL SSL negotiation")
+			return err
+		}
+
+		// After SSL negotiation, we need to read the next packet (StartupMessage)
+		// and wrap it in the srcConn so parsers see it
+		nextBuf, err := util.ReadInitialBuf(parserCtx, logger, srcConn)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read post-SSL PostgreSQL packet")
+			return err
+		}
+
+		// Update initialBuf with the post-SSL packet
+		initialBuf = nextBuf
+		srcConn = &util.Conn{
+			Conn:   srcConn,
+			Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+			Logger: p.logger,
+		}
+
+		logger.Debug("PostgreSQL SSL handled at proxy level, continuing with plaintext connections")
+	}
+
 	dstCfg := &models.ConditionalDstCfg{
 		Port: uint(destInfo.Port),
 	}

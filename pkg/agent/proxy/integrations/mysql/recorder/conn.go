@@ -3,7 +3,6 @@ package recorder
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -117,7 +116,26 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		PacketBundle: *handshakeResponsePkt,
 	})
 
-	// handle the SSL request
+	// Handle the SSL request.
+	//
+	// NOTE: Unlike PostgreSQL where SSLRequest is a standalone packet that can be intercepted
+	// at the proxy level, MySQL SSL is tightly coupled with the protocol handshake:
+	// 1. Server sends initial handshake with SSL capability flag
+	// 2. Client responds with SSLRequest (handshake response with SSL flag but no auth)
+	// 3. Both sides upgrade to TLS
+	// 4. Client re-sends full handshake response with authentication over TLS
+	//
+	// This tight coupling means proxy-level MySQL SSL handling would require the proxy to:
+	// - Parse the MySQL handshake protocol
+	// - Track MySQL capability flags
+	// - Understand the multi-phase MySQL handshake
+	//
+	// For now, MySQL SSL handling remains in the parser. Future work may move this to
+	// the proxy level if needed.
+	//
+	// TODO: Consider moving MySQL SSL to proxy level when:
+	// - Heap-based TLS key extraction is implemented
+	// - MySQL protocol parsing is centralized in proxy
 	if decodeCtx.UseSSL {
 
 		reader := bufio.NewReader(clientConn)
@@ -150,44 +168,21 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			}
 		}
 
-		// upgrade the destConn to TLS if the client connection is upgraded to TLS
-		var tlsDestConn *tls.Conn
+		// Upgrade both connections to TLS using centralized helper
 		if isTLS {
-
 			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 			sourcePort := remoteAddr.Port
+			serverAddr := destConn.RemoteAddr().String()
 
-			url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
-			if !ok {
-				utils.LogError(logger, err, "failed to fetch the destination url")
-				return res, err
+			// Use the centralized TLS upgrade from proto_tls.go
+			upgradedClient, upgradedDest, tlsErr := pTls.UpgradeMySQLConnections(
+				ctx, logger, clientConn, destConn, sourcePort, serverAddr, opts.Backdate)
+			if tlsErr != nil {
+				utils.LogError(logger, tlsErr, "failed to upgrade MySQL connections to TLS")
+				return res, tlsErr
 			}
-
-			//type case the dstUrl to string
-			dstURL, ok := url.(string)
-			if !ok {
-				utils.LogError(logger, err, "failed to type cast the destination url")
-				return res, err
-			}
-
-			addr := fmt.Sprintf("%v:%v", dstURL, opts.DstCfg.Port)
-			tlsConfig := &tls.Config{
-				InsecureSkipVerify: true,
-				ServerName:         dstURL,
-			}
-
-			logger.Debug("Upgrading the destination connection to TLS", zap.String("Destination Addr", addr), zap.String("ServerName", tlsConfig.ServerName))
-
-			tlsDestConn = tls.Client(destConn, tlsConfig)
-			err = tlsDestConn.Handshake()
-			if err != nil {
-				utils.LogError(logger, err, "failed to upgrade the destination connection to TLS for mysql")
-				return res, err
-			}
-			logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-
-			// Update the destination connection to TLS connection
-			destConn = tlsDestConn
+			clientConn = upgradedClient
+			destConn = upgradedDest
 		}
 
 		// Update this tls connection information in the handshake result
