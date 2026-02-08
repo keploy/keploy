@@ -3,7 +3,6 @@ package integrations
 
 import (
 	"context"
-	"io"
 	"net"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -33,43 +32,6 @@ type Parsers struct {
 }
 
 var Registered = make(map[IntegrationType]*Parsers)
-
-// StreamConn wraps a connection with a custom reader.
-// This allows the proxy to prepend already-read bytes (like initial buffer)
-// back onto the stream, so parsers can read from the beginning.
-// After proxy-level TLS handling, the underlying Conn is the TLS connection
-// but from the parser's perspective, it's just a plain byte stream.
-type StreamConn struct {
-	// Conn is the underlying connection (may be TLS-wrapped by proxy)
-	Conn net.Conn
-	// Reader is a custom reader that may include buffered/peeked data
-	Reader io.Reader
-}
-
-// Read implements io.Reader, reading from the custom Reader
-func (s *StreamConn) Read(p []byte) (n int, err error) {
-	return s.Reader.Read(p)
-}
-
-// Write implements io.Writer, writing to the underlying Conn
-func (s *StreamConn) Write(p []byte) (n int, err error) {
-	return s.Conn.Write(p)
-}
-
-// Close closes the underlying connection
-func (s *StreamConn) Close() error {
-	return s.Conn.Close()
-}
-
-// RemoteAddr returns the remote address of the underlying connection
-func (s *StreamConn) RemoteAddr() net.Addr {
-	return s.Conn.RemoteAddr()
-}
-
-// LocalAddr returns the local address of the underlying connection
-func (s *StreamConn) LocalAddr() net.Addr {
-	return s.Conn.LocalAddr()
-}
 
 // Integrations interface for protocol parsers.
 // Parsers receive net.Conn values that represent plaintext byte streams.
