@@ -282,7 +282,7 @@ func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Connect to the service to get the channel
-	mappingChan, err := a.svc.GetMappingStream(r.Context())
+	mappingChan, err := a.svc.GetMapping(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

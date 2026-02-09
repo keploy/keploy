@@ -74,9 +74,6 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
-
-	// mappingCh is the channel to send the mapping to the agent
-	mappingCh chan models.TestMockMapping
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -114,11 +111,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
-		mappingCh:         make(chan models.TestMockMapping, 100),
 	}
-
-	// Set the mapping channel in the sync mock manager
-	syncMock.Get().SetMappingChannel(proxy.mappingCh)
 
 	return proxy
 }
@@ -915,8 +908,11 @@ func (p *Proxy) CloseErrorChannel() {
 	close(p.errChannel)
 }
 
-func (p *Proxy) GetMappingStream(ctx context.Context) (<-chan models.TestMockMapping, error) {
-	return p.mappingCh, nil
+func (p *Proxy) Mapping(ctx context.Context, mappingCh chan models.TestMockMapping) {
+	mgr := syncMock.Get()
+	if mgr != nil {
+		mgr.SetMappingChannel(mappingCh)
+	}
 }
 
 func isShutdownError(err error) bool {
