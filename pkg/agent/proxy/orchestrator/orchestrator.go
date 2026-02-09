@@ -107,43 +107,37 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
-		o.writeLoop(ctx)
+		o.writeLoop()
 	}()
 }
 
-// writeLoop handles all writes asynchronously
-func (o *Orchestrator) writeLoop(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case req, ok := <-o.writeChan:
-			if !ok {
-				return
-			}
-			var err error
-			var conn net.Conn
+// writeLoop handles all writes asynchronously.
+// It runs until the channel is closed by Stop(), ensuring all queued writes
+// are processed. This prevents deadlocks when producers are blocked on a full channel.
+func (o *Orchestrator) writeLoop() {
+	for req := range o.writeChan {
+		var conn net.Conn
 
-			// Use explicit connection if provided, otherwise fallback to stored targets
-			if req.Conn != nil {
-				conn = req.Conn
+		// Use explicit connection if provided, otherwise fallback to stored targets
+		if req.Conn != nil {
+			conn = req.Conn
+		} else {
+			o.connMu.Lock()
+			if req.Target == TargetClient {
+				conn = o.clientConn
 			} else {
-				o.connMu.Lock()
-				if req.Target == TargetClient {
-					conn = o.clientConn
-				} else {
-					conn = o.destConn
-				}
-				o.connMu.Unlock()
+				conn = o.destConn
 			}
+			o.connMu.Unlock()
+		}
 
-			if conn != nil {
-				_, err = conn.Write(req.Data)
-			}
+		var err error
+		if conn != nil {
+			_, err = conn.Write(req.Data)
+		}
 
-			if req.ErrChan != nil {
-				req.ErrChan <- err
-			}
+		if req.ErrChan != nil {
+			req.ErrChan <- err
 		}
 	}
 }

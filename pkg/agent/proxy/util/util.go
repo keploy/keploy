@@ -206,7 +206,7 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 // It returns the content as a byte array.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
 	var buffer []byte
-	const maxEmptyReads = 5
+	const maxEmptyReads = 3
 	emptyReads := 0
 
 	// Channel to communicate read results
@@ -259,7 +259,7 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 					if emptyReads >= maxEmptyReads {
 						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
 					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
+					time.Sleep(time.Millisecond * 10) // Sleep before trying again
 					continue
 				}
 				return buffer, result.err
@@ -332,7 +332,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 					if emptyReads >= maxEmptyReads {
 						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
 					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
+					time.Sleep(time.Millisecond * 10010) // Sleep before trying again
 					continue
 				}
 				return buffer, result.err

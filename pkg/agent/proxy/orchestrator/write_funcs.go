@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"fmt"
 	"net"
 )
 
@@ -34,36 +33,28 @@ func (o *Orchestrator) NewWriteFuncs() WriteFuncs {
 	return WriteFuncs{
 		WriteToClient: func(conn net.Conn, data []byte) error {
 			if conn != nil {
-				fmt.Println("writing to client sync :: WriteToConn")
 				return o.WriteToConn(conn, data)
 			}
-			fmt.Println("writing to client sync :: WriteToClient")
 			return o.WriteToClient(data)
 		},
 		WriteToDestination: func(conn net.Conn, data []byte) error {
 			if conn != nil {
-				fmt.Println("writing to dest sync :: WriteToConn")
 				return o.WriteToConn(conn, data)
 			}
-			fmt.Println("writing to dest sync :: WriteToDestination")
 			return o.WriteToDestination(data)
 		},
 		ForwardToClient: func(conn net.Conn, data []byte) error {
 			if conn != nil {
-				fmt.Println("writing to client async :: WriteAsyncToConn")
 				o.WriteAsyncToConn(conn, data)
 			} else {
-				fmt.Println("writing to client async :: WriteAsync")
 				o.WriteAsync(TargetClient, data)
 			}
 			return nil
 		},
 		ForwardToDestination: func(conn net.Conn, data []byte) error {
 			if conn != nil {
-				fmt.Println("writing to dest async :: WriteAsyncToConn")
 				o.WriteAsyncToConn(conn, data)
 			} else {
-				fmt.Println("writing to dest async :: WriteAsync")
 				o.WriteAsync(TargetDestination, data)
 			}
 			return nil
