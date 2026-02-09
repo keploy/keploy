@@ -127,6 +127,32 @@ func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
 }
 
+func (p *Proxy) StartMockSession(ctx context.Context, name string) error {
+	p.logger.Debug("Updating session name in proxy", zap.String("name", name))
+	// Get current session
+	session, ok := p.sessions.Get(uint64(0))
+	if !ok {
+		return fmt.Errorf("no active session found")
+	}
+
+	// Create a new session with updated name
+	// We shallow copy the struct first
+	newSession := *session
+	newSession.OutgoingOptions.Name = name
+
+	// Update the map
+	p.sessions.Set(uint64(0), &newSession)
+	return nil
+}
+
+func (p *Proxy) GetCurrentSessionName(_ context.Context) string {
+	session, ok := p.sessions.Get(uint64(0))
+	if !ok || session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.OutgoingOptions.Name)
+}
+
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
@@ -440,7 +466,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if srcConn != nil {
 			err := srcConn.Close()
 			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				if !isNetworkClosedErr(err) {
 					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 				}
 			}
@@ -449,9 +475,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if dstConn != nil {
 			err = dstConn.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					// Log other errors
+				if !isNetworkClosedErr(err) {
 					utils.LogError(p.logger, err, "failed to close the destination connection")
 				}
 			}

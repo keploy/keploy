@@ -10,7 +10,7 @@ type Instrumentation interface {
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 	GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
-	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
+	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.MockFrame, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
@@ -52,5 +52,5 @@ type Telemetry interface {
 
 type FrameChan struct {
 	Incoming <-chan *models.TestCase
-	Outgoing <-chan *models.Mock
+	Outgoing <-chan *models.MockFrame
 }

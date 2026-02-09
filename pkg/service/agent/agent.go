@@ -5,13 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -109,6 +112,55 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	a.logger.Debug("Setting graceful shutdown flag on proxy")
 	return a.Proxy.SetGracefulShutdown(ctx)
+}
+
+// StartMockSession starts a new recording/replay session with the given name
+func (a *Agent) StartMockSession(ctx context.Context, name string) error {
+	sessionName := strings.TrimSpace(name)
+	a.logger.Debug("Starting new mock session", zap.String("name", sessionName))
+
+	if err := a.Proxy.StartMockSession(ctx, sessionName); err != nil {
+		return err
+	}
+
+	if a.config != nil && a.config.Agent.Mode != models.MODE_TEST {
+		return nil
+	}
+
+	if sessionName == "" {
+		return errors.New("session name is required; call /agent/hooks/start-session with a non-empty name")
+	}
+
+	basePath := strings.TrimSpace(a.config.Path)
+	if basePath == "" {
+		return errors.New("mock path is not set; pass -p/--path to keploy mock test and call start-session before outbound calls")
+	}
+
+	db := mockdb.New(a.logger, basePath, "")
+	beforeTime := time.Now()
+	filtered, err := db.GetFilteredMocks(ctx, sessionName, models.BaseTime, beforeTime)
+	if err != nil {
+		return err
+	}
+	unfiltered, err := db.GetUnFilteredMocks(ctx, sessionName, models.BaseTime, beforeTime)
+	if err != nil {
+		return err
+	}
+
+	if err := a.StoreMocks(ctx, filtered, unfiltered); err != nil {
+		return err
+	}
+	return a.UpdateMockParams(ctx, models.MockFilterParams{
+		AfterTime:  models.BaseTime,
+		BeforeTime: beforeTime,
+	})
+}
+
+func (a *Agent) GetCurrentMockSessionName(ctx context.Context) string {
+	if a.Proxy == nil {
+		return ""
+	}
+	return a.Proxy.GetCurrentSessionName(ctx)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {

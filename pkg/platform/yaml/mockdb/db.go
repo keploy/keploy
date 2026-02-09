@@ -2,12 +2,14 @@
 package mockdb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -287,6 +289,110 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	unfiltered := pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime)
 
 	return unfiltered, nil
+}
+
+func (ys *MockYaml) GetMocks(ctx context.Context, testSetID string) ([]*models.Mock, error) {
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+
+	path := filepath.Join(ys.MockPath, testSetID)
+	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(mockPath); err != nil {
+		return nil, err
+	}
+
+	data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("session", filepath.Base(path)), zap.String("path", mockPath))
+		return nil, err
+	}
+	if len(data) == 0 {
+		return []*models.Mock{}, nil
+	}
+
+	dec := yamlLib.NewDecoder(bytes.NewReader(data))
+	var mockYamls []*yaml.NetworkTrafficDoc
+	for {
+		var doc *yaml.NetworkTrafficDoc
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to decode the yaml file documents", zap.String("at_path", mockPath))
+			return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+		}
+		if doc != nil {
+			mockYamls = append(mockYamls, doc)
+		}
+	}
+
+	if len(mockYamls) == 0 {
+		return []*models.Mock{}, nil
+	}
+
+	return DecodeMocks(mockYamls, ys.Logger)
+}
+
+func (ys *MockYaml) GetAllMockSetIDs(ctx context.Context) ([]string, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	entries, err := os.ReadDir(ys.MockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+
+	type mockSetInfo struct {
+		name    string
+		modTime time.Time
+	}
+	var mockSets []mockSetInfo
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == yaml.FolderReports || name == yaml.FolderTestReports || name == yaml.FolderSchema {
+			continue
+		}
+
+		mockPath := filepath.Join(ys.MockPath, name, mockFileName+".yaml")
+		info, err := os.Stat(mockPath)
+		if err != nil {
+			continue
+		}
+
+		mockSets = append(mockSets, mockSetInfo{name: name, modTime: info.ModTime()})
+	}
+
+	sort.SliceStable(mockSets, func(i, j int) bool {
+		if mockSets[i].modTime.Equal(mockSets[j].modTime) {
+			return mockSets[i].name < mockSets[j].name
+		}
+		return mockSets[i].modTime.After(mockSets[j].modTime)
+	})
+
+	out := make([]string, len(mockSets))
+	for i, set := range mockSets {
+		out[i] = set.name
+	}
+	return out, nil
 }
 
 func (ys *MockYaml) getNextID() int64 {

@@ -14,7 +14,7 @@ func init() {
 	Register("mock", Mock)
 }
 
-func Mock(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "mock",
 		Short: "Managing mocks",
@@ -22,6 +22,8 @@ func Mock(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 
 	cmd.AddCommand(DownloadMocks(ctx, logger, serviceFactory, cmdConfigurator))
 	cmd.AddCommand(UploadMocks(ctx, logger, serviceFactory, cmdConfigurator))
+	cmd.AddCommand(MockRecord(ctx, logger, cfg, serviceFactory, cmdConfigurator))
+	cmd.AddCommand(MockTest(ctx, logger, cfg, serviceFactory, cmdConfigurator))
 	for _, subCmd := range cmd.Commands() {
 		err := cmdConfigurator.AddFlags(subCmd)
 		if err != nil {
