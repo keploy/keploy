@@ -193,6 +193,17 @@ func (o *Orchestrator) WriteAsync(target Target, data []byte) {
 	}
 }
 
+// WriteAsyncToConn queues a write to a specific connection without waiting for
+// completion. Use this in hot loops (e.g., command phase) where pipelining
+// matters and errors are detected by the reader goroutines.
+func (o *Orchestrator) WriteAsyncToConn(conn net.Conn, data []byte) {
+	o.writeChan <- WriteRequest{
+		Conn:    conn,
+		Data:    data,
+		ErrChan: nil,
+	}
+}
+
 // Stop closes the write channel and waits for completion
 func (o *Orchestrator) Stop() {
 	close(o.writeChan)
