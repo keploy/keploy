@@ -548,7 +548,19 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 
 	// Save the test-mock mappings to YAML file
 	if len(mappings) > 0 && isMappingEnabled {
-		err := o.replay.StoreMappings(ctx, mappingTestSet, mappings)
+		mapping := &models.Mapping{
+			Version:   string(models.GetVersion()), // or models.GetVersion() casted
+			Kind:      models.MappingKind,
+			TestSetID: mappingTestSet,
+		}
+		for tcID, mocks := range mappings {
+			mapping.Tests = append(mapping.Tests, models.Test{
+				ID:    tcID,
+				Mocks: models.FromSlice(mocks),
+			})
+		}
+
+		err := o.replay.StoreMappings(ctx, mapping)
 		if err != nil {
 			o.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {

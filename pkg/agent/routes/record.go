@@ -34,6 +34,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/health", a.Health)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
+		r.Post("/mappings", a.HandleMappings)
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/storemocks", a.StoreMocks)
 		r.Post("/updatemockparams", a.UpdateMockParams)
@@ -264,6 +265,40 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := enc.Encode(m); err != nil {
 				a.logger.Error("gob encode failed", zap.Error(err))
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
+	a.logger.Debug("Received request to handle mappings stream")
+	w.Header().Set("Content-Type", "application/json")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Connect to the service to get the channel
+	mappingChan, err := a.svc.GetMapping(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	enc := json.NewEncoder(w)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case mapping, ok := <-mappingChan:
+			if !ok {
+				return
+			}
+			if err := enc.Encode(mapping); err != nil {
 				return
 			}
 			flusher.Flush()

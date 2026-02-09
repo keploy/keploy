@@ -699,6 +699,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
 	var isMappingEnabled bool
+	isMappingEnabled = !r.config.DisableMapping
+	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
@@ -785,8 +787,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		mocksThatHaveMappings := make(map[string]bool)
+
+		mocksWeNeed := make(map[string]bool)
+
+		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
+			// Populate the Registry
+			for _, mocks := range expectedTestMockMappings {
+				for _, m := range mocks {
+					mocksThatHaveMappings[m] = true
+				}
+			}
+
+			if len(selectedTests) > 0 {
+				for testID := range selectedTests {
+					if mocks, ok := expectedTestMockMappings[testID]; ok {
+						for _, m := range mocks {
+							mocksWeNeed[m] = true
+						}
+					}
+				}
+			} else {
+				// If running all tests, we need all mapped mocks
+				mocksWeNeed = mocksThatHaveMappings
+			}
+		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -800,13 +828,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
-
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased, false)
@@ -828,12 +853,38 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if cmdType != utils.DockerCompose {
+
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		mocksThatHaveMappings := make(map[string]bool)
+
+		mocksWeNeed := make(map[string]bool)
+
+		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
+			// Populate the Registry
+			for _, mocks := range expectedTestMockMappings {
+				for _, m := range mocks {
+					mocksThatHaveMappings[m] = true
+				}
+			}
+
+			if len(selectedTests) > 0 {
+				for testID := range selectedTests {
+					if mocks, ok := expectedTestMockMappings[testID]; ok {
+						for _, m := range mocks {
+							mocksWeNeed[m] = true
+						}
+					}
+				}
+			} else {
+				// If running all tests, we need all mapped mocks
+				mocksWeNeed = mocksThatHaveMappings
+			}
+		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
-
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
@@ -852,8 +903,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
-
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
@@ -935,7 +984,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
@@ -974,7 +1022,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var actualTestMockMappings = make(map[string][]string)
+	actualTestMockMappings := &models.Mapping{
+		Version:   string(models.GetVersion()),
+		Kind:      models.MappingKind,
+		TestSetID: testSetID,
+	}
 	var consumedMocks []models.MockState
 	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
@@ -1211,8 +1263,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if len(consumedMocks) > 0 {
+			var mockNames []string
 			for _, m := range consumedMocks {
-				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+				mockNames = append(mockNames, m.Name)
+			}
+			found := false
+			for i, t := range actualTestMockMappings.Tests {
+				if t.ID == testCase.Name {
+					actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(actualTestMockMappings.Tests[i].Mocks.ToSlice(), mockNames...))
+					found = true
+					break
+				}
+			}
+			if !found {
+				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+					ID:    testCase.Name,
+					Mocks: models.FromSlice(mockNames),
+				})
 			}
 		}
 
@@ -1408,21 +1475,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
-		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
-		if err != nil {
+		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings)))
+				zap.Int("numTests", len(actualTestMockMappings.Tests)))
 		}
 	}
 
 	if testSetStatus == models.TestSetStatusFailed && r.instrument && isMappingEnabled {
+		// Create a map for easier lookup
+		actualMockMap := make(map[string][]string)
+		for _, t := range actualTestMockMappings.Tests {
+			actualMockMap[t.ID] = t.Mocks.ToSlice()
+		}
 
 		for tc, expectedMocks := range expectedTestMockMappings {
 
-			actualMocks, ok := actualTestMockMappings[tc]
+			actualMocks, ok := actualMockMap[tc]
 
 			if !ok {
 				continue
@@ -1523,13 +1594,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	return testSetStatus, nil
 }
 
-func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) (filtered, unfiltered []*models.Mock, err error) {
-	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime)
+func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
 		return nil, nil, err
 	}
-	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime)
+	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return nil, nil, err
@@ -2125,9 +2196,9 @@ func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
 	return nil
 }
 
-func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]string) error {
+func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
 	// Save test-mock mappings to YAML file
-	err := r.mappingDB.Insert(ctx, testSetID, mappings)
+	err := r.mappingDB.Insert(ctx, mapping)
 	return err
 }
 

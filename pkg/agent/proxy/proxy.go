@@ -94,7 +94,7 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	return &Proxy{
+	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
@@ -112,6 +112,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 	}
+
+	return proxy
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -904,6 +906,13 @@ func (p *Proxy) SendError(err error) {
 // CloseErrorChannel closes the error channel
 func (p *Proxy) CloseErrorChannel() {
 	close(p.errChannel)
+}
+
+func (p *Proxy) Mapping(ctx context.Context, mappingCh chan models.TestMockMapping) {
+	mgr := syncMock.Get()
+	if mgr != nil {
+		mgr.SetMappingChannel(mappingCh)
+	}
 }
 
 func isShutdownError(err error) bool {
