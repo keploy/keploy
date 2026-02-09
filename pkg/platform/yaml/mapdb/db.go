@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -27,7 +26,8 @@ func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
 	}
 }
 
-func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error {
+func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error {
+	testSetID := mapping.TestSetID
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -51,7 +51,7 @@ func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappi
 			return err
 		}
 
-		var existingConfig models.ExistingMappingConfig
+		var existingConfig models.Mapping
 		if err := yamlLib.Unmarshal(data, &existingConfig); err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", fullFilePath))
 			return err
@@ -59,23 +59,18 @@ func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappi
 
 		// Convert existing struct data into our map for merging
 		for _, t := range existingConfig.Tests {
-			if t.Mocks != "" {
-				// Split the comma-separated string back into a slice
-				finalMappings[t.ID] = strings.Split(t.Mocks, ",")
-			} else {
-				finalMappings[t.ID] = []string{}
-			}
+			finalMappings[t.ID] = t.Mocks.ToSlice()
 		}
 	}
 
-	// Overwrite existing keys, add new ones
-	for testID, mocks := range testMockMappings {
-		finalMappings[testID] = mocks
+	// Overwrite existing keys, add new ones from the incoming mapping
+	for _, t := range mapping.Tests {
+		finalMappings[t.ID] = t.Mocks.ToSlice()
 	}
 
-	mapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
+	newMapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
 
-	yamlData, err := EncodeMapping(mapping, db.logger)
+	yamlData, err := EncodeMapping(newMapping, db.logger)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping to yaml", zap.String("testSetID", testSetID))
 		return err

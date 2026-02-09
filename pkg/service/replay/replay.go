@@ -1022,7 +1022,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var actualTestMockMappings = make(map[string][]string)
+	actualTestMockMappings := &models.Mapping{
+		Version:   string(models.GetVersion()),
+		Kind:      models.MappingKind,
+		TestSetID: testSetID,
+	}
 	var consumedMocks []models.MockState
 	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
@@ -1259,8 +1263,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if len(consumedMocks) > 0 {
+			var mockNames []string
 			for _, m := range consumedMocks {
-				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+				mockNames = append(mockNames, m.Name)
+			}
+			found := false
+			for i, t := range actualTestMockMappings.Tests {
+				if t.ID == testCase.Name {
+					actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(actualTestMockMappings.Tests[i].Mocks.ToSlice(), mockNames...))
+					found = true
+					break
+				}
+			}
+			if !found {
+				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+					ID:    testCase.Name,
+					Mocks: models.FromSlice(mockNames),
+				})
 			}
 		}
 
@@ -1456,21 +1475,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
-		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
-		if err != nil {
+		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings)))
+				zap.Int("numTests", len(actualTestMockMappings.Tests)))
 		}
 	}
 
 	if testSetStatus == models.TestSetStatusFailed && r.instrument && isMappingEnabled {
+		// Create a map for easier lookup
+		actualMockMap := make(map[string][]string)
+		for _, t := range actualTestMockMappings.Tests {
+			actualMockMap[t.ID] = t.Mocks.ToSlice()
+		}
 
 		for tc, expectedMocks := range expectedTestMockMappings {
 
-			actualMocks, ok := actualTestMockMappings[tc]
+			actualMocks, ok := actualMockMap[tc]
 
 			if !ok {
 				continue
@@ -2173,9 +2196,9 @@ func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
 	return nil
 }
 
-func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]string) error {
+func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
 	// Save test-mock mappings to YAML file
-	err := r.mappingDB.Insert(ctx, testSetID, mappings)
+	err := r.mappingDB.Insert(ctx, mapping)
 	return err
 }
 
