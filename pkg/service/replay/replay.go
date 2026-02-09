@@ -147,6 +147,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}()
 
+	// check if its the last testset running -
+
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
@@ -1587,6 +1589,10 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
+	if r.config.Test.SchemaMatch {
+		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+	}
+
 	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger)
 }
 
