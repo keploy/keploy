@@ -1,0 +1,253 @@
+// Package orchestrator provides async I/O handling for parsers.
+// Parsers become read-only transformers, this orchestrator handles all writes.
+package orchestrator
+
+import (
+	"context"
+	"io"
+	"net"
+	"sync"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+// Target specifies the write destination
+type Target int
+
+const (
+	TargetClient Target = iota
+	TargetDestination
+)
+
+// WriteRequest represents a request to write data to a connection
+type WriteRequest struct {
+	Target  Target
+	Conn    net.Conn // Optional: Explicit connection to write to
+	Data    []byte
+	ErrChan chan error
+}
+
+// ParseResult contains transformed data from parser
+type ParseResult struct {
+	RawData   []byte      // Original bytes to forward
+	Parsed    interface{} // Decoded struct for YAML/mock
+	Operation string      // Type of operation (e.g., "Query", "Execute")
+	Timestamp time.Time
+	Metadata  map[string]string // Additional context
+}
+
+// Parser defines the read-only parser interface
+// Parsers only read and transform data, no writes allowed
+type Parser interface {
+	// MatchType checks if the initial bytes match this protocol
+	MatchType(ctx context.Context, reqBuf []byte) bool
+
+	// ParseRequest reads from client and returns parsed result
+	// The reader is read-only - parser cannot write to client
+	ParseRequest(ctx context.Context, reader io.Reader) (*ParseResult, error)
+
+	// ParseResponse reads server response and returns parsed result
+	// The reader is read-only - parser cannot write to server
+	ParseResponse(ctx context.Context, reader io.Reader) (*ParseResult, error)
+
+	// GetMockResponse returns the mock response for replay mode
+	// Returns the bytes to send back to client
+	GetMockResponse(ctx context.Context, request *ParseResult, mockDb interface{}) ([]byte, error)
+}
+
+// Orchestrator handles async I/O between client, parser, and destination
+type Orchestrator struct {
+	logger     *zap.Logger
+	connMu     sync.Mutex // protects clientConn and destConn
+	clientConn net.Conn
+	destConn   net.Conn // nil in replay mode
+	parser     Parser
+	writeChan  chan WriteRequest
+	mode       Mode
+	wg         sync.WaitGroup
+}
+
+// Mode represents the operating mode
+type Mode int
+
+const (
+	ModeRecord Mode = iota
+	ModeReplay
+)
+
+// Config holds orchestrator configuration
+type Config struct {
+	Logger     *zap.Logger
+	ClientConn net.Conn
+	DestConn   net.Conn // nil for replay mode
+	Parser     Parser
+	Mode       Mode
+	BufferSize int // Write channel buffer size
+}
+
+// New creates a new Orchestrator
+func New(cfg Config) *Orchestrator {
+	bufSize := cfg.BufferSize
+	if bufSize <= 0 {
+		bufSize = 100
+	}
+	return &Orchestrator{
+		logger:     cfg.Logger,
+		clientConn: cfg.ClientConn,
+		destConn:   cfg.DestConn,
+		parser:     cfg.Parser,
+		writeChan:  make(chan WriteRequest, bufSize),
+		mode:       cfg.Mode,
+	}
+}
+
+// Run starts the orchestrator's async write handler
+func (o *Orchestrator) Run(ctx context.Context) {
+	o.wg.Add(1)
+	go func() {
+		defer o.wg.Done()
+		o.writeLoop(ctx)
+	}()
+}
+
+// writeLoop handles all writes asynchronously
+func (o *Orchestrator) writeLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case req, ok := <-o.writeChan:
+			if !ok {
+				return
+			}
+			var err error
+			var conn net.Conn
+
+			// Use explicit connection if provided, otherwise fallback to stored targets
+			if req.Conn != nil {
+				conn = req.Conn
+			} else {
+				o.connMu.Lock()
+				if req.Target == TargetClient {
+					conn = o.clientConn
+				} else {
+					conn = o.destConn
+				}
+				o.connMu.Unlock()
+			}
+
+			if conn != nil {
+				_, err = conn.Write(req.Data)
+			}
+
+			if req.ErrChan != nil {
+				req.ErrChan <- err
+			}
+		}
+	}
+}
+
+// SetClientConn updates the client connection held by the orchestrator.
+// This must be called after in-protocol TLS upgrades (e.g., PostgreSQL SSLRequest)
+// so that subsequent writes go through the TLS-wrapped connection.
+func (o *Orchestrator) SetClientConn(conn net.Conn) {
+	o.connMu.Lock()
+	o.clientConn = conn
+	o.connMu.Unlock()
+}
+
+// WriteToClient queues a write to the client connection
+func (o *Orchestrator) WriteToClient(data []byte) error {
+	return o.write(TargetClient, nil, data)
+}
+
+// WriteToDestination queues a write to the destination connection
+func (o *Orchestrator) WriteToDestination(data []byte) error {
+	return o.write(TargetDestination, nil, data)
+}
+
+// WriteToConn queues a write to a specific connection
+func (o *Orchestrator) WriteToConn(conn net.Conn, data []byte) error {
+	return o.write(TargetClient, conn, data) // Target ignored when Conn is present
+}
+
+// write sends a write request and waits for completion
+func (o *Orchestrator) write(target Target, conn net.Conn, data []byte) error {
+	errChan := make(chan error, 1)
+	o.writeChan <- WriteRequest{
+		Target:  target,
+		Conn:    conn,
+		Data:    data,
+		ErrChan: errChan,
+	}
+	return <-errChan
+}
+
+// WriteAsync queues a write without waiting for completion
+func (o *Orchestrator) WriteAsync(target Target, data []byte) {
+	o.writeChan <- WriteRequest{
+		Target:  target,
+		Data:    data,
+		ErrChan: nil, // No wait
+	}
+}
+
+// Stop closes the write channel and waits for completion
+func (o *Orchestrator) Stop() {
+	close(o.writeChan)
+	o.wg.Wait()
+}
+
+// RecordFlow handles the record mode flow
+func (o *Orchestrator) RecordFlow(ctx context.Context, mockChan chan<- interface{}) error {
+	// 1. Parse request from client (read-only)
+	reqResult, err := o.parser.ParseRequest(ctx, o.clientConn)
+	if err != nil {
+		return err
+	}
+
+	// 2. Write request to destination (via orchestrator)
+	if err := o.WriteToDestination(reqResult.RawData); err != nil {
+		return err
+	}
+
+	// 3. Parse response from destination (read-only)
+	respResult, err := o.parser.ParseResponse(ctx, o.destConn)
+	if err != nil {
+		return err
+	}
+
+	// 4. Write response to client (via orchestrator)
+	if err := o.WriteToClient(respResult.RawData); err != nil {
+		return err
+	}
+
+	// 5. Record the mock (if channel provided)
+	if mockChan != nil {
+		mockChan <- struct {
+			Request  *ParseResult
+			Response *ParseResult
+		}{reqResult, respResult}
+	}
+
+	return nil
+}
+
+// ReplayFlow handles the replay mode flow
+func (o *Orchestrator) ReplayFlow(ctx context.Context, mockDb interface{}) error {
+	// 1. Parse request from client (read-only)
+	reqResult, err := o.parser.ParseRequest(ctx, o.clientConn)
+	if err != nil {
+		return err
+	}
+
+	// 2. Get mock response
+	mockResp, err := o.parser.GetMockResponse(ctx, reqResult, mockDb)
+	if err != nil {
+		return err
+	}
+
+	// 3. Write mock response to client (via orchestrator)
+	return o.WriteToClient(mockResp)
+}
