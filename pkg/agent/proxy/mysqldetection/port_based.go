@@ -17,20 +17,29 @@ import (
 // PortBasedDetection implements MySQL detection based on destination port
 type PortBasedDetection struct {
 	logger *zap.Logger
-	port   uint32 // Default MySQL port (3306)
+	ports  []uint32 // List of MySQL ports to check
 }
 
 // NewPortBasedDetection creates a new port-based detection strategy
-func NewPortBasedDetection(logger *zap.Logger) *PortBasedDetection {
+func NewPortBasedDetection(logger *zap.Logger, ports []uint32) *PortBasedDetection {
+	// Default to port 3306 if no ports specified
+	if len(ports) == 0 {
+		ports = []uint32{3306}
+	}
 	return &PortBasedDetection{
 		logger: logger,
-		port:   3306, // Default MySQL port
+		ports:  ports,
 	}
 }
 
-// ShouldHandle checks if the destination port matches MySQL port
+// ShouldHandle checks if the destination port matches any MySQL port
 func (p *PortBasedDetection) ShouldHandle(_ context.Context, destInfo *agent.NetworkAddress, _ []byte) bool {
-	return destInfo.Port == p.port
+	for _, port := range p.ports {
+		if destInfo.Port == port {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleConnection handles MySQL connection using port-based detection

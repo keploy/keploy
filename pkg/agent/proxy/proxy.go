@@ -104,8 +104,12 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		mysqlStrategy = mysqldetection.NewProtocolBasedDetection(logger)
 		logger.Info("Using protocol-based MySQL detection")
 	} else {
-		mysqlStrategy = mysqldetection.NewPortBasedDetection(logger)
-		logger.Debug("Using port-based MySQL detection (legacy)")
+		mysqlPorts := opts.Agent.MySQLPorts
+		if len(mysqlPorts) == 0 {
+			mysqlPorts = []uint32{3306} // Default to 3306 if not configured
+		}
+		mysqlStrategy = mysqldetection.NewPortBasedDetection(logger, mysqlPorts)
+		logger.Debug("Using port-based MySQL detection", zap.Any("ports", mysqlPorts))
 	}
 
 	return &Proxy{
