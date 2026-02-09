@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -183,9 +184,13 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
 	touched := map[models.Kind]struct{}{}
 
+	var maxSortOrder int64
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
+		if mock.TestModeInfo.SortOrder > maxSortOrder {
+			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
@@ -198,6 +203,10 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
+	}
+
+	if maxSortOrder > 0 {
+		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 
 	// atomically swap the per-kind map
@@ -219,9 +228,13 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
 	touched := map[models.Kind]struct{}{}
 
+	var maxSortOrder int64
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
+		if mock.TestModeInfo.SortOrder > maxSortOrder {
+			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
@@ -234,6 +247,10 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
+	}
+
+	if maxSortOrder > 0 {
+		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 
 	// atomically swap the per-kind map

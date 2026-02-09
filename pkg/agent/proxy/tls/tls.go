@@ -32,14 +32,34 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 		return nil, false, err
 	}
 
-	// 3. Create TLS Configuration
 	config := &tls.Config{
-		// A. Server Identity: Present the Proxy's certificate to the client
-		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if clientHello.ServerName == "" {
-				clientHello.ServerName = "127.0.0.1"
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			// Check if client supports http/1.1
+			clientSupportsHTTP1 := false
+			for _, proto := range hello.SupportedProtos {
+				if proto == "http/1.1" {
+					clientSupportsHTTP1 = true
+					break
+				}
 			}
-			return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+
+			var nextProtos []string
+			if clientSupportsHTTP1 {
+				// Client supports HTTP/1.1, prefer it (safer for HTTP traffic)
+				nextProtos = []string{"http/1.1"}
+				logger.Debug("Client supports http/1.1, using http/1.1 only", zap.Strings("clientProtos", hello.SupportedProtos))
+			} else {
+				// Client only supports H2 (likely gRPC), must offer H2
+				nextProtos = []string{"h2", "http/1.1"}
+				logger.Debug("Client requires H2 (likely gRPC), offering H2", zap.Strings("clientProtos", hello.SupportedProtos))
+			}
+
+			return &tls.Config{
+				NextProtos: nextProtos,
+				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
+				},
+			}, nil
 		},
 
 		// B. Client Identity: OPTIONAL TRUST ALL MODE

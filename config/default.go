@@ -60,6 +60,7 @@ test:
   protoFile: ""
   protoDir: ""
   protoInclude: []
+  compareAll: false
 record:
   recordTimer: 0s
   filters: []
