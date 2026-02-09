@@ -1,13 +1,13 @@
 name: Prepare Binary and Run Workflows (Windows)
 on:
   pull_request:
-    branches: [main]
+    branches: [main, flipkart]
   push:
-    branches: [main]
+    branches: [main, flipkart]
 
 jobs:
   build-and-upload:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart')) }}
     runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Create workflow start lock
@@ -91,7 +91,7 @@ jobs:
           git config --global --unset url."git@github.com:".insteadOf
 
   docker-image-build:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart')) }}
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
@@ -131,7 +131,7 @@ jobs:
     
   pull-docker-image:
     needs: [docker-image-build]
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart')) }}
     runs-on: [self-hosted, Windows, X64]
 
     steps:
@@ -183,7 +183,7 @@ jobs:
     uses: ./.github/workflows/golang_native_windows.yml
 
   cleanup:
-    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart'))) }}
     runs-on: [self-hosted, Windows, X64]
     needs: [run_golang_docker_windows, run_golang_native_windows]
     steps:
