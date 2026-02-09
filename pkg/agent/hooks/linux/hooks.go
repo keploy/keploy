@@ -234,7 +234,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		Program: objs.K_udp4Sendmsg,
 	})
 	if err != nil {
-		h.logger.Warn("failed to attach the udp4 sendmsg cgroup hook (unconnected UDP DNS won't be intercepted)", zap.Error(err))
+		h.logger.Error("failed to attach the udp4 sendmsg cgroup hook (unconnected UDP DNS won't be intercepted)", zap.Error(err))
 	} else {
 		h.udp4Sendmsg = udp4
 	}
@@ -269,7 +269,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		Program: objs.K_udp6Sendmsg,
 	})
 	if err != nil {
-		h.logger.Warn("failed to attach the udp6 sendmsg cgroup hook (unconnected UDP DNS won't be intercepted)", zap.Error(err))
+		h.logger.Error("failed to attach the udp6 sendmsg cgroup hook (unconnected UDP DNS won't be intercepted)", zap.Error(err))
 	} else {
 		h.udp6Sendmsg = udp6
 	}
