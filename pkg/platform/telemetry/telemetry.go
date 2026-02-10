@@ -63,12 +63,15 @@ func (tel *Telemetry) TestSetRun(success int, failure int, testSet string, runSt
 	go tel.SendTelemetry("TestSetRun", dataMap)
 }
 
-func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus string) {
+func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus string, domains []string) {
 	dataMap := &sync.Map{}
 	dataMap.Store("Passed-Tests", success)
 	dataMap.Store("Failed-Tests", failure)
 	dataMap.Store("Test-Sets", testSets)
 	dataMap.Store("Run-Status", runStatus)
+	if len(domains) > 0 {
+		dataMap.Store("host-domains", domains)
+	}
 	go tel.SendTelemetry("TestRun", dataMap)
 }
 
@@ -80,7 +83,7 @@ func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 }
 
 // RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
-func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int) {
+func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, domains []string) {
 	dataMap := &sync.Map{}
 	dataMap.Store("test-set", testSet)
 	dataMap.Store("tests", testsTotal)
@@ -90,6 +93,10 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 		mockMap.Store(k, v)
 	}
 	dataMap.Store("mocks", mockMap)
+
+	if len(domains) > 0 {
+		dataMap.Store("host-domains", domains)
+	}
 
 	go tel.SendTelemetry("RecordedTestSuite", dataMap)
 }
