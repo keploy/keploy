@@ -6,9 +6,10 @@ import (
 	"reflect"
 
 	"github.com/k0kubun/pp/v3"
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
-	"go.uber.org/zap"
 )
 
 // MatchSchema checks if the actual response matches the expected response schema.
