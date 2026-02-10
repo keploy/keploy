@@ -39,7 +39,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	var expObj, actObj interface{}
 	errExp := json.Unmarshal([]byte(tc.HTTPResp.Body), &expObj)
 	errAct := json.Unmarshal([]byte(actualResponse.Body), &actObj)
-	
+
 	var failureReason string
 
 	if errExp == nil && errAct == nil {
@@ -65,7 +65,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 			}
 		}
 	}
-	
+
 	// Logging similar to Match() in match.go
 	if !pass {
 		newLogger := pp.New()
@@ -73,10 +73,10 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
 		logs += newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-		
+
 		// Print reason
 		logs += newLogger.Sprintf("Schema Matching Failed: %s\n", failureReason)
-		
+
 		_, err := newLogger.Printf(logs)
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
