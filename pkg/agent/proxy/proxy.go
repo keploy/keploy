@@ -673,11 +673,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			NextProtos:         nextProtos,
 		}
 
-		if isMTLS && clientPeerCert != nil {
+		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
 			p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
 		}
 
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		addr := dstAddr
+		if dstURL != "" {
+			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		}
+
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {

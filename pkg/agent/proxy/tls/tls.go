@@ -59,26 +59,13 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
 				},
+				ClientAuth: tls.RequestClientCert,
+				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+					return nil
+				},
+				ClientCAs: nil,
 			}, nil
 		},
-
-		// B. Client Identity: OPTIONAL TRUST ALL MODE
-		// RequestClientCert:
-		// - Request a certificate from the client.
-		// - If client sends one, we accept it (and skip verification via VerifyPeerCertificate).
-		// - If client sends NONE, we continue (Standard TLS).
-		ClientAuth: tls.RequestClientCert,
-
-		// Custom verification validation to skip verifying the client's certificate chain.
-		// This effectively trusts ANY certificate the client sends.
-		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			return nil
-		},
-
-		// C. Trusted Authorities
-		// Set to nil so we don't send a restrictive list of accepted CAs to the client.
-		// This encourages the client to send its certificate regardless of who signed it.
-		ClientCAs: nil,
 	}
 
 	// Wrap the TCP conn with TLS
