@@ -56,6 +56,13 @@ _~/.gitconfig_
   cm = commit -s -m
   commit = commit -s
 ```
+ **Quick Start Example:**
+After making your changes, simply run:
+```bash
+git add .
+git commit -s -m 'feat: your contribution message'
+```
+This ensures your work is both staged and DCO-verified in one go!
 
 # How to contribute ?
 
