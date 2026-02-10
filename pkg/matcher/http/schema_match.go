@@ -10,7 +10,7 @@ import (
 )
 
 // MatchSchema checks if the actual response matches the expected response schema.
-func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
+func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, logger *zap.Logger) (bool, *models.Result) {
 	pass := true
 	res := &models.Result{
 		StatusCode: models.IntResult{
@@ -42,9 +42,9 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		match, msg := schemaMatchRecursive(expObj, actObj, "body", logger)
 		if !match {
 			pass = false
-			logger.Error("Schema match FAIL", zap.String("reason", msg))
+			logger.Info("result", zap.String("testcase id", models.HighlightFailingString(tc.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString("false")), zap.String("reason", msg))
 		} else {
-			logger.Info("Schema match PASS")
+			logger.Info("result", zap.String("testcase id", models.HighlightPassingString(tc.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString("true")))
 		}
 		res.BodyResult[0].Normal = match
 	} else {
