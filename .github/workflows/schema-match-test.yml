@@ -38,11 +38,13 @@ jobs:
       - name: Clone sample app
         run: git clone https://github.com/pathakharshit/keploy-schema-match-sample.git sample-app
 
-      # Step F: Install build dependencies (needed for Keploy's eBPF on Linux)
-      - name: Install dependencies
+      # Step F: Install build dependencies and move binary
+      - name: Install dependencies & install Keploy
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
+          # Move binary to /usr/local/bin so sudo can find it easily without path issues
+          sudo mv keploy /usr/local/bin/keploy
 
       # Step G: RECORD phase - Record test cases using the original app
       - name: Record test cases with original app
@@ -52,7 +54,7 @@ jobs:
           rm -rf keploy/
 
           # Start Keploy in RECORD mode with the original app (runs in background)
-          sudo $GITHUB_WORKSPACE/keploy record -c "python3 app.py" &
+          sudo keploy record -c "python3 app.py" &
           KEPLOY_PID=$!
 
           # Wait for the app to start up
@@ -73,21 +75,21 @@ jobs:
           ls -la keploy/ || echo "No keploy directory found"
 
       # Step H: TEST phase - Run tests with --schema-match using the modified app
-      # Step H: TEST phase - Run tests with --schema-match using the modified app
       - name: Run schema-match test with modified app
         working-directory: sample-app
         run: |
           # Run Keploy test and capture output.
           # We expect failures, so we add "|| true" to prevent immediate exit.
           echo "Running Keploy Test..."
-          OUTPUT=$(sudo $GITHUB_WORKSPACE/keploy test -c "python3 app-test.py" --schema-match --delay 5 2>&1 || true)
+          OUTPUT=$(sudo keploy test -c "python3 app-test.py" --schema-match --delay 5 2>&1 || true)
           
           # Print the full output for debugging
           echo "$OUTPUT"
 
-          # Count passes and failures
-          PASS_COUNT=$(echo "$OUTPUT" | grep -c "test passed" || true)
-          FAIL_COUNT=$(echo "$OUTPUT" | grep -c "test failed" || true)
+          # Count passes and failures based on our schema-match specific logs
+          # Logs look like: "Schema match PASS" and "Schema match FAIL"
+          PASS_COUNT=$(echo "$OUTPUT" | grep -c "Schema match PASS" || true)
+          FAIL_COUNT=$(echo "$OUTPUT" | grep -c "Schema match FAIL" || true)
 
           echo "----------------------------------------"
           echo "Results: $PASS_COUNT PASSED, $FAIL_COUNT FAILED"
