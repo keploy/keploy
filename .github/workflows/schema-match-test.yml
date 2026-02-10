@@ -32,7 +32,7 @@ jobs:
 
       - name: Clone Sample App
         run: |
-          git clone -b schema-match https://github.com/keploy/samples-python.git sample-app
+          git clone -b python-schema-match https://github.com/keploy/samples-python.git sample-app
 
       - name: Record Test Cases
         working-directory: sample-app/python-schema-match
