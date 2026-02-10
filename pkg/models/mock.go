@@ -217,6 +217,10 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 	if m.Spec.DNSResp != nil {
 		dnsRespCopy := *m.Spec.DNSResp
+		if m.Spec.DNSResp.Answers != nil {
+			dnsRespCopy.Answers = make([]string, len(m.Spec.DNSResp.Answers))
+			copy(dnsRespCopy.Answers, m.Spec.DNSResp.Answers)
+		}
 		c.Spec.DNSResp = &dnsRespCopy
 	}
 
