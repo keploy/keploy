@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -36,37 +38,57 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	var expObj, actObj interface{}
 	errExp := json.Unmarshal([]byte(tc.HTTPResp.Body), &expObj)
 	errAct := json.Unmarshal([]byte(actualResponse.Body), &actObj)
+	
+	var failureReason string
 
 	if errExp == nil && errAct == nil {
 		res.BodyResult[0].Type = models.JSON
 		match, msg := schemaMatchRecursive(expObj, actObj, "body", logger)
 		if !match {
 			pass = false
-			// Log the reason for failure, but do NOT log the "result" JSON here.
-			// replay.go handles the standard "result" logging.
-			// We use Error to make it visible why it failed.
-			logger.Error("Schema match FAIL", zap.String("reason", msg))
-		} else {
-			// Optional: We can log a simple info message, but standard Match doesn't log "PASS" explicitely per se, 
-			// it uses pp.Printf("Testrun passed...").
-			// For now, a debug/info log is fine, or we can look at mimicking pp.Printf if requested.
-			// But the user asked to use the "same log methods".
-			// Since match.go uses pp.Printf for "Testrun passed", maybe we should too?
-			// However, simply removing the duplicate "result" log satisfies the "don't duplicate" requirement.
-			logger.Info("Schema match PASS")
+			failureReason = msg
 		}
 		res.BodyResult[0].Normal = match
 	} else {
 		if (errExp == nil) != (errAct == nil) {
 			pass = false
 			res.BodyResult[0].Normal = false
+			failureReason = "One of the body is json and other is not"
 		} else {
 			// Both non-JSON: fallback to strict equality.
 			bodyMatch := tc.HTTPResp.Body == actualResponse.Body
 			res.BodyResult[0].Normal = bodyMatch
 			if !bodyMatch {
 				pass = false
+				failureReason = "Body mismatch (non-JSON)"
 			}
+		}
+	}
+	
+	// Logging similar to Match() in match.go
+	if !pass {
+		newLogger := pp.New()
+		newLogger.WithLineInfo = false
+		newLogger.SetColorScheme(models.GetFailingColorScheme())
+		var logs = ""
+		logs += newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+		
+		// Print reason
+		logs += newLogger.Sprintf("Schema Matching Failed: %s\n", failureReason)
+		
+		_, err := newLogger.Printf(logs)
+		if err != nil {
+			utils.LogError(logger, err, "failed to print the logs")
+		}
+	} else {
+		newLogger := pp.New()
+		newLogger.WithLineInfo = false
+		newLogger.SetColorScheme(models.GetPassingColorScheme())
+		var log2 = ""
+		log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+		_, err := newLogger.Printf(log2)
+		if err != nil {
+			utils.LogError(logger, err, "failed to print the logs")
 		}
 	}
 
