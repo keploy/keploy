@@ -87,6 +87,7 @@ type Record struct {
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 }
 
 type ReRecord struct {
@@ -150,6 +151,7 @@ type Test struct {
 	ProtoFile           string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
 	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
+	CompareAll          bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
 	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
 }
 

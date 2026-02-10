@@ -5,6 +5,7 @@ package utils
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -15,7 +16,8 @@ import (
 
 // NewAgentCommand on Windows returns a plain command (no sudo).
 // If the agent needs admin, run the parent process with Administrator rights.
-func NewAgentCommand(bin string, args []string) *exec.Cmd {
+// The useCachedCreds parameter is ignored on Windows.
+func NewAgentCommand(bin string, args []string, useCachedCreds bool) *exec.Cmd {
 	cmd := exec.Command(bin, args...)
 	// Run in a separate process group so Ctrl+C in the parent console doesn't hit the agent.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -24,8 +26,68 @@ func NewAgentCommand(bin string, args []string) *exec.Cmd {
 	return cmd
 }
 
+// NewAgentCommandForPTY on Windows is the same as NewAgentCommand since PTY is not supported.
+func NewAgentCommandForPTY(bin string, args []string) *exec.Cmd {
+	return NewAgentCommand(bin, args, false)
+}
+
+// NeedsPTY on Windows always returns false since PTY is not supported.
+func NeedsPTY() bool {
+	return false
+}
+
 func StartCommand(cmd *exec.Cmd) error {
 	return cmd.Start()
+}
+
+// PTYHandle represents a PTY session (stub for Windows)
+type PTYHandle struct {
+	cmd    *exec.Cmd
+	logger *zap.Logger
+}
+
+// StartCommandWithPTY on Windows falls back to regular command execution since PTY is not supported.
+func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) {
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return &PTYHandle{
+		cmd:    cmd,
+		logger: logger,
+	}, nil
+}
+
+// Wait waits for the command to finish.
+func (h *PTYHandle) Wait() error {
+	return h.cmd.Wait()
+}
+
+// GetProcess returns the underlying process for signal handling
+func (h *PTYHandle) GetProcess() *os.Process {
+	if h.cmd != nil {
+		return h.cmd.Process
+	}
+	return nil
+}
+
+// StopPTYCommand on Windows uses StopCommand since PTY is not supported.
+func StopPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
+	if handle == nil || handle.cmd == nil {
+		return nil
+	}
+	return StopCommand(handle.cmd, logger)
+}
+
+// ConfigureCommandForPTY configures the command's SysProcAttr for PTY execution.
+// On Windows, this is a no-op since PTY is not supported in the same way.
+func ConfigureCommandForPTY(cmd *exec.Cmd) {
+	// On Windows, PTY is not supported in the same way as Unix.
+	// The command will run with stdin/stdout/stderr connected directly.
 }
 
 // StopCommand uses "taskkill" to terminate the process tree:

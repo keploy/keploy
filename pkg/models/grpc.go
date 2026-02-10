@@ -8,6 +8,7 @@ type GrpcSpec struct {
 	Metadata         map[string]string             `json:"metadata" yaml:"metadata"`
 	GrpcReq          GrpcReq                       `json:"grpcReq" yaml:"grpcReq"`
 	GrpcResp         GrpcResp                      `json:"grpcResp" yaml:"grpcResp"`
+	AppPort          uint16                        `json:"app_port" yaml:"app_port,omitempty"`
 	Created          int64                         `json:"created" yaml:"created"`
 	Assertions       map[AssertionType]interface{} `json:"assertions" yaml:"assertions"`
 	ReqTimestampMock time.Time                     `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`

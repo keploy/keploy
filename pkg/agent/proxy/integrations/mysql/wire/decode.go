@@ -261,19 +261,32 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		logger.Debug("AuthSwitchRequest decoded", zap.Any("parsed packet", parsedPacket))
 
 	case payloadType == 0x02:
-		if len(payload) == 1 {
-			logger.Debug(("Request public key detected"))
-			setPacketInfo(ctx, parsedPacket, "request_public_key", mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), clientConn, byte(mysql.RequestPublicKey), decodeCtx)
-			logger.Debug("Request public key decoded", zap.Any("parsed packet", parsedPacket))
-		} else {
-			logger.Debug("AuthNextFactor packet", zap.Any("Type", payloadType))
-			pkt, err := connection.DecodeAuthNextFactor(ctx, payload)
-			if err != nil {
-				return parsedPacket, fmt.Errorf("failed to decode AuthNextFactor packet: %w", err)
+		// 0x02 is ambiguous: it can be COM_INIT_DB or auth-related (AuthNextFactor / request public key).
+		// Resolve based on the last observed auth phase.
+		if lastOp == mysql.AuthMoreData || lastOp == mysql.AuthSwitchRequest || lastOp == mysql.HandshakeV10 || lastOp == mysql.AuthNextFactor {
+			if len(payload) == 1 {
+				logger.Debug(("Request public key detected"))
+				setPacketInfo(ctx, parsedPacket, "request_public_key", mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), clientConn, byte(mysql.RequestPublicKey), decodeCtx)
+				logger.Debug("Request public key decoded", zap.Any("parsed packet", parsedPacket))
+			} else {
+				logger.Debug("AuthNextFactor packet", zap.Any("Type", payloadType))
+				pkt, err := connection.DecodeAuthNextFactor(ctx, payload)
+				if err != nil {
+					return parsedPacket, fmt.Errorf("failed to decode AuthNextFactor packet: %w", err)
+				}
+				logger.Warn("AuthNextFactor packet not supported, further flow can be affected")
+				setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthNextFactor), clientConn, mysql.AuthNextFactor, decodeCtx)
+				logger.Debug("AuthNextFactor decoded", zap.Any("parsed packet", parsedPacket))
 			}
-			logger.Warn("AuthNextFactor packet not supported, further flow can be affected")
-			setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthNextFactor), clientConn, mysql.AuthNextFactor, decodeCtx)
-			logger.Debug("AuthNextFactor decoded", zap.Any("parsed packet", parsedPacket))
+		} else {
+			logger.Debug("COM_INIT_DB packet", zap.Any("Type", payloadType))
+			pkt, err := utility.DecodeInitDb(ctx, payload)
+			if err != nil {
+				return parsedPacket, fmt.Errorf("failed to decode COM_INIT_DB packet: %w", err)
+			}
+
+			setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_INIT_DB), clientConn, mysql.COM_INIT_DB, decodeCtx)
+			logger.Debug("COM_INIT_DB decoded", zap.Any("parsed packet", parsedPacket))
 		}
 	case payloadType == mysql.HandshakeV10:
 		logger.Debug("HandshakeV10 packet", zap.Any("Type", payloadType))
@@ -295,16 +308,6 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		}
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_QUIT), clientConn, mysql.COM_QUIT, decodeCtx)
 		logger.Debug("COM_QUIT decoded", zap.Any("parsed packet", parsedPacket))
-	case payloadType == mysql.COM_INIT_DB:
-		logger.Debug("COM_INIT_DB packet", zap.Any("Type", payloadType))
-		pkt, err := utility.DecodeInitDb(ctx, payload)
-		if err != nil {
-			return parsedPacket, fmt.Errorf("failed to decode COM_INIT_DB packet: %w", err)
-		}
-
-		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_INIT_DB), clientConn, mysql.COM_INIT_DB, decodeCtx)
-		logger.Debug("COM_INIT_DB decoded", zap.Any("parsed packet", parsedPacket))
-
 	case payloadType == mysql.COM_STATISTICS:
 		logger.Debug("COM_STATISTICS packet", zap.Any("Type", payloadType))
 		pkt := &mysql.StatisticsPacket{

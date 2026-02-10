@@ -184,8 +184,8 @@ send_requests() {
       "user": "postgres",
       "password": "password",
       "dbName": "postgres",
-      "seed": 12345,
-      "totalOps": 2000,
+      "seed": 42,
+      "totalOps": 3000,
       "drop_db_first": true,
       "schema": "fuzz_schema_12345"
     }'
@@ -220,7 +220,7 @@ endsec
 
 # --- Recording Phase ---
 section "Start Recording Server"
-sudo -E env PATH="$PATH" "$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record.txt &
+"$RECORD_KEPLOY_BIN" record -c "$POSTGRES_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
@@ -267,7 +267,7 @@ endsec
 
 # --- Replay Phase ---
 section "Replaying Tests"
-sudo -E env PATH="$PATH" "$REPLAY_KEPLOY_BIN" test -c "$POSTGRES_FUZZER_BIN" --delay 15 --api-timeout=1000 2>&1 | tee test.txt
+"$REPLAY_KEPLOY_BIN" test -c "$POSTGRES_FUZZER_BIN" --delay 15 --api-timeout=1000 2>&1 | tee test.txt
 check_for_errors "test.txt"
 check_test_report
 endsec

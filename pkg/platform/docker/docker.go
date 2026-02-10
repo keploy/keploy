@@ -179,12 +179,12 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 
 		// Compare driver options
 		if idc.volumeOptionsMatch(existingVolume.Options, driverOpts) {
-			idc.logger.Info("volume already exists with the same options", zap.String("volume", volumeName))
+			idc.logger.Debug("volume already exists with the same options", zap.String("volume", volumeName))
 			return nil
 		}
 
 		if !recreate {
-			idc.logger.Info("volume already exists but with different options", zap.String("volume", volumeName))
+			idc.logger.Debug("volume already exists but with different options", zap.String("volume", volumeName))
 			return fmt.Errorf("volume %s exists with different options", volumeName)
 		}
 
@@ -555,7 +555,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
-
+	if models.IsAnsiDisabled {
+		command = append(command, "--disable-ansi")
+	}
 	if len(opts.PassThroughPorts) > 0 {
 		portStrings := make([]string, len(opts.PassThroughPorts))
 		for i, port := range opts.PassThroughPorts {

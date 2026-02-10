@@ -58,7 +58,11 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 	// Reuse one pretty printer
 	pr := pp.New()
 	pr.WithLineInfo = false
-	pr.SetColorScheme(models.GetFailingColorScheme())
+	if !cfg.DisableANSI {
+		pr.SetColorScheme(models.GetFailingColorScheme())
+	} else {
+		pr.SetColoringEnabled(false)
+	}
 	r.printer = pr
 	return r
 }
@@ -719,7 +723,13 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 	// Status & header diffs (compact)
 	metaDiff := GenerateStatusAndHeadersTableDiff(test)
-	sb.WriteString(applyCliColorsToDiff(metaDiff))
+
+	if !r.config.DisableANSI {
+		sb.WriteString(applyCliColorsToDiff(metaDiff))
+	} else {
+		sb.WriteString(metaDiff)
+	}
+
 	sb.WriteString("\n")
 	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
@@ -733,7 +743,11 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 			if pkg.IsJSON([]byte(bodyResult.Expected)) && pkg.IsJSON([]byte(bodyResult.Actual)) {
 				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
 				if err == nil {
-					sb.WriteString(applyCliColorsToDiff(diff))
+					if !r.config.DisableANSI {
+						sb.WriteString(applyCliColorsToDiff(diff))
+					} else {
+						sb.WriteString(diff)
+					}
 					sb.WriteString("\n")
 				} else {
 					tmp := *r
@@ -747,7 +761,12 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 
 		// Force the old compact format for non-JSON bodies (fast).
 		diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
-		sb.WriteString(applyCliColorsToDiff(diff))
+
+		if !r.config.DisableANSI {
+			sb.WriteString(applyCliColorsToDiff(diff))
+		} else {
+			sb.WriteString(diff)
+		}
 		sb.WriteString("\n\n")
 
 	}

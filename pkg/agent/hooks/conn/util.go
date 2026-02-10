@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"sync/atomic"
+
 	"go.keploy.io/server/v3/pkg"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -21,11 +23,16 @@ import (
 	"go.uber.org/zap"
 )
 
-type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool)
+var GlobalTestCounter int64
+
+type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16)
 
 var CaptureHook CaptureFunc = Capture
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool) {
+// MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
+const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
+
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -85,6 +92,18 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}
 
+	// Check if combined request and response size exceeds 5MB limit (after decompression)
+	totalSize := len(reqBody) + len(respBody)
+	if totalSize > MaxTestCaseSize {
+		logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
+			zap.Int("totalSize", totalSize),
+			zap.Int("reqBodySize", len(reqBody)),
+			zap.Int("respBodySize", len(respBody)),
+			zap.String("url", req.URL.String()),
+			zap.String("method", req.Method))
+		return
+	}
+
 	testCase := &models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
@@ -108,12 +127,17 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
-		Noise: map[string][]string{},
+		Noise:   map[string][]string{},
+		AppPort: appPort,
 		// Mocks: mocks,
 	}
+
 	if synchronous {
+		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
+		testName := fmt.Sprintf("test-%d", currentID)
+		testCase.Name = testName
 		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
-			mgr.ResolveRange(reqTimeTest, resTimeTest, true)
+			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true)
 		}
 	}
 	select {
@@ -269,7 +293,7 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 }
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream) {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -289,6 +313,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		GrpcReq:  *http2Stream.GRPCReq,
 		GrpcResp: *http2Stream.GRPCResp,
 		Noise:    map[string][]string{},
+		AppPort:  appPort,
 	}
 
 	select {
