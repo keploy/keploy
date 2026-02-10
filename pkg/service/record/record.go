@@ -131,7 +131,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
-		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, domainSet.ToSlice())
+		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
+			"host-domains": domainSet.ToSlice(),
+		})
 	}()
 
 	defer close(appErrChan)

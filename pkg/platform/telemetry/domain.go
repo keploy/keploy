@@ -9,9 +9,10 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// ExtractDomain extracts the host (domain:port or just domain) from a raw URL string.
+// ExtractDomain extracts the hostname (domain without port) from a raw URL string.
 // Returns empty string if parsing fails or no host is present.
 func ExtractDomain(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return ""
 	}

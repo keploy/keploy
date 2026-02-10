@@ -484,7 +484,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	passed := totalTestPassed
 	failed := totalTestFailed
 	completeTestReportMu.RUnlock()
-	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, runDomainSet.ToSlice())
+	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
+		"host-domains": runDomainSet.ToSlice(),
+	})
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
