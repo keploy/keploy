@@ -15,7 +15,7 @@ import (
 // MatchSchema checks if the actual response matches the expected response schema.
 func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
 	pass := true
-	res := &models.Result{
+	result := &models.Result{
 		StatusCode: models.IntResult{
 			Normal:   false,
 			Expected: tc.HTTPResp.StatusCode,
@@ -30,7 +30,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 
 	// Status Code Match
 	if tc.HTTPResp.StatusCode == actualResponse.StatusCode {
-		res.StatusCode.Normal = true
+		result.StatusCode.Normal = true
 	} else {
 		pass = false
 	}
@@ -43,22 +43,22 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	var failureReason string
 
 	if errExp == nil && errAct == nil {
-		res.BodyResult[0].Type = models.JSON
+		result.BodyResult[0].Type = models.JSON
 		match, msg := schemaMatchRecursive(expObj, actObj, "body", logger)
 		if !match {
 			pass = false
 			failureReason = msg
 		}
-		res.BodyResult[0].Normal = match
+		result.BodyResult[0].Normal = match
 	} else {
 		if (errExp == nil) != (errAct == nil) {
 			pass = false
-			res.BodyResult[0].Normal = false
+			result.BodyResult[0].Normal = false
 			failureReason = "One of the body is json and other is not"
 		} else {
 			// Both non-JSON: fallback to strict equality.
 			bodyMatch := tc.HTTPResp.Body == actualResponse.Body
-			res.BodyResult[0].Normal = bodyMatch
+			result.BodyResult[0].Normal = bodyMatch
 			if !bodyMatch {
 				pass = false
 				failureReason = "Body mismatch (non-JSON)"
@@ -100,7 +100,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		}
 	}
 
-	return pass, res
+	return pass, result
 }
 
 func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap.Logger) (bool, string) {

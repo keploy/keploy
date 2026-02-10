@@ -121,9 +121,9 @@ func TestSchemaMatch(t *testing.T) {
 				Body:       tt.actual,
 			}
 
-			got, res := MatchSchema(tc, actualResp, logger)
+			got, result := MatchSchema(tc, actualResp, logger)
 			if got != tt.want {
-				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", got, tt.want, res)
+				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", got, tt.want, result)
 			}
 		})
 	}
@@ -172,9 +172,9 @@ func TestSchemaMatch_Headers(t *testing.T) {
 				Body:       `{}`,
 			}
 
-			got, res := MatchSchema(tc, actualResp, logger)
+			got, result := MatchSchema(tc, actualResp, logger)
 			if got != tt.want {
-				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", got, tt.want, res)
+				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", got, tt.want, result)
 			}
 		})
 	}
@@ -240,9 +240,9 @@ func TestUserVerification_SchemaMatch(t *testing.T) {
 				Header: map[string]string{"Content-Type": "application/json"},
 			}
 
-			pass, res := MatchSchema(tCase, actualResp, logger)
+			pass, result := MatchSchema(tCase, actualResp, logger)
 			if pass != tc.shouldPass {
-				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", pass, tc.shouldPass, res)
+				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", pass, tc.shouldPass, result)
 			}
 		})
 	}
