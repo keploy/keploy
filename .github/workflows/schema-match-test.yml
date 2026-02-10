@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - schema_check
   pull_request:
 
 jobs:
