@@ -29,19 +29,12 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			return ctx.Err()
 		default:
 
-			// read the command from the client
+			// read the command from the client (auto-forwarded to dest via ForwardingReadOnlyConn)
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read command packet from client")
 				}
-				return err
-			}
-
-			// write the command to the destination server
-			_, err = destConn.Write(command)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write command to the server")
 				return err
 			}
 
@@ -93,19 +86,12 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 }
 
 func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, time.Time, error) {
-	// read the command response from the destination server
+	// read the command response from the destination server (auto-forwarded to client via ForwardingReadOnlyConn)
 	commandResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		if err != io.EOF {
 			utils.LogError(logger, err, "failed to read command response from the server")
 		}
-		return nil, time.Time{}, err
-	}
-
-	// write the command response to the client
-	_, err = clientConn.Write(commandResp)
-	if err != nil {
-		utils.LogError(logger, err, "failed to write command response to the client")
 		return nil, time.Time{}, err
 	}
 
@@ -178,19 +164,12 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 	if responseOk.NumParams > 0 {
 		for i := uint16(0); i < responseOk.NumParams; i++ {
 
-			// Read the column definition packet
+			// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
 			colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read column data for parameter definition")
 				}
-				return nil, err
-			}
-
-			// Write the column definition packet to the client
-			_, err = clientConn.Write(colData)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write column data for parameter definition")
 				return nil, err
 			}
 
@@ -205,19 +184,12 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
 
-		// Read the EOF packet for parameter definition
+		// Read the EOF packet for parameter definition (auto-forwarded to client)
 		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
 			}
-			return nil, err
-		}
-
-		// Write the EOF packet for parameter definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for parameter definition to the client")
 			return nil, err
 		}
 
@@ -235,19 +207,12 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 	if responseOk.NumColumns > 0 {
 		for i := uint16(0); i < responseOk.NumColumns; i++ {
 
-			// Read the column definition packet
+			// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
 			colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read column data for column definition")
 				}
-				return nil, err
-			}
-
-			// Write the column definition packet to the client
-			_, err = clientConn.Write(colData)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write column data for column definition")
 				return nil, err
 			}
 
@@ -262,19 +227,12 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
 
-		// Read the EOF packet for column definition
+		// Read the EOF packet for column definition (auto-forwarded to client)
 		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read EOF packet for column definition")
 			}
-			return nil, err
-		}
-
-		// Write the EOF packet for column definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
 			return nil, err
 		}
 
@@ -312,19 +270,12 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	// Read the column definition packets
 	for i := uint64(0); i < colCount; i++ {
-		// Read the column definition packet
+		// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
 		colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read column definition packet")
 			}
-			return nil, err
-		}
-
-		// Write the column definition packet to the client
-		_, err = clientConn.Write(colData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write column definition packet")
 			return nil, err
 		}
 
@@ -340,19 +291,12 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
 		logger.Debug("EOF packet is not deprecated while handling textResultSet")
 
-		// Read the EOF packet for column definition
+		// Read the EOF packet for column definition (auto-forwarded to client)
 		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read EOF packet for column definition")
 			}
-			return nil, err
-		}
-
-		// Write the EOF packet for column definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
 			return nil, err
 		}
 
@@ -372,19 +316,12 @@ rowLoop:
 			return nil, ctx.Err()
 		default:
 
-			// Read the packet
+			// Read the packet (auto-forwarded to client via ForwardingReadOnlyConn)
 			data, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read data packet while reading row data")
 				}
-				return nil, err
-			}
-
-			// Write the packet to the client
-			_, err = clientConn.Write(data)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write data packet while reading row data")
 				return nil, err
 			}
 
@@ -442,19 +379,12 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 	logger.Debug("ColCount in handleBinaryResultSet: ", zap.Any("ColCount", colCount))
 	// Read the column definition packets
 	for i := uint64(0); i < colCount; i++ {
-		// Read the column definition packet
+		// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
 		colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read column definition packet")
 			}
-			return nil, err
-		}
-
-		// Write the column definition packet to the client
-		_, err = clientConn.Write(colData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write column definition packet")
 			return nil, err
 		}
 
@@ -469,19 +399,12 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 
 	logger.Debug("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
 
-	// Read the EOF packet for column definition
+	// Read the EOF packet for column definition (auto-forwarded to client)
 	eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		if err != io.EOF {
 			utils.LogError(logger, err, "failed to read EOF packet for column definition")
 		}
-		return nil, err
-	}
-
-	// Write the EOF packet for column definition to the client
-	_, err = clientConn.Write(eofData)
-	if err != nil {
-		utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
 		return nil, err
 	}
 
@@ -500,19 +423,12 @@ rowLoop:
 			return nil, ctx.Err()
 		default:
 
-			// Read the packet
+			// Read the packet (auto-forwarded to client via ForwardingReadOnlyConn)
 			data, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read data packet while reading row data")
 				}
-				return nil, err
-			}
-
-			// Write the packet to the client
-			_, err = clientConn.Write(data)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write data packet while reading row data")
 				return nil, err
 			}
 

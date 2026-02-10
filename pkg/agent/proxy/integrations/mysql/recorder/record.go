@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -82,8 +83,23 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
 		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
+		// Create read-only connection wrappers with auto-forwarding for the query phase.
+		// The handshake phase uses direct writes (due to TLS upgrade complexity),
+		// but the query phase (performance-critical path) is fully read-only.
+		clientReadConn := orchestrator.NewForwardingReadOnlyConn(clientConn, destConn)
+		destReadConn := orchestrator.NewForwardingReadOnlyConn(destConn, clientConn)
+
+		// Re-register decodeCtx map entries with the new ForwardingReadOnlyConn key,
+		// since the query phase will use clientReadConn as the map key.
+		if op, ok := decodeCtx.LastOp.Load(clientConn); ok {
+			decodeCtx.LastOp.Store(clientReadConn, op)
+		}
+		if sg, ok := decodeCtx.ServerGreetings.Load(clientConn); ok {
+			decodeCtx.ServerGreetings.Store(clientReadConn, sg)
+		}
+
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
+		err = handleClientQueries(ctx, logger, clientReadConn, destReadConn, mocks, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")
