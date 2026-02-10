@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/java"
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -66,6 +67,7 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
+	runDomainSet    *telemetry.DomainSet // collects host domains across a test run for telemetry
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -250,6 +252,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	abortTestRun := false
 	var flakyTestSets []string
 	var testSets []string
+	runDomainSet := telemetry.NewDomainSet()
+	r.runDomainSet = runDomainSet
 	for _, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
@@ -480,7 +484,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	passed := totalTestPassed
 	failed := totalTestFailed
 	completeTestReportMu.RUnlock()
-	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus)
+	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
+		"host-domains": runDomainSet.ToSlice(),
+	})
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
@@ -601,6 +607,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
+	if r.runDomainSet != nil {
+		for _, tc := range testCases {
+			r.runDomainSet.AddAll(telemetry.ExtractDomainsFromTestCase(tc))
+		}
 	}
 
 	if len(testCases) == 0 {
@@ -819,6 +832,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
+		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
+		if r.runDomainSet != nil {
+			for _, m := range filteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+			for _, m := range unfilteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+		}
+
 		if filteredMocks == nil && unfilteredMocks == nil {
 			r.logger.Warn("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
@@ -884,6 +907,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
+		}
+		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
+		if r.runDomainSet != nil {
+			for _, m := range filteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+			for _, m := range unfilteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
 		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
