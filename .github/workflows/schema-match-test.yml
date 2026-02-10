@@ -92,11 +92,11 @@ jobs:
 
           echo "----------------------------------------"
           echo "Results: $PASS_COUNT PASSED, $FAIL_COUNT FAILED"
-          echo "Expected: 8 PASSED, 2 FAILED"
+          echo "Expected: 6 PASSED, 4 FAILED"
           echo "----------------------------------------"
 
           # Verify exact counts
-          if [ "$PASS_COUNT" -eq 8 ] && [ "$FAIL_COUNT" -eq 2 ]; then
+          if [ "$PASS_COUNT" -eq 6 ] && [ "$FAIL_COUNT" -eq 4 ]; then
             echo "✅ SUCCESS: Schema match logic is working as expected!"
             exit 0
           else

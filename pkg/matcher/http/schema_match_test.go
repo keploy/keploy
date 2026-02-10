@@ -65,10 +65,10 @@ func TestSchemaMatch(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "Array Length Mismatch (Pass - Relaxed)",
+			name:     "Array Length Mismatch (Fail - Actual < Expected)",
 			expected: `{"list": [1, 2]}`,
 			actual:   `{"list": [1]}`,
-			want:     true,
+			want:     false,
 		},
 		{
 			name:     "Array Superset (Match)",
@@ -219,11 +219,11 @@ func TestUserVerification_SchemaMatch(t *testing.T) {
 			shouldPass:  false,
 		},
 		{
-			name:        "5. Array Length Mismatch (Success - Relaxed)",
-			description: "Expected list has 2 items, Actual has only 1. Since length check is relaxed, this PASSES.",
+			name:        "5. Array Length Mismatch (Fail - Actual < Expected)",
+			description: "Expected list has 2 items, Actual has only 1. Actual < Expected is a structural mismatch, so this FAILS.",
 			expected:    `{"tags": ["a", "b"]}`,
 			actual:      `{"tags": ["a"]}`,
-			shouldPass:  true,
+			shouldPass:  false,
 		},
 	}
 
