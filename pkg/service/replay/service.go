@@ -95,7 +95,7 @@ type TestSetConfig interface {
 
 type Telemetry interface {
 	TestSetRun(success int, failure int, testSet string, runStatus string)
-	TestRun(success int, failure int, testSets int, runStatus string)
+	TestRun(success int, failure int, testSets int, runStatus string, metadata map[string]interface{})
 	MockTestRun(utilizedMocks int)
 }
 
