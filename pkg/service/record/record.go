@@ -129,12 +129,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+		// Close channels after all workers have stopped
+		close(appErrChan)
+		close(insertTestErrChan)
+		close(insertMockErrChan)
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
-
-	defer close(appErrChan)
-	defer close(insertTestErrChan)
-	defer close(insertMockErrChan)
 
 	if reRecordCfg.TestSet != "" {
 		// --- TARGETING AN EXISTING TEST SET ---
@@ -256,7 +256,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 					if ctx.Err() == context.Canceled {
 						continue
 					}
-					insertTestErrChan <- err
+					select {
+					case insertTestErrChan <- err:
+						// Error sent successfully
+					case <-ctx.Done():
+						return nil
+					}
 				} else {
 					testCount++
 					r.telemetry.RecordedTestAndMocks()
@@ -289,7 +294,12 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				if ctx.Err() == context.Canceled {
 					continue
 				}
-				insertMockErrChan <- err
+				select {
+				case insertMockErrChan <- err:
+					// Error sent successfully
+				case <-ctx.Done():
+					return nil
+				}
 			} else {
 				if tempID != "" && mock.Name != "" {
 					correlationMap.Store(tempID, mock.Name)
