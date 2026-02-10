@@ -25,14 +25,14 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		}},
 	}
 
-	// 1. Status Code Match
+	// Status Code Match
 	if tc.HTTPResp.StatusCode == actualResponse.StatusCode {
 		res.StatusCode.Normal = true
 	} else {
 		pass = false
 	}
 
-	// 2. Body Schema Match
+	// Body Schema Match
 	var expObj, actObj interface{}
 	errExp := json.Unmarshal([]byte(tc.HTTPResp.Body), &expObj)
 	errAct := json.Unmarshal([]byte(actualResponse.Body), &actObj)
@@ -72,7 +72,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 }
 
 func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap.Logger) (bool, string) {
-	// 1. Handle Nil Cases
+	// Handle Nil Cases
 	if expected == nil {
 		// Strict: if we expect nil/null, actual must be nil/null
 		if actual == nil {
@@ -88,7 +88,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 	expType := reflect.TypeOf(expected)
 	actType := reflect.TypeOf(actual)
 
-	// 2. Type Check with Numeric Compatibility
+	// Type Check with Numeric Compatibility
 	if expType != actType {
 		// Handle the specific case where one is int and the other is float (common in Go JSON)
 		if isNumeric(expType.Kind()) && isNumeric(actType.Kind()) {
@@ -98,7 +98,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 		}
 	}
 
-	// 3. Recursive Check
+	// Recursive Check
 	expKind := expType.Kind()
 
 	// If expected was an interface, get the underlying kind
