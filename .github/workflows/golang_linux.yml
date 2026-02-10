@@ -62,7 +62,7 @@ jobs:
           curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
           chmod +x yq
           sudo mv yq /usr/bin/
-
+          
       - id: record
         uses: ./.github/actions/download-binary
         with:
@@ -141,3 +141,57 @@ jobs:
         run: |
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
+
+  dns_mock_test:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [udp-with-connect, udp-without-connect]
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: dns_mock (${{ matrix.branch }}) - ${{ matrix.config.job }}
+    steps:
+      - name: Checkout Keploy
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout DNS Mock App
+        uses: actions/checkout@v4
+        with:
+          repository: akashkumar7902/dns-mock-test
+          ref: ${{ matrix.branch }}
+          path: dns-mock-test
+
+      - name: Run Test
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd dns-mock-test
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/dns_mock/golang-linux.sh
