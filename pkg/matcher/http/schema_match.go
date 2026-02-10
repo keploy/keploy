@@ -58,8 +58,12 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 			res.BodyResult[0].Normal = false
 		} else {
 			// Both non-JSON: fallback to strict equality.
-			pass = tc.HTTPResp.Body == actualResponse.Body
-			res.BodyResult[0].Normal = pass
+			// Both non-JSON: fallback to strict equality.
+			bodyMatch := tc.HTTPResp.Body == actualResponse.Body
+			res.BodyResult[0].Normal = bodyMatch
+			if !bodyMatch {
+				pass = false
+			}
 		}
 	}
 
