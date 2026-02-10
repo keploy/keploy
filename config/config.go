@@ -87,6 +87,7 @@ type Record struct {
 	Metadata          string          `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
+	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
 }
 
 type ReRecord struct {
