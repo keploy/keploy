@@ -20,6 +20,7 @@ type TestReportVerdict struct {
 	total     int
 	passed    int
 	failed    int
+	obsolete  int
 	ignored   int
 	status    bool
 	duration  time.Duration

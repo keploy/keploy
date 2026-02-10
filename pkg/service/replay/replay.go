@@ -41,6 +41,7 @@ var (
 	totalTests           int
 	totalTestPassed      int
 	totalTestFailed      int
+	totalTestObsolete    int
 	totalTestIgnored     int
 	totalTestTimeTaken   time.Duration
 )
@@ -165,9 +166,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	completeTestReportMu.Lock()
 	completeTestReport = make(map[string]TestReportVerdict)
-	totalTests, totalTestPassed, totalTestFailed, totalTestIgnored = 0, 0, 0, 0
+	totalTests, totalTestPassed, totalTestFailed, totalTestObsolete, totalTestIgnored = 0, 0, 0, 0, 0
 	totalTestTimeTaken = 0
 	completeTestReportMu.Unlock()
+	failedTCsBySetID = make(map[string][]string)
+	mockMismatchFailures = NewTestFailureStore()
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
@@ -295,6 +298,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		initTotal := totalTests
 		initPassed := totalTestPassed
 		initFailed := totalTestFailed
+		initObsolete := totalTestObsolete
 		initIgnored := totalTestIgnored
 		initTimeTaken := totalTestTimeTaken
 		completeTestReportMu.RUnlock()
@@ -317,6 +321,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTests = initTotal
 			totalTestPassed = initPassed
 			totalTestFailed = initFailed
+			totalTestObsolete = initObsolete
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
 			completeTestReportMu.Unlock()
@@ -645,6 +650,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			total:     testReport.Total,
 			failed:    0,
 			passed:    0,
+			obsolete:  0,
 			ignored:   testReport.Ignored,
 			status:    true,
 			duration:  timeTaken,
@@ -688,6 +694,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var appErr models.AppError
 	var success int
 	var failure int
+	var obsolete int
 	var ignored int
 	var totalConsumedMocks = map[string]models.MockState{}
 
@@ -1192,6 +1199,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		r.logger.Debug("test case kind", zap.String("kind", string(testCase.Kind)), zap.String("testcase", testCase.Name), zap.String("testset", testSetID))
 
+		mockNames := make([]string, 0, len(consumedMocks))
+		for _, m := range consumedMocks {
+			mockNames = append(mockNames, m.Name)
+		}
+
+		expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
+		mockSetMismatch := false
+		if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
+			if len(expectedMocks) != len(mockNames) || !compareMockArrays(expectedMocks, mockNames) {
+				mockSetMismatch = true
+			}
+		}
+
+		showMatcherLogs := !mockSetMismatch
+
 		switch testCase.Kind {
 		case models.HTTP:
 			httpResp, ok := resp.(*models.HTTPResp)
@@ -1207,7 +1229,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID)
+			testPass, testResult = r.CompareHTTPRespWithOptions(testCase, httpResp, testSetID, showMatcherLogs)
 
 		case models.GRPC_EXPORT:
 			grpcResp, ok := resp.(*models.GrpcResp)
@@ -1259,14 +1281,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 		compareResp:
-			testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID)
+			testPass, testResult = r.CompareGRPCRespWithOptions(testCase, &respCopy, testSetID, showMatcherLogs)
 		}
 
-		if len(consumedMocks) > 0 {
-			var mockNames []string
-			for _, m := range consumedMocks {
-				mockNames = append(mockNames, m.Name)
-			}
+		if len(mockNames) > 0 {
 			found := false
 			for i, t := range actualTestMockMappings.Tests {
 				if t.ID == testCase.Name {
@@ -1286,6 +1304,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// log the consumed mocks during the test run of the test case for test set
 		r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 
+		if mockSetMismatch {
+			if testPass {
+				r.logger.Debug("mock mapping mismatch ignored because testcase passed",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", expectedMocks),
+					zap.Strings("actualMocks", mockNames))
+			} else {
+				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", expectedMocks),
+					zap.Strings("actualMocks", mockNames))
+				mockMismatchFailures.AddFailure(testSetID, testCase.Name, expectedMocks, mockNames)
+			}
+		}
+
 		if !testPass {
 			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
 		} else {
@@ -1294,6 +1329,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if testPass {
 			testStatus = models.TestStatusPassed
 			success++
+		} else if mockSetMismatch {
+			testStatus = models.TestStatusObsolete
+			obsolete++
 		} else {
 			testStatus = models.TestStatusFailed
 			failure++
@@ -1441,6 +1479,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Total:      testCasesCount,
 		Success:    success,
 		Failure:    failure,
+		Obsolete:   obsolete,
 		Ignored:    ignored,
 		Tests:      testCaseResults,
 		TimeTaken:  timeTaken.String(),
@@ -1464,7 +1503,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
-	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
+	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.String("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
 		r.logger.Info("deleting unused mocks from the data store", zap.String("for test-set", testSetID))
@@ -1474,7 +1513,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
+	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
@@ -1484,32 +1523,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusFailed && r.instrument && isMappingEnabled {
-		// Create a map for easier lookup
-		actualMockMap := make(map[string][]string)
-		for _, t := range actualTestMockMappings.Tests {
-			actualMockMap[t.ID] = t.Mocks.ToSlice()
-		}
-
-		for tc, expectedMocks := range expectedTestMockMappings {
-
-			actualMocks, ok := actualMockMap[tc]
-
-			if !ok {
-				continue
-			}
-
-			if len(expectedMocks) != len(actualMocks) || !compareMockArrays(expectedMocks, actualMocks) {
-				mockMismatchFailures.AddFailure(testSetID, tc, expectedMocks, actualMocks)
-			}
-		}
-	}
-
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
 		total:     testReport.Total,
 		failed:    testReport.Failure,
 		passed:    testReport.Success,
+		obsolete:  testReport.Obsolete,
 		ignored:   testReport.Ignored,
 		status:    testSetStatus == models.TestSetStatusPassed,
 		duration:  timeTaken,
@@ -1521,6 +1540,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
+	totalTestObsolete += testReport.Obsolete
 	totalTestIgnored += testReport.Ignored
 	totalTestTimeTaken += timeTaken
 	completeTestReportMu.Unlock()
@@ -1543,9 +1563,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				"\tTotal test failed:  %s\n"
 
 			args := []interface{}{testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure}
+			if testReport.Obsolete > 0 {
+				summaryFormat += "\tTotal test obsolete: %s\n"
+				args = append(args, testReport.Obsolete)
+			}
 
 			if testReport.Ignored > 0 {
-				summaryFormat += "\tTotal test ignored: %d\n"
+				summaryFormat += "\tTotal test ignored: %s\n"
 				args = append(args, testReport.Ignored)
 			}
 
@@ -1563,6 +1587,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
 			sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
 			sb.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", testReport.Failure))
+			if testReport.Obsolete > 0 {
+				sb.WriteString(fmt.Sprintf("\tTotal test obsolete: %d\n", testReport.Obsolete))
+			}
 
 			if testReport.Ignored > 0 {
 				sb.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", testReport.Ignored))
@@ -1654,20 +1681,29 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
+	return r.CompareHTTPRespWithOptions(tc, actualResponse, testSetID, true)
+}
+
+func (r *Replayer) CompareHTTPRespWithOptions(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitLogs bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger)
+
+	return httpMatcher.MatchWithOptions(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, httpMatcher.MatchOptions{EmitLogs: emitLogs})
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
+	return r.CompareGRPCRespWithOptions(tc, actualResp, testSetID, true)
+}
+
+func (r *Replayer) CompareGRPCRespWithOptions(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitLogs bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	return grpcMatcher.MatchWithOptions(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, grpcMatcher.MatchOptions{EmitLogs: emitLogs})
 
 }
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
@@ -1675,6 +1711,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	totalTestsSnapshot := totalTests
 	totalTestPassedSnapshot := totalTestPassed
 	totalTestFailedSnapshot := totalTestFailed
+	totalTestObsoleteSnapshot := totalTestObsolete
 	totalTestIgnoredSnapshot := totalTestIgnored
 	totalTestTimeTakenSnapshot := totalTestTimeTaken
 	reportSnapshot := make(map[string]TestReportVerdict, len(completeTestReport))
@@ -1705,19 +1742,31 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTakenSnapshot)
 
 		if !r.config.DisableANSI {
+			summaryFormat := "\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n" +
+				"\tTotal tests: %s\n" +
+				"\tTotal test passed: %s\n" +
+				"\tTotal test failed: %s\n"
+			summaryArgs := []interface{}{totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot}
+			if totalTestObsoleteSnapshot > 0 {
+				summaryFormat += "\tTotal test obsolete: %s\n"
+				summaryArgs = append(summaryArgs, totalTestObsoleteSnapshot)
+			}
 			if totalTestIgnoredSnapshot > 0 {
-				if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestIgnoredSnapshot, totalTestTimeTakenStr); err != nil {
-					utils.LogError(r.logger, err, "failed to print test run summary")
-					return
-				}
-			} else {
-				if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestTimeTakenStr); err != nil {
-					utils.LogError(r.logger, err, "failed to print test run summary")
-					return
-				}
+				summaryFormat += "\tTotal test ignored: %s\n"
+				summaryArgs = append(summaryArgs, totalTestIgnoredSnapshot)
+			}
+			summaryFormat += "\tTotal time taken: %s\n"
+			summaryArgs = append(summaryArgs, totalTestTimeTakenStr)
+
+			if _, err := pp.Printf(summaryFormat, summaryArgs...); err != nil {
+				utils.LogError(r.logger, err, "failed to print test run summary")
+				return
 			}
 
 			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			if totalTestObsoleteSnapshot > 0 {
+				header += "\t\tObsolete"
+			}
 			if totalTestIgnoredSnapshot > 0 {
 				header += "\t\tIgnored"
 			}
@@ -1749,6 +1798,11 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				format.WriteString("\n\t%s\t\t%s\t\t%s\t\t%s")
 				args = append(args, testSuiteName, report.total, report.passed, report.failed)
 
+				if totalTestObsoleteSnapshot > 0 {
+					format.WriteString("\t\t%s")
+					args = append(args, report.obsolete)
+				}
+
 				if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
 					format.WriteString("\t\t%s")
 					args = append(args, report.ignored)
@@ -1777,13 +1831,19 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 
 		} else {
-			if totalTestIgnoredSnapshot > 0 {
-				fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n"+"\tTotal test ignored: %d\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestIgnoredSnapshot, totalTestTimeTakenStr)
-			} else {
-				fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestTimeTakenStr)
+			fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot)
+			if totalTestObsoleteSnapshot > 0 {
+				fmt.Printf("\tTotal test obsolete: %d\n", totalTestObsoleteSnapshot)
 			}
+			if totalTestIgnoredSnapshot > 0 {
+				fmt.Printf("\tTotal test ignored: %d\n", totalTestIgnoredSnapshot)
+			}
+			fmt.Printf("\tTotal time taken: %s\n", totalTestTimeTakenStr)
 
 			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			if totalTestObsoleteSnapshot > 0 {
+				header += "\t\tObsolete"
+			}
 			if totalTestIgnoredSnapshot > 0 {
 				header += "\t\tIgnored"
 			}
@@ -1804,6 +1864,11 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 				format.WriteString("\n\t%s\t\t%d\t\t%d\t\t%d")
 				args = append(args, testSuiteName, report.total, report.passed, report.failed)
+
+				if totalTestObsoleteSnapshot > 0 {
+					format.WriteString("\t\t%d")
+					args = append(args, report.obsolete)
+				}
 
 				if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
 					format.WriteString("\t\t%d")

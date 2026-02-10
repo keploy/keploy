@@ -27,7 +27,15 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
+type MatchOptions struct {
+	EmitLogs bool
+}
+
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger) (bool, *models.Result) {
+	return MatchWithOptions(tc, actualResponse, noiseConfig, ignoreOrdering, compareAll, logger, MatchOptions{EmitLogs: true})
+}
+
+func MatchWithOptions(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, options MatchOptions) (bool, *models.Result) {
 	bodyType := models.Plain
 	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
@@ -379,21 +387,23 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true
-			_, err := newLogger.Printf(logs)
-			if err != nil {
-				utils.LogError(logger, err, "failed to print the logs")
-			}
+			if options.EmitLogs {
+				_, err := newLogger.Printf(logs)
+				if err != nil {
+					utils.LogError(logger, err, "failed to print the logs")
+				}
 
-			err = logDiffs.Render()
-			if err != nil {
-				utils.LogError(logger, err, "failed to render the diffs")
+				err = logDiffs.Render()
+				if err != nil {
+					utils.LogError(logger, err, "failed to render the diffs")
+				}
 			}
 		} else {
 			pass = true
 		}
 	}
 
-	if !skipSuccessMsg {
+	if !skipSuccessMsg && options.EmitLogs {
 		newLogger := ppNew234()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
