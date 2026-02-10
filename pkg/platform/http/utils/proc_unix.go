@@ -117,6 +117,10 @@ type PTYHandle struct {
 	resizeCh     chan os.Signal
 	wg           sync.WaitGroup
 	oldTermState *term.State // Store original terminal state for restoration
+	closeOnce    sync.Once   // Ensure PTY is closed only once
+	stopOnce     sync.Once   // Ensure resize channel cleanup happens only once
+	ptmxMu       sync.Mutex  // Protects access to ptmx during resize and close
+	closing      bool        // Flag to indicate we're shutting down
 }
 
 // makeRawInputOnly sets the terminal to a mode suitable for PTY interaction:
@@ -172,9 +176,7 @@ func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) 
 		resizeCh: make(chan os.Signal, 1),
 	}
 
-	// Set terminal to a mode suitable for PTY interaction:
-	// - Disable local echo (let the PTY slave control echo for password prompts)
-	// - Keep output processing enabled (so \n is converted to \r\n)
+	// Set terminal to a mode suitable for PTY interaction
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		oldState, err := makeRawInputOnly(int(os.Stdin.Fd()))
 		if err != nil {
@@ -190,18 +192,28 @@ func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) 
 	go func() {
 		defer handle.wg.Done()
 		for range handle.resizeCh {
+			// Use mutex to prevent race with ptmx.Close()
+			handle.ptmxMu.Lock()
+			if handle.closing {
+				handle.ptmxMu.Unlock()
+				continue
+			}
 			if resizeErr := pty.InheritSize(os.Stdin, ptmx); resizeErr != nil {
 				if !isClosedPTYError(resizeErr) {
 					logger.Debug("failed to resize PTY", zap.Error(resizeErr))
 				}
 			}
+			handle.ptmxMu.Unlock()
 		}
 	}()
 	// Trigger initial resize
 	handle.resizeCh <- syscall.SIGWINCH
 
 	// Copy PTY output to real stdout (for agent logs, prompts, etc.)
+	// We add to WG so we can wait for this to finish (or error out)
+	handle.wg.Add(1)
 	go func() {
+		defer handle.wg.Done()
 		_, copyErr := io.Copy(os.Stdout, ptmx)
 		if copyErr != nil && !isClosedPTYError(copyErr) {
 			logger.Debug("error copying PTY output to stdout", zap.Error(copyErr))
@@ -209,6 +221,9 @@ func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) 
 	}()
 
 	// Copy stdin to PTY (for password input, etc.)
+	// NOTE: We do NOT add this to WaitGroup because io.Copy blocks on os.Stdin.Read()
+	// which cannot be interrupted by closing ptmx. This goroutine will exit when
+	// the process terminates or when a write to closed ptmx fails.
 	go func() {
 		_, copyErr := io.Copy(ptmx, os.Stdin)
 		if copyErr != nil && !isClosedPTYError(copyErr) {
@@ -231,22 +246,30 @@ func (h *PTYHandle) Wait() error {
 		}
 	}
 
-	// Stop listening for resize signals
-	signal.Stop(h.resizeCh)
-	// Drain any pending signals
-	select {
-	case <-h.resizeCh:
-	default:
-	}
-	close(h.resizeCh)
+	// Use stopOnce to ensure cleanup only happens once (Wait and StopPTYCommand may both be called)
+	h.stopOnce.Do(func() {
+		// Stop listening for resize signals
+		signal.Stop(h.resizeCh)
+		// Drain any pending signals
+		select {
+		case <-h.resizeCh:
+		default:
+		}
+		close(h.resizeCh)
 
-	// Wait for the resize goroutine to finish
+		// Set closing flag and close PTY under mutex to prevent race with resize handler
+		h.ptmxMu.Lock()
+		h.closing = true
+		h.closeOnce.Do(func() {
+			if closeErr := h.ptmx.Close(); closeErr != nil {
+				h.logger.Debug("failed to close PTY", zap.Error(closeErr))
+			}
+		})
+		h.ptmxMu.Unlock()
+	})
+
+	// Wait for background goroutines (resize, stdout copy, stdin copy) to finish
 	h.wg.Wait()
-
-	// Close PTY
-	if closeErr := h.ptmx.Close(); closeErr != nil {
-		h.logger.Debug("failed to close PTY", zap.Error(closeErr))
-	}
 
 	return cmdErr
 }
@@ -275,16 +298,40 @@ func StopPTYCommand(handle *PTYHandle, logger *zap.Logger) error {
 
 	pid := handle.cmd.Process.Pid
 
-	// Send SIGTERM to the process
-	if err := handle.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		if err.Error() == "os: process already finished" {
-			logger.Debug("process already finished during graceful shutdown", zap.Int("pid", pid))
-			return nil
+	// Use stopOnce to ensure cleanup only happens once (Wait and StopPTYCommand may both be called)
+	handle.stopOnce.Do(func() {
+		// Stop resize signal handling BEFORE closing the PTY
+		signal.Stop(handle.resizeCh)
+		// Drain any pending signals
+		select {
+		case <-handle.resizeCh:
+		default:
 		}
-		logger.Warn("failed to send SIGTERM to PTY process", zap.Int("pid", pid), zap.Error(err))
-		// Force kill
-		return handle.cmd.Process.Kill()
+		close(handle.resizeCh)
+
+		// Close PTY FIRST - this causes sudo to see EOF and exit immediately
+		// This is more effective than SIGTERM when sudo is waiting for password input
+		handle.ptmxMu.Lock()
+		handle.closing = true
+		handle.closeOnce.Do(func() {
+			if handle.ptmx != nil {
+				if err := handle.ptmx.Close(); err != nil && !isClosedPTYError(err) {
+					logger.Debug("failed to close PTY in StopPTYCommand", zap.Error(err))
+				}
+			}
+		})
+		handle.ptmxMu.Unlock()
+	})
+
+	// Send SIGTERM as a fallback in case closing PTY didn't terminate the process
+	if err := handle.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		if err.Error() != "os: process already finished" {
+			logger.Debug("failed to send SIGTERM to PTY process", zap.Int("pid", pid), zap.Error(err))
+		}
 	}
+
+	// Wait for all goroutines (resize, stdout copy) to finish
+	handle.wg.Wait()
 
 	return nil
 }

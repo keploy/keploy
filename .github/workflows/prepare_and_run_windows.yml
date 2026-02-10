@@ -145,6 +145,27 @@ jobs:
         $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
         if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
+    - name: Wait for Docker to be ready
+      shell: powershell
+      run: |
+        $maxAttempts = 30
+        $attempt = 0
+        while ($attempt -lt $maxAttempts) {
+          $attempt++
+          try {
+            $result = docker info 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Docker is ready after $attempt attempts"
+              break
+            }
+          } catch {}
+          Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
+          Start-Sleep -Seconds 2
+        }
+        if ($attempt -eq $maxAttempts) {
+          Write-Error "Docker did not become ready in time"
+          exit 1
+        }
     
     - name: Pull Docker image
       shell: powershell

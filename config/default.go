@@ -60,12 +60,14 @@ test:
   protoFile: ""
   protoDir: ""
   protoInclude: []
+  compareAll: false
 record:
   recordTimer: 0s
   filters: []
   sync: false
 configPath: ""
 bypassRules: []
+disableMapping: true
 contract:
   driven: "consumer"
   mappings:
