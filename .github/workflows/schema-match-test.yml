@@ -1,0 +1,103 @@
+# This pipeline tests the --schema-match feature using a Python sample app
+name: Schema-Match-Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  schema-match-test:
+    name: Schema Match E2E Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step A: Download our Keploy repo code onto the machine
+      - name: Checkout Keploy source code
+        uses: actions/checkout@v4
+
+      # Step B: Install Go (needed to build Keploy)
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24'
+
+      # Step C: Install Python (needed to run our sample app)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # Step D: Build Keploy from source code (compile Go code → keploy binary)
+      - name: Build Keploy
+        run: go build -tags=viper_bind_struct -o keploy .
+
+      # Step E: Clone the sample Python app from your GitHub repo
+      - name: Clone sample app
+        run: git clone https://github.com/pathakharshit/keploy-schema-match-sample.git sample-app
+
+      # Step F: Install build dependencies (needed for Keploy's eBPF on Linux)
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      # Step G: RECORD phase - Record test cases using the original app
+      - name: Record test cases with original app
+        working-directory: sample-app
+        run: |
+          # Remove any pre-existing recorded tests (start fresh)
+          rm -rf keploy/
+
+          # Start Keploy in RECORD mode with the original app (runs in background)
+          sudo $GITHUB_WORKSPACE/keploy record -c "python3 app.py" &
+          KEPLOY_PID=$!
+
+          # Wait for the app to start up
+          sleep 10
+
+          # Hit all endpoints to generate test cases
+          python3 check_endpoints.py
+
+          # Wait a bit for Keploy to finish writing test files
+          sleep 5
+
+          # Stop Keploy recording
+          sudo kill $KEPLOY_PID || true
+          sleep 3
+
+          # Show what was recorded
+          echo "=== Recorded test cases ==="
+          ls -la keploy/ || echo "No keploy directory found"
+
+      # Step H: TEST phase - Run tests with --schema-match using the modified app
+      # Step H: TEST phase - Run tests with --schema-match using the modified app
+      - name: Run schema-match test with modified app
+        working-directory: sample-app
+        run: |
+          # Run Keploy test and capture output.
+          # We expect failures, so we add "|| true" to prevent immediate exit.
+          echo "Running Keploy Test..."
+          OUTPUT=$(sudo $GITHUB_WORKSPACE/keploy test -c "python3 app-test.py" --schema-match --delay 5 2>&1 || true)
+          
+          # Print the full output for debugging
+          echo "$OUTPUT"
+
+          # Count passes and failures
+          PASS_COUNT=$(echo "$OUTPUT" | grep -c "test passed" || true)
+          FAIL_COUNT=$(echo "$OUTPUT" | grep -c "test failed" || true)
+
+          echo "----------------------------------------"
+          echo "Results: $PASS_COUNT PASSED, $FAIL_COUNT FAILED"
+          echo "Expected: 8 PASSED, 2 FAILED"
+          echo "----------------------------------------"
+
+          # Verify exact counts
+          if [ "$PASS_COUNT" -eq 8 ] && [ "$FAIL_COUNT" -eq 2 ]; then
+            echo "✅ SUCCESS: Schema match logic is working as expected!"
+            exit 0
+          else
+            echo "❌ FAILURE: Unexpected test results."
+            exit 1
+          fi
