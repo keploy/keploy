@@ -80,10 +80,18 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.DNS:
+		var dnsReq models.DNSReq
+		if mock.Spec.DNSReq != nil {
+			dnsReq = *mock.Spec.DNSReq
+		}
+		var dnsResp models.DNSResp
+		if mock.Spec.DNSResp != nil {
+			dnsResp = *mock.Spec.DNSResp
+		}
 		dnsSpec := models.DNSSchema{
 			Metadata:         mock.Spec.Metadata,
-			Request:          *mock.Spec.DNSReq,
-			Response:         *mock.Spec.DNSResp,
+			Request:          dnsReq,
+			Response:         dnsResp,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
