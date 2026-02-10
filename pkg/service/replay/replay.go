@@ -1659,7 +1659,7 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 	if r.config.Test.SchemaMatch {
-		return httpMatcher.MatchSchema(tc, actualResponse, testSetID, r.logger)
+		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
 	}
 
 	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger)

@@ -121,7 +121,7 @@ func TestSchemaMatch(t *testing.T) {
 				Body:       tt.actual,
 			}
 
-			got, res := MatchSchema(tc, actualResp, "test-set-1", logger)
+			got, res := MatchSchema(tc, actualResp, logger)
 			if got != tt.want {
 				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", got, tt.want, res)
 			}
@@ -172,7 +172,7 @@ func TestSchemaMatch_Headers(t *testing.T) {
 				Body:       `{}`,
 			}
 
-			got, res := MatchSchema(tc, actualResp, "test-set-1", logger)
+			got, res := MatchSchema(tc, actualResp, logger)
 			if got != tt.want {
 				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", got, tt.want, res)
 			}
@@ -240,7 +240,7 @@ func TestUserVerification_SchemaMatch(t *testing.T) {
 				Header: map[string]string{"Content-Type": "application/json"},
 			}
 
-			pass, res := MatchSchema(tCase, actualResp, "test-set-1", logger)
+			pass, res := MatchSchema(tCase, actualResp, logger)
 			if pass != tc.shouldPass {
 				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", pass, tc.shouldPass, res)
 			}

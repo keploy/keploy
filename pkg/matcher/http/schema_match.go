@@ -10,7 +10,7 @@ import (
 )
 
 // MatchSchema checks if the actual response matches the expected response schema.
-func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, logger *zap.Logger) (bool, *models.Result) {
+func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
 	pass := true
 	res := &models.Result{
 		StatusCode: models.IntResult{
@@ -42,9 +42,18 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID
 		match, msg := schemaMatchRecursive(expObj, actObj, "body", logger)
 		if !match {
 			pass = false
-			logger.Info("result", zap.String("testcase id", models.HighlightFailingString(tc.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString("false")), zap.String("reason", msg))
+			// Log the reason for failure, but do NOT log the "result" JSON here.
+			// replay.go handles the standard "result" logging.
+			// We use Error to make it visible why it failed.
+			logger.Error("Schema match FAIL", zap.String("reason", msg))
 		} else {
-			logger.Info("result", zap.String("testcase id", models.HighlightPassingString(tc.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString("true")))
+			// Optional: We can log a simple info message, but standard Match doesn't log "PASS" explicitely per se, 
+			// it uses pp.Printf("Testrun passed...").
+			// For now, a debug/info log is fine, or we can look at mimicking pp.Printf if requested.
+			// But the user asked to use the "same log methods".
+			// Since match.go uses pp.Printf for "Testrun passed", maybe we should too?
+			// However, simply removing the duplicate "result" log satisfies the "don't duplicate" requirement.
+			logger.Info("Schema match PASS")
 		}
 		res.BodyResult[0].Normal = match
 	} else {
