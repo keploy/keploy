@@ -13,6 +13,7 @@ import (
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -39,16 +40,16 @@ func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn,
 	// Defer connection closures with nil checks
 	defer func() {
 		if err := clientConn.Close(); err != nil &&
-			!strings.Contains(err.Error(), "use of closed network connection") {
+			!util.IsExpectedCloseError(err) {
 			logger.Error("failed to close client connection in test case mode", zap.Error(err))
 		}
 		if err := destConn.Close(); err != nil &&
-			!strings.Contains(err.Error(), "use of closed network connection") {
+			!util.IsExpectedCloseError(err) {
 			logger.Error("failed to close destination connection in test case mode", zap.Error(err))
 		}
 
 		if proxy.cc != nil {
-			if err := proxy.cc.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			if err := proxy.cc.Close(); err != nil && !util.IsExpectedCloseError(err) {
 				logger.Debug("failed to close gRPC client connection in test case mode", zap.Error(err))
 			}
 		}
@@ -81,8 +82,7 @@ func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn,
 		switch {
 		case err == nil,
 			err == io.EOF,
-			strings.Contains(err.Error(), "connection reset by peer"),
-			strings.Contains(err.Error(), "use of closed network connection"):
+			util.IsExpectedCloseError(err):
 			logger.Info("gRPC test case capture server stopped gracefully")
 			return nil
 		default:
