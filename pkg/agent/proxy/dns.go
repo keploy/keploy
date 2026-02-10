@@ -169,11 +169,11 @@ func (p *Proxy) defaultDNSAnswers(question dns.Question) []dns.RR {
 		}}
 
 	case dns.TypeAAAA:
-		p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
-		return []dns.RR{&dns.AAAA{
-			Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-			AAAA: net.ParseIP(p.IP6),
-		}}
+		// Do not synthesize AAAA fallback (::1/proxy IPv6). For environments that are IPv4-only
+		// (for example many docker bridge networks), returning a synthetic IPv6 answer can make
+		// clients prefer an unreachable ::1 destination.
+		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
+		return nil
 
 	case dns.TypeSRV:
 		// Special handling for MongoDB SRV queries
