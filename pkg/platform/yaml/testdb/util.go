@@ -44,21 +44,19 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		}
 		noise = tc.Noise
 
-		if tc.Name == "" {
-			noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-				// check if k is date
-				for _, v := range vals {
-					if pkg.IsTime(v) {
-						return true
-					}
+		noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+			// check if k is date
+			for _, v := range vals {
+				if pkg.IsTime(v) {
+					return true
 				}
-				// maybe we need to concatenate the values
-				return pkg.IsTime(strings.Join(vals, ", "))
-			})
-
-			for _, v := range noiseFieldsFound {
-				noise[v] = []string{}
 			}
+			// maybe we need to concatenate the values
+			return pkg.IsTime(strings.Join(vals, ", "))
+		})
+
+		for _, v := range noiseFieldsFound {
+			noise[v] = []string{}
 		}
 
 		httpSchema := models.HTTPSchema{
