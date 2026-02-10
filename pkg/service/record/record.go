@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"time"
 
@@ -23,6 +25,7 @@ type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	mappingDb       MappingDb
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
@@ -30,11 +33,12 @@ type Recorder struct {
 	globalMockCh    chan<- *models.Mock
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
+		mappingDb:       mappingDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		testSetConf:     testSetConf,
@@ -58,6 +62,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	setupCtx := context.WithoutCancel(ctx)
 	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
 	setupCtx = context.WithValue(setupCtx, models.ErrGroupKey, setupErrGrp)
+
+	// Propagate parent context cancellation to setupCtx
+	// This ensures that when Ctrl+C is pressed, setupCtx is cancelled immediately
+	go func() {
+		<-ctx.Done()
+		setupCtxCancel()
+	}()
 
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)
@@ -169,6 +180,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	err := r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath})
 
 	if err != nil {
+		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
+		if ctx.Err() != nil {
+			return nil
+		}
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf("%s", stopReason)
@@ -207,6 +222,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
+	var correlationMap sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx)
 	if err != nil {
@@ -254,6 +270,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			tempID := mock.Name
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
 				currMockID := r.mockDB.GetCurrMockID()
@@ -274,8 +291,51 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 				insertMockErrChan <- err
 			} else {
+				if tempID != "" && mock.Name != "" {
+					correlationMap.Store(tempID, mock.Name)
+				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+			}
+		}
+		return nil
+	})
+
+	errGrp.Go(func() error {
+		for mapping := range frames.Mappings {
+			var realMockNames []string
+
+			for _, tempID := range mapping.MockIDs {
+
+				var realName string
+				found := false
+
+				// Simple retry loop (fast spin) to wait for the Mock Loop
+				for i := 0; i < 50; i++ { // Wait up to ~500ms
+					if val, ok := correlationMap.Load(tempID); ok {
+						realName = val.(string)
+						found = true
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+
+				if found {
+					realMockNames = append(realMockNames, realName)
+					correlationMap.Delete(tempID)
+				} else {
+					r.logger.Warn("Failed to correlate mock mapping",
+						zap.String("test", mapping.TestName),
+						zap.String("tempMockID", tempID))
+				}
+			}
+
+			// Write to mappings.yaml
+			if len(realMockNames) > 0 {
+				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to save mapping")
+				}
 			}
 		}
 		return nil
@@ -355,32 +415,33 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.Mock)
-	errChan := make(chan error, 2)
+	mappingChan := make(chan models.TestMockMapping)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
 	}
 
+	// INCOMING
+	incomingStream, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+	if err != nil {
+		if ctx.Err() != nil || utils.IsShutdownError(err) {
+			r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
+			// Close channels to prevent callers from hanging when ranging over them
+			close(incomingChan)
+			close(outgoingChan)
+			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+		}
+		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
+	}
+
 	g.Go(func() error {
 		defer close(incomingChan)
-
-		ch, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
-		if err != nil {
-			// During shutdown, context cancellation or EOF errors are expected
-			if ctx.Err() != nil || utils.IsShutdownError(err) {
-				r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
-				return nil
-			}
-			errChan <- err
-			return fmt.Errorf("failed to get incoming test cases: %w", err)
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case tc, ok := <-ch:
+			case tc, ok := <-incomingStream:
 				if !ok {
 					return nil
 				}
@@ -395,38 +456,53 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	})
 
 	// OUTGOING
+	// Create a cancelable child that we always cancel when ctx is done.
+	mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	var tlsPrivateKey string
+	if r.config.Record.TLSPrivateKeyPath != "" {
+		keyBytes, err := os.ReadFile(r.config.Record.TLSPrivateKeyPath)
+		if err != nil {
+			r.logger.Error("failed to read tls private key", zap.Error(err))
+			cancel()
+			return FrameChan{}, err
+		}
+		tlsPrivateKey = string(keyBytes)
+	}
+
+	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		TLSPrivateKey:  tlsPrivateKey,
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+	})
+	if err != nil {
+
+		cancel()
+		if ctx.Err() != nil || utils.IsShutdownError(err) {
+			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
+			// Close outgoingChan to prevent callers from hanging
+			// Note: incomingChan will be closed by the goroutine started above when ctx is done
+			close(outgoingChan)
+			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+		}
+		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
+	}
 	g.Go(func() error {
 		defer close(outgoingChan)
-
-		// Create a cancelable child that we always cancel when ctx is done.
-		mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
 
-		// Cancel child as soon as parent is done
+		// Also cancel mockCtx when parent ctx is done
+		// This is done inside the goroutine to avoid goroutine leaks
 		go func() {
 			<-ctx.Done()
 			cancel()
 		}()
 
-		ch, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-		})
-		if err != nil {
-			// During shutdown, context cancellation or EOF errors are expected
-			if ctx.Err() != nil || utils.IsShutdownError(err) {
-				r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
-				return nil
-			}
-			return fmt.Errorf("failed to get outgoing mocks: %w", err)
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case m, ok := <-ch:
+			case m, ok := <-outgoingStream:
 				if !ok {
 					return nil
 				}
@@ -440,9 +516,48 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		}
 	})
 
+	// MAPPINGS
+	g.Go(func() error {
+		defer close(mappingChan)
+
+		// Create context that cancels with parent
+		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancel()
+		go func() {
+			<-ctx.Done()
+			cancel()
+		}()
+
+		// Call the new AgentClient method
+		ch, err := r.instrumentation.GetMappings(mapCtx, incomingOpts)
+		if err != nil {
+			if ctx.Err() != nil || utils.IsShutdownError(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get mappings: %w", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case m, ok := <-ch:
+				if !ok {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case mappingChan <- m:
+				}
+			}
+		}
+	})
+
 	return FrameChan{
 		Incoming: incomingChan,
 		Outgoing: outgoingChan,
+		Mappings: mappingChan,
 	}, nil
 
 }

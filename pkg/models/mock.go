@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/gob"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -29,6 +30,7 @@ const (
 	PostgresV2  Kind = "PostgresV2"
 	GRPC_EXPORT Kind = "gRPC"
 	Mongo       Kind = "Mongo"
+	DNS         Kind = "DNS"
 )
 
 type Mock struct {
@@ -44,6 +46,29 @@ type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
 	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	// mu protects concurrent access to IsFiltered
+	mu sync.RWMutex `json:"-" bson:"-"`
+}
+
+// Snapshot returns a consistent view of test mode fields.
+func (t *TestModeInfo) Snapshot() (id int, isFiltered bool, sortOrder int64) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.ID, t.IsFiltered, t.SortOrder
+}
+
+// SetIsFiltered safely sets the IsFiltered field
+func (t *TestModeInfo) SetIsFiltered(val bool) {
+	t.mu.Lock()
+	t.IsFiltered = val
+	t.mu.Unlock()
+}
+
+// GetIsFiltered safely gets the IsFiltered field
+func (t *TestModeInfo) GetIsFiltered() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.IsFiltered
 }
 
 func (m *Mock) GetKind() string {
@@ -70,6 +95,8 @@ type MockSpec struct {
 	GRPCResp         *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
 	MySQLRequests    []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
 	MySQLResponses   []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	DNSReq           *DNSReq          `json:"dnsReq,omitempty" bson:"dns_req,omitempty"`
+	DNSResp          *DNSResp         `json:"dnsResp,omitempty" bson:"dns_resp,omitempty"`
 	ReqTimestampMock time.Time        `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock time.Time        `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
@@ -112,11 +139,20 @@ func (m *Mock) DeepCopy() *Mock {
 		return nil
 	}
 
-	// 1. Perform a shallow copy of the main struct and its nested structs.
-	// This handles all simple value types (string, int, bool, etc.).
-	c := *m
-	c.Spec = m.Spec
-	c.TestModeInfo = m.TestModeInfo
+	// Copy top-level fields explicitly to avoid copying embedded lock fields.
+	id, isFiltered, sortOrder := m.TestModeInfo.Snapshot()
+	c := Mock{
+		Version: m.Version,
+		Name:    m.Name,
+		Kind:    m.Kind,
+		Spec:    m.Spec,
+		TestModeInfo: TestModeInfo{
+			ID:         id,
+			IsFiltered: isFiltered,
+			SortOrder:  sortOrder,
+		},
+		ConnectionID: m.ConnectionID,
+	}
 
 	// 2. Deep copy the map by creating a new one and copying key-value pairs.
 	if m.Spec.Metadata != nil {
@@ -174,6 +210,18 @@ func (m *Mock) DeepCopy() *Mock {
 	if m.Spec.GRPCResp != nil {
 		grpcRespCopy := *m.Spec.GRPCResp
 		c.Spec.GRPCResp = &grpcRespCopy
+	}
+	if m.Spec.DNSReq != nil {
+		dnsReqCopy := *m.Spec.DNSReq
+		c.Spec.DNSReq = &dnsReqCopy
+	}
+	if m.Spec.DNSResp != nil {
+		dnsRespCopy := *m.Spec.DNSResp
+		if m.Spec.DNSResp.Answers != nil {
+			dnsRespCopy.Answers = make([]string, len(m.Spec.DNSResp.Answers))
+			copy(dnsRespCopy.Answers, m.Spec.DNSResp.Answers)
+		}
+		c.Spec.DNSResp = &dnsRespCopy
 	}
 
 	return &c
