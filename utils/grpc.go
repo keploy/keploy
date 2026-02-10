@@ -10,7 +10,6 @@ import (
 
 	"github.com/bufbuild/protocompile"
 	"github.com/bufbuild/protocompile/reporter"
-	"github.com/bytedance/gopkg/util/logger"
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -38,7 +37,7 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 		if err == nil {
 			protoDir = derived // Use derived directory, taking precedence over config
 		} else {
-			logger.Info("could not auto-derive protoDir from protoInclude; proceeding with provided protoDir", zap.Error(err))
+			logger.Debug("could not auto-derive protoDir from protoInclude; proceeding with provided protoDir", zap.Error(err))
 		}
 	}
 
@@ -79,7 +78,6 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 		if err != nil {
 			return nil, nil, err
 		}
-		logger.Info("resolved protoDir to absolute path", zap.String("protoDir", protoDir), zap.String("absProtoDir", absProtoDir))
 		if !containsDir(absRoots, absProtoDir) {
 			absRoots = append(absRoots, absProtoDir)
 		}
@@ -113,7 +111,6 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 	if absProtoDir != "" {
 		err := filepath.WalkDir(absProtoDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				logger.Info("error walking proto directory", zap.String("path", path), zap.Error(err))
 				return err
 			}
 			if d.IsDir() {
@@ -138,8 +135,6 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 		return nil, nil, fmt.Errorf("no .proto files found to compile (proto=%q, proto_dir=%q)", protoPath, protoDir)
 	}
 
-	logger.Info("found proto files to compile", zap.Int("count", len(compileNames)), zap.Strings("files", compileNames[:min(5, len(compileNames))]))
-
 	// Parse :path -> service + method
 	svcFull, mName, err := ParseGRPCPath(grpcPath)
 	if err != nil {
@@ -158,11 +153,6 @@ func GetProtoMessageDescriptor(ctx context.Context, logger *zap.Logger, pc model
 // compileAndFindResponseDescriptor compiles all compileNames (+ imports via roots) and returns serviceFull.method Output desc.
 // We avoid building a separate registry; instead we search the linked files directly.
 func compileAndFindResponseDescriptor(compileNames []string, roots []string, serviceFull, method string) (protoreflect.MessageDescriptor, []protoreflect.FileDescriptor, error) {
-	logger.Info("compiling proto files",
-		zap.Strings("compileNames", compileNames),
-		zap.Strings("roots", roots),
-		zap.String("serviceFull", serviceFull),
-		zap.String("method", method))
 
 	c := &protocompile.Compiler{
 		Resolver: &protocompile.SourceResolver{ImportPaths: roots},
@@ -183,8 +173,6 @@ func compileAndFindResponseDescriptor(compileNames []string, roots []string, ser
 		return nil, nil, fmt.Errorf("no files compiled for %v", compileNames)
 	}
 
-	logger.Info("successfully compiled proto files", zap.Int("fileCount", len(files)))
-
 	// Collect all available services for debug logging
 	var availableServices []string
 	for _, f := range files {
@@ -193,7 +181,6 @@ func compileAndFindResponseDescriptor(compileNames []string, roots []string, ser
 			availableServices = append(availableServices, string(svcs.Get(i).FullName()))
 		}
 	}
-	logger.Info("available services in compiled protos", zap.Strings("services", availableServices))
 
 	// Directly search the linked files for the service, then the method.
 	full := protoreflect.FullName(serviceFull)

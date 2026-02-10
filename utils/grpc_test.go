@@ -120,7 +120,7 @@ func TestDeriveProtoDirFromPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := deriveProtoDirFromPath(tt.grpcPath, tt.protoIncludes)
+			got, err := deriveProtoDirFromPath(tt.grpcPath, tt.protoIncludes, "")
 
 			if tt.wantErrContain != "" {
 				if err == nil {
