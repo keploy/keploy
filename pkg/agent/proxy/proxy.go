@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -554,12 +556,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	var clientPeerCert *x509.Certificate
+	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
+		}
+
+		if isMTLS {
+			if tlsConn, ok := srcConn.(*tls.Conn); ok {
+				state := tlsConn.ConnectionState()
+				if len(state.PeerCertificates) > 0 {
+					clientPeerCert = state.PeerCertificates[0]
+				}
+			}
 		}
 	}
 
@@ -665,7 +678,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			NextProtos:         nextProtos,
 		}
 
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
+			err = p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
+			if err != nil {
+				return err
+			}
+		}
+
+		addr := dstAddr
+		if dstURL != "" {
+			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		}
+
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
@@ -806,6 +830,48 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	} else {
 		p.logger.Debug("proxy stopped cleanly...")
 	}
+}
+
+func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certificate, tlsPrivateKey string) error {
+	if cfg == nil || clientPeerCert == nil {
+		return nil
+	}
+
+	if tlsPrivateKey == "" {
+		err := errors.New("failed to read private key from outgoing options")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	keyBytes := []byte(tlsPrivateKey)
+	block, _ := pem.Decode(keyBytes)
+	if block == nil {
+		err := errors.New("failed to decode PEM block containing private key")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	var privKey any
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		privKey = key
+	}
+
+	if privKey == nil {
+		err := errors.New("failed to parse private key from PEM")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	cfg.Certificates = []tls.Certificate{{
+		Certificate: [][]byte{clientPeerCert.Raw},
+		PrivateKey:  privKey,
+	}}
+	p.logger.Debug("Successfully constructed mTLS certificate using client peer cert and local key")
+	return nil
 }
 
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
