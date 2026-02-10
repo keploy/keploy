@@ -122,6 +122,13 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	return m, nil
 }
 
+func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {
+	mappingCh := make(chan models.TestMockMapping, 100)
+	a.Proxy.Mapping(ctx, mappingCh)
+
+	return mappingCh, nil
+}
+
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
 	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
 
