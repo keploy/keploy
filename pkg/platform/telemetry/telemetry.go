@@ -12,7 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
 var teleURL = "https://telemetry.keploy.io/analytics"
 
 type Telemetry struct {
