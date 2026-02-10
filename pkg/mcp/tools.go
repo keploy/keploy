@@ -4,36 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
-
-// ListMocksInput defines the input parameters for the list mocks tool.
-type ListMocksInput struct {
-	// Path is the optional path to search for mocks (default: ./keploy).
-	Path string `json:"path,omitempty" jsonschema:"Path to search for mock files (default: ./keploy)"`
-}
-
-// ListMocksOutput defines the output of the list mocks tool.
-type ListMocksOutput struct {
-	// Success indicates whether the operation was successful.
-	Success bool `json:"success"`
-	// MockSets is the list of available mock set names/IDs.
-	MockSets []string `json:"mockSets"`
-	// Count is the number of mock sets found.
-	Count int `json:"count"`
-	// Path is the path where mocks were searched.
-	Path string `json:"path"`
-	// Message is a human-readable status message.
-	Message string `json:"message"`
-}
 
 // MockRecordInput defines the input parameters for the mock record tool.
 type MockRecordInput struct {
@@ -91,109 +67,37 @@ type MockReplayOutput struct {
 	Configuration *ReplayConfiguration `json:"configuration,omitempty"`
 }
 
+// PromptTestIntegrationInput defines input for keploy_prompt_test_integration.
+type PromptTestIntegrationInput struct {
+	// Command provides optional command context to narrow test discovery scope.
+	Command string `json:"command,omitempty" jsonschema:"Optional test command context (e.g., 'go test -v ./pkg/auth/...')."`
+	// ScopePath optionally narrows edits to a subtree.
+	ScopePath string `json:"scopePath,omitempty" jsonschema:"Optional path scope for test file edits."`
+}
+
+// PromptPipelineInput defines input for keploy_prompt_pipeline_creation.
+type PromptPipelineInput struct {
+	// AppCommand is the command used in keploy mock test.
+	AppCommand string `json:"appCommand,omitempty" jsonschema:"Optional app/test command for pipeline prompt."`
+	// MockPath is the path passed to mock test in CI.
+	MockPath string `json:"mockPath,omitempty" jsonschema:"Optional mock path for pipeline prompt (default: ./keploy)."`
+}
+
+// PromptOutput is raw text prompt output for prompt helper tools.
+type PromptOutput struct {
+	// Success indicates whether prompt generation was successful.
+	Success bool `json:"success"`
+	// Prompt is raw prompt text for client LLM execution.
+	Prompt string `json:"prompt"`
+	// Message is status text.
+	Message string `json:"message"`
+}
+
 // ReplayConfiguration shows the configuration used for replay.
 type ReplayConfiguration struct {
 	Command        string `json:"command"`
 	Path           string `json:"path"`
 	FallBackOnMiss bool   `json:"fallBackOnMiss"`
-}
-
-// handleListMocks handles the keploy_list_mocks tool invocation.
-func (s *Server) handleListMocks(ctx context.Context, req *sdkmcp.CallToolRequest, in ListMocksInput) (*sdkmcp.CallToolResult, ListMocksOutput, error) {
-	s.logger.Info("List mocks tool invoked", zap.String("path", in.Path))
-
-	path := strings.TrimSpace(in.Path)
-	if path == "" {
-		path = "./keploy"
-	}
-
-	s.logger.Info("Scanning directory for mock sets", zap.String("path", path))
-
-	// Scan the directory directly for mock sets (fixes path mismatch issue)
-	mockSets, err := s.scanMockSets(path)
-	if err != nil {
-		s.logger.Error("Failed to scan mock sets", zap.Error(err), zap.String("path", path))
-		return nil, ListMocksOutput{
-			Success: false,
-			Path:    path,
-			Message: fmt.Sprintf("Failed to list mock sets: %s", err.Error()),
-		}, nil
-	}
-
-	if len(mockSets) == 0 {
-		return nil, ListMocksOutput{
-			Success:  true,
-			MockSets: []string{},
-			Count:    0,
-			Path:     path,
-			Message:  "No mock sets found. Use keploy_mock_record to create mocks first.",
-		}, nil
-	}
-
-	message := fmt.Sprintf("Found %d mock set(s). The latest is '%s'.", len(mockSets), mockSets[0])
-
-	return nil, ListMocksOutput{
-		Success:  true,
-		MockSets: mockSets,
-		Count:    len(mockSets),
-		Path:     path,
-		Message:  message,
-	}, nil
-}
-
-// scanMockSets scans the directory for mock sets (subdirectories containing mocks.yaml).
-func (s *Server) scanMockSets(basePath string) ([]string, error) {
-	entries, err := os.ReadDir(basePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			s.logger.Info("Mock directory does not exist", zap.String("path", basePath))
-			return []string{}, nil
-		}
-		return nil, err
-	}
-
-	type mockSetInfo struct {
-		name    string
-		modTime time.Time
-	}
-	var mockSets []mockSetInfo
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		// Skip special directories
-		if name == "reports" || name == "testReports" || name == "schema" {
-			continue
-		}
-
-		// Check if this directory contains a mocks.yaml or mocks.yml file
-		mockPath := filepath.Join(basePath, name, "mocks.yaml")
-		info, err := os.Stat(mockPath)
-		if err != nil {
-			mockPath = filepath.Join(basePath, name, "mocks.yml")
-			info, err = os.Stat(mockPath)
-			if err != nil {
-				continue
-			}
-		}
-
-		mockSets = append(mockSets, mockSetInfo{name: name, modTime: info.ModTime()})
-	}
-
-	// Sort by modification time (most recent first)
-	sort.SliceStable(mockSets, func(i, j int) bool {
-		return mockSets[i].modTime.After(mockSets[j].modTime)
-	})
-
-	out := make([]string, len(mockSets))
-	for i, set := range mockSets {
-		out[i] = set.name
-	}
-
-	s.logger.Info("Found mock sets", zap.String("path", basePath), zap.Int("count", len(out)), zap.Strings("mockSets", out))
-	return out, nil
 }
 
 // handleMockRecord handles the keploy_mock_record tool invocation.
@@ -441,4 +345,24 @@ func hasArgument(req *sdkmcp.CallToolRequest, key string) bool {
 
 	_, ok := args[key]
 	return ok
+}
+
+// handlePromptTestIntegration returns a raw prompt for automatic start-session integration in test files.
+func (s *Server) handlePromptTestIntegration(_ context.Context, _ *sdkmcp.CallToolRequest, in PromptTestIntegrationInput) (*sdkmcp.CallToolResult, PromptOutput, error) {
+	prompt := buildTestIntegrationPrompt(in.Command, in.ScopePath)
+	return nil, PromptOutput{
+		Success: true,
+		Prompt:  prompt,
+		Message: "Generated test integration prompt. Client LLM should execute this prompt as a direct user task.",
+	}, nil
+}
+
+// handlePromptPipelineCreation returns a raw prompt for CI/CD pipeline generation.
+func (s *Server) handlePromptPipelineCreation(_ context.Context, _ *sdkmcp.CallToolRequest, in PromptPipelineInput) (*sdkmcp.CallToolResult, PromptOutput, error) {
+	prompt := buildPipelineCreationPrompt(in.AppCommand, in.MockPath)
+	return nil, PromptOutput{
+		Success: true,
+		Prompt:  prompt,
+		Message: "Generated pipeline creation prompt. Client LLM should execute this prompt as a direct user task.",
+	}, nil
 }

@@ -1,0 +1,71 @@
+test_integration = '''
+Master Prompt: Keploy Test Integration Agent
+Role: Senior Test Automation Architect and Polyglot Programmer.
+Goal: autonomously modify project test files to integrate Keploy session management hooks in an idempotent way.
+
+User test command scope: {{command}}
+User path scope: {{scope_path}}
+
+Context:
+- Keploy agent endpoint is KEPLOY_AGENT_URI + /hooks/start-session
+- Call start-session immediately before test logic so each test gets isolated recording
+- Session naming rule: session_name MUST be unique per test (use full test name/function name; no reused static value)
+- Tests run sequentially; do not implement parallel synchronization logic
+
+Execution phases:
+1) Discovery and scope:
+   - Infer search scope from provided command/path.
+   - Go: *_test.go; JS/TS: *.test.*, *.spec.*, __tests__; Python: test_*.py, *_test.py; Java: *Test.java.
+   - Skip node_modules, vendor, .venv, dist, build, .git and generated files.
+2) Framework classification:
+   - Detect runner from file content and test declarations.
+3) Idempotency checks:
+   - If helper startKeploySession/start_keploy_session exists, do not add duplicate helper.
+   - If hook call already exists in a test/hook, do not add duplicate call.
+4) Helper creation (stdlib only):
+   - No axios/requests/third-party network deps.
+   - Read KEPLOY_AGENT_URI; if missing/unreachable, log warning and continue tests.
+   - POST JSON payload {"name": <session_name>} with Content-Type application/json.
+5) Injection strategy:
+   - Prefer global beforeEach/setup hook if runner exposes current test name.
+   - Fallback: inject first line in each test function (Go default).
+6) Import reconciliation:
+   - Add only missing standard-library imports.
+7) Edit application:
+   - Apply in-place edits. Keep idempotent behavior.
+   - Return concise summary of files changed and tests instrumented.
+
+Safety constraints:
+- Do not fail tests when Keploy is unavailable.
+- Do not modify non-test files.
+- Do not add unrelated refactors.
+'''
+
+pipeline_creation = '''
+Master Prompt: Keploy Pipeline Creation Agent
+Goal: generate CI/CD pipeline config that runs Keploy mock tests deterministically.
+
+Application/Test command: {{app_command}}
+Mock path: {{mock_path}}
+
+Execution requirements:
+1) Determine the default branch first from repository context (branch config/workflows/docs). If uncertain, use main and state assumption.
+2) Detect CI/CD platform from repo files (GitHub Actions, GitLab CI, Jenkins, CircleCI, Azure, Bitbucket). If multiple are present, pick the primary one and state why.
+3) Generate/update the canonical pipeline file for the chosen platform using Linux runners only (ubuntu-latest or equivalent Linux agent).
+4) Install Keploy explicitly using this exact command:
+   curl --silent -O -L https://keploy.io/install.sh && source install.sh
+5) Ensure the pipeline sets up/installs all dependencies required to run the user application command:
+   {{app_command}}
+   Include language runtime setup and dependency installation steps before running Keploy.
+6) Pipeline must run:
+   {{keploy_command}}
+7) Trigger on pull requests and pushes to the detected default branch.
+8) Keep pipeline minimal, deterministic, and non-interactive.
+9) Preserve existing project CI style; avoid destructive rewrites.
+
+Output requirements:
+- Show file path(s) created/updated.
+- Show exact final pipeline content.
+- Show detected default branch and chosen CI/CD platform.
+- Summarize assumptions made.
+'''

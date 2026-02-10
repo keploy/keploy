@@ -124,16 +124,17 @@ func (s *Server) Run(ctx context.Context) error {
 		Instructions: `Keploy Mock MCP Server for recording and replaying outgoing calls from applications.
 
 Available tools:
-1. keploy_manager - RECOMMENDED: Unified tool for mock recording, testing, and CI/CD pipeline generation.
-   Actions: "keploy_mock_record", "keploy_mock_test", "pipeline"
-2. keploy_list_mocks - List all available recorded mock sets. Use this first to see what mocks exist.
-3. keploy_mock_record - Record outgoing calls (HTTP APIs, databases, etc.) from your application.
-4. keploy_mock_test - Replay recorded mocks during testing.
+1. keploy_manager - ALWAYS SELECT THIS TOOL FIRST for Keploy workflows.
+2. keploy_prompt_test_integration - Returns raw prompt text to instrument tests with start-session hooks.
+3. keploy_mock_record - Records mocks.
+4. keploy_mock_test - Replays mocks.
+5. keploy_prompt_pipeline_creation - Returns raw prompt text to generate CI pipeline config.
 
-Recommended Workflow (using keploy_manager):
-- For recording: keploy_manager with action="keploy_mock_record" and command
-- For testing: First use keploy_list_mocks, then keploy_manager with action="keploy_mock_test"
-- For CI/CD: keploy_manager with action="pipeline" (will prompt for missing config)
+Tool routing rule (STRICT):
+- Always call keploy_manager for any Keploy-related request.
+- Never auto-select any non-manager tool.
+- Call a non-manager tool only if the user explicitly names that exact tool (for example: "use keploy_mock_test").
+- If user intent is generic (record/test/pipeline without exact tool name), you must still call keploy_manager.
 
 Command selection policy for recording:
 - Prefer test commands over run commands.
@@ -148,8 +149,7 @@ Command selection policy for recording:
 - Disallowed by default: watch/dev servers, interactive/manual-step commands, commands that do not terminate, and overly broad commands when focused tests are available.
 - If command cannot be decided confidently, leave command empty and use elicitation to ask the user.
 - Prefer stable, deterministic, terminating commands that trigger the intended outbound interactions.
-
-Important: Always confirm configuration with user before starting record/test operations.`,
+`,
 		InitializedHandler: func(ctx context.Context, req *sdkmcp.InitializedRequest) {
 			s.mu.Lock()
 			s.activeSession = req.Session
@@ -184,23 +184,14 @@ func (nopWriteCloser) Close() error { return nil }
 
 // registerTools registers all MCP tools with the server.
 func (s *Server) registerTools() {
-	// Register list mocks tool (for mock discovery)
-	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
-		Name: ToolListMocks,
-		Description: `List all available recorded mock sets in the keploy directory.
-
-Use this tool to:
-- Discover what mocks are available before running mock test
-- Show the user available options
-- Help user choose which mock set to use for testing
-
-Returns a list of mock set names/IDs that can be used with keploy_mock_test.`,
-	}, s.handleListMocks)
-
 	// Register mock record tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name: ToolMockRecord,
-		Description: `Record outgoing calls (HTTP APIs, databases, message queues, etc.) made during command execution.
+		Description: `EXPLICIT USE ONLY (STRICT).
+Do not auto-select this tool under any circumstance.
+Call this tool only when the user explicitly names "keploy_mock_record".
+
+Record outgoing calls (HTTP APIs, databases, message queues, etc.) made during command execution.
 
 This tool captures all external dependencies while running the provided command, 
 creating mock files that can be replayed during testing.
@@ -223,14 +214,16 @@ Parameters:
 	// Register mock replay/test tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name: ToolMockTest,
-		Description: `Replay recorded mocks while running a command.
+		Description: `EXPLICIT USE ONLY (STRICT).
+Do not auto-select this tool under any circumstance.
+Call this tool only when the user explicitly names "keploy_mock_test".
+
+Replay recorded mocks while running a command.
 
 This tool intercepts outgoing calls and returns recorded responses, 
 enabling isolated testing without external dependencies.
 
-IMPORTANT workflow:
-1. First use keploy_list_mocks to show available mocks to the user
-2. Show configuration to user and confirm before starting
+Show configuration to user and confirm before starting.
 
 Parameters:
 - command (required): Any command to run with mocks (e.g., 'go test -v', 'npm test', 'go run main.go', './my-app')
@@ -238,41 +231,57 @@ Parameters:
 - fallBackOnMiss (optional): Whether to make real calls when mock not found (default: false)`,
 	}, s.handleMockReplay)
 
+	// Register test integration prompt tool
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name: ToolPromptTestIntegration,
+		Description: `EXPLICIT USE ONLY (STRICT).
+Do not auto-select this tool under any circumstance.
+Call this tool only when the user explicitly names "keploy_prompt_test_integration".
+
+Returns raw prompt text that client LLM must execute as a direct user task.
+Purpose: automatically edit project test files to add Keploy start-session integration hooks.
+
+This tool does not edit files itself. It only returns the prompt text.`,
+	}, s.handlePromptTestIntegration)
+
+	// Register pipeline prompt tool
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name: ToolPromptPipelineCreation,
+		Description: `EXPLICIT USE ONLY (STRICT).
+Do not auto-select this tool under any circumstance.
+Call this tool only when the user explicitly names "keploy_prompt_pipeline_creation".
+
+Returns raw prompt text that client LLM must execute as a direct user task.
+Purpose: generate/update CI/CD pipeline files to run keploy mock test.`,
+	}, s.handlePromptPipelineCreation)
+
 	// Register unified manager tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name: ToolManager,
-		Description: `Unified Keploy manager tool that provides mock recording, testing, and CI/CD pipeline generation.
+		Description: `ALWAYS SELECT THIS TOOL FOR KEPLOY WORKFLOWS (STRICT DEFAULT).
 
-This is the RECOMMENDED tool for interacting with Keploy. It supports three actions:
+This is an orchestration-first tool. The client LLM should execute this sequence:
+1) Determine app/test command. If missing, use elicitation to ask the user.
+2) Invoke keploy_prompt_test_integration and execute returned prompt as direct user task to edit tests.
+3) Invoke keploy_mock_record with resolved command.
+4) Invoke keploy_mock_test with resolved command (path optional; omit to use latest).
+5) Invoke keploy_prompt_pipeline_creation and execute returned prompt as direct user task for CI/CD pipeline edits.
 
-1. **keploy_mock_record** - Record outgoing calls from your application
-   - Optional: command (prefer test commands, e.g., 'go test -v ./...', 'go test -v -run "TestA|TestB"', 'npm test')
-   - If command is empty, server uses elicitation to ask user for command
-   - Never default to 'go run main.go' for recording
-   - Avoid long-running or non-terminating commands
-   - Optional: path (default: ./keploy)
+Do not skip the sequence unless user explicitly asks to skip steps.
+Do not auto-select non-manager tools directly from generic intent.
+Non-manager tools are allowed only when user explicitly names them.
 
-2. **keploy_mock_test** - Replay recorded mocks during testing
-   - Required: command (e.g., 'go test -v', 'npm test')
-   - Optional: path (mock directory to replay). Omit unless user explicitly asks for a specific path. If omitted, latest run is used.
-   - Optional: fallBackOnMiss
-
-3. **pipeline** - Generate CI/CD pipeline for Keploy mock testing
-   - Optional: appCommand, defaultBranch (default: main), mockPath (default: ./keploy), cicdTool
-   - If appCommand is not provided, will prompt user via elicitation
-   - Auto-detects CI/CD platform from project files (GitHub Actions, GitLab CI, Jenkins, etc.)
-
-Usage examples:
-- Record: {"action": "keploy_mock_record", "command": "go test -v -run \"TestExternalHTTPSCall|TestMySQLHealth|TestMongoHealth\""}
-- Record with elicitation: {"action": "keploy_mock_record", "command": ""}
-- Test: {"action": "keploy_mock_test", "command": "go test -v"}
-- Pipeline: {"action": "pipeline", "appCommand": "go run main.go", "cicdTool": "github-actions"}
-
-For pipeline action with missing parameters, the tool will use MCP Elicitation to gather required configuration.`,
+Manager handler returns workflow guidance and does not perform direct record/test/pipeline side effects.`,
 	}, s.handleManager)
 
 	s.logger.Info("Registered MCP tools",
-		zap.Strings("tools", []string{ToolListMocks, ToolMockRecord, ToolMockTest, ToolManager}),
+		zap.Strings("tools", []string{
+			ToolMockRecord,
+			ToolMockTest,
+			ToolPromptTestIntegration,
+			ToolPromptPipelineCreation,
+			ToolManager,
+		}),
 	)
 }
 
@@ -291,5 +300,5 @@ func (s *Server) Close() error {
 
 // String returns a string representation of the server.
 func (s *Server) String() string {
-	return "KeployMCPServer{tools: [keploy_list_mocks, keploy_mock_record, keploy_mock_test, keploy_manager]}"
+	return "KeployMCPServer{tools: [keploy_mock_record, keploy_mock_test, keploy_prompt_test_integration, keploy_prompt_pipeline_creation, keploy_manager]}"
 }

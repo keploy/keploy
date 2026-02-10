@@ -977,13 +977,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.Agent.AgentURI = opts.AgentURI
 
 	// Expose the discovered agent endpoint to the child app/test process.
-	// Integration tests (present in application) can read these values before calling /agent/hooks/*
+	// Integration tests can read this before calling /agent/hooks/*
 	//
-	// KEPLOY_AGENT_URI  -> full base URI (example: http://localhost:33003/agent)
-	// KEPLOY_AGENT_PORT -> port only (example: 33003)
-	//
-	// The test-side helper can prefer URI, then PORT, then final fallback.
-	_ = os.Setenv("KEPLOY_AGENT_PORT", strconv.Itoa(int(agentPort)))
+	// KEPLOY_AGENT_URI -> full base URI (example: http://localhost:33003/agent)
 	_ = os.Setenv("KEPLOY_AGENT_URI", opts.AgentURI)
 
 	// Always bypass the agent's own HTTP port to avoid proxying control-plane calls.
