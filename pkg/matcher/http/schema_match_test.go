@@ -179,3 +179,71 @@ func TestSchemaMatch_Headers(t *testing.T) {
 		})
 	}
 }
+
+func TestUserVerification_SchemaMatch(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	tests := []struct {
+		name        string
+		description string
+		expected    string
+		actual      string
+		shouldPass  bool
+	}{
+		{
+			name:        "1. Superset Match (Success)",
+			description: "Actual JSON has an EXTRA field 'timestamp' not in Expected. Strict match would FAIL, but Schema Match allows it.",
+			expected:    `{"id": 1, "name": "Keploy"}`,
+			actual:      `{"id": 1, "name": "Keploy", "timestamp": 123456}`,
+			shouldPass:  true,
+		},
+		{
+			name:        "2. Null Value Match (Success)",
+			description: "Both Expected and Actual have 'val: null'. This should PASS.",
+			expected:    `{"val": null}`,
+			actual:      `{"val": null}`,
+			shouldPass:  true,
+		},
+		{
+			name:        "3. Missing Field (Failure)",
+			description: "Actual JSON is MISSING the 'name' field required by Expected. This MUST fail.",
+			expected:    `{"id": 1, "name": "Keploy"}`,
+			actual:      `{"id": 1}`,
+			shouldPass:  false,
+		},
+		{
+			name:        "4. Type Mismatch (Failure)",
+			description: "Expected 'id' is a NUMBER (1), but Actual is a STRING ('1'). Schema Match enforces types, so this FAILS.",
+			expected:    `{"id": 1}`,
+			actual:      `{"id": "1"}`,
+			shouldPass:  false,
+		},
+		{
+			name:        "5. Array Length Mismatch (Success - Relaxed)",
+			description: "Expected list has 2 items, Actual has only 1. Since length check is relaxed, this PASSES.",
+			expected:    `{"tags": ["a", "b"]}`,
+			actual:      `{"tags": ["a"]}`,
+			shouldPass:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tCase := &models.TestCase{
+				HTTPResp: models.HTTPResp{
+					Body:   tc.expected,
+					Header: map[string]string{"Content-Type": "application/json"},
+				},
+			}
+			actualResp := &models.HTTPResp{
+				Body:   tc.actual,
+				Header: map[string]string{"Content-Type": "application/json"},
+			}
+
+			pass, res := MatchSchema(tCase, actualResp, logger)
+			if pass != tc.shouldPass {
+				t.Errorf("MatchSchema() = %v, want %v. Result: %+v", pass, tc.shouldPass, res)
+			}
+		})
+	}
+}

@@ -147,8 +147,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}()
 
-	// check if its the last testset running -
-
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
