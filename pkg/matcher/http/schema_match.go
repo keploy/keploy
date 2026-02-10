@@ -33,26 +33,21 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	}
 
 	// 2. Body Schema Match
-	// Try to unmarshal both as JSON
 	var expObj, actObj interface{}
 	errExp := json.Unmarshal([]byte(tc.HTTPResp.Body), &expObj)
 	errAct := json.Unmarshal([]byte(actualResponse.Body), &actObj)
 
 	if errExp == nil && errAct == nil {
 		res.BodyResult[0].Type = models.JSON
-		// Both are JSON, perform schema match
 		match, msg := schemaMatchRecursive(expObj, actObj, "body", logger)
 		if !match {
 			pass = false
 			logger.Error("Schema match FAIL", zap.String("reason", msg))
 		} else {
-			logger.Info("Schema match PASS", zap.String("note", "Extra fields in actual are ignored (Superset)"))
+			logger.Info("Schema match PASS")
 		}
-		// Populate body result with schema match outcome.
 		res.BodyResult[0].Normal = match
 	} else {
-		// Non-JSON body handling.
-		// If one is JSON and other is not, that's a type mismatch -> Fail.
 		if (errExp == nil) != (errAct == nil) {
 			pass = false
 			res.BodyResult[0].Normal = false
@@ -66,10 +61,9 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		}
 	}
 
-	// Check headers existence (schema match checks key presence, not values).
+	// Check headers existence
 	for k := range tc.HTTPResp.Header {
 		if _, ok := actualResponse.Header[k]; !ok {
-			// Missing header
 			pass = false
 		}
 	}
@@ -78,23 +72,12 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 }
 
 func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap.Logger) (bool, string) {
-	// 1. Handle nil cases
+	// 1. Handle Nil Cases
 	if expected == nil {
-		// If expected is nil, we generally accept anything in actual,
-		// unless strictly we want actual to be nil too.
-		// For looser schema matching, nil expected usually means "any structure" or "optional".
-		// But here, if expected has a specific structure (e.g. key: nil),
-		// we probably just check path existence which is done by caller for maps.
-		// If the value itself is nil, it matches anything or nothing?
-		// Let's assume strict type matching: nil matches nil.
-		// But in JSON, null is a value.
+		// Strict: if we expect nil/null, actual must be nil/null
 		if actual == nil {
 			return true, ""
 		}
-		// If expected is nil but actual is not, it's a mismatch if we treat nil as a specific "null" type.
-		// However, in Go unmarshaling, nil interface{} could be anything.
-		// Let's print a warning and allow it for now, or fail?
-		// Failure message:
 		return false, fmt.Sprintf("mismatch at %s: expected nil, got %T", path, actual)
 	}
 
@@ -105,80 +88,100 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 	expType := reflect.TypeOf(expected)
 	actType := reflect.TypeOf(actual)
 
-	// 2. Type Check
-	// Note: JSON numbers are float64 by default in Go unmarshal.
-	// If types are different, check if they are compatible (e.g. both numeric? float64 vs int?)
+	// 2. Type Check with Numeric Compatibility
 	if expType != actType {
-		// Handle numeric cases if necessary, though json.Unmarshal usually gives float64 for all numbers
-		// unless UseNumber is used. Standard Keploy seems to use standard unmarshal.
-		return false, fmt.Sprintf("type mismatch at %s: expected %T, got %T", path, expected, actual)
+		// Handle the specific case where one is int and the other is float (common in Go JSON)
+		if isNumeric(expType.Kind()) && isNumeric(actType.Kind()) {
+			// Compatible numeric types, proceed
+		} else {
+			return false, fmt.Sprintf("type mismatch at %s: expected %T, got %T", path, expected, actual)
+		}
 	}
 
-	// 3. Recursive Check based on Kind
-	switch expType.Kind() {
+	// 3. Recursive Check
+	expKind := expType.Kind()
+
+	// If expected was an interface, get the underlying kind
+	if expKind == reflect.Interface {
+		expKind = reflect.ValueOf(expected).Elem().Kind()
+	}
+
+	switch expKind {
 	case reflect.Map:
-		expMap, ok := expected.(map[string]interface{})
-		if !ok {
-			// Should be map[string]interface{} for JSON objects
-			// If not, it might be map[interface{}]interface{} or custom type.
-			// Attempt to cast or handle generic map.
-			// for simplicity assuming map[string]interface{} as typical from json.Unmarshal
-			logger.Warn("SchemaMatch: expected value matches map kind but not map[string]interface{}", zap.String("path", path))
-			// strict match for now
-			if !reflect.DeepEqual(expected, actual) {
-				return false, fmt.Sprintf("non-standard map mismatch at %s", path)
-			}
-			return true, ""
-		}
-		actMap, ok := actual.(map[string]interface{})
-		if !ok {
-			return false, fmt.Sprintf("type mismatch at %s: expected map, got %T", path, actual)
+		// Convert both to reflect.Value to handle any map type (not just map[string]interface{})
+		expVal := reflect.ValueOf(expected)
+		actVal := reflect.ValueOf(actual)
+
+		if actVal.Kind() != reflect.Map {
+			return false, fmt.Sprintf("type mismatch at %s: expected Map, got %v", path, actVal.Kind())
 		}
 
-		for k, vExp := range expMap {
-			vAct, exists := actMap[k]
-			if !exists {
-				return false, fmt.Sprintf("missing key at %s: %s", path, k)
+		// Iterate over EXPECTED keys (because Field Deletion is NOT tolerable)
+		for _, key := range expVal.MapKeys() {
+			// Check if key exists in actual
+			actValue := actVal.MapIndex(key)
+
+			if !actValue.IsValid() {
+				// Key missing in actual -> FAILURE
+				return false, fmt.Sprintf("missing key at %s: %v", path, key)
 			}
-			newPath := k
-			if path != "" {
-				newPath = path + "." + k
+
+			// Construct new path
+			newPath := fmt.Sprintf("%s.%v", path, key)
+			if path == "" {
+				newPath = fmt.Sprintf("%v", key)
 			}
-			if match, msg := schemaMatchRecursive(vExp, vAct, newPath, logger); !match {
+
+			// Recursion
+			match, msg := schemaMatchRecursive(expVal.MapIndex(key).Interface(), actValue.Interface(), newPath, logger)
+			if !match {
 				return false, msg
 			}
 		}
-		// Extra keys in actMap are allowed (superset)
+		// Extra keys in Actual are ignored (Superset allowed)
 
 	case reflect.Slice, reflect.Array:
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
 
-		// For schema matching, the user requested that array length differences should be ignored.
-		// We will only check the elements that exist in both arrays.
-		// If actual has fewer elements, it's a pass.
-		// If actual has more elements, it's a pass (superset).
-		// We only check type/structure for the common indices.
-
-		minLen := expSlice.Len()
-		if actSlice.Len() < minLen {
-			minLen = actSlice.Len()
+		// Rule Update: If Actual has FEWER elements than Expected, it's a structural mismatch
+		// (missing fields/items defined in expected schema).
+		// If Actual has MORE elements, it is tolerable.
+		if actSlice.Len() < expSlice.Len() {
+			return false, fmt.Sprintf("array length mismatch at %s: expected at least %d items, got %d", path, expSlice.Len(), actSlice.Len())
 		}
 
-		for i := 0; i < minLen; i++ {
+		// Iterate only up to Expected Length
+		// We validate that the first N items of Actual match the N items of Expected.
+		// Any extra items in Actual are ignored.
+		for i := 0; i < expSlice.Len(); i++ {
 			vExp := expSlice.Index(i).Interface()
 			vAct := actSlice.Index(i).Interface()
 			newPath := fmt.Sprintf("%s[%d]", path, i)
-			if match, msg := schemaMatchRecursive(vExp, vAct, newPath, logger); !match {
+
+			match, msg := schemaMatchRecursive(vExp, vAct, newPath, logger)
+			if !match {
 				return false, msg
 			}
 		}
 
 	default:
-		// Primitives (string, float64, bool)
-		// We already checked types above. Value doesn't matter for schema match.
+		// Primitives (String, Bool, Float, Int)
+		// We already checked Types (or numeric compatibility) above.
+		// Values are ignored.
 		return true, ""
 	}
 
 	return true, ""
+}
+
+// Helper to handle Go's strict types vs JSON loose numbers
+func isNumeric(k reflect.Kind) bool {
+	switch k {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return false
 }
