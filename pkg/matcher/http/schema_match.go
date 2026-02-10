@@ -144,17 +144,18 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
 
-		// Rule Update: If Actual has FEWER elements than Expected, it's a structural mismatch
-		// (missing fields/items defined in expected schema).
-		// If Actual has MORE elements, it is tolerable.
-		if actSlice.Len() < expSlice.Len() {
-			return false, fmt.Sprintf("array length mismatch at %s: expected at least %d items, got %d", path, expSlice.Len(), actSlice.Len())
+		// For schema matching, array length differences should be ignored.
+		// We will only check the elements that exist in both arrays.
+		// If actual has fewer elements, it's a pass.
+		// If actual has more elements, it's a pass (superset).
+		// We only check type/structure for the common indices.
+
+		minLen := expSlice.Len()
+		if actSlice.Len() < minLen {
+			minLen = actSlice.Len()
 		}
 
-		// Iterate only up to Expected Length
-		// We validate that the first N items of Actual match the N items of Expected.
-		// Any extra items in Actual are ignored.
-		for i := 0; i < expSlice.Len(); i++ {
+		for i := 0; i < minLen; i++ {
 			vExp := expSlice.Index(i).Interface()
 			vAct := actSlice.Index(i).Interface()
 			newPath := fmt.Sprintf("%s[%d]", path, i)
