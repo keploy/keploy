@@ -32,22 +32,22 @@ jobs:
 
       - name: Clone Sample App
         run: |
-          git clone -b schema_branch https://github.com/keploy/samples-python.git sample-app
+          git clone -b schema-match https://github.com/keploy/samples-python.git sample-app
 
       - name: Record Test Cases
-        working-directory: sample-app/http-schema
+        working-directory: sample-app/python-schema-match
         run: |
           sudo keploy record -c "python3 app.py" &
           KEPLOY_PID=$!
           sleep 5
-          python3 check_endpoints.py
+          python3 check-endpoints.py
           sleep 5
           sudo kill $KEPLOY_PID || true
           echo "=== Recorded Data ==="
           ls -R keploy/
 
       - name: Run Schema Match Test
-        working-directory: sample-app/http-schema
+        working-directory: sample-app/python-schema-match
         run: |
           set +e
           OUTPUT=$(sudo keploy test -c "python3 app-test.py" --schema-match --delay 5 2>&1)
