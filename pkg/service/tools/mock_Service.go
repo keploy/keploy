@@ -4,7 +4,6 @@ package tools
 
 import (
 	context "context"
-	sync "sync"
 
 	mock "github.com/stretchr/testify/mock"
 )
@@ -87,7 +86,7 @@ func (_m *MockService) Login(ctx context.Context) bool {
 }
 
 // SendTelemetry provides a mock function with given fields: event, output
-func (_m *MockService) SendTelemetry(event string, output ...*sync.Map) {
+func (_m *MockService) SendTelemetry(event string, output ...map[string]interface{}) {
 	_va := make([]interface{}, len(output))
 	for _i := range output {
 		_va[_i] = output[_i]

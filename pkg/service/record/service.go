@@ -50,7 +50,7 @@ type TestSetConfig interface {
 }
 
 type Telemetry interface {
-	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int)
+	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, metadata map[string]interface{})
 	RecordedTestCaseMock(mockType string)
 	RecordedMocks(mockTotal map[string]int)
 	RecordedTestAndMocks()
