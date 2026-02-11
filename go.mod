@@ -103,7 +103,6 @@ require (
 	github.com/go-chi/render v1.0.3
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
-	github.com/keploy/integrations v0.0.0-20260210075912-04d7c6dbede4
 	github.com/keploy/jsonDiff v1.0.8
 	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
 	github.com/spf13/viper v1.19.0
@@ -199,5 +198,3 @@ require (
 	github.com/yuin/goldmark v1.5.2 // indirect
 	github.com/yuin/goldmark-emoji v1.0.1 // indirect
 )
-
-replace github.com/keploy/integrations => ../integrations
