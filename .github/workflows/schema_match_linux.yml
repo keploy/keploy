@@ -69,7 +69,6 @@ jobs:
         with:
           repository: keploy/samples-python
           path: samples-python
-          ref: python-schema-match
           
       - name: Run Schema Match Test
         env:
