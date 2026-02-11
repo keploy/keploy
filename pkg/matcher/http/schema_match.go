@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/models"
+	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -40,46 +41,43 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	errExp := json.Unmarshal([]byte(tc.HTTPResp.Body), &expObj)
 	errAct := json.Unmarshal([]byte(actualResponse.Body), &actObj)
 
-	var failureReason string
+	var schemaErrors []matcherUtils.SchemaError
 
 	if errExp == nil && errAct == nil {
 		result.BodyResult[0].Type = models.JSON
-		match, msg := schemaMatchRecursive(expObj, actObj, "body", logger)
-		if !match {
+		schemaErrors = schemaMatchRecursive(expObj, actObj, "body", logger)
+		if len(schemaErrors) > 0 {
 			pass = false
-			failureReason = msg
 		}
-		result.BodyResult[0].Normal = match
+		result.BodyResult[0].Normal = len(schemaErrors) == 0
 	} else {
 		if (errExp == nil) != (errAct == nil) {
 			pass = false
 			result.BodyResult[0].Normal = false
-			failureReason = "One of the body is json and other is not"
+			schemaErrors = append(schemaErrors, matcherUtils.SchemaError{
+				Reason: "One of the body is json and other is not",
+			})
 		} else {
 			// Both non-JSON: fallback to strict equality.
 			bodyMatch := tc.HTTPResp.Body == actualResponse.Body
 			result.BodyResult[0].Normal = bodyMatch
 			if !bodyMatch {
 				pass = false
-				failureReason = "Body mismatch (non-JSON)"
+				schemaErrors = append(schemaErrors, matcherUtils.SchemaError{
+					Reason: "Body mismatch (non-JSON)",
+				})
 			}
 		}
 	}
 
 	// Logging similar to Match() in match.go
 	if !pass {
-		newLogger := pp.New()
-		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.GetFailingColorScheme())
-		var logs = ""
-		logs += newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-
-		// Print reason
-		logs += newLogger.Sprintf("Schema Matching Failed: %s\n", failureReason)
-
-		_, err := newLogger.Printf(logs)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
+		printer := matcherUtils.NewSchemaDiffPrinter(tc.Name)
+		for _, err := range schemaErrors {
+			printer.PushError(err.Reason, err.Expected, err.Actual)
+		}
+		if err := printer.Render(); err != nil {
+			utils.LogError(logger, err, "failed to print schema diffs")
 		}
 	} else {
 		newLogger := pp.New()
@@ -103,18 +101,29 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	return pass, result
 }
 
-func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap.Logger) (bool, string) {
+func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap.Logger) []matcherUtils.SchemaError {
+	var errors []matcherUtils.SchemaError
+
 	// Handle Nil Cases
 	if expected == nil {
-		// Strict: if we expect nil/null, actual must be nil/null
 		if actual == nil {
-			return true, ""
+			return errors
 		}
-		return false, fmt.Sprintf("mismatch at %s: expected nil, got %T", path, actual)
+		errors = append(errors, matcherUtils.SchemaError{
+			Reason:   fmt.Sprintf("mismatch at %s", path),
+			Expected: "nil",
+			Actual:   fmt.Sprintf("%T", actual),
+		})
+		return errors
 	}
 
 	if actual == nil {
-		return false, fmt.Sprintf("mismatch at %s: expected %T, got nil", path, expected)
+		errors = append(errors, matcherUtils.SchemaError{
+			Reason:   fmt.Sprintf("mismatch at %s", path),
+			Expected: fmt.Sprintf("%T", expected),
+			Actual:   "nil",
+		})
+		return errors
 	}
 
 	expType := reflect.TypeOf(expected)
@@ -122,11 +131,13 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 
 	// Type Check with Numeric Compatibility
 	if expType != actType {
-		// Handle the specific case where one is int and the other is float (common in Go JSON)
-		if isNumeric(expType.Kind()) && isNumeric(actType.Kind()) {
-			// Compatible numeric types, proceed
-		} else {
-			return false, fmt.Sprintf("type mismatch at %s: expected %T, got %T", path, expected, actual)
+		if !isNumeric(expType.Kind()) || !isNumeric(actType.Kind()) {
+			errors = append(errors, matcherUtils.SchemaError{
+				Reason:   fmt.Sprintf("type mismatch at %s", path),
+				Expected: fmt.Sprintf("%T", expected),
+				Actual:   fmt.Sprintf("%T", actual),
+			})
+			return errors
 		}
 	}
 
@@ -140,23 +151,21 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 
 	switch expKind {
 	case reflect.Map:
-		// Convert both to reflect.Value to handle any map type (not just map[string]interface{})
 		expVal := reflect.ValueOf(expected)
 		actVal := reflect.ValueOf(actual)
 
 		if actVal.Kind() != reflect.Map {
-			return false, fmt.Sprintf("type mismatch at %s: expected Map, got %v", path, actVal.Kind())
+			errors = append(errors, matcherUtils.SchemaError{
+				Reason:   fmt.Sprintf("type mismatch at %s", path),
+				Expected: "Map",
+				Actual:   fmt.Sprintf("%v", actVal.Kind()),
+			})
+			return errors
 		}
 
-		// Iterate over EXPECTED keys (because Field Deletion is NOT tolerable)
+		// Iterate over EXPECTED keys
 		for _, key := range expVal.MapKeys() {
-			// Check if key exists in actual
 			actValue := actVal.MapIndex(key)
-
-			if !actValue.IsValid() {
-				// Key missing in actual -> FAILURE
-				return false, fmt.Sprintf("missing key at %s: %v", path, key)
-			}
 
 			// Construct new path
 			newPath := fmt.Sprintf("%s.%v", path, key)
@@ -164,23 +173,23 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 				newPath = fmt.Sprintf("%v", key)
 			}
 
-			// Recursion
-			match, msg := schemaMatchRecursive(expVal.MapIndex(key).Interface(), actValue.Interface(), newPath, logger)
-			if !match {
-				return false, msg
+			if !actValue.IsValid() {
+				errors = append(errors, matcherUtils.SchemaError{
+					Reason:   fmt.Sprintf("missing key at %s", path),
+					Expected: fmt.Sprintf("%v", key),
+					Actual:   "(missing)",
+				})
+				continue 
 			}
+
+			// Recursion - Collect errors from children
+			childErrors := schemaMatchRecursive(expVal.MapIndex(key).Interface(), actValue.Interface(), newPath, logger)
+			errors = append(errors, childErrors...)
 		}
-		// Extra keys in Actual are ignored (Superset allowed)
 
 	case reflect.Slice, reflect.Array:
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
-
-		// For schema matching, array length differences should be ignored.
-		// We will only check the elements that exist in both arrays.
-		// If actual has fewer elements, it's a pass.
-		// If actual has more elements, it's a pass (superset).
-		// We only check type/structure for the common indices.
 
 		minLen := expSlice.Len()
 		if actSlice.Len() < minLen {
@@ -192,20 +201,16 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 			vAct := actSlice.Index(i).Interface()
 			newPath := fmt.Sprintf("%s[%d]", path, i)
 
-			match, msg := schemaMatchRecursive(vExp, vAct, newPath, logger)
-			if !match {
-				return false, msg
-			}
+			childErrors := schemaMatchRecursive(vExp, vAct, newPath, logger)
+			errors = append(errors, childErrors...)
 		}
 
 	default:
-		// Primitives (String, Bool, Float, Int)
-		// We already checked Types (or numeric compatibility) above.
-		// Values are ignored.
-		return true, ""
+		// Primitives - already checked types above
+		return errors
 	}
 
-	return true, ""
+	return errors
 }
 
 // Helper to handle Go's strict types vs JSON loose numbers
