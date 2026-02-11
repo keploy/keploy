@@ -25,7 +25,9 @@ type Telemetry struct {
 	KeployVersion  string
 	GlobalMap      *sync.Map
 	client         *http.Client
+	mu             sync.Mutex // guards closed + inflight.Add to prevent Add/Wait race
 	inflight       sync.WaitGroup
+	inflightN      atomic.Int64
 	closed         atomic.Bool
 }
 
@@ -167,12 +169,15 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 	}
 
 	if tracked {
-		tel.inflight.Add(1)
-	}
-	if tel.closed.Load() {
-		if tracked {
-			tel.inflight.Done()
+		tel.mu.Lock()
+		if tel.closed.Load() {
+			tel.mu.Unlock()
+			return
 		}
+		tel.inflight.Add(1)
+		tel.inflightN.Add(1)
+		tel.mu.Unlock()
+	} else if tel.closed.Load() {
 		return
 	}
 
@@ -207,6 +212,7 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 	bin, err := marshalEvent(event)
 	if err != nil {
 		if tracked {
+			tel.inflightN.Add(-1)
 			tel.inflight.Done()
 		}
 		return
@@ -214,7 +220,10 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 
 	go func() {
 		if tracked {
-			defer tel.inflight.Done()
+			defer func() {
+				tel.inflightN.Add(-1)
+				tel.inflight.Done()
+			}()
 		}
 
 		req, err := http.NewRequest(http.MethodPost, teleURL, bytes.NewBuffer(bin))
@@ -236,7 +245,13 @@ func (tel *Telemetry) Shutdown() {
 	if !tel.Enabled {
 		return
 	}
+	tel.mu.Lock()
 	if !tel.closed.CompareAndSwap(false, true) {
+		tel.mu.Unlock()
+		return
+	}
+	tel.mu.Unlock()
+	if tel.inflightN.Load() == 0 {
 		return
 	}
 	if tel.logger != nil {
