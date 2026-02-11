@@ -78,14 +78,14 @@ FAIL_COUNT=$(echo "$OUTPUT" | grep -c "Testrun failed" || true)
 
 echo "------------------------------------------------"
 echo "Results Summary: $PASS_COUNT PASSED, $FAIL_COUNT FAILED"
-echo "Expected Results: 7 PASSED, 5 FAILED"
+echo "Expected Results: 8 PASSED, 5 FAILED"
 echo "------------------------------------------------"
 
-if [ "$PASS_COUNT" -eq 7 ] && [ "$FAIL_COUNT" -eq 5 ]; then
+if [ "$PASS_COUNT" -eq 8 ] && [ "$FAIL_COUNT" -eq 5 ]; then
     echo "✅ SUCCESS: Schema match logic and side-by-side visualization verified."
     exit 0
 else
     echo "❌ FAILURE: Unexpected test results."
-    echo "Expected 7 PASSED and 5 FAILED, but got $PASS_COUNT PASSED and $FAIL_COUNT FAILED."
+    echo "Expected 8 PASSED and 5 FAILED, but got $PASS_COUNT PASSED and $FAIL_COUNT FAILED."
     exit 1
 fi
