@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,10 +59,11 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		}
 	}
 
-	runID := fmt.Sprintf("run-%d", time.Now().Unix())
-	if !strings.HasPrefix(filepath.Base(basePath), "run-") {
-		basePath = filepath.Join(basePath, runID)
+	resolvedPath, err := resolveMockSetPath(basePath)
+	if err != nil {
+		return nil, err
 	}
+	basePath = resolvedPath
 
 	sessionID := fmt.Sprintf("mock-%d", time.Now().Unix())
 	mockFilePath := filepath.Join(basePath, "mocks.yaml")
@@ -71,7 +73,7 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		db = mockdb.New(r.logger, basePath, "")
 	}
 
-	collector := newMetadataCollector(opts.Command)
+	collector := newMetadataCollector()
 
 	recordTimer := opts.Duration
 	useTimer := opts.Duration > 0
@@ -124,6 +126,64 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		AppExitCode:  appExitCode,
 		Output:       "",
 	}, nil
+}
+
+func resolveMockSetPath(basePath string) (string, error) {
+	basePath = filepath.Clean(strings.TrimSpace(basePath))
+	if basePath == "" {
+		basePath = "./keploy"
+	}
+
+	// If user explicitly passes a specific mock-set directory, use it as-is.
+	if _, ok := parseMockSetID(filepath.Base(basePath)); ok {
+		return basePath, nil
+	}
+
+	nextSetName, err := getNextMockSetName(basePath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(basePath, nextSetName), nil
+}
+
+func getNextMockSetName(basePath string) (string, error) {
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "mock-set-0", nil
+		}
+		return "", fmt.Errorf("failed to read mock base path %q: %w", basePath, err)
+	}
+
+	maxSetID := -1
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if setID, ok := parseMockSetID(entry.Name()); ok && setID > maxSetID {
+			maxSetID = setID
+		}
+	}
+
+	return fmt.Sprintf("mock-set-%d", maxSetID+1), nil
+}
+
+func parseMockSetID(name string) (int, bool) {
+	const prefix = "mock-set-"
+	if !strings.HasPrefix(name, prefix) {
+		return 0, false
+	}
+
+	rawID := strings.TrimPrefix(name, prefix)
+	if rawID == "" {
+		return 0, false
+	}
+
+	setID, err := strconv.Atoi(rawID)
+	if err != nil || setID < 0 {
+		return 0, false
+	}
+	return setID, true
 }
 
 func exitCodeFromAppError(appErr models.AppError) int {

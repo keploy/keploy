@@ -227,7 +227,7 @@ Show configuration to user and confirm before starting.
 
 Parameters:
 - command (required): Any command to run with mocks (e.g., 'go test -v', 'npm test', 'go run main.go', './my-app')
-- path (optional): Path to the mock directory to replay (e.g., './keploy/run-1234567890'). Omit (send empty) unless user explicitly asks for a specific path. If omitted, latest run is used.
+- path (optional): Path to the mock directory to replay (e.g., './keploy/mock-set-3'). Omit (send empty) unless user explicitly asks for a specific path. If omitted, latest mock set is used.
 - fallBackOnMiss (optional): Whether to make real calls when mock not found (default: false)`,
 	}, s.handleMockReplay)
 

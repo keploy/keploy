@@ -45,8 +45,8 @@ type RecordConfiguration struct {
 type MockReplayInput struct {
 	// Command is the command to run with mocks.
 	Command string `json:"command" jsonschema:"Command to run with mocks (e.g. 'go test -v', 'npm test', 'go run main.go', or any other command)."`
-	// Path is the path to load mock files from. If omitted, replay resolves latest run automatically.
-	Path string `json:"path,omitempty" jsonschema:"Path to load mock files from (optional). Omit unless user explicitly wants a specific path. If omitted, replay service selects latest run automatically."`
+	// Path is the path to load mock files from. If omitted, replay resolves latest mock set automatically.
+	Path string `json:"path,omitempty" jsonschema:"Path to load mock files from (optional). Omit unless user explicitly wants a specific path. If omitted, replay service selects latest mock set automatically."`
 	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches (optional, default: false).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
 }
@@ -253,7 +253,7 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	}
 	path := strings.TrimSpace(in.Path)
 	if req != nil && !hasArgument(req, "path") {
-		// If caller omitted "path", keep it empty so replay service resolves latest run.
+		// If caller omitted "path", keep it empty so replay service resolves latest mock set.
 		path = ""
 	}
 

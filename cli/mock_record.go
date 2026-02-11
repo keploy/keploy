@@ -81,7 +81,7 @@ func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, servi
 	var cmd = &cobra.Command{
 		Use:     "test",
 		Short:   "replay recorded mocks during testing",
-		Example: `keploy mock test -c "go test ./..." -p ./keploy/run-<timestamp>`,
+		Example: `keploy mock test -c "go test ./..." -p ./keploy/mock-set-<n>`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},

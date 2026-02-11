@@ -139,7 +139,7 @@ func (r *replayer) resolveReplayPath(path string) (string, error) {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("mock base path %q does not exist; pass --path or record mocks first", basePath)
 		}
-		return "", fmt.Errorf("failed to resolve latest mock run in %q: %w", basePath, err)
+		return "", fmt.Errorf("failed to resolve latest mock set in %q: %w", basePath, err)
 	}
 
 	type runInfo struct {
@@ -147,33 +147,42 @@ func (r *replayer) resolveReplayPath(path string) (string, error) {
 		modTime time.Time
 	}
 
-	var runs []runInfo
+	var mockSets []runInfo
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "run-") {
+		if !entry.IsDir() {
 			continue
 		}
 
-		run := runInfo{name: entry.Name()}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "mock-set-") {
+			continue
+		}
+
+		run := runInfo{name: name}
 		if info, statErr := entry.Info(); statErr == nil {
 			run.modTime = info.ModTime()
 		}
-		runs = append(runs, run)
+
+		mockSets = append(mockSets, run)
 	}
 
-	if len(runs) == 0 {
-		r.logger.Info("No run-* directories found; using base path for replay", zap.String("path", basePath))
+	if len(mockSets) == 0 {
+		r.logger.Info("No mock-set-* directories found; using base path for replay", zap.String("path", basePath))
 		return basePath, nil
 	}
 
-	sort.SliceStable(runs, func(i, j int) bool {
-		if !runs[i].modTime.Equal(runs[j].modTime) {
-			return runs[i].modTime.After(runs[j].modTime)
-		}
-		return runs[i].name > runs[j].name
-	})
+	sortByNewest := func(items []runInfo) {
+		sort.SliceStable(items, func(i, j int) bool {
+			if !items[i].modTime.Equal(items[j].modTime) {
+				return items[i].modTime.After(items[j].modTime)
+			}
+			return items[i].name > items[j].name
+		})
+	}
 
-	resolvedPath := filepath.Join(basePath, runs[0].name)
-	r.logger.Info("Resolved latest mock run for replay", zap.String("basePath", basePath), zap.String("path", resolvedPath))
+	sortByNewest(mockSets)
+	resolvedPath := filepath.Join(basePath, mockSets[0].name)
+	r.logger.Info("Resolved latest mock set for replay", zap.String("basePath", basePath), zap.String("path", resolvedPath))
 	return resolvedPath, nil
 }
 

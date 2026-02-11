@@ -19,8 +19,8 @@ type ManagerInput struct {
 	// Path is the base path for mock storage.
 	// Optional for both keploy_mock_record and keploy_mock_test.
 	// For mock_test, omit unless user explicitly asks for a specific path.
-	// If omitted, latest run is selected automatically by replay service.
-	Path string `json:"path,omitempty" jsonschema:"Path for mock storage. Optional for mock_record/mock_test. For mock_test, omit unless user explicitly asks for a specific path; when omitted, latest run is used."`
+	// If omitted, latest mock set is selected automatically by replay service.
+	Path string `json:"path,omitempty" jsonschema:"Path for mock storage. Optional for mock_record/mock_test. For mock_test, omit unless user explicitly asks for a specific path; when omitted, latest mock set is used."`
 
 	// FallBackOnMiss indicates whether to fall back to real calls (for mock_test action).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when mock not found (default: false)"`
