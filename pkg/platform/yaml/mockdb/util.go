@@ -218,10 +218,18 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.HTTP2:
+		var http2Req models.HTTP2Req
+		if mock.Spec.HTTP2Req != nil {
+			http2Req = *mock.Spec.HTTP2Req
+		}
+		var http2Resp models.HTTP2Resp
+		if mock.Spec.HTTP2Resp != nil {
+			http2Resp = *mock.Spec.HTTP2Resp
+		}
 		http2Spec := models.HTTP2Schema{
 			Metadata:         mock.Spec.Metadata,
-			Request:          *mock.Spec.HTTP2Req,
-			Response:         *mock.Spec.HTTP2Resp,
+			Request:          http2Req,
+			Response:         http2Resp,
 			Created:          mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
