@@ -90,17 +90,17 @@ type MockSpec struct {
 	PostgresRequestsV2  []postgres.Request  `json:"PostgresRequestsV2,omitempty" bson:"postgres_requests_v2,omitempty"`
 	PostgresResponsesV2 []postgres.Response `json:"PostgresResponsesV2,omitempty" bson:"postgres_responses_v2,omitempty"`
 	// gRPC
-	GRPCReq          *GrpcReq         `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
-	GRPCResp         *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
-	MySQLRequests    []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
-	MySQLResponses   []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
-	DNSReq           *DNSReq          `json:"dnsReq,omitempty" bson:"dns_req,omitempty"`
-	DNSResp          *DNSResp         `json:"dnsResp,omitempty" bson:"dns_resp,omitempty"`
+	GRPCReq        *GrpcReq         `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
+	GRPCResp       *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
+	MySQLRequests  []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
+	MySQLResponses []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	DNSReq         *DNSReq          `json:"dnsReq,omitempty" bson:"dns_req,omitempty"`
+	DNSResp        *DNSResp         `json:"dnsResp,omitempty" bson:"dns_resp,omitempty"`
 	// HTTP/2
-	HTTP2Req         *HTTP2Req        `json:"http2Req,omitempty" bson:"http2_req,omitempty"`
-	HTTP2Resp        *HTTP2Resp       `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
-	ReqTimestampMock time.Time        `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
-	ResTimestampMock time.Time        `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	HTTP2Req         *HTTP2Req  `json:"http2Req,omitempty" bson:"http2_req,omitempty"`
+	HTTP2Resp        *HTTP2Resp `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
+	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
+	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings

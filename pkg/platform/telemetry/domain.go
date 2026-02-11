@@ -91,6 +91,17 @@ func ExtractDomainsFromMock(mock *models.Mock) []string {
 				}
 			}
 		}
+	case models.HTTP2:
+		if mock.Spec.HTTP2Req != nil {
+			if d := ExtractDomain(mock.Spec.HTTP2Req.URL); d != "" {
+				domains = append(domains, d)
+			}
+			if mock.Spec.HTTP2Req.Authority != "" {
+				if d := ExtractDomain(mock.Spec.HTTP2Req.Authority); d != "" {
+					domains = append(domains, d)
+				}
+			}
+		}
 	}
 	return domains
 }
