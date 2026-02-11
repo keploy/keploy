@@ -2,7 +2,6 @@ package models
 
 import (
 	"encoding/gob"
-	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -46,29 +45,6 @@ type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
 	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
-	// mu protects concurrent access to IsFiltered
-	mu sync.RWMutex `json:"-" bson:"-"`
-}
-
-// Snapshot returns a consistent view of test mode fields.
-func (t *TestModeInfo) Snapshot() (id int, isFiltered bool, sortOrder int64) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.ID, t.IsFiltered, t.SortOrder
-}
-
-// SetIsFiltered safely sets the IsFiltered field
-func (t *TestModeInfo) SetIsFiltered(val bool) {
-	t.mu.Lock()
-	t.IsFiltered = val
-	t.mu.Unlock()
-}
-
-// GetIsFiltered safely gets the IsFiltered field
-func (t *TestModeInfo) GetIsFiltered() bool {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.IsFiltered
 }
 
 func (m *Mock) GetKind() string {
@@ -138,7 +114,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	// Copy top-level fields explicitly to avoid copying embedded lock fields.
-	id, isFiltered, sortOrder := m.TestModeInfo.Snapshot()
+	id, isFiltered, sortOrder := m.TestModeInfo.ID, m.TestModeInfo.IsFiltered, m.TestModeInfo.SortOrder
 	c := Mock{
 		Version: m.Version,
 		Name:    m.Name,
