@@ -18,6 +18,7 @@ import (
 	"github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/utils"
@@ -88,6 +89,55 @@ func IsHTTPReq(buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("CONNECT "))
 
 	return isHTTP
+}
+
+// IsHTTP2Preface checks if the buffer starts with the HTTP/2 client connection preface.
+func IsHTTP2Preface(buf []byte) bool {
+	return len(buf) >= len(http2.ClientPreface) && bytes.HasPrefix(buf, []byte(http2.ClientPreface))
+}
+
+// HasHTTP2HeadersFrame checks whether the buffer (after the HTTP/2 client preface)
+// contains at least one HEADERS frame. This is needed so that protocol matchers
+// (e.g. gRPC vs plain h2c) can inspect content-type to make an informed decision.
+func HasHTTP2HeadersFrame(buf []byte) bool {
+	if len(buf) <= len(http2.ClientPreface) {
+		return false
+	}
+	framer := http2.NewFramer(nil, bytes.NewReader(buf[len(http2.ClientPreface):]))
+	for {
+		f, err := framer.ReadFrame()
+		if err != nil {
+			return false
+		}
+		if _, ok := f.(*http2.HeadersFrame); ok {
+			return true
+		}
+	}
+}
+
+// ReadWithTimeout attempts to read more data from the connection with a short timeout.
+// If data arrives within the timeout, it is returned. If the timeout expires without
+// data, an empty slice is returned with no error — this is not treated as a failure.
+func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
+	// Always clear the deadline so subsequent reads are not affected.
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			// Timeout simply means no data was available yet — not an error.
+			return nil, nil
+		}
+		if err == io.EOF && n > 0 {
+			return buf[:n], nil
+		}
+		return nil, err
+	}
+	return buf[:n], nil
 }
 
 // ReadBuffConn is used to read the buffer from the connection

@@ -86,8 +86,6 @@ type MockSpec struct {
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
 	MongoRequests       []MongoRequest      `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
 	MongoResponses      []MongoResponse     `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
-	PostgresRequests    []Backend           `json:"postgresRequests,omitempty" bson:"postgres_requests,omitempty"`
-	PostgresResponses   []Frontend          `json:"postgresResponses,omitempty" bson:"postgres_responses,omitempty"`
 	PostgresRequestsV2  []postgres.Request  `json:"PostgresRequestsV2,omitempty" bson:"postgres_requests_v2,omitempty"`
 	PostgresResponsesV2 []postgres.Response `json:"PostgresResponsesV2,omitempty" bson:"postgres_responses_v2,omitempty"`
 	// gRPC
@@ -181,12 +179,6 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.MongoResponses = make([]MongoResponse, len(m.Spec.MongoResponses))
 	copy(c.Spec.MongoResponses, m.Spec.MongoResponses)
-
-	c.Spec.PostgresRequests = make([]Backend, len(m.Spec.PostgresRequests))
-	copy(c.Spec.PostgresRequests, m.Spec.PostgresRequests)
-
-	c.Spec.PostgresResponses = make([]Frontend, len(m.Spec.PostgresResponses))
-	copy(c.Spec.PostgresResponses, m.Spec.PostgresResponses)
 
 	c.Spec.MySQLRequests = make([]mysql.Request, len(m.Spec.MySQLRequests))
 	copy(c.Spec.MySQLRequests, m.Spec.MySQLRequests)
