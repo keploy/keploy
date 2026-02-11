@@ -20,18 +20,18 @@ type Telemetry struct {
 	logger         *zap.Logger
 	InstallationID string
 	KeployVersion  string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	client         *http.Client
 }
 
 type Options struct {
 	Enabled        bool
 	Version        string
-	GlobalMap      sync.Map
+	GlobalMap      *sync.Map
 	InstallationID string
 }
 
-func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
+func NewTelemetry(logger *zap.Logger, opt *Options) *Telemetry {
 	return &Telemetry{
 		Enabled:        opt.Enabled,
 		logger:         logger,
