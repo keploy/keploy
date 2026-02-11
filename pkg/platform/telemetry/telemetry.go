@@ -4,6 +4,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"runtime"
 	"sync"
@@ -36,13 +37,17 @@ type Options struct {
 }
 
 func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
+	gm := opt.GlobalMap
+	if gm == nil {
+		gm = &sync.Map{}
+	}
 	return &Telemetry{
 		Enabled:        opt.Enabled,
 		logger:         logger,
 		KeployVersion:  opt.Version,
-		GlobalMap:      opt.GlobalMap,
+		GlobalMap:      gm,
 		InstallationID: opt.InstallationID,
-		client:         &http.Client{Timeout: 2 * time.Second},
+		client:         &http.Client{Timeout: 2 * time.Second}, // matches Shutdown drain timeout
 	}
 }
 
@@ -181,14 +186,12 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 		event.Meta = map[string]interface{}{}
 	}
 
-	if tel.GlobalMap != nil {
-		tel.GlobalMap.Range(func(key, value interface{}) bool {
-			if k, ok := key.(string); ok {
-				event.Meta[k] = value
-			}
-			return true
-		})
-	}
+	tel.GlobalMap.Range(func(key, value interface{}) bool {
+		if k, ok := key.(string); ok {
+			event.Meta[k] = value
+		}
+		return true
+	})
 
 	event.InstallationID = tel.InstallationID
 	event.OS = runtime.GOOS
@@ -224,8 +227,8 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 		if err != nil {
 			return
 		}
-		defer resp.Body.Close()
-		_, _ = unmarshalResp(resp)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 	}()
 }
 
