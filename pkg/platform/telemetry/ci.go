@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -83,7 +84,7 @@ func detectGitRepo() string {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "git", "config", "--get", "remote.origin.url")
-		cmd.Stderr = nil // suppress any stderr output
+		cmd.Stderr = io.Discard
 		out, err := cmd.Output()
 		if err == nil {
 			gitRepoOnce.repo = normalizeRepo(strings.TrimSpace(string(out)))
@@ -111,9 +112,10 @@ func normalizeRepo(raw string) string {
 	// HTTPS format: https://host/owner/repo
 	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
 		parts := strings.SplitN(raw, "/", 4) // ["https:", "", "host", "owner/repo"]
-		if len(parts) >= 4 {
+		if len(parts) >= 4 && strings.Contains(parts[3], "/") {
 			return parts[3]
 		}
+		return ""
 	}
 	// Already "owner/repo" or just a name
 	return raw

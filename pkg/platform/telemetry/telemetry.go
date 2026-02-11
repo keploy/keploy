@@ -1,3 +1,4 @@
+// Package telemetry collects anonymous usage metrics.
 package telemetry
 
 import (
@@ -156,7 +157,17 @@ func (tel *Telemetry) sendTracked(eventType string, output ...map[string]interfa
 }
 
 func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[string]interface{}) {
-	if !tel.Enabled || tel.closed.Load() {
+	if !tel.Enabled {
+		return
+	}
+
+	if tracked {
+		tel.inflight.Add(1)
+	}
+	if tel.closed.Load() {
+		if tracked {
+			tel.inflight.Done()
+		}
 		return
 	}
 
@@ -192,12 +203,12 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 
 	bin, err := marshalEvent(event)
 	if err != nil {
+		if tracked {
+			tel.inflight.Done()
+		}
 		return
 	}
 
-	if tracked {
-		tel.inflight.Add(1)
-	}
 	go func() {
 		if tracked {
 			defer tel.inflight.Done()
@@ -222,7 +233,9 @@ func (tel *Telemetry) Shutdown() {
 	if !tel.Enabled {
 		return
 	}
-	tel.closed.Store(true)
+	if !tel.closed.CompareAndSwap(false, true) {
+		return
+	}
 	if tel.logger != nil {
 		tel.logger.Info("Cleaning up running operations...")
 	}
