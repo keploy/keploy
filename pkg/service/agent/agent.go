@@ -293,7 +293,6 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.TotalConsumedMocks != nil {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
-		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
 	}
 
 	// Set the filtered mocks to the proxy
