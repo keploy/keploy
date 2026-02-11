@@ -7,46 +7,26 @@ import (
 	"net/http"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.uber.org/zap"
 )
 
-func marshalEvent(event models.TeleEvent, log *zap.Logger) (bin []byte, err error) {
-
-	bin, err = json.Marshal(event)
-	if err != nil {
-		log.Fatal("failed to marshal event struct into json", zap.Error(err))
-	}
-	return
+func marshalEvent(event models.TeleEvent) ([]byte, error) {
+	return json.Marshal(event)
 }
 
-func unmarshalResp(resp *http.Response, log *zap.Logger) (id string, err error) {
-
-	defer func(Body io.ReadCloser) {
-		err = Body.Close()
-		if err != nil {
-			log.Debug("failed to close connecton reader", zap.String("url", "https://telemetry.keploy.io/analytics"), zap.Error(err))
-			return
-		}
-	}(resp.Body)
-
-	var res map[string]string
+func unmarshalResp(resp *http.Response) (string, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Debug("failed to read response from telemetry server", zap.String("url", "https://telemetry.keploy.io/analytics"), zap.Error(err))
-		return
+		return "", err
 	}
 
-	err = json.Unmarshal(body, &res)
-	if err != nil {
-		log.Debug("failed to read testcases from telemetry server", zap.Error(err))
-		return
+	var res map[string]string
+	if err := json.Unmarshal(body, &res); err != nil {
+		return "", err
 	}
 
 	id, ok := res["InstallationID"]
 	if !ok {
-		log.Debug("InstallationID not present")
-		err = errors.New("InstallationID not present")
-		return
+		return "", errors.New("InstallationID not present")
 	}
-	return
+	return id, nil
 }

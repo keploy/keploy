@@ -487,6 +487,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
 		"host-domains": runDomainSet.ToSlice(),
 	})
+	if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+		s.Shutdown()
+	}
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
