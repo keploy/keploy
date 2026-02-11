@@ -16,6 +16,7 @@ type IntegrationType string
 // constants for different types of integrations
 const (
 	HTTP        IntegrationType = "http"
+	HTTP2       IntegrationType = "http2"
 	GRPC        IntegrationType = "grpc"
 	GENERIC     IntegrationType = "generic"
 	MYSQL       IntegrationType = "mysql"
