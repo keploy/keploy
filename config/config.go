@@ -209,7 +209,6 @@ func SetSelectedServices(conf *Config, services []string) {
 	conf.Contract.Services = services
 }
 func SetSelectedContractTests(conf *Config, tests []string) {
-
 	conf.Contract.Tests = tests
 }
 
