@@ -71,7 +71,7 @@ func (tel *Telemetry) TestSetRun(success int, failure int, testSet string, runSt
 		"Test-Set":     testSet,
 		"Run-Status":   runStatus,
 	}
-	tel.SendTelemetry("TestSetRun", dataMap)
+	tel.sendTracked("TestSetRun", dataMap)
 }
 
 func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus string, metadata map[string]interface{}) {
@@ -84,14 +84,14 @@ func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus 
 	for k, v := range metadata {
 		dataMap[k] = v
 	}
-	tel.SendTelemetry("TestRun", dataMap)
+	tel.sendTracked("TestRun", dataMap)
 }
 
 func (tel *Telemetry) MockTestRun(utilizedMocks int) {
 	dataMap := map[string]interface{}{
 		"Utilized-Mocks": utilizedMocks,
 	}
-	tel.SendTelemetry("MockTestRun", dataMap)
+	tel.sendTracked("MockTestRun", dataMap)
 }
 
 func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, metadata map[string]interface{}) {
@@ -107,7 +107,7 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 	for k, v := range metadata {
 		dataMap[k] = v
 	}
-	tel.SendTelemetry("RecordedTestSuite", dataMap)
+	tel.sendTracked("RecordedTestSuite", dataMap)
 }
 
 func (tel *Telemetry) RecordedTestAndMocks() {
@@ -140,6 +140,14 @@ func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
+	tel.sendEvent(eventType, false, output...)
+}
+
+func (tel *Telemetry) sendTracked(eventType string, output ...map[string]interface{}) {
+	tel.sendEvent(eventType, true, output...)
+}
+
+func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[string]interface{}) {
 	if !tel.Enabled || tel.closed.Load() {
 		return
 	}
@@ -179,9 +187,13 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 		return
 	}
 
-	tel.inflight.Add(1)
+	if tracked {
+		tel.inflight.Add(1)
+	}
 	go func() {
-		defer tel.inflight.Done()
+		if tracked {
+			defer tel.inflight.Done()
+		}
 
 		req, err := http.NewRequest(http.MethodPost, teleURL, bytes.NewBuffer(bin))
 		if err != nil {
