@@ -243,6 +243,9 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	recordingStarted = true
 
 	if r.config.CommandType == string(utils.DockerCompose) {

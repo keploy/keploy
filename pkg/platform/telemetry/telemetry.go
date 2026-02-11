@@ -59,6 +59,9 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 			tel.SendTelemetry("Ping")
 		}
 		for {
+			if tel.closed.Load() {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -216,6 +219,9 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 }
 
 func (tel *Telemetry) Shutdown() {
+	if !tel.Enabled {
+		return
+	}
 	tel.closed.Store(true)
 	if tel.logger != nil {
 		tel.logger.Info("Cleaning up running operations...")
