@@ -179,7 +179,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 					Expected: fmt.Sprintf("%v", key),
 					Actual:   "(missing)",
 				})
-				continue 
+				continue
 			}
 
 			// Recursion - Collect errors from children
