@@ -259,7 +259,8 @@ Write-Host "Verifying test reports..."
 $logErrors = Select-String -Path $testLogFile -Pattern "ERROR"
 $realErrors = $logErrors | Where-Object { 
     $_.Line -notmatch "The process .* not found" -and
-    $_.Line -notmatch "Error removing file.*keploy-logs\.txt"
+    $_.Line -notmatch "Error removing file.*keploy-logs\.txt" -and
+    $_.Line -notmatch "remove keploy-logs\.txt: The process cannot access the file because it is being used by another process"
 }
 
 if ($realErrors) {
