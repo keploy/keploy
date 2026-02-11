@@ -33,17 +33,17 @@ var ciProviders = []struct {
 
 // CI-specific env vars that hold the repository slug (owner/repo).
 var ciRepoVars = []string{
-	"GITHUB_REPOSITORY",           // github-actions: "owner/repo"
-	"CI_PROJECT_PATH",             // gitlab-ci:      "group/project"
-	"TRAVIS_REPO_SLUG",            // travis-ci:      "owner/repo"
-	"CIRCLE_PROJECT_REPONAME",     // circleci:       "repo" (no owner)
-	"BUILDKITE_REPO",              // buildkite:      git URL
-	"BITBUCKET_REPO_FULL_NAME",    // bitbucket:      "owner/repo"
-	"BUILD_REPOSITORY_NAME",       // azure-pipelines
-	"DRONE_REPO",                  // drone:          "owner/repo"
-	"CI_REPO",                     // woodpecker:     "owner/repo"
-	"SEMAPHORE_GIT_REPO_SLUG",     // semaphore:      "owner/repo"
-	"HARNESS_REPO",                // harness
+	"GITHUB_REPOSITORY",        // github-actions: "owner/repo"
+	"CI_PROJECT_PATH",          // gitlab-ci:      "group/project"
+	"TRAVIS_REPO_SLUG",         // travis-ci:      "owner/repo"
+	"CIRCLE_PROJECT_REPONAME",  // circleci:       "repo" (no owner)
+	"BUILDKITE_REPO",           // buildkite:      git URL
+	"BITBUCKET_REPO_FULL_NAME", // bitbucket:      "owner/repo"
+	"BUILD_REPOSITORY_NAME",    // azure-pipelines
+	"DRONE_REPO",               // drone:          "owner/repo"
+	"CI_REPO",                  // woodpecker:     "owner/repo"
+	"SEMAPHORE_GIT_REPO_SLUG",  // semaphore:      "owner/repo"
+	"HARNESS_REPO",             // harness
 }
 
 // detectCI returns whether the process is running inside a CI environment
@@ -70,13 +70,7 @@ var gitRepoOnce struct {
 // It first checks CI-specific env vars, then falls back to parsing the local
 // .git remote origin URL. Returns "" if nothing is found.
 // This function never panics or blocks for more than 2 seconds.
-func detectGitRepo() (repo string) {
-	defer func() {
-		if r := recover(); r != nil {
-			repo = ""
-		}
-	}()
-
+func detectGitRepo() string {
 	// 1. Try CI env vars first (fast, always available in CI)
 	for _, v := range ciRepoVars {
 		if val := os.Getenv(v); val != "" {

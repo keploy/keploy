@@ -41,7 +41,7 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 		KeployVersion:  opt.Version,
 		GlobalMap:      opt.GlobalMap,
 		InstallationID: opt.InstallationID,
-		client:         &http.Client{Timeout: 10 * time.Second},
+		client:         &http.Client{Timeout: 2 * time.Second},
 	}
 }
 
@@ -52,7 +52,12 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
-		tel.SendTelemetry("Ping")
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			tel.SendTelemetry("Ping")
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -177,7 +182,7 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 	event.Arch = runtime.GOARCH
 
 	func() {
-		defer func() { recover() }() //nolint:errcheck
+		defer func() { _ = recover() }()
 		event.IsCI, event.CIProvider = detectCI()
 		event.GitRepo = detectGitRepo()
 	}()
