@@ -1244,7 +1244,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		showMatcherLogs := !mockSetMismatch
+		emitFailureLogs := !mockSetMismatch
 
 		switch testCase.Kind {
 		case models.HTTP:
@@ -1261,7 +1261,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.CompareHTTPRespWithOptions(testCase, httpResp, testSetID, showMatcherLogs)
+			testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID, emitFailureLogs)
 
 		case models.GRPC_EXPORT:
 			grpcResp, ok := resp.(*models.GrpcResp)
@@ -1313,7 +1313,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 		compareResp:
-			testPass, testResult = r.CompareGRPCRespWithOptions(testCase, &respCopy, testSetID, showMatcherLogs)
+			testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 		}
 
 		if len(mockNames) > 0 {
@@ -1712,32 +1712,24 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
-	return r.CompareHTTPRespWithOptions(tc, actualResponse, testSetID, true)
-}
-
-func (r *Replayer) CompareHTTPRespWithOptions(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitLogs bool) (bool, *models.Result) {
+func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	return httpMatcher.MatchWithOptions(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, httpMatcher.MatchOptions{EmitLogs: emitLogs})
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
 }
 
-func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
-	return r.CompareGRPCRespWithOptions(tc, actualResp, testSetID, true)
-}
-
-func (r *Replayer) CompareGRPCRespWithOptions(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitLogs bool) (bool, *models.Result) {
+func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	return grpcMatcher.MatchWithOptions(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, grpcMatcher.MatchOptions{EmitLogs: emitLogs})
-
+	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs)
 }
+
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	completeTestReportMu.RLock()
 	totalTestsSnapshot := totalTests
@@ -2048,7 +2040,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Body:       errorMessage,
 		}
 
-		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID)
+		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID, true)
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
@@ -2114,7 +2106,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		}
 
 	compareResp:
-		_, result = r.CompareGRPCResp(testCase, &respCopy, testSetID)
+		_, result = r.CompareGRPCResp(testCase, &respCopy, testSetID, true)
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse

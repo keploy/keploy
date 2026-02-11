@@ -13,17 +13,9 @@ import (
 	"go.uber.org/zap"
 )
 
-type MatchOptions struct {
-	EmitLogs bool
-}
-
 // Match compares an expected gRPC response with an actual response and returns whether they match
 // along with detailed comparison results
-func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
-	return MatchWithOptions(tc, actualResp, noiseConfig, ignoreOrdering, logger, MatchOptions{EmitLogs: true})
-}
-
-func MatchWithOptions(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, options MatchOptions) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),
@@ -371,7 +363,7 @@ func MatchWithOptions(tc *models.TestCase, actualResp *models.GrpcResp, noiseCon
 		}
 
 		// Print the differences
-		if options.EmitLogs {
+		if emitFailureLogs {
 			_, err := newLogger.Printf(logs)
 			if err != nil {
 				utils.LogError(logger, err, "failed to print the logs")
@@ -382,7 +374,7 @@ func MatchWithOptions(tc *models.TestCase, actualResp *models.GrpcResp, noiseCon
 				utils.LogError(logger, err, "failed to render the diffs")
 			}
 		}
-	} else if options.EmitLogs {
+	} else {
 		// Display success message
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false

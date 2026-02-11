@@ -27,15 +27,7 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-type MatchOptions struct {
-	EmitLogs bool
-}
-
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger) (bool, *models.Result) {
-	return MatchWithOptions(tc, actualResponse, noiseConfig, ignoreOrdering, compareAll, logger, MatchOptions{EmitLogs: true})
-}
-
-func MatchWithOptions(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, options MatchOptions) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	bodyType := models.Plain
 	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
@@ -387,7 +379,7 @@ func MatchWithOptions(tc *models.TestCase, actualResponse *models.HTTPResp, nois
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true
-			if options.EmitLogs {
+			if emitFailureLogs {
 				_, err := newLogger.Printf(logs)
 				if err != nil {
 					utils.LogError(logger, err, "failed to print the logs")
@@ -403,7 +395,7 @@ func MatchWithOptions(tc *models.TestCase, actualResponse *models.HTTPResp, nois
 		}
 	}
 
-	if !skipSuccessMsg && options.EmitLogs {
+	if !skipSuccessMsg {
 		newLogger := ppNew234()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
