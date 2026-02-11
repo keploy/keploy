@@ -69,7 +69,7 @@ jobs:
         with:
           repository: keploy/samples-python
           path: samples-python
-          ref: schema_branch
+          ref: pyhton-schema-match
           
       - name: Run Schema Match Test
         env:
