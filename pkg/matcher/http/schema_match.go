@@ -6,11 +6,10 @@ import (
 	"reflect"
 
 	"github.com/k0kubun/pp/v3"
-	"go.uber.org/zap"
-
+	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
-	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // MatchSchema checks if the actual response matches the expected response schema.
@@ -41,7 +40,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	errExp := json.Unmarshal([]byte(tc.HTTPResp.Body), &expObj)
 	errAct := json.Unmarshal([]byte(actualResponse.Body), &actObj)
 
-	var schemaErrors []matcherUtils.SchemaError
+	var schemaErrors []matcher.SchemaError
 
 	if errExp == nil && errAct == nil {
 		result.BodyResult[0].Type = models.JSON
@@ -54,7 +53,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		if (errExp == nil) != (errAct == nil) {
 			pass = false
 			result.BodyResult[0].Normal = false
-			schemaErrors = append(schemaErrors, matcherUtils.SchemaError{
+			schemaErrors = append(schemaErrors, matcher.SchemaError{
 				Reason: "One of the body is json and other is not",
 			})
 		} else {
@@ -63,7 +62,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 			result.BodyResult[0].Normal = bodyMatch
 			if !bodyMatch {
 				pass = false
-				schemaErrors = append(schemaErrors, matcherUtils.SchemaError{
+				schemaErrors = append(schemaErrors, matcher.SchemaError{
 					Reason: "Body mismatch (non-JSON)",
 				})
 			}
@@ -72,7 +71,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 
 	// Logging similar to Match() in match.go
 	if !pass {
-		printer := matcherUtils.NewSchemaDiffPrinter(tc.Name)
+		printer := matcher.NewSchemaDiffPrinter(tc.Name)
 		for _, err := range schemaErrors {
 			printer.PushError(err.Reason, err.Expected, err.Actual)
 		}
@@ -101,15 +100,15 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 	return pass, result
 }
 
-func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap.Logger) []matcherUtils.SchemaError {
-	var errors []matcherUtils.SchemaError
+func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap.Logger) []matcher.SchemaError {
+	var errors []matcher.SchemaError
 
 	// Handle Nil Cases
 	if expected == nil {
 		if actual == nil {
 			return errors
 		}
-		errors = append(errors, matcherUtils.SchemaError{
+		errors = append(errors, matcher.SchemaError{
 			Reason:   fmt.Sprintf("mismatch at %s", path),
 			Expected: "nil",
 			Actual:   fmt.Sprintf("%T", actual),
@@ -118,7 +117,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 	}
 
 	if actual == nil {
-		errors = append(errors, matcherUtils.SchemaError{
+		errors = append(errors, matcher.SchemaError{
 			Reason:   fmt.Sprintf("mismatch at %s", path),
 			Expected: fmt.Sprintf("%T", expected),
 			Actual:   "nil",
@@ -132,7 +131,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 	// Type Check with Numeric Compatibility
 	if expType != actType {
 		if !isNumeric(expType.Kind()) || !isNumeric(actType.Kind()) {
-			errors = append(errors, matcherUtils.SchemaError{
+			errors = append(errors, matcher.SchemaError{
 				Reason:   fmt.Sprintf("type mismatch at %s", path),
 				Expected: fmt.Sprintf("%T", expected),
 				Actual:   fmt.Sprintf("%T", actual),
@@ -155,7 +154,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 		actVal := reflect.ValueOf(actual)
 
 		if actVal.Kind() != reflect.Map {
-			errors = append(errors, matcherUtils.SchemaError{
+			errors = append(errors, matcher.SchemaError{
 				Reason:   fmt.Sprintf("type mismatch at %s", path),
 				Expected: "Map",
 				Actual:   fmt.Sprintf("%v", actVal.Kind()),
@@ -174,7 +173,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 			}
 
 			if !actValue.IsValid() {
-				errors = append(errors, matcherUtils.SchemaError{
+				errors = append(errors, matcher.SchemaError{
 					Reason:   fmt.Sprintf("missing key at %s", path),
 					Expected: fmt.Sprintf("%v", key),
 					Actual:   "(missing)",
