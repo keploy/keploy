@@ -335,7 +335,7 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 		return false
 	}
 	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
-	id, isFiltered, sortOrder := matchedMock.TestModeInfo.Snapshot()
+	id, isFiltered, sortOrder := matchedMock.TestModeInfo.ID, matchedMock.TestModeInfo.IsFiltered, matchedMock.TestModeInfo.SortOrder
 
 	originalMatchedMock := &models.Mock{
 		Name: matchedMock.Name,
