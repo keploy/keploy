@@ -76,6 +76,7 @@ type UtGen struct {
 	FunctionUnderTest  string  `json:"functionUnderTest" yaml:"-" mapstructure:"functionUnderTest"`
 	Flakiness          bool    `json:"flakiness" yaml:"flakiness" mapstructure:"flakiness"`
 }
+
 type Templatize struct {
 	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
 }
@@ -102,6 +103,7 @@ type ReRecord struct {
 	Branch        string          `json:"branch" yaml:"branch" mapstructure:"branch"`
 	Owner         string          `json:"owner" yaml:"owner" mapstructure:"owner"`
 }
+
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
 	Tests    []string `json:"tests" yaml:"tests" mapstructure:"tests"`
@@ -111,6 +113,7 @@ type Contract struct {
 	Driven   string   `json:"driven" yaml:"driven" mapstructure:"driven"`
 	Mappings Mappings `json:"mappings" yaml:"mappings" mapstructure:"mappings"`
 }
+
 type Mappings struct {
 	ServicesMapping map[string][]string `json:"servicesMapping" yaml:"servicesMapping" mapstructure:"servicesMapping"`
 	Self            string              `json:"self" yaml:"self" mapstructure:"self"`
@@ -152,6 +155,7 @@ type Test struct {
 	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 	CompareAll          bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
+	SchemaMatch         bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
 	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
 }
 
@@ -203,12 +207,13 @@ func SetSelectedTests(conf *Config, testSets []string) {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
 }
+
 func SetSelectedServices(conf *Config, services []string) {
 	// string is "s1,s2" so i want to get s1,s2
 	conf.Contract.Services = services
 }
-func SetSelectedContractTests(conf *Config, tests []string) {
 
+func SetSelectedContractTests(conf *Config, tests []string) {
 	conf.Contract.Tests = tests
 }
 
