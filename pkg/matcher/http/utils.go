@@ -101,3 +101,21 @@ func toStringMap(val interface{}) map[string]string {
 	}
 	return out
 }
+
+// GetValueByPath fetches nested JSON value using dot notation
+func GetValueByPath(data map[string]interface{}, path string) (interface{}, bool) {
+	parts := strings.Split(path, ".")
+	var current interface{} = data
+
+	for _, part := range parts {
+		obj, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		current, ok = obj[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}

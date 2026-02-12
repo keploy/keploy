@@ -296,3 +296,13 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 	conf.Normalize.SelectedTests = selected
 	return nil
 }
+
+type FieldMatcher struct {
+	Type    string  `yaml:"type" json:"type"`
+	Pattern string  `yaml:"pattern,omitempty" json:"pattern,omitempty"`
+	Delta   float64 `yaml:"delta,omitempty" json:"delta,omitempty"`
+}
+
+type ReplayMatchers struct {
+	Body map[string]FieldMatcher `yaml:"body" json:"body"`
+}
