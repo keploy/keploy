@@ -85,7 +85,7 @@ func HandlePostgresSSL(
 	logger.Debug("PostgreSQL server accepted SSL, upgrading connections")
 
 	// Upgrade client connection (act as TLS server to the app)
-	upgradedClient, err = HandleTLSConnection(ctx, logger, clientConn, backdate)
+	upgradedClient, _, err = HandleTLSConnection(ctx, logger, clientConn, backdate)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to upgrade client connection to TLS: %w", err)
 	}
