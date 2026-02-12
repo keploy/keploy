@@ -185,7 +185,7 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 		EventType: eventType,
 		CreatedAt: time.Now().Unix(),
 	}
-	if len(output) > 0 {
+	if len(output) > 0 && output[0] != nil {
 		event.Meta = output[0]
 	} else {
 		event.Meta = map[string]interface{}{}
