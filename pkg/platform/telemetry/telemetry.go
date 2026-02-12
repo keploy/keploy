@@ -203,27 +203,23 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 	event.KeployVersion = tel.KeployVersion
 	event.Arch = runtime.GOARCH
 
-	func() {
-		defer func() { _ = recover() }()
-		event.IsCI, event.CIProvider = detectCI()
-		event.GitRepo = detectGitRepo()
-	}()
-
-	bin, err := marshalEvent(event)
-	if err != nil {
-		if tracked {
-			tel.inflightN.Add(-1)
-			tel.inflight.Done()
-		}
-		return
-	}
-
 	go func() {
 		if tracked {
 			defer func() {
 				tel.inflightN.Add(-1)
 				tel.inflight.Done()
 			}()
+		}
+
+		func() {
+			defer func() { _ = recover() }()
+			event.IsCI, event.CIProvider = detectCI()
+			event.GitRepo = detectGitRepo()
+		}()
+
+		bin, err := marshalEvent(event)
+		if err != nil {
+			return
 		}
 
 		req, err := http.NewRequest(http.MethodPost, teleURL, bytes.NewBuffer(bin))

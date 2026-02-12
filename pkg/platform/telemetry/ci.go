@@ -132,6 +132,16 @@ func normalizeRepo(raw string) string {
 		return ""
 	}
 
-	// Already "owner/repo" or just a name
-	return raw
+	// Already "owner/repo" — only accept if it looks like a clean slug
+	if strings.Count(raw, "/") == 1 && !strings.ContainsAny(raw, " @:.") {
+		return raw
+	}
+	// host/owner/repo (e.g. "github.com/owner/repo") — strip the host
+	if strings.Contains(raw, "/") {
+		parts := strings.SplitN(raw, "/", 2)
+		if len(parts) == 2 && strings.Contains(parts[0], ".") && strings.Contains(parts[1], "/") {
+			return parts[1]
+		}
+	}
+	return ""
 }
