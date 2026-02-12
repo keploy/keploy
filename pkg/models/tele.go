@@ -9,4 +9,7 @@ type TeleEvent struct {
 	OS             string                 `json:"os"`
 	KeployVersion  string                 `json:"keploy_version"`
 	Arch           string                 `json:"arch"`
+	IsCI           bool                   `json:"is_ci"`
+	CIProvider     string                 `json:"ci_provider,omitempty"`
+	GitRepo        string                 `json:"git_repo,omitempty"`
 }

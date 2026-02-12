@@ -487,6 +487,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
 		"host-domains": runDomainSet.ToSlice(),
 	})
+	// Shutdown is optional: the static Telemetry interface does not require it,
+	// but the concrete implementation exposes it for graceful drain of in-flight events.
+	if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+		s.Shutdown()
+	}
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
