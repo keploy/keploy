@@ -179,6 +179,10 @@ func (ys *MockYaml) InsertMockToPath(ctx context.Context, mock *models.Mock, moc
 	if err := os.MkdirAll(mockDir, 0o755); err != nil {
 		return err
 	}
+	// Best-effort attempt to set ownership of the directory to the sudo user
+	// Required because Keploy (running as root) creates this directory, but we want
+	// the regular user to own it to avoid permission issues.
+	_ = utils.SetOwnershipToSudoUser(mockDir)
 
 	prefix := []byte{}
 	if info, statErr := os.Stat(validatedPath); statErr == nil {
@@ -211,6 +215,10 @@ func (ys *MockYaml) InsertMockToPath(ctx context.Context, mock *models.Mock, moc
 	if _, err := file.Write(data); err != nil {
 		return err
 	}
+
+	// Best-effort attempt to set ownership of the file to the sudo user
+	// Ensures the user owns the newly created mock file.
+	_ = utils.SetOwnershipToSudoUser(validatedPath)
 
 	return nil
 }

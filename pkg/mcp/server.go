@@ -285,11 +285,9 @@ This is an orchestration-first tool. The client LLM should execute this sequence
 5) Invoke keploy_mock_test with resolved command (path optional; omit to use latest).
 6) Invoke keploy_prompt_pipeline_creation and execute returned prompt as direct user task for CI/CD pipeline edits.
 
-Do not skip the sequence unless user explicitly asks to skip steps.
-Do not auto-select non-manager tools directly from generic intent.
-Non-manager tools are allowed only when user explicitly names them.
-
-Manager handler returns workflow guidance and does not perform direct record/test/pipeline side effects.`,
+CRITICAL: Execute ALL steps 1-6 in order. Do not stop after recording (step 4).
+You must proceed immediately to step 5 (replay) and step 6 (pipeline) in the same session.
+Do not ask for user confirmation between steps unless an error occurs.`,
 	}, s.handleManager)
 
 	s.logger.Info("Registered MCP tools",

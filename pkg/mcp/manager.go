@@ -14,7 +14,7 @@ func (s *Server) handleManager(_ context.Context, _ *sdkmcp.CallToolRequest, in 
 		zap.String("path", in.Path),
 	)
 
-	message := "Orchestration plan:\n" +
+	message := "Orchestration plan (EXECUTE ALL STEPS IN ONE GO):\n" +
 		"1) Call keploy_prompt_test_command and execute returned prompt as direct user task.\n" +
 		"2) If app/test command is empty, pass it as-is; server-side elicitation in execution tools will resolve it.\n" +
 		"3) Call keploy_prompt_test_integration and execute returned prompt as direct user task.\n" +

@@ -145,12 +145,12 @@ func (a *Agent) StartMockSession(ctx context.Context, name string) error {
 		}); err != nil {
 			return err
 		}
-		a.logger.Info("Loaded mocks for session", zap.String("mockFilePath", sessionPath), zap.Int("mocksLoaded", len(filtered)+len(unfiltered)))
+		a.logger.Debug("Loaded mocks for session", zap.String("mockFilePath", sessionPath), zap.Int("mocksLoaded", len(filtered)+len(unfiltered)))
 	} else {
 		if err := overwriteMockFile(sessionPath); err != nil {
 			return err
 		}
-		a.logger.Info("Prepared mock file for session", zap.String("mockFilePath", sessionPath))
+		a.logger.Debug("Prepared mock file for session", zap.String("mockFilePath", sessionPath))
 	}
 
 	if err := a.Proxy.StartMockSession(ctx, sessionPath); err != nil {
@@ -166,11 +166,24 @@ func overwriteMockFile(mockFilePath string) error {
 	}
 
 	cleanPath := filepath.Clean(mockFilePath)
-	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o755); err != nil {
+	dir := filepath.Dir(cleanPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// Best-effort attempt to set ownership of the directory to the sudo user
+	// This is necessary because Keploy runs as root (for eBPF) but we want the
+	// user to be able to modify/delete the generated mock directory without sudo.
+	_ = utils.SetOwnershipToSudoUser(dir)
 
-	return os.WriteFile(cleanPath, []byte(utils.GetVersionAsComment()), 0o644)
+	if err := os.WriteFile(cleanPath, []byte(utils.GetVersionAsComment()), 0o644); err != nil {
+		return err
+	}
+	// Best-effort attempt to set ownership of the file to the sudo user
+	// This ensures the user owns the generated mock file, avoiding "permission denied"
+	// errors when they try to edit or delete it later.
+	_ = utils.SetOwnershipToSudoUser(cleanPath)
+
+	return nil
 }
 
 func (a *Agent) GetCurrentMockSessionName(ctx context.Context) string {

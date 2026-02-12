@@ -140,7 +140,8 @@ func (r *replayer) resolveReplayPath(path string) (string, error) {
 	entries, err := os.ReadDir(basePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("mock base path %q does not exist; pass --path or record mocks first", basePath)
+			r.logger.Info("Mock base path does not exist; continuing without startup mocks and waiting for /agent/hooks/start-session", zap.String("path", basePath))
+			return basePath, nil
 		}
 		return "", fmt.Errorf("failed to resolve latest mock set in %q: %w", basePath, err)
 	}
