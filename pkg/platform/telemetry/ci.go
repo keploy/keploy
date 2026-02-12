@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -93,30 +94,44 @@ func detectGitRepo() string {
 	return gitRepoOnce.repo
 }
 
-// normalizeRepo extracts "owner/repo" from various formats:
-//   - "git@github.com:owner/repo.git"
-//   - "https://github.com/owner/repo.git"
-//   - "owner/repo"
+// normalizeRepo extracts "owner/repo" from various remote URL formats:
+//   - "git@github.com:owner/repo.git"       (SCP-like)
+//   - "ssh://git@github.com/owner/repo.git" (SSH URL)
+//   - "git://github.com/owner/repo.git"     (git protocol)
+//   - "https://github.com/owner/repo.git"   (HTTPS)
+//   - "owner/repo"                          (already normalized)
 func normalizeRepo(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
-	// Strip .git suffix
 	raw = strings.TrimSuffix(raw, ".git")
 
-	// SSH format: git@host:owner/repo
-	if idx := strings.Index(raw, ":"); idx > 0 && strings.Contains(raw[:idx], "@") {
-		return raw[idx+1:]
+	// SCP-like: git@host:owner/repo (no scheme, has ":" after user@host)
+	// Must check before URL parsing because net/url misparses this form.
+	if !strings.Contains(raw, "://") {
+		if idx := strings.Index(raw, ":"); idx > 0 && strings.Contains(raw[:idx], "@") {
+			path := strings.TrimPrefix(raw[idx+1:], "/")
+			if strings.Contains(path, "/") {
+				return path
+			}
+			return ""
+		}
 	}
-	// HTTPS format: https://host/owner/repo
-	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
-		parts := strings.SplitN(raw, "/", 4) // ["https:", "", "host", "owner/repo"]
-		if len(parts) >= 4 && strings.Contains(parts[3], "/") {
-			return parts[3]
+
+	// URL with scheme: ssh://, git://, http://, https://
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		path := strings.TrimPrefix(u.Path, "/")
+		if strings.Contains(path, "/") {
+			return path
 		}
 		return ""
 	}
+
 	// Already "owner/repo" or just a name
 	return raw
 }
