@@ -39,7 +39,6 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 }
 
 func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.Config, opts models.SetupOptions) (keployAlias string, err error) {
-	// Preserves your environment variable setup
 	if DockerConfig.Envs == nil {
 		DockerConfig.Envs = map[string]string{
 			"INSTALLATION_ID": conf.InstallationID,
@@ -48,7 +47,6 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
 	}
 
-	// Preserves your Docker client initialization and setup
 	client, err := New(logger, conf)
 	if err != nil {
 		return "", fmt.Errorf("failed to initialise docker: %w", err)
@@ -59,25 +57,22 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 		"device": "debugfs",
 	})
 	if err != nil {
-		// Log the error but don't fail, consistent with original logic.
 		utils.LogError(logger, err, "failed to create debugfs volume")
 	}
 
-	// Preserves the alias generation
 	keployalias, err := getAlias(ctx, logger, opts, conf.Debug)
 	if err != nil {
 		return "", err
 	}
-
 	return keployalias, nil
 }
 
 func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
-	// Get the name of the operating system.
 	osName := runtime.GOOS
-	//TODO: configure the hardcoded port mapping
+
 	img := DockerConfig.DockerImage + ":v" + utils.Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
+
 	envs := GenerateDockerEnvs(DockerConfig)
 	if envs != "" {
 		envs = envs + " "
@@ -87,6 +82,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	if len(opts.AppPorts) > 0 {
 		appPortsStr = " " + strings.Join(opts.AppPorts, " ")
 	}
+
 	appNetworkStr := ""
 	if len(opts.AppNetworks) > 0 {
 		for _, network := range opts.AppNetworks {
@@ -107,26 +103,27 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			Volumes = Volumes + " "
 		}
 	}
-
 	Volumes = Volumes + tlsVolumeMount
 
 	extraArgs := opts.ExtraArgs
 
 	switch osName {
 	case "linux":
-
-		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
+		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs +
+			"-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
 		}
 		alias += " --port " + fmt.Sprintf("%d", opts.AgentPort)
 		alias += " --proxy-port " + fmt.Sprintf("%d", opts.ProxyPort)
+
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
@@ -141,7 +138,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			for i, port := range opts.PassThroughPorts {
 				portStrings[i] = strconv.Itoa(int(port))
 			}
-			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 		}
 		if debug {
@@ -153,31 +149,30 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.Synchronous {
 			alias += " --sync"
 		}
-
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
 		}
 		return alias, nil
-	case "windows":
 
+	case "windows":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err != nil {
 			utils.LogError(logger, err, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
+
 		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 		if len(dockerContext) == 0 {
 			utils.LogError(logger, nil, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
 		dockerContext = strings.Split(dockerContext, "\n")[0]
+
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
-			// return alias, nil
-
-			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
+			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs +
+				"-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
@@ -205,7 +200,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				for i, port := range opts.PassThroughPorts {
 					portStrings[i] = strconv.Itoa(int(port))
 				}
-				// Note the "=" sign, which is good practice for docker run
 				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 			}
 			if debug {
@@ -222,10 +216,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			return alias, nil
 		}
-		// if default docker context is used
+
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
-		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
+		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs +
+			"-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
@@ -253,7 +247,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			for i, port := range opts.PassThroughPorts {
 				portStrings[i] = strconv.Itoa(int(port))
 			}
-			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 		}
 		if debug {
@@ -277,18 +270,18 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			utils.LogError(logger, err, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
+
 		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 		if len(dockerContext) == 0 {
 			utils.LogError(logger, nil, "failed to get the current docker context")
 			return "", errors.New("failed to get alias")
 		}
 		dockerContext = strings.Split(dockerContext, "\n")[0]
+
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-			// return alias, nil
-			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
+			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs +
+				"-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
@@ -316,7 +309,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				for i, port := range opts.PassThroughPorts {
 					portStrings[i] = strconv.Itoa(int(port))
 				}
-				// Note the "=" sign, which is good practice for docker run
 				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 			}
 			if debug {
@@ -333,11 +325,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			return alias, nil
 		}
-		// if default docker context is used
+
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-		// return alias, nil
-		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
+		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs +
+			"-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
@@ -365,7 +356,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			for i, port := range opts.PassThroughPorts {
 				portStrings[i] = strconv.Itoa(int(port))
 			}
-			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
 		}
 		if debug {
@@ -382,12 +372,11 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		return alias, nil
 	}
+
 	return "", errors.New("failed to get alias")
 }
 
 func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string, error) {
-
-	// Regular expression patterns
 	var containerNamePattern string
 	switch kind {
 	case utils.DockerStart:
@@ -395,10 +384,8 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 	default:
 		containerNamePattern = `--name\s+([^\s]+)`
 	}
-
 	networkNamePattern := `(--network|--net)\s+([^\s]+)`
 
-	// Extract container name
 	containerNameRegex := regexp.MustCompile(containerNamePattern)
 	containerNameMatches := containerNameRegex.FindStringSubmatch(cmd)
 	if len(containerNameMatches) < 2 {
@@ -417,7 +404,6 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 		return containerName, "", fmt.Errorf("failed to parse network name")
 	}
 
-	// Extract network name
 	networkNameRegex := regexp.MustCompile(networkNamePattern)
 	networkNameMatches := networkNameRegex.FindStringSubmatch(cmd)
 	if len(networkNameMatches) < 3 {
