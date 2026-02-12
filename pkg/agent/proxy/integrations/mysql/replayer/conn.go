@@ -171,7 +171,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// pTls.HandleTLSConnection is the centralized TLS handler used across all parsers.
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
-			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
+			clientConn, _, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err

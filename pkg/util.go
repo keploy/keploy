@@ -977,37 +977,41 @@ func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*mode
 }
 
 func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
-	// Early exit if no time filters
-	if afterTime.Equal(time.Time{}) || beforeTime.Equal(time.Time{}) {
-		return m, nil
+
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
 	}
 
-	// OPTIMIZATION: Pre-allocate slices based on expected distribution
-	// Assuming most mocks will be filtered (within time range)
-	filteredMocks := make([]*models.Mock, 0, len(m))
-	unfilteredMocks := make([]*models.Mock, 0, len(m)/4) // Expect ~25% unfiltered
+	if beforeTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
 
 	isNonKeploy := false
 
 	for _, mock := range m {
-		// OPTIMIZATION: Removed deep copy - using thread-safe SetIsFiltered method
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		if mock.Spec.ReqTimestampMock.Equal(time.Time{}) || mock.Spec.ResTimestampMock.Equal(time.Time{}) {
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
 
-		if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
-		mock.TestModeInfo.SetIsFiltered(false)
-		unfilteredMocks = append(unfilteredMocks, mock)
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
@@ -1016,35 +1020,40 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 }
 
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
-	// OPTIMIZATION: Pre-allocate slices
-	filteredMocks := make([]*models.Mock, 0, len(mocksPresentInMapping))
-	unfilteredMocks := make([]*models.Mock, 0, len(m))
-
-	// OPTIMIZATION: Build a set for O(1) lookup instead of O(n) linear search
-	mappingSet := make(map[string]struct{}, len(mocksPresentInMapping))
-	for _, name := range mocksPresentInMapping {
-		mappingSet[name] = struct{}{}
-	}
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
 
 	isNonKeploy := false
 
 	for _, mock := range m {
-		// OPTIMIZATION: Removed deep copy (same rationale as filterByTimeStamp)
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+
+		p := mock.DeepCopy()
+
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
 
-		if _, found := mappingSet[mock.Name]; found {
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
-		} else {
-			mock.TestModeInfo.SetIsFiltered(false)
-			unfilteredMocks = append(unfilteredMocks, mock)
+		matched := false
+		for _, name := range mocksPresentInMapping {
+			if p.Name == name {
+				p.TestModeInfo.IsFiltered = true
+				filteredMocks = append(filteredMocks, p)
+				matched = true
+				break
+			}
 		}
+
+		if matched {
+			continue
+		}
+
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
 	}
 
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+		return filteredMocks, unfilteredMocks
 	}
 
 	return filteredMocks, unfilteredMocks
