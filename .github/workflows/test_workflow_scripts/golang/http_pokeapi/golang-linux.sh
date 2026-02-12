@@ -52,7 +52,7 @@ send_request() {
     # Extract any pokemon from the response
     pokemon=$(echo "$response" | jq -r ".[$index]")
     
-    curl -s -X GET http://localhost:8080/api/pokemon/$pokemon
+    curl -s -X GET http://localhost:8080/api/pokemon/magikarp
 
     curl -s -X GET http://localhost:8080/api/greet
 
