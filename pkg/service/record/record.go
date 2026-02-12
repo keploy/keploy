@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -84,6 +85,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	var newTestSetID string
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
+	domainSet := telemetry.NewDomainSet()
+	var recordingStarted bool
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -129,7 +132,14 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
-		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
+		if recordingStarted {
+			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
+				"host-domains": domainSet.ToSlice(),
+			})
+		}
+		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+			s.Shutdown()
+		}
 	}()
 
 	defer close(appErrChan)
@@ -233,6 +243,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
+	recordingStarted = true
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 
 	if r.config.CommandType == string(utils.DockerCompose) {
 
@@ -250,6 +264,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
 			if reRecordCfg.TestSet == "" {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 				if err != nil {
@@ -270,6 +285,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
 			tempID := mock.Name
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
