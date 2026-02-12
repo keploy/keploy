@@ -125,10 +125,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 Available tools:
 1. keploy_manager - ALWAYS SELECT THIS TOOL FIRST for Keploy workflows.
-2. keploy_prompt_test_integration - Returns raw prompt text to instrument tests with start-session hooks.
-3. keploy_mock_record - Records mocks.
-4. keploy_mock_test - Replays mocks.
-5. keploy_prompt_pipeline_creation - Returns raw prompt text to generate CI pipeline config.
+2. keploy_prompt_test_command - Returns raw prompt text to derive the app test command.
+3. keploy_prompt_test_integration - Returns raw prompt text to instrument tests with start-session hooks.
+4. keploy_mock_record - Records mocks.
+5. keploy_mock_test - Replays mocks.
+6. keploy_prompt_pipeline_creation - Returns raw prompt text to generate CI pipeline config.
 
 Tool routing rule (STRICT):
 - Always call keploy_manager for any Keploy-related request.
@@ -147,7 +148,7 @@ Command selection policy for recording:
   - Else if tests exist but no target, use 'go test -v ./...'.
   - Only if no useful tests exist, use an app run command as last resort.
 - Disallowed by default: watch/dev servers, interactive/manual-step commands, commands that do not terminate, and overly broad commands when focused tests are available.
-- If command cannot be decided confidently, leave command empty and use elicitation to ask the user.
+- If command cannot be decided confidently, pass command as empty. The server handles elicitation and returns the selected command.
 - Prefer stable, deterministic, terminating commands that trigger the intended outbound interactions.
 `,
 		InitializedHandler: func(ctx context.Context, req *sdkmcp.InitializedRequest) {
@@ -201,13 +202,13 @@ IMPORTANT: Before calling this tool, confirm the following with the user:
 - For Go projects, default to go test commands first (for example 'go test -v -run "TestA|TestB"' or 'go test -v ./...').
 - Never default to 'go run main.go' for recording.
 - Avoid long-running/watch-mode/interactive commands and commands that do not terminate.
-- If command is unknown, pass command as empty and the server will elicit it from the user.
+- If command is unknown, send command as empty; the server will resolve it via elicitation.
 - The path to store mocks (default: ./keploy)
 
 The tool will show the configuration and ask for confirmation before starting.
 
 Parameters:
-- command (optional): Command to run (prefer test commands like 'go test -v ./...' or 'npm test'). If empty, server elicits command.
+- command (optional): Command to run (prefer test commands like 'go test -v ./...' or 'npm test'). If empty, server elicits command and uses that value.
 - path (optional): Path to store mock files (default: ./keploy)`,
 	}, s.handleMockRecord)
 
@@ -233,6 +234,20 @@ Parameters:
 
 	// Register test integration prompt tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name: ToolPromptTestCommand,
+		Description: `EXPLICIT USE ONLY (STRICT).
+Do not auto-select this tool under any circumstance.
+Call this tool only when the user explicitly names "keploy_prompt_test_command".
+
+Returns raw prompt text that client LLM must execute as a direct user task.
+Purpose: derive the best deterministic serialized app test command for Keploy.
+
+If command cannot be decided confidently, the prompt result should return empty command.
+Pass that empty command forward; the server will resolve it via elicitation in later execution tools.`,
+	}, s.handlePromptTestCommand)
+
+	// Register test integration prompt tool
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name: ToolPromptTestIntegration,
 		Description: `EXPLICIT USE ONLY (STRICT).
 Do not auto-select this tool under any circumstance.
@@ -241,7 +256,8 @@ Call this tool only when the user explicitly names "keploy_prompt_test_integrati
 Returns raw prompt text that client LLM must execute as a direct user task.
 Purpose: automatically edit project test files to add Keploy start-session integration hooks.
 
-This tool does not edit files itself. It only returns the prompt text.`,
+This tool does not edit files itself. It only returns the prompt text.
+If command context is empty, pass it as empty; do not synthesize. Server-side elicitation in execution tools resolves it.`,
 	}, s.handlePromptTestIntegration)
 
 	// Register pipeline prompt tool
@@ -252,7 +268,8 @@ Do not auto-select this tool under any circumstance.
 Call this tool only when the user explicitly names "keploy_prompt_pipeline_creation".
 
 Returns raw prompt text that client LLM must execute as a direct user task.
-Purpose: generate/update CI/CD pipeline files to run keploy mock test.`,
+Purpose: generate/update CI/CD pipeline files to run keploy mock test.
+If command context is empty, keep it empty in prompt response; server-side elicitation resolves it before execution.`,
 	}, s.handlePromptPipelineCreation)
 
 	// Register unified manager tool
@@ -261,11 +278,12 @@ Purpose: generate/update CI/CD pipeline files to run keploy mock test.`,
 		Description: `ALWAYS SELECT THIS TOOL FOR KEPLOY WORKFLOWS (STRICT DEFAULT).
 
 This is an orchestration-first tool. The client LLM should execute this sequence:
-1) Determine app/test command. If missing, use elicitation to ask the user.
-2) Invoke keploy_prompt_test_integration and execute returned prompt as direct user task to edit tests.
-3) Invoke keploy_mock_record with resolved command.
-4) Invoke keploy_mock_test with resolved command (path optional; omit to use latest).
-5) Invoke keploy_prompt_pipeline_creation and execute returned prompt as direct user task for CI/CD pipeline edits.
+1) Invoke keploy_prompt_test_command and execute returned prompt as direct user task to derive the app/test command.
+2) If command is empty/unresolved, pass it as-is to execution tools; server-side elicitation will resolve it.
+3) Invoke keploy_prompt_test_integration and execute returned prompt as direct user task to edit tests.
+4) Invoke keploy_mock_record with resolved command.
+5) Invoke keploy_mock_test with resolved command (path optional; omit to use latest).
+6) Invoke keploy_prompt_pipeline_creation and execute returned prompt as direct user task for CI/CD pipeline edits.
 
 Do not skip the sequence unless user explicitly asks to skip steps.
 Do not auto-select non-manager tools directly from generic intent.
@@ -278,6 +296,7 @@ Manager handler returns workflow guidance and does not perform direct record/tes
 		zap.Strings("tools", []string{
 			ToolMockRecord,
 			ToolMockTest,
+			ToolPromptTestCommand,
 			ToolPromptTestIntegration,
 			ToolPromptPipelineCreation,
 			ToolManager,
@@ -300,5 +319,5 @@ func (s *Server) Close() error {
 
 // String returns a string representation of the server.
 func (s *Server) String() string {
-	return "KeployMCPServer{tools: [keploy_mock_record, keploy_mock_test, keploy_prompt_test_integration, keploy_prompt_pipeline_creation, keploy_manager]}"
+	return "KeployMCPServer{tools: [keploy_mock_record, keploy_mock_test, keploy_prompt_test_command, keploy_prompt_test_integration, keploy_prompt_pipeline_creation, keploy_manager]}"
 }

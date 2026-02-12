@@ -67,6 +67,12 @@ type MockReplayOutput struct {
 	Configuration *ReplayConfiguration `json:"configuration,omitempty"`
 }
 
+// PromptTestCommandInput defines input for keploy_prompt_test_command.
+type PromptTestCommandInput struct {
+	// TestCommand is optional context command for refinement/validation.
+	TestCommand string `json:"testCommand,omitempty" jsonschema:"Optional existing test command context to refine/validate."`
+}
+
 // PromptTestIntegrationInput defines input for keploy_prompt_test_integration.
 type PromptTestIntegrationInput struct {
 	// Command provides optional command context to narrow test discovery scope.
@@ -77,7 +83,7 @@ type PromptTestIntegrationInput struct {
 
 // PromptPipelineInput defines input for keploy_prompt_pipeline_creation.
 type PromptPipelineInput struct {
-	// AppCommand is the command used in keploy mock test.
+	// AppCommand is the app/test command used in keploy mock test.
 	AppCommand string `json:"appCommand,omitempty" jsonschema:"Optional app/test command for pipeline prompt."`
 	// MockPath is the path passed to mock test in CI.
 	MockPath string `json:"mockPath,omitempty" jsonschema:"Optional mock path for pipeline prompt (default: ./keploy)."`
@@ -345,6 +351,16 @@ func hasArgument(req *sdkmcp.CallToolRequest, key string) bool {
 
 	_, ok := args[key]
 	return ok
+}
+
+// handlePromptTestCommand returns a raw prompt for deriving the best serialized app test command.
+func (s *Server) handlePromptTestCommand(_ context.Context, _ *sdkmcp.CallToolRequest, in PromptTestCommandInput) (*sdkmcp.CallToolResult, PromptOutput, error) {
+	prompt := buildTestCommandPrompt(in.TestCommand)
+	return nil, PromptOutput{
+		Success: true,
+		Prompt:  prompt,
+		Message: "Generated test command prompt. Client LLM should execute this prompt as a direct user task.",
+	}, nil
 }
 
 // handlePromptTestIntegration returns a raw prompt for automatic start-session integration in test files.

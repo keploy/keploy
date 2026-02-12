@@ -1,0 +1,26 @@
+Master Prompt: Keploy Pipeline Creation Agent
+Goal: generate CI/CD pipeline config that runs Keploy mock tests deterministically.
+
+Application/Test command: {{test_command}}
+Mock path: {{mock_path}}
+
+Execution requirements:
+1) Determine the default branch first from repository context (branch config/workflows/docs). If uncertain, use main and state assumption.
+2) Detect CI/CD platform from repo files (GitHub Actions, GitLab CI, Jenkins, CircleCI, Azure, Bitbucket). If multiple are present, pick the primary one and state why.
+3) Generate/update the canonical pipeline file for the chosen platform using Linux runners only (ubuntu-latest or equivalent Linux agent).
+4) Install Keploy explicitly using this exact command:
+   curl --silent -O -L https://keploy.io/install.sh && source install.sh
+5) Ensure the pipeline sets up/installs all dependencies required to run the user application command:
+   {{test_command}}
+   Include language runtime setup and dependency installation steps before running Keploy.
+6) Pipeline must run:
+   {{keploy_command}}
+7) Trigger on pull requests and pushes to the detected default branch.
+8) Keep pipeline minimal, deterministic, and non-interactive.
+9) Preserve existing project CI style; avoid destructive rewrites.
+
+Output requirements:
+- Show file path(s) created/updated.
+- Show exact final pipeline content.
+- Show detected default branch and chosen CI/CD platform.
+- Summarize assumptions made.

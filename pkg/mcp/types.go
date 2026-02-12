@@ -6,6 +6,8 @@ const (
 	ToolMockRecord = "keploy_mock_record"
 	// ToolMockTest is the name of the mock test tool.
 	ToolMockTest = "keploy_mock_test"
+	// ToolPromptTestCommand returns an LLM prompt to derive the best serialized test command.
+	ToolPromptTestCommand = "keploy_prompt_test_command"
 	// ToolPromptTestIntegration returns an LLM prompt to instrument tests with start-session hooks.
 	ToolPromptTestIntegration = "keploy_prompt_test_integration"
 	// ToolPromptPipelineCreation returns an LLM prompt to generate CI/CD pipeline files.

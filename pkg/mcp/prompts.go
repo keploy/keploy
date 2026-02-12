@@ -1,77 +1,65 @@
 package mcp
 
 import (
-	_ "embed"
+	"embed"
 	"fmt"
 	"strings"
-	"sync"
-
-	toml "github.com/pelletier/go-toml/v2"
 )
 
-//go:embed prompts.toml
-var promptTemplatesTOML string
+//go:embed prompts/*.toml
+var promptTemplatesFS embed.FS
 
-type promptTemplates struct {
-	TestIntegration  string `toml:"test_integration"`
-	PipelineCreation string `toml:"pipeline_creation"`
+func loadPromptTemplate(path string) (string, error) {
+	data, err := promptTemplatesFS.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
-var (
-	templatesOnce sync.Once
-	templatesData promptTemplates
-	templatesErr  error
-)
-
-func loadPromptTemplates() (promptTemplates, error) {
-	templatesOnce.Do(func() {
-		templatesErr = toml.Unmarshal([]byte(promptTemplatesTOML), &templatesData)
-	})
-	return templatesData, templatesErr
-}
-
-func buildTestIntegrationPrompt(command, scopePath string) string {
-	templates, err := loadPromptTemplates()
-	if err != nil || strings.TrimSpace(templates.TestIntegration) == "" {
-		return fmt.Sprintf("Failed to load test integration prompt template from TOML: %v", err)
+func buildTestCommandPrompt(testCommand string) string {
+	template, err := loadPromptTemplate("prompts/app_test_command.toml")
+	if err != nil || strings.TrimSpace(template) == "" {
+		return fmt.Sprintf("Failed to load test command prompt template: %v", err)
 	}
 
-	return renderPromptTemplate(templates.TestIntegration, map[string]string{
-		"command":    displayOrDefault(command, "not provided"),
-		"scope_path": displayOrDefault(scopePath, "not provided"),
+	return renderPromptTemplate(template, map[string]string{
+		"test_command": strings.TrimSpace(testCommand),
 	})
 }
 
-func buildPipelineCreationPrompt(appCommand, mockPath string) string {
-	templates, err := loadPromptTemplates()
-	if err != nil || strings.TrimSpace(templates.PipelineCreation) == "" {
-		return fmt.Sprintf("Failed to load pipeline creation prompt template from TOML: %v", err)
+func buildTestIntegrationPrompt(testCommand, scopePath string) string {
+	template, err := loadPromptTemplate("prompts/test_integration.toml")
+	if err != nil || strings.TrimSpace(template) == "" {
+		return fmt.Sprintf("Failed to load test integration prompt template: %v", err)
+	}
+
+	return renderPromptTemplate(template, map[string]string{
+		"test_command": strings.TrimSpace(testCommand),
+		"scope_path":   strings.TrimSpace(scopePath),
+	})
+}
+
+func buildPipelineCreationPrompt(testCommand, mockPath string) string {
+	template, err := loadPromptTemplate("prompts/pipeline_creation.toml")
+	if err != nil || strings.TrimSpace(template) == "" {
+		return fmt.Sprintf("Failed to load pipeline creation prompt template: %v", err)
 	}
 
 	if strings.TrimSpace(mockPath) == "" {
 		mockPath = "./keploy"
 	}
+	trimmedCommand := strings.TrimSpace(testCommand)
 
-	return renderPromptTemplate(templates.PipelineCreation, map[string]string{
-		"app_command":    displayOrDefault(appCommand, "go test -v ./..."),
+	return renderPromptTemplate(template, map[string]string{
+		"test_command":   trimmedCommand,
 		"mock_path":      mockPath,
-		"keploy_command": fmt.Sprintf("keploy mock test -c \"%s\" -p \"%s\"", safePipelineCommand(appCommand), mockPath),
+		"keploy_command": fmt.Sprintf("keploy mock test -c \"%s\" -p \"%s\"", safePipelineCommand(trimmedCommand), mockPath),
 	})
 }
 
 func safePipelineCommand(appCommand string) string {
-	cmd := strings.TrimSpace(appCommand)
-	if cmd == "" {
-		return "go test -v ./..."
-	}
-	return strings.ReplaceAll(cmd, "\"", "\\\"")
-}
-
-func displayOrDefault(s, fallback string) string {
-	if strings.TrimSpace(s) == "" {
-		return fallback
-	}
-	return strings.TrimSpace(s)
+	return strings.ReplaceAll(strings.TrimSpace(appCommand), "\"", "\\\"")
 }
 
 func renderPromptTemplate(tpl string, values map[string]string) string {
