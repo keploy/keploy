@@ -3,10 +3,14 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	yaml3 "gopkg.in/yaml.v3"
 )
 
 type MockDownload struct {
@@ -285,4 +289,71 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 
 	conf.Normalize.SelectedTests = selected
 	return nil
+}
+
+// UpdateTestDelay reads the existing keploy.yml config file at the given configPath,
+// updates the test.delay field with the measured startup delay, and writes it back.
+//
+// This uses yaml.v3's Node API to walk the YAML tree and update the value in-place,
+// preserving the original field order, comments, and formatting.
+func UpdateTestDelay(configPath string, delay uint64) error {
+	configFilePath := filepath.Join(configPath, "keploy.yml")
+
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file %s: %w", configFilePath, err)
+	}
+
+	var doc yaml3.Node
+	if err := yaml3.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// The document node wraps the root mapping node
+	if doc.Kind != yaml3.DocumentNode || len(doc.Content) == 0 {
+		return fmt.Errorf("unexpected YAML structure in config file")
+	}
+	root := doc.Content[0]
+
+	// Find the "test" mapping key in the root
+	if err := setNestedYAMLValue(root, []string{"test", "delay"}, strconv.FormatUint(delay, 10)); err != nil {
+		return fmt.Errorf("failed to update test.delay: %w", err)
+	}
+
+	// Marshal back preserving formatting
+	updatedData, err := yaml3.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated config: %w", err)
+	}
+
+	if err := os.WriteFile(configFilePath, updatedData, 0644); err != nil {
+		return fmt.Errorf("failed to write updated config file: %w", err)
+	}
+
+	return nil
+}
+
+// setNestedYAMLValue traverses a yaml.Node tree by key path and sets the scalar value.
+func setNestedYAMLValue(node *yaml3.Node, keys []string, value string) error {
+	if node.Kind != yaml3.MappingNode {
+		return fmt.Errorf("expected mapping node, got kind %d", node.Kind)
+	}
+
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		keyNode := node.Content[i]
+		valNode := node.Content[i+1]
+
+		if keyNode.Value == keys[0] {
+			if len(keys) == 1 {
+				// Found the target key — update the scalar value
+				valNode.Value = value
+				valNode.Tag = "!!int"
+				return nil
+			}
+			// Recurse into nested mapping
+			return setNestedYAMLValue(valNode, keys[1:], value)
+		}
+	}
+
+	return fmt.Errorf("key %q not found in YAML", keys[0])
 }

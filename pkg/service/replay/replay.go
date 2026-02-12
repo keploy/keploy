@@ -33,6 +33,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/term"
 )
 
 var (
@@ -872,10 +873,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 		}
 
-		// Delay for user application to run
-		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
+		// Delay for user application to run (with countdown)
+		if err := r.countdownDelay(runTestSetCtx, r.config.Test.Delay, testSetID); err != nil {
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 	}
@@ -1011,10 +1010,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				return nil
 			})
 
-			// Delay for user application to run
-			select {
-			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-			case <-runTestSetCtx.Done():
+			// Delay for user application to run (with countdown)
+			if err := r.countdownDelay(runTestSetCtx, r.config.Test.Delay, testSetID); err != nil {
 				return models.TestSetStatusUserAbort, context.Canceled
 			}
 
@@ -2383,4 +2380,56 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 	r.logger.Debug("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
 		zap.String("testSetID", testSetID))
 	return false, defaultMappings
+}
+
+// countdownDelay waits for the configured delay before replaying tests.
+// For interactive terminals, it displays a live countdown timer.
+// For non-interactive terminals, it logs a single message.
+func (r *Replayer) countdownDelay(ctx context.Context, delaySec uint64, testSetID string) error {
+	if delaySec == 0 {
+		return nil
+	}
+
+	isInteractive := !r.config.DisableANSI && term.IsTerminal(int(os.Stderr.Fd()))
+
+	if !isInteractive {
+		// Non-interactive: single log message
+		r.logger.Info(fmt.Sprintf("Waiting %ds for application to start before replaying %q...", delaySec, testSetID))
+		select {
+		case <-time.After(time.Duration(delaySec) * time.Second):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Interactive: live countdown timer
+	remaining := delaySec
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Format the message template to calculate the clear width dynamically
+	countdownMsg := fmt.Sprintf("\r🕐 Replaying %q in %ds...", testSetID, remaining)
+	// Use the longest possible message length (initial count) + padding for safety
+	clearWidth := len(countdownMsg) + 4
+	clearLine := fmt.Sprintf("\r%s\r\n", strings.Repeat(" ", clearWidth))
+
+	// Print initial countdown
+	fmt.Fprint(os.Stderr, countdownMsg)
+
+	for {
+		select {
+		case <-ticker.C:
+			remaining--
+			if remaining == 0 {
+				// Clear the countdown line and move to a new line
+				fmt.Fprint(os.Stderr, clearLine)
+				return nil
+			}
+			fmt.Fprintf(os.Stderr, "\r🕐 Replaying %q in %ds...  ", testSetID, remaining)
+		case <-ctx.Done():
+			fmt.Fprint(os.Stderr, clearLine)
+			return ctx.Err()
+		}
+	}
 }
