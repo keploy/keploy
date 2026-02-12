@@ -376,21 +376,26 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 					}
 				}
 
-				// Determine test set ID for this mock
-				targetTestSetID := newTestSetID
-				if opts.RootMocksUntilSession {
-					targetTestSetID = ""
-				}
 				if frame.SessionName != "" {
-					targetTestSetID = frame.SessionName
-				}
-
-				if err := mockDB.InsertMock(ctx, mock, targetTestSetID); err != nil {
-					if ctx.Err() == context.Canceled {
+					if err := mockDB.InsertMockToPath(ctx, mock, frame.SessionName); err != nil {
+						if ctx.Err() == context.Canceled {
+							return nil
+						}
+						insertMockErrChan <- err
 						return nil
 					}
-					insertMockErrChan <- err
-					return nil
+				} else {
+					targetTestSetID := newTestSetID
+					if opts.RootMocksUntilSession {
+						targetTestSetID = ""
+					}
+					if err := mockDB.InsertMock(ctx, mock, targetTestSetID); err != nil {
+						if ctx.Err() == context.Canceled {
+							return nil
+						}
+						insertMockErrChan <- err
+						return nil
+					}
 				}
 
 				if opts.OnMock != nil {

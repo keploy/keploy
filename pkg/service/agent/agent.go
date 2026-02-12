@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -116,44 +118,59 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 
 // StartMockSession starts a new recording/replay session with the given name
 func (a *Agent) StartMockSession(ctx context.Context, name string) error {
-	sessionName := strings.TrimSpace(name)
-	a.logger.Debug("Starting new mock session", zap.String("name", sessionName))
+	sessionPath := strings.TrimSpace(name)
+	if sessionPath == "" {
+		return errors.New("mock file path is required in /agent/hooks/start-session request")
+	}
+	a.logger.Debug("Starting new mock session", zap.String("mockFilePath", sessionPath))
 
-	if err := a.Proxy.StartMockSession(ctx, sessionName); err != nil {
+	mode := models.MODE_RECORD
+	if a.config != nil {
+		mode = a.config.Agent.Mode
+	}
+
+	if mode == models.MODE_TEST {
+		db := mockdb.New(a.logger, "", "")
+		filtered, unfiltered, err := db.LoadMocksFromPath(ctx, sessionPath)
+		if err != nil {
+			return err
+		}
+		if err := a.StoreMocks(ctx, filtered, unfiltered); err != nil {
+			return err
+		}
+		beforeTime := time.Now()
+		if err := a.UpdateMockParams(ctx, models.MockFilterParams{
+			AfterTime:  models.BaseTime,
+			BeforeTime: beforeTime,
+		}); err != nil {
+			return err
+		}
+		a.logger.Info("Loaded mocks for session", zap.String("mockFilePath", sessionPath), zap.Int("mocksLoaded", len(filtered)+len(unfiltered)))
+	} else {
+		if err := overwriteMockFile(sessionPath); err != nil {
+			return err
+		}
+		a.logger.Info("Prepared mock file for session", zap.String("mockFilePath", sessionPath))
+	}
+
+	if err := a.Proxy.StartMockSession(ctx, sessionPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func overwriteMockFile(mockFilePath string) error {
+	mockFilePath = strings.TrimSpace(mockFilePath)
+	if mockFilePath == "" {
+		return errors.New("mock file path cannot be empty")
+	}
+
+	cleanPath := filepath.Clean(mockFilePath)
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o755); err != nil {
 		return err
 	}
 
-	if a.config != nil && a.config.Agent.Mode != models.MODE_TEST {
-		return nil
-	}
-
-	if sessionName == "" {
-		return errors.New("session name is required; call /agent/hooks/start-session with a non-empty name")
-	}
-
-	basePath := strings.TrimSpace(a.config.Path)
-	if basePath == "" {
-		return errors.New("mock path is not set; pass -p/--path to keploy mock test and call start-session before outbound calls")
-	}
-
-	db := mockdb.New(a.logger, basePath, "")
-	beforeTime := time.Now()
-	filtered, err := db.GetFilteredMocks(ctx, sessionName, models.BaseTime, beforeTime)
-	if err != nil {
-		return err
-	}
-	unfiltered, err := db.GetUnFilteredMocks(ctx, sessionName, models.BaseTime, beforeTime)
-	if err != nil {
-		return err
-	}
-
-	if err := a.StoreMocks(ctx, filtered, unfiltered); err != nil {
-		return err
-	}
-	return a.UpdateMockParams(ctx, models.MockFilterParams{
-		AfterTime:  models.BaseTime,
-		BeforeTime: beforeTime,
-	})
+	return os.WriteFile(cleanPath, []byte(utils.GetVersionAsComment()), 0o644)
 }
 
 func (a *Agent) GetCurrentMockSessionName(ctx context.Context) string {

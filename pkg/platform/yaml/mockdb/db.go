@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -151,6 +152,145 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	}
 	return nil
 }
+
+func (ys *MockYaml) InsertMockToPath(ctx context.Context, mock *models.Mock, mockFilePath string) error {
+	mockFilePath = strings.TrimSpace(mockFilePath)
+	if mockFilePath == "" {
+		return errors.New("mock file path cannot be empty")
+	}
+
+	validatedPath, err := yaml.ValidatePath(filepath.Clean(mockFilePath))
+	if err != nil {
+		return err
+	}
+
+	mock.Name = fmt.Sprint("mock-", ys.getNextID())
+	mockYaml, err := EncodeMock(mock, ys.Logger)
+	if err != nil {
+		return err
+	}
+
+	data, err := yamlLib.Marshal(&mockYaml)
+	if err != nil {
+		return err
+	}
+
+	mockDir := filepath.Dir(validatedPath)
+	if err := os.MkdirAll(mockDir, 0o755); err != nil {
+		return err
+	}
+
+	prefix := []byte{}
+	if info, statErr := os.Stat(validatedPath); statErr == nil {
+		if info.Size() > 0 {
+			prefix = []byte("---\n")
+		} else {
+			prefix = []byte(utils.GetVersionAsComment())
+		}
+	} else if os.IsNotExist(statErr) {
+		prefix = []byte(utils.GetVersionAsComment())
+	} else {
+		return statErr
+	}
+
+	file, err := os.OpenFile(validatedPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			utils.LogError(ys.Logger, closeErr, "failed to close mock file", zap.String("path", validatedPath))
+		}
+	}()
+
+	if len(prefix) > 0 {
+		if _, err := file.Write(prefix); err != nil {
+			return err
+		}
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ys *MockYaml) LoadMocksFromPath(ctx context.Context, mockFilePath string) ([]*models.Mock, []*models.Mock, error) {
+	mockFilePath = strings.TrimSpace(mockFilePath)
+	if mockFilePath == "" {
+		return nil, nil, errors.New("mock file path cannot be empty")
+	}
+
+	validatedPath, err := yaml.ValidatePath(filepath.Clean(mockFilePath))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if ctx != nil && ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+
+	file, err := os.Open(validatedPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			utils.LogError(ys.Logger, closeErr, "failed to close mock file", zap.String("path", validatedPath))
+		}
+	}()
+
+	dec := yamlLib.NewDecoder(file)
+	var mockYamls []*yaml.NetworkTrafficDoc
+	for {
+		var doc *yaml.NetworkTrafficDoc
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to decode the yaml file documents", zap.String("at_path", validatedPath))
+			return nil, nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+		}
+		if doc != nil {
+			mockYamls = append(mockYamls, doc)
+		}
+	}
+
+	if len(mockYamls) == 0 {
+		return []*models.Mock{}, []*models.Mock{}, nil
+	}
+
+	mocks, err := DecodeMocks(mockYamls, ys.Logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	filtered := make([]*models.Mock, 0)
+	unfiltered := make([]*models.Mock, 0)
+	for _, mock := range mocks {
+		isFilteredMock := true
+		switch mock.Kind {
+		case "Generic", "Postgres", "Http", "Redis", "MySQL":
+			isFilteredMock = false
+		}
+		if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
+			filtered = append(filtered, mock)
+		}
+
+		isUnFilteredMock := false
+		switch mock.Kind {
+		case "Generic", "Postgres", "Http", "Redis", "MySQL", "PostgresV2":
+			isUnFilteredMock = true
+		}
+		if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
+			unfiltered = append(unfiltered, mock)
+		}
+	}
+
+	return filtered, unfiltered, nil
+}
+
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)

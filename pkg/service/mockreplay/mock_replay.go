@@ -16,7 +16,6 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -35,12 +34,7 @@ func (r *replayer) mockReplay(ctx context.Context, opts models.ReplayOptions) (*
 		return nil, err
 	}
 
-	rootFiltered, rootUnfiltered, mocks, err := r.loadRootMocks(ctx, r.cfg.Path)
-	if err != nil {
-		return nil, err
-	}
-
-	return r.runMockReplay(ctx, command, commandType, rootFiltered, rootUnfiltered, mocks, opts)
+	return r.runMockReplay(ctx, command, commandType, nil, nil, nil, opts)
 }
 
 func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, string, func(), error) {
@@ -101,26 +95,6 @@ func (r *replayer) prepareMockReplayConfig(opts models.ReplayOptions) (string, s
 		return command, commandType, cleanup, errors.New("missing required container name for docker compose command")
 	}
 	return command, commandType, cleanup, nil
-}
-
-func (r *replayer) loadRootMocks(ctx context.Context, basePath string) ([]*models.Mock, []*models.Mock, []*models.Mock, error) {
-	db := mockdb.New(r.logger, basePath, "")
-	beforeTime := time.Now()
-	rootFiltered, err := db.GetFilteredMocks(ctx, "", models.BaseTime, beforeTime)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to load root filtered mocks: %w", err)
-	}
-	rootUnfiltered, err := db.GetUnFilteredMocks(ctx, "", models.BaseTime, beforeTime)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to load root config mocks: %w", err)
-	}
-	var mocks []*models.Mock
-	mocks = append(mocks, rootFiltered...)
-	mocks = append(mocks, rootUnfiltered...)
-	if len(mocks) > 0 {
-		r.logger.Info("Loaded root mocks before session start", zap.Int("mockCount", len(mocks)))
-	}
-	return rootFiltered, rootUnfiltered, mocks, nil
 }
 
 func (r *replayer) resolveReplayPath(path string) (string, error) {
@@ -290,7 +264,7 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 		return nil, err
 	}
 
-	r.logger.Info("Mock replay will load mocks on start-session; call /agent/hooks/start-session before outbound calls if you need per-session mock segregation")
+	r.logger.Info("Mock replay will load mocks from the exact file path passed in /agent/hooks/start-session before matching outbound calls")
 
 	if cmdType == utils.DockerCompose {
 		err = instrumentation.MakeAgentReadyForDockerCompose(grpCtx)

@@ -9,7 +9,8 @@ type OutgoingReq struct {
 }
 
 // MockFrame carries a recorded mock with its active session context.
-// SessionName is transient stream metadata and is not persisted into mock files.
+// SessionName stores the current start-session value (expected to be the target mock file path).
+// It is transient stream metadata and is not persisted into mock files.
 type MockFrame struct {
 	SessionName string `json:"sessionName,omitempty"`
 	Mock        *Mock  `json:"mock"`
@@ -59,6 +60,7 @@ type AfterSimulateRequest struct {
 }
 
 type StartSessionRequest struct {
+	// Name carries the full mock file path for record/replay session switching.
 	Name string `json:"name"`
 }
 
