@@ -64,6 +64,9 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
+			if tel.closed.Load() {
+				return
+			}
 			tel.SendTelemetry("Ping")
 		}
 		for {
