@@ -363,6 +363,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 			cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
+			cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		}
 	}
 }
@@ -430,6 +431,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"allowHighRisk":         "allow-high-risk",
 		"disableMapping":        "disable-mapping",
 		"compareAll":            "compare-all",
+		"schemaMatch":           "schema-match",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
