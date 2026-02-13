@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +66,7 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
+	nsSwitchMutex     sync.Mutex
 	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
@@ -75,8 +78,25 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 }
 
+// isNetworkClosedErr checks if the error is due to a closed network connection.
+// This includes broken pipe, connection reset by peer, and use of closed network connection errors.
+// These errors are expected during graceful shutdown and should not be logged as errors.
+func isNetworkClosedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "use of closed network connection") ||
+		// Windows-specific error patterns
+		strings.Contains(errStr, "wsarecv") ||
+		strings.Contains(errStr, "wsasend") ||
+		strings.Contains(errStr, "forcibly closed by the remote host")
+}
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	return &Proxy{
+	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
@@ -94,6 +114,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 	}
+
+	return proxy
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -274,6 +296,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			}
 		}
 
+		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
 			// reset the hosts config in nsswitch.conf of the system (in test mode)
 			err = p.resetNsSwitchConfig()
@@ -281,6 +304,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
 			}
 		}
+		p.nsSwitchMutex.Unlock()
 	}()
 
 	for {
@@ -311,8 +335,10 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
-					if p.IsGracefulShutdown() && isShutdownError(err) {
-						p.logger.Debug("failed to handle the client connection (graceful shutdown)", zap.Error(err))
+					// Network closed errors are expected when client closes connection (e.g., app shutdown)
+					// Only log as error if it's not a shutdown/network closed error
+					if isShutdownError(err) || isNetworkClosedErr(err) {
+						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
 					} else {
 						utils.LogError(p.logger, err, "failed to handle the client connection")
 					}
@@ -353,8 +379,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
-		return err
+		// Gracefully handle untracked connections (eBPF lookup failed)
+		// This can happen when:
+		// 1. A new connection was opened after test completion (e.g., driver health check)
+		// 2. The eBPF hook didn't fire for this connection (race condition, bypass rule)
+		// 3. The entry was already deleted before this lookup
+		//
+		// Instead of failing with an error (which causes the app to see a broken connection),
+		// we close the connection gracefully. The client will see "connection refused" or EOF,
+		// which is cleaner than a partial/broken connection that causes "already closed" errors.
+		p.logger.Warn("Untracked connection (eBPF lookup failed), closing gracefully",
+			zap.Int("Source port", sourcePort), zap.Error(err))
+		if srcConn != nil {
+			srcConn.Close()
+		}
+		return nil
 	}
 
 	p.logger.Debug("Handling outgoing connection to destination port", zap.Uint32("Destination port", destInfo.Port))
@@ -479,7 +518,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		//mock the outgoing message
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), outgoingOpts)
-		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
+		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			// Send specific error type to error channel for external monitoring
 			proxyErr := models.ParserError{
@@ -501,8 +540,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-		if p.IsGracefulShutdown() && isShutdownError(err) {
-			p.logger.Debug("failed to peek the request message in proxy (graceful shutdown)", zap.Uint32("proxy port", p.Port), zap.Error(err))
+		// Network closed errors are expected when client closes connection (e.g., app shutdown)
+		if isShutdownError(err) || isNetworkClosedErr(err) {
+			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(err))
 		} else {
 			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		}
@@ -516,12 +556,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	var clientPeerCert *x509.Certificate
+	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
+		}
+
+		if isMTLS {
+			if tlsConn, ok := srcConn.(*tls.Conn); ok {
+				state := tlsConn.ConnectionState()
+				if len(state.PeerCertificates) > 0 {
+					clientPeerCert = state.PeerCertificates[0]
+				}
+			}
 		}
 	}
 
@@ -570,6 +621,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		initialBuf = append(initialBuf, headerBuf...)
 	}
 
+	// For HTTP/2 connections, the initial buffer may only contain the client
+	// preface and SETTINGS frames. Protocol matchers (gRPC vs h2c) need to
+	// inspect the HEADERS frame's content-type to decide.
+	//
+	// We use a short timeout read instead of a blocking read because:
+	//  - h2c clients typically send preface+SETTINGS+HEADERS in quick succession
+	//  - gRPC clients send preface+SETTINGS, then WAIT for server SETTINGS_ACK
+	//    before sending HEADERS — a blocking read would deadlock.
+	//
+	// If HEADERS arrives within the timeout → matchers can inspect content-type.
+	// If it doesn't (gRPC pattern) → matchers treat missing HEADERS as gRPC.
+	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
+		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
+
+		moreBuf, err := util.ReadWithTimeout(srcConn, 150*time.Millisecond)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
+			return err
+		}
+		if len(moreBuf) > 0 {
+			initialBuf = append(initialBuf, moreBuf...)
+		}
+	}
+
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
@@ -601,9 +676,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		nextProtos := []string{"http/1.1"} // default safe
 
-		if !util.IsHTTPReq(initialBuf) {
+		isHTTP := util.IsHTTPReq(initialBuf)
+		isCONNECT := bytes.HasPrefix(initialBuf, []byte("CONNECT "))
+		logger.Debug("ALPN decision debug",
+			zap.Bool("isHTTPReq", isHTTP),
+			zap.Bool("isCONNECT", isCONNECT),
+			zap.Int("initialBufLen", len(initialBuf)),
+			zap.String("initialBufPrefix", string(initialBuf[:min(20, len(initialBuf))])),
+		)
+
+		// Allow H2 if:
+		// 1. It's not an HTTP/1.x request (could be gRPC/HTTP2 frames), OR
+		// 2. It's a CONNECT request (used by gRPC parser for tunneling, ALB requires H2)
+		if !isHTTP || isCONNECT {
 			// not an HTTP/1.x request line; could be HTTP/2 (gRPC) frames
 			nextProtos = []string{"h2", "http/1.1"}
+			logger.Debug("Offering H2 for ALPN", zap.Strings("nextProtos", nextProtos))
+		} else {
+			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
 		}
 
 		cfg := &tls.Config{
@@ -612,7 +702,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			NextProtos:         nextProtos,
 		}
 
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
+			err = p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
+			if err != nil {
+				return err
+			}
+		}
+
+		addr := dstAddr
+		if dstURL != "" {
+			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		}
+
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
@@ -623,7 +724,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			conn := dstConn.(*tls.Conn)
 			state := conn.ConnectionState()
 
-			p.logger.Info("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
+			p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -679,7 +780,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
 				proxyErr := models.ParserError{
@@ -702,7 +803,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		} else {
 			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
-			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
 				proxyErr := models.ParserError{
@@ -755,6 +856,48 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	}
 }
 
+func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certificate, tlsPrivateKey string) error {
+	if cfg == nil || clientPeerCert == nil {
+		return nil
+	}
+
+	if tlsPrivateKey == "" {
+		err := errors.New("failed to read private key from outgoing options")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	keyBytes := []byte(tlsPrivateKey)
+	block, _ := pem.Decode(keyBytes)
+	if block == nil {
+		err := errors.New("failed to decode PEM block containing private key")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	var privKey any
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		privKey = key
+	}
+
+	if privKey == nil {
+		err := errors.New("failed to parse private key from PEM")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	cfg.Certificates = []tls.Certificate{{
+		Certificate: [][]byte{clientPeerCert.Raw},
+		PrivateKey:  privKey,
+	}}
+	p.logger.Debug("Successfully constructed mTLS certificate using client peer cert and local key")
+	return nil
+}
+
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
@@ -784,6 +927,8 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
 	}
 
+	p.nsSwitchMutex.Lock()
+	defer p.nsSwitchMutex.Unlock()
 	if string(p.nsswitchData) == "" {
 		// setup the nsswitch config to redirect the DNS queries to the proxy
 		err := p.setupNsswitchConfig()
@@ -800,6 +945,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
+		clearDNSCache()
 	}
 
 	return nil
@@ -835,6 +981,13 @@ func (p *Proxy) CloseErrorChannel() {
 	close(p.errChannel)
 }
 
+func (p *Proxy) Mapping(ctx context.Context, mappingCh chan models.TestMockMapping) {
+	mgr := syncMock.Get()
+	if mgr != nil {
+		mgr.SetMappingChannel(mappingCh)
+	}
+}
+
 func isShutdownError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return true
@@ -842,13 +995,19 @@ func isShutdownError(err error) bool {
 	if errors.Is(err, net.ErrClosed) {
 		return true
 	}
-	if strings.Contains(err.Error(), "use of closed network connection") {
+	errStr := err.Error()
+	if strings.Contains(errStr, "use of closed network connection") {
 		return true
 	}
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
 		return true
 	}
-	if strings.Contains(err.Error(), "connection reset by peer") {
+	if strings.Contains(errStr, "connection reset by peer") {
+		return true
+	}
+	// Windows-specific error patterns for connection close during shutdown
+	if strings.Contains(errStr, "wsarecv") || strings.Contains(errStr, "wsasend") ||
+		strings.Contains(errStr, "forcibly closed by the remote host") {
 		return true
 	}
 	return false

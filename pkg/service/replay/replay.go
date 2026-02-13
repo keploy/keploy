@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/java"
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -66,6 +67,7 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
+	runDomainSet    *telemetry.DomainSet // collects host domains across a test run for telemetry
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -250,6 +252,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	abortTestRun := false
 	var flakyTestSets []string
 	var testSets []string
+	runDomainSet := telemetry.NewDomainSet()
+	r.runDomainSet = runDomainSet
 	for _, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
@@ -480,7 +484,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 	passed := totalTestPassed
 	failed := totalTestFailed
 	completeTestReportMu.RUnlock()
-	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus)
+	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
+		"host-domains": runDomainSet.ToSlice(),
+	})
+	// Shutdown is optional: the static Telemetry interface does not require it,
+	// but the concrete implementation exposes it for graceful drain of in-flight events.
+	if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+		s.Shutdown()
+	}
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
@@ -603,6 +614,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
 
+	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
+	if r.runDomainSet != nil {
+		for _, tc := range testCases {
+			r.runDomainSet.AddAll(telemetry.ExtractDomainsFromTestCase(tc))
+		}
+	}
+
 	if len(testCases) == 0 {
 		r.logger.Warn("no valid test cases found to run for test set", zap.String("test-set", testSetID))
 
@@ -699,6 +717,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
 	var isMappingEnabled bool
+	isMappingEnabled = !r.config.DisableMapping
+	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
@@ -785,10 +805,46 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		mocksThatHaveMappings := make(map[string]bool)
+
+		mocksWeNeed := make(map[string]bool)
+
+		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
+			// Populate the Registry
+			for _, mocks := range expectedTestMockMappings {
+				for _, m := range mocks {
+					mocksThatHaveMappings[m] = true
+				}
+			}
+
+			if len(selectedTests) > 0 {
+				for testID := range selectedTests {
+					if mocks, ok := expectedTestMockMappings[testID]; ok {
+						for _, m := range mocks {
+							mocksWeNeed[m] = true
+						}
+					}
+				}
+			} else {
+				// If running all tests, we need all mapped mocks
+				mocksWeNeed = mocksThatHaveMappings
+			}
+		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
+		}
+
+		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
+		if r.runDomainSet != nil {
+			for _, m := range filteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+			for _, m := range unfilteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
 		}
 
 		if filteredMocks == nil && unfilteredMocks == nil {
@@ -800,13 +856,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
-
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
@@ -828,12 +881,47 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if cmdType != utils.DockerCompose {
+
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		mocksThatHaveMappings := make(map[string]bool)
+
+		mocksWeNeed := make(map[string]bool)
+
+		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
+			// Populate the Registry
+			for _, mocks := range expectedTestMockMappings {
+				for _, m := range mocks {
+					mocksThatHaveMappings[m] = true
+				}
+			}
+
+			if len(selectedTests) > 0 {
+				for testID := range selectedTests {
+					if mocks, ok := expectedTestMockMappings[testID]; ok {
+						for _, m := range mocks {
+							mocksWeNeed[m] = true
+						}
+					}
+				}
+			} else {
+				// If running all tests, we need all mapped mocks
+				mocksWeNeed = mocksThatHaveMappings
+			}
+		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
-
+		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
+		if r.runDomainSet != nil {
+			for _, m := range filteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+			for _, m := range unfilteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
@@ -852,8 +940,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !isMappingEnabled {
 			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
-
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
@@ -935,7 +1021,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
@@ -974,7 +1059,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var actualTestMockMappings = make(map[string][]string)
+	actualTestMockMappings := &models.Mapping{
+		Version:   string(models.GetVersion()),
+		Kind:      models.MappingKind,
+		TestSetID: testSetID,
+	}
 	var consumedMocks []models.MockState
 	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
@@ -1193,8 +1282,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if len(consumedMocks) > 0 {
+			var mockNames []string
 			for _, m := range consumedMocks {
-				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+				mockNames = append(mockNames, m.Name)
+			}
+			found := false
+			for i, t := range actualTestMockMappings.Tests {
+				if t.ID == testCase.Name {
+					actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(actualTestMockMappings.Tests[i].Mocks.ToSlice(), mockNames...))
+					found = true
+					break
+				}
+			}
+			if !found {
+				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+					ID:    testCase.Name,
+					Mocks: models.FromSlice(mockNames),
+				})
 			}
 		}
 
@@ -1273,7 +1377,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
+				insertStart := time.Now()
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if time.Since(insertStart) > 50*time.Millisecond {
+					r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+				}
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
@@ -1386,21 +1494,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
-		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
-		if err != nil {
+		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings)))
+				zap.Int("numTests", len(actualTestMockMappings.Tests)))
 		}
 	}
 
 	if testSetStatus == models.TestSetStatusFailed && r.instrument && isMappingEnabled {
+		// Create a map for easier lookup
+		actualMockMap := make(map[string][]string)
+		for _, t := range actualTestMockMappings.Tests {
+			actualMockMap[t.ID] = t.Mocks.ToSlice()
+		}
 
 		for tc, expectedMocks := range expectedTestMockMappings {
 
-			actualMocks, ok := actualTestMockMappings[tc]
+			actualMocks, ok := actualMockMap[tc]
 
 			if !ok {
 				continue
@@ -1501,13 +1613,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	return testSetStatus, nil
 }
 
-func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) (filtered, unfiltered []*models.Mock, err error) {
-	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime)
+func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
 		return nil, nil, err
 	}
-	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime)
+	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return nil, nil, err
@@ -1562,7 +1674,11 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	if r.config.Test.SchemaMatch {
+		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+	}
+
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger)
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
@@ -2100,9 +2216,9 @@ func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
 	return nil
 }
 
-func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]string) error {
+func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
 	// Save test-mock mappings to YAML file
-	err := r.mappingDB.Insert(ctx, testSetID, mappings)
+	err := r.mappingDB.Insert(ctx, mapping)
 	return err
 }
 

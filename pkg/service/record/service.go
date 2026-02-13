@@ -11,6 +11,7 @@ type Instrumentation interface {
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 	GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
+	GetMappings(ctx context.Context, opts models.IncomingOptions) (<-chan models.TestMockMapping, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
 	MakeAgentReadyForDockerCompose(ctx context.Context) error
@@ -38,13 +39,18 @@ type MockDB interface {
 	ResetCounterID()
 }
 
+type MappingDb interface {
+	Insert(ctx context.Context, mapping *models.Mapping) error
+	Upsert(ctx context.Context, testSetID string, testID string, mockIDs []string) error
+}
+
 type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
 
 type Telemetry interface {
-	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int)
+	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int, metadata map[string]interface{})
 	RecordedTestCaseMock(mockType string)
 	RecordedMocks(mockTotal map[string]int)
 	RecordedTestAndMocks()
@@ -53,4 +59,5 @@ type Telemetry interface {
 type FrameChan struct {
 	Incoming <-chan *models.TestCase
 	Outgoing <-chan *models.Mock
+	Mappings <-chan models.TestMockMapping
 }

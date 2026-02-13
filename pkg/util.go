@@ -45,6 +45,18 @@ func GetNextSortNum() int64 {
 	return atomic.AddInt64(&SortCounter, 1)
 }
 
+func UpdateSortCounterIfHigher(val int64) {
+	for {
+		curr := atomic.LoadInt64(&SortCounter)
+		if val <= curr {
+			return
+		}
+		if atomic.CompareAndSwapInt64(&SortCounter, curr, val) {
+			return
+		}
+	}
+}
+
 // URLParams returns the Url and Query parameters from the request url.
 func URLParams(r *http.Request) map[string]string {
 	qp := r.URL.Query()
@@ -1086,8 +1098,7 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	for _, mock := range m {
 		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
 		// field in this for loop, and write in mockmanager functions.
-		tmp := *mock
-		p := &tmp
+		p := mock.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
@@ -1120,19 +1131,24 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 
 	for _, mock := range m {
 
-		tmp := *mock
-		p := &tmp
+		p := mock.DeepCopy()
 
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
 
+		matched := false
 		for _, name := range mocksPresentInMapping {
 			if p.Name == name {
 				p.TestModeInfo.IsFiltered = true
 				filteredMocks = append(filteredMocks, p)
+				matched = true
 				break
 			}
+		}
+
+		if matched {
+			continue
 		}
 
 		p.TestModeInfo.IsFiltered = false
