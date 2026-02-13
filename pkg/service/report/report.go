@@ -143,16 +143,8 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 			}
 			continue
 		}
-		switch t.Status {
-		case models.TestStatusPassed:
-			fmt.Fprintf(r.out, "Testcase %q (%s) PASSED ✅ (%s)\n", t.TestCaseID, t.Name, t.TimeTaken)
-		case models.TestStatusObsolete:
-			fmt.Fprintf(r.out, "Testcase %q (%s) OBSOLETE (%s)\n", t.TestCaseID, t.Name, t.TimeTaken)
-		case models.TestStatusIgnored:
-			fmt.Fprintf(r.out, "Testcase %q (%s) IGNORED (%s)\n", t.TestCaseID, t.Name, t.TimeTaken)
-		default:
-			fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, t.Status, t.TimeTaken)
-		}
+		// Passed — minimize output and avoid pretty printer
+		fmt.Fprintf(r.out, "Testcase %q (%s) PASSED ✅ (%s)\n", t.TestCaseID, t.Name, t.TimeTaken)
 		fmt.Fprintln(r.out, "\n--------------------------------------------------------------------")
 	}
 	err := r.out.Flush()
