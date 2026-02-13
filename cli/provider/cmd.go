@@ -651,6 +651,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.logger.Info("Color encoding is disabled")
 	}
 
+	if cmd.Name() == "test" {
+		schemaMatch, _ := cmd.Flags().GetBool("schema-match")
+		if schemaMatch {
+			// since schemaMatch is not being set in the config from the flag, we are setting it here
+			c.cfg.Test.SchemaMatch = schemaMatch
+		}
+	}
+
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
