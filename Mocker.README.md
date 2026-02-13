@@ -4,10 +4,10 @@ A comprehensive guide for using Keploy's mock recording and replay functionality
 
 ## Overview
 
-Keploy provides powerful commands to record and replay mocks for your e2e/integration tests:
+Keploy provides powerful commands to record and replay real environment mocks for your e2e/integration tests:
 
-- **`keploy mock record`** - Records external service calls during test execution
-- **`keploy mock test`** - Replays tests using recorded mocks (no external service calls needed)
+- **`keploy sandbox record`** - Records external service calls during test execution
+- **`keploy sandbox test`** - Replays tests using recorded mocks (no external service calls needed)
 
 This significantly reduces test execution time and eliminates dependencies on external services during testing.
 
@@ -18,13 +18,13 @@ This significantly reduces test execution time and eliminates dependencies on ex
 ### Recording Mocks
 
 ```bash
-keploy mock record -c "go test -v"
+keploy sandbox record -c "go test -v" --location="./sandboxes" --name="main_test"
 ```
 
 ### Replaying Tests with Mocks
 
 ```bash
-keploy mock test -c "go test -v"
+keploy sandbox test -c "go test -v" --location="./sandboxes" --name="main_test" --local
 ```
 
 ---
@@ -42,26 +42,33 @@ This ensures proper mock segregation for different tests.
 
 ### Mock Segregation
 
-To properly segregate mocks for different tests, two API calls to the Keploy agent are required:
+To properly segregate mocks for different tests, **checkpoint** API calls to the Keploy agent are required.
 
-1. **In `init()`** - Tells Keploy which package to save mocks for
-2. **At the start of each test** - Associates the mock with the specific test name
+> **Note:** These modifications can be automated using the Keploy MCP server with AI assistance. If not configured, all mocks will be saved under a single file (the first checkpoint provided in the `keploy sandbox record` command).
 
-> **Note:** These modifications can be automated using the Keploy MCP server with AI assistance.
+**AI-assisted refactoring will:**
+- Consolidate all `init()` functions in each package into a single `init()` function with the Keploy checkpoint API call at the beginning (since Go doesn't guarantee init function execution order, this ensures the checkpoint is always called first)
+- Add checkpoint API calls at the start of each test so Keploy can save mocks separately per test
+
+**Checkpoint API Endpoint:**
+```
+POST /sandbox/checkpoint
+{
+  "location": "./pkg/api",
+  "name": "test_service"
+}
+```
+
 
 ### Mock Storage Structure
 
-After running `keploy mock record -c "go test -v"`, mocks are saved locally:
+After running `keploy sandbox record -c "go test -v"`, mocks are saved locally with the `.sb.yaml` extension. A `.gitignore` entry is automatically created/updated to exclude these files from version control.
 
-```
-kmocks/
-├── TestIntegrationCreateTodo.yaml      # Mocks for CreateTodo test
-├── TestIntegrationGetAllTodos.yaml     # Mocks for GetAllTodos test
-├── TestIntegrationGetTodoByID.yaml     # Mocks for GetTodoByID test
-└── mocks.yaml                          # Initial mocks for all init functions
-```
+**Storage behavior:**
+- Mocks are saved according to the checkpoint provided in the command
+- If no checkpoint is specified, all mocks are saved under the initial checkpoint file
 
-Each package with tests will have its own `kmocks` folder.
+**File Extension:** `.sb.yaml` is used to differentiate sandbox mocks from other Keploy-generated test mock files.
 
 ---
 
@@ -69,22 +76,29 @@ Each package with tests will have its own `kmocks` folder.
 
 ### Configuration
 
-When running with a tag, mocks are uploaded to the cloud registry. Local mocks are automatically added to `.gitignore`.
+Local mocks (.sb.yaml) are automatically added to `.gitignore` during record mode.
 
-**config.yaml:**
+**Test Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `keploy sandbox test ... --local` | Uses existing local mocks for testing |
+| `keploy sandbox test ... --tag "v1.1.0"` | Creates a new tag, uploads mocks to registry, then runs tests |
+| `keploy sandbox test ... --cloud` | Fetches and uses existing mocks from registry (requires config reference) |
+
+**Registry Reference Configuration:**
+
+The reference is stored in the root `keploy.yaml` config file under the `sandbox` section:
 
 ```yaml
-metadata:
-  name: "integration-suite-mocks"
-  labels:
-    env: staging
-    runner: playwright
-
-mockRegistry:
-  tag: ["v1.0.0", "staging"]
-  app: page-service
-  kind: mock-set
+sandbox:
+  ref: allen/order-svc:v3.3
 ```
+
+**Reference Format:** `<company>/<service>:<tag>`
+- `allen` - Company name
+- `order-svc` - Service name (root directory app name)
+- `v3.3` - Tag name
 
 ### Tag Permissions
 
@@ -108,7 +122,7 @@ Since mocks are not committed to the repository, users have two options when add
 
 #### Option 2: Create Local Tag First
 1. Create a local tag and upload mocks to registry
-2. Ensure tests pass before creating tag (to avoid un-necessay tag spread)
+2. Ensure tests pass before creating tag (to avoid unnecessary tag proliferation)
 3. Submit PR with passing tests
 4. On merge to main, tag is incremented (and overridden if necessary)
 
@@ -116,7 +130,7 @@ Since mocks are not committed to the repository, users have two options when add
 
 #### On Pull Request
 
-Runs: `keploy mock test`
+Runs: `keploy sandbox test -c "go test -v" --cloud`
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -128,7 +142,7 @@ Runs: `keploy mock test`
 
 #### On Push to Main
 
-Runs: `keploy mock record` → `keploy mock test`
+Runs: `keploy sandbox record` → `keploy sandbox test`
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -157,16 +171,3 @@ Runs: `keploy mock record` → `keploy mock test`
 If following Option 1 (merging failing PRs), the generated mocks in main may not make tests pass initially. Monitor and address these cases accordingly.
 
 ---
-
-## Example Workflow
-
-```bash
-# 1. Record mocks locally during development
-keploy mock record -c "go test -v ./..."
-
-# 2. Verify tests pass with recorded mocks
-keploy mock test -c "go test -v ./..."
-
-# 3. Run tests in CI using cloud mocks
-keploy mock test -c "go test -v ./..." --tag v1.0.0
-```
