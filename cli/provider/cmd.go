@@ -657,6 +657,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			// since schemaMatch is not being set in the config from the flag, we are setting it here
 			c.cfg.Test.SchemaMatch = schemaMatch
 		}
+		fmt.Printf("DEBUG: Schema Match Flag Parsed: %v, Config Value: %v\n", schemaMatch, c.cfg.Test.SchemaMatch)
 	}
 
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
