@@ -367,7 +367,6 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			return nil
 		}
 	}
-	// --------------------------------------------------------------------------------------------------------------------------------
 	if r.config.Report.Summary {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
