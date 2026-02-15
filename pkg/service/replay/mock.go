@@ -57,6 +57,12 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 		return fmt.Errorf("storage service is not initialized")
 	}
 
+	// Ensure we are not trying to download a sandbox file by mistake.
+	if strings.HasSuffix(testSetID, ".sb.yaml") || strings.HasSuffix(testSetID, ".sb.yml") {
+		m.logger.Debug("Skipping download for sandbox file", zap.String("testSetID", testSetID))
+		return nil
+	}
+
 	// Check if test-set config is present
 	tsConfig, err := m.tsConfigDB.Read(ctx, testSetID)
 	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
@@ -161,6 +167,23 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 		return fmt.Errorf("storage service is not initialized")
 	}
 
+	// Inspect local mock file
+	localMockPath := filepath.Join(m.cfg.Path, testSetID, "mocks.yaml")
+
+	// Ensure we are not trying to upload a sandbox file by mistake.
+	// Legacy mocks are strictly named "mocks.yaml".
+	// Sandboxes use ".sb.yaml" extension and are handled differently.
+	if strings.HasSuffix(testSetID, ".sb.yaml") || strings.HasSuffix(testSetID, ".sb.yml") {
+		m.logger.Debug("Skipping upload for sandbox file", zap.String("testSetID", testSetID))
+		return nil
+	}
+
+	mockFileContent, err := osReadFile224(localMockPath)
+	if err != nil {
+		m.logger.Error("Failed to read mock file for mock upload", zap.String("path", localMockPath), zap.Error(err))
+		return err
+	}
+
 	claims, err := extractClaimsWithoutVerification224(m.token)
 	var role, username string
 	var ok bool
@@ -187,14 +210,6 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 	}
 
 	m.logger.Debug("The latest plan", zap.Any("Plan", plan))
-
-	// Inspect local mock file
-	localMockPath := filepath.Join(m.cfg.Path, testSetID, "mocks.yaml")
-	mockFileContent, err := osReadFile224(localMockPath)
-	if err != nil {
-		m.logger.Error("Failed to read mock file for mock upload", zap.String("path", localMockPath), zap.Error(err))
-		return err
-	}
 
 	// If mock file is empty, return error
 	if len(mockFileContent) == 0 {

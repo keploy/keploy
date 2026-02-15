@@ -6,8 +6,10 @@ import "time"
 type RecordOptions struct {
 	// Command is the application command to execute.
 	Command string
-	// Path is the base path for mock storage.
+	// Path is the sandbox location directory.
 	Path string
+	// Name is the sandbox file prefix (final file is <name>.sb.yaml).
+	Name string
 	// ProxyPort is the proxy port (optional, uses default if 0).
 	ProxyPort uint32
 	// DNSPort is the DNS port (optional, uses default if 0).
@@ -18,7 +20,7 @@ type RecordOptions struct {
 
 // RecordResult contains the result of a recording session.
 type RecordResult struct {
-	// MockFilePath is the path to the generated mock file.
+	// MockFilePath is the path to the generated sandbox file.
 	MockFilePath string
 	// Metadata contains extracted metadata for contextual naming.
 	Metadata *MockMetadata

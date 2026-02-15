@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -14,11 +15,32 @@ import (
 	"go.uber.org/zap"
 )
 
-func MockRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func init() {
+	Register("sandbox", Sandbox)
+}
+
+func Sandbox(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+	var cmd = &cobra.Command{
+		Use:   "sandbox",
+		Short: "Managing sandbox",
+	}
+
+	cmd.AddCommand(SandboxRecord(ctx, logger, cfg, serviceFactory, cmdConfigurator))
+	cmd.AddCommand(SandboxReplay(ctx, logger, cfg, serviceFactory, cmdConfigurator))
+	for _, subCmd := range cmd.Commands() {
+		err := cmdConfigurator.AddFlags(subCmd)
+		if err != nil {
+			utils.LogError(logger, err, "failed to add flags to command", zap.String("command", subCmd.Name()))
+		}
+	}
+	return cmd
+}
+
+func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "record",
-		Short:   "record outgoing calls as mocks",
-		Example: `keploy mock record -c "npm start" -p ./keploy`,
+		Short:   "record outgoing calls as sandboxes",
+		Example: `keploy sandbox record -c "go test -v" --location "./sandboxes" --name "main_test"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -37,16 +59,17 @@ func MockRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, ser
 
 			recorder := mockrecord.New(logger, cfg, runner, nil)
 
-			// Read the --duration flag if provided, otherwise fall back to config
-			duration, _ := cmd.Flags().GetDuration("duration")
-			if duration == 0 {
-				duration = cfg.Record.RecordTimer
+			name, err := cmd.Flags().GetString("name")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get name flag")
+				return errors.New("failed to get name flag")
 			}
 
 			result, err := recorder.Record(ctx, models.RecordOptions{
 				Command:   cfg.Command,
 				Path:      cfg.Path,
-				Duration:  duration,
+				Name:      name,
+				Duration:  cfg.Record.RecordTimer,
 				ProxyPort: cfg.ProxyPort,
 				DNSPort:   cfg.DNSPort,
 			})
@@ -59,15 +82,15 @@ func MockRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, ser
 				fmt.Fprintln(cmd.OutOrStdout(), output)
 			}
 			if result.AppExitCode != 0 {
-				logger.Warn("mock record command exited with non-zero code",
+				logger.Warn("sandbox record command exited with non-zero code",
 					zap.Int("exitCode", result.AppExitCode),
 				)
 			}
 
-			logger.Info("Mock recording completed",
-				zap.Int("mockCount", result.MockCount),
+			logger.Info("Sandbox recording completed",
+				zap.Int("sandboxCount", result.MockCount),
 				zap.Strings("protocols", result.Metadata.Protocols),
-				zap.String("mockFilePath", result.MockFilePath),
+				zap.String("sandboxFilePath", result.MockFilePath),
 				zap.Int("exitCode", result.AppExitCode),
 			)
 			return nil
@@ -77,11 +100,11 @@ func MockRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, ser
 	return cmd
 }
 
-func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "test",
-		Short:   "replay recorded mocks during testing",
-		Example: `keploy mock test -c "go test ./..." -p ./keploy/mock-set-<n>`,
+		Use:     "replay",
+		Short:   "replay recorded sandboxes during testing",
+		Example: `keploy sandbox replay -c "go test -v" --location "./sandboxes" --name "main_test"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -98,12 +121,19 @@ func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, servi
 				return nil
 			}
 
+			name, err := cmd.Flags().GetString("name")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get name flag")
+				return errors.New("failed to get name flag")
+			}
+
 			replayer := mockreplay.New(logger, cfg, runtime)
 			result, err := replayer.Replay(ctx, models.ReplayOptions{
-				Command:        cfg.Command,
-				FallBackOnMiss: cfg.Test.FallBackOnMiss,
-				ProxyPort:      cfg.ProxyPort,
-				DNSPort:        cfg.DNSPort,
+				Command:   cfg.Command,
+				Path:      cfg.Path,
+				Name:      name,
+				ProxyPort: cfg.ProxyPort,
+				DNSPort:   cfg.DNSPort,
 			})
 			if err != nil {
 				utils.LogError(logger, err, "failed to replay mocks")
@@ -116,11 +146,11 @@ func MockTest(ctx context.Context, logger *zap.Logger, cfg *config.Config, servi
 
 			mocksLoaded := result.MocksReplayed + result.MocksMissed
 			mocksUnused := result.MocksMissed
-			logger.Info("Mock replay completed",
+			logger.Info("Sandbox replay completed",
 				zap.Bool("success", result.Success),
-				zap.Int("mocksReplayed", result.MocksReplayed),
-				zap.Int("mocksLoaded", mocksLoaded),
-				zap.Int("mocksUnused", mocksUnused),
+				zap.Int("sandboxesReplayed", result.MocksReplayed),
+				zap.Int("sandboxesLoaded", mocksLoaded),
+				zap.Int("sandboxesUnused", mocksUnused),
 				zap.Int("exitCode", result.AppExitCode),
 			)
 			return nil

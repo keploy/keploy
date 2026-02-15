@@ -100,13 +100,12 @@ func MCP(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFac
 	var cmd = &cobra.Command{
 		Use:   "mcp",
 		Short: "MCP server for AI assistant integration",
-		Long: `MCP (Model Context Protocol) server that exposes Keploy's mock recording 
+		Long: `MCP (Model Context Protocol) server that exposes Keploy's sandbox recording 
 and replay capabilities as tools for AI assistants.
 
 This allows AI coding assistants to:
-- List available recorded mocks
 - Record outgoing calls (HTTP, databases, etc.) from your application
-- Replay recorded mocks during testing
+- Replay recorded sandbox files during testing
 
 The server communicates via stdio using JSON-RPC 2.0, making it compatible 
 with VS Code, Claude Desktop, and other MCP-compatible AI assistants.
@@ -128,16 +127,16 @@ Do not pipe stdout to other commands when using as an MCP server.`,
 func MCPServe(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "serve",
-		Short: "Start the MCP server for mock recording and replay",
-		Long: `Start the MCP server that exposes Keploy mock tools.
+		Short: "Start the MCP server for sandbox recording and replay",
+		Long: `Start the MCP server that exposes Keploy sandbox tools.
 
 The server runs on stdio transport using JSON-RPC 2.0 protocol and can be 
 configured as an MCP server in your AI assistant's configuration.
 
 Available tools:
-- keploy_list_mocks: List all available recorded mock sets
+- keploy_manager: Orchestrates full Keploy workflow
 - keploy_mock_record: Record outgoing calls from your application
-- keploy_mock_test: Replay recorded mocks during testing
+- keploy_mock_test: Replay recorded sandbox files during testing
 
 Example Claude Desktop configuration (claude_desktop_config.json):
 {
@@ -161,10 +160,9 @@ Example VS Code configuration:
 		Example: `  # Start the MCP server
   keploy mcp serve
 
-  # The server will expose three tools:
-  # - keploy_list_mocks: List available mock sets
+  # The server will expose tools including:
   # - keploy_mock_record: Record outgoing calls from your application
-  # - keploy_mock_test: Replay recorded mocks during testing`,
+  # - keploy_mock_test: Replay recorded sandbox files during testing`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			utils.SetMCPStdio(true)
 			return cmdConfigurator.Validate(ctx, cmd)
@@ -214,13 +212,10 @@ Example VS Code configuration:
 
 			mcpLogger.Info("Initializing Keploy MCP server")
 
-			// Set default path for MCP commands if not already set.
-			// This ensures the mockDB has the correct base path ("./keploy")
-			// for both recording and replay, fixing the path mismatch where
-			// mock replay was looking for "mockName/mocks.yaml" instead of
-			// "./keploy/mockName/mocks.yaml".
+			// Set default location for MCP sandbox commands if not already set.
+			// Sandbox record/replay now default to the current directory.
 			if cfg.Path == "" {
-				cfg.Path = "./keploy"
+				cfg.Path = "."
 			}
 
 			recordSvc, err := serviceFactory.GetService(ctx, "record")

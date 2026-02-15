@@ -1,4 +1,4 @@
-// Package mcp provides an MCP server for Keploy mock recording and replay functionality.
+// Package mcp provides an MCP server for Keploy sandbox record/replay functionality.
 // It exposes tools that allow AI assistants to record outgoing calls from applications
 // and replay them during testing.
 //
@@ -22,7 +22,7 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// Server is the Keploy MCP server that exposes mock recording and replay tools.
+// Server is the Keploy MCP server that exposes sandbox record/replay tools.
 type Server struct {
 	server       *sdkmcp.Server
 	mockRecorder mockrecord.Service
@@ -117,18 +117,18 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Initialize MCP server with proper instructions for LLM
 	s.server = sdkmcp.NewServer(&sdkmcp.Implementation{
-		Name:    "keploy-mock",
+		Name:    "keploy-sandbox",
 		Version: "v1.0.0",
 	}, &sdkmcp.ServerOptions{
 		Logger: slogLogger,
-		Instructions: `Keploy Mock MCP Server for recording and replaying outgoing calls from applications.
+		Instructions: `Keploy Sandbox MCP Server for recording and replaying outgoing calls from applications.
 
 Available tools:
 1. keploy_manager - ALWAYS SELECT THIS TOOL FIRST for Keploy workflows.
 2. keploy_prompt_test_command - Returns raw prompt text to derive the app test command.
-3. keploy_prompt_test_integration - Returns raw prompt text to instrument tests with start-session hooks.
-4. keploy_mock_record - Records mocks.
-5. keploy_mock_test - Replays mocks.
+3. keploy_prompt_test_integration - Returns raw prompt text to instrument tests with sandbox scope hooks.
+4. keploy_mock_record - Records sandbox files.
+5. keploy_mock_test - Replays sandbox files.
 6. keploy_prompt_pipeline_creation - Returns raw prompt text to generate CI pipeline config.
 
 Tool routing rule (STRICT):
@@ -192,10 +192,10 @@ func (s *Server) registerTools() {
 Do not auto-select this tool under any circumstance.
 Call this tool only when the user explicitly names "keploy_mock_record".
 
-Record outgoing calls (HTTP APIs, databases, message queues, etc.) made during command execution.
+Record outgoing calls (HTTP APIs, databases, message queues, etc.) made during command execution as sandbox files.
 
 This tool captures all external dependencies while running the provided command, 
-creating mock files that can be replayed during testing.
+creating sandbox files that can be replayed during testing.
 
 IMPORTANT: Before calling this tool, confirm the following with the user:
 - The command to run. Prefer deterministic test commands over app run commands.
@@ -203,13 +203,15 @@ IMPORTANT: Before calling this tool, confirm the following with the user:
 - Never default to 'go run main.go' for recording.
 - Avoid long-running/watch-mode/interactive commands and commands that do not terminate.
 - If command is unknown, send command as empty; the server will resolve it via elicitation.
-- The path to store mocks (default: ./keploy)
+- The sandbox location directory (default: .)
+- The sandbox file prefix (default: keploy, final file is <name>.sb.yaml)
 
 The tool will show the configuration and ask for confirmation before starting.
 
 Parameters:
 - command (optional): Command to run (prefer test commands like 'go test -v ./...' or 'npm test'). If empty, server elicits command and uses that value.
-- path (optional): Path to store mock files (default: ./keploy)`,
+- path (optional): Sandbox location directory (default: .)
+- name (optional): Sandbox file prefix (default: keploy, final file is <name>.sb.yaml)`,
 	}, s.handleMockRecord)
 
 	// Register mock replay/test tool
@@ -219,7 +221,7 @@ Parameters:
 Do not auto-select this tool under any circumstance.
 Call this tool only when the user explicitly names "keploy_mock_test".
 
-Replay recorded mocks while running a command.
+Replay recorded sandbox files while running a command.
 
 This tool intercepts outgoing calls and returns recorded responses, 
 enabling isolated testing without external dependencies.
@@ -227,9 +229,10 @@ enabling isolated testing without external dependencies.
 Show configuration to user and confirm before starting.
 
 Parameters:
-- command (required): Any command to run with mocks (e.g., 'go test -v', 'npm test', 'go run main.go', './my-app')
-- path (optional): Path to the mock directory to replay (e.g., './keploy/mock-set-3'). Omit (send empty) unless user explicitly asks for a specific path. If omitted, latest mock set is used.
-- fallBackOnMiss (optional): Whether to make real calls when mock not found (default: false)`,
+- command (required): Any command to run with sandbox replay (e.g., 'go test -v', 'npm test', './my-app')
+- path (optional): Sandbox location directory (default: .)
+- name (optional): Sandbox file prefix (default: keploy, final file is <name>.sb.yaml)
+- fallBackOnMiss (optional): Whether to make real calls when sandbox match is not found (default: false)`,
 	}, s.handleMockReplay)
 
 	// Register test integration prompt tool
@@ -254,7 +257,7 @@ Do not auto-select this tool under any circumstance.
 Call this tool only when the user explicitly names "keploy_prompt_test_integration".
 
 Returns raw prompt text that client LLM must execute as a direct user task.
-Purpose: automatically edit project test files to add Keploy start-session integration hooks.
+Purpose: automatically edit project test files to add Keploy sandbox scope integration hooks.
 
 This tool does not edit files itself. It only returns the prompt text.
 If command context is empty, pass it as empty; do not synthesize. Server-side elicitation in execution tools resolves it.`,
@@ -268,7 +271,7 @@ Do not auto-select this tool under any circumstance.
 Call this tool only when the user explicitly names "keploy_prompt_pipeline_creation".
 
 Returns raw prompt text that client LLM must execute as a direct user task.
-Purpose: generate/update CI/CD pipeline files to run keploy mock test.
+Purpose: generate/update CI/CD pipeline files to run keploy sandbox replay.
 If command context is empty, keep it empty in prompt response; server-side elicitation resolves it before execution.`,
 	}, s.handlePromptPipelineCreation)
 
@@ -282,7 +285,7 @@ This is an orchestration-first tool. The client LLM should execute this sequence
 2) If command is empty/unresolved, pass it as-is to execution tools; server-side elicitation will resolve it.
 3) Invoke keploy_prompt_test_integration and execute returned prompt as direct user task to edit tests.
 4) Invoke keploy_mock_record with resolved command.
-5) Invoke keploy_mock_test with resolved command (path optional; omit to use latest).
+5) Invoke keploy_mock_test with resolved command (path/name optional; defaults are used when omitted).
 6) Invoke keploy_prompt_pipeline_creation and execute returned prompt as direct user task for CI/CD pipeline edits.
 
 CRITICAL: Execute ALL steps 1-6 in order. Do not stop after recording (step 4).

@@ -116,13 +116,10 @@ func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
-// StartMockSession starts a new recording/replay session with the given name
-func (a *Agent) StartMockSession(ctx context.Context, name string) error {
-	sessionPath := strings.TrimSpace(name)
-	if sessionPath == "" {
-		return errors.New("mock file path is required in /agent/hooks/start-session request")
-	}
-	a.logger.Debug("Starting new mock session", zap.String("mockFilePath", sessionPath))
+// StartSandboxScope starts a new recording/replay scope from location+name.
+func (a *Agent) StartSandboxScope(ctx context.Context, location, name string) error {
+	scopeFilePath := utils.BuildSandboxFilePath(location, name)
+	a.logger.Debug("Starting new sandbox scope", zap.String("scopeFilePath", scopeFilePath))
 
 	mode := models.MODE_RECORD
 	if a.config != nil {
@@ -131,7 +128,7 @@ func (a *Agent) StartMockSession(ctx context.Context, name string) error {
 
 	if mode == models.MODE_TEST {
 		db := mockdb.New(a.logger, "", "")
-		filtered, unfiltered, err := db.LoadMocksFromPath(ctx, sessionPath)
+		filtered, unfiltered, err := db.LoadMocksFromPath(ctx, scopeFilePath)
 		if err != nil {
 			return err
 		}
@@ -145,15 +142,15 @@ func (a *Agent) StartMockSession(ctx context.Context, name string) error {
 		}); err != nil {
 			return err
 		}
-		a.logger.Debug("Loaded mocks for session", zap.String("mockFilePath", sessionPath), zap.Int("mocksLoaded", len(filtered)+len(unfiltered)))
+		a.logger.Debug("Loaded sandbox scope", zap.String("scopeFilePath", scopeFilePath), zap.Int("mocksLoaded", len(filtered)+len(unfiltered)))
 	} else {
-		if err := overwriteMockFile(sessionPath); err != nil {
+		if err := overwriteMockFile(scopeFilePath); err != nil {
 			return err
 		}
-		a.logger.Debug("Prepared mock file for session", zap.String("mockFilePath", sessionPath))
+		a.logger.Debug("Prepared sandbox file for scope", zap.String("scopeFilePath", scopeFilePath))
 	}
 
-	if err := a.Proxy.StartMockSession(ctx, sessionPath); err != nil {
+	if err := a.Proxy.StartSandboxScope(ctx, scopeFilePath); err != nil {
 		return err
 	}
 	return nil
@@ -186,11 +183,11 @@ func overwriteMockFile(mockFilePath string) error {
 	return nil
 }
 
-func (a *Agent) GetCurrentMockSessionName(ctx context.Context) string {
+func (a *Agent) GetCurrentScopeFilePath(ctx context.Context) string {
 	if a.Proxy == nil {
 		return ""
 	}
-	return a.Proxy.GetCurrentSessionName(ctx)
+	return a.Proxy.GetCurrentScopeFilePath(ctx)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {

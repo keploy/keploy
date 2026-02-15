@@ -1,8 +1,8 @@
 Master Prompt: Keploy Pipeline Creation Agent
-Goal: generate CI/CD pipeline config that runs Keploy mock tests deterministically.
+Goal: generate CI/CD pipeline config that runs Keploy sandbox replay deterministically.
 
 Application/Test command: {{test_command}}
-Mock path: {{mock_path}}
+Sandbox location: {{mock_path}}
 
 Execution requirements:
 1) Determine the default branch first from repository context (branch config/workflows/docs). If uncertain, use main and state assumption.

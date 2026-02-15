@@ -47,14 +47,14 @@ func buildPipelineCreationPrompt(testCommand, mockPath string) string {
 	}
 
 	if strings.TrimSpace(mockPath) == "" {
-		mockPath = "./keploy"
+		mockPath = "."
 	}
 	trimmedCommand := strings.TrimSpace(testCommand)
 
 	return renderPromptTemplate(template, map[string]string{
 		"test_command":   trimmedCommand,
 		"mock_path":      mockPath,
-		"keploy_command": fmt.Sprintf("keploy mock test -c \"%s\" -p \"%s\"", safePipelineCommand(trimmedCommand), mockPath),
+		"keploy_command": fmt.Sprintf("keploy sandbox replay -c \"%s\" --location \"%s\"", safePipelineCommand(trimmedCommand), mockPath),
 	})
 }
 

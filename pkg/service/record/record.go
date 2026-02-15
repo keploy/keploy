@@ -376,8 +376,8 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 					}
 				}
 
-				if frame.SessionName != "" {
-					if err := mockDB.InsertMockToPath(ctx, mock, frame.SessionName); err != nil {
+				if frame.ScopeFilePath != "" {
+					if err := mockDB.InsertMockToPath(ctx, mock, frame.ScopeFilePath); err != nil {
 						if ctx.Err() == context.Canceled {
 							return nil
 						}

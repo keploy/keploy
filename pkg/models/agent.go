@@ -9,11 +9,11 @@ type OutgoingReq struct {
 }
 
 // MockFrame carries a recorded mock with its active session context.
-// SessionName stores the current start-session value (expected to be the target mock file path).
+// ScopeFilePath stores the current sandbox scope file path.
 // It is transient stream metadata and is not persisted into mock files.
 type MockFrame struct {
-	SessionName string `json:"sessionName,omitempty"`
-	Mock        *Mock  `json:"mock"`
+	ScopeFilePath string `json:"scopeFilePath,omitempty"`
+	Mock          *Mock  `json:"mock"`
 }
 
 type IncomingReq struct {
@@ -59,8 +59,10 @@ type AfterSimulateRequest struct {
 	TestCaseName string `json:"testCaseName"`
 }
 
-type StartSessionRequest struct {
-	// Name carries the full mock file path for record/replay session switching.
+type SandboxScopeRequest struct {
+	// Location is the directory where sandbox file will be written/read.
+	Location string `json:"location"`
+	// Name is the sandbox file name prefix (without extension).
 	Name string `json:"name"`
 }
 

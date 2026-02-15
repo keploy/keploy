@@ -15,8 +15,10 @@ import (
 type MockRecordInput struct {
 	// Command is the command to run. If empty, server attempts elicitation.
 	Command string `json:"command,omitempty" jsonschema:"Command to run (prefer test commands like 'go test -v ./...'). If empty, server will elicit it from user."`
-	// Path is the path to store mock files (default: ./keploy).
-	Path string `json:"path,omitempty" jsonschema:"Path to store mock files (default: ./keploy)"`
+	// Path is the sandbox location directory (default: .).
+	Path string `json:"path,omitempty" jsonschema:"Sandbox location directory (default: .)."`
+	// Name is the sandbox file prefix (final file: <name>.sb.yaml).
+	Name string `json:"name,omitempty" jsonschema:"Sandbox file prefix (default: keploy, final file: <name>.sb.yaml)."`
 }
 
 // MockRecordOutput defines the output of the mock record tool.
@@ -39,16 +41,19 @@ type MockRecordOutput struct {
 type RecordConfiguration struct {
 	Command string `json:"command"`
 	Path    string `json:"path"`
+	Name    string `json:"name"`
 }
 
 // MockReplayInput defines the input parameters for the mock replay tool.
 type MockReplayInput struct {
 	// Command is the command to run with mocks.
-	Command string `json:"command" jsonschema:"Command to run with mocks (e.g. 'go test -v', 'npm test', 'go run main.go', or any other command)."`
-	// Path is the path to load mock files from. If omitted, replay resolves latest mock set automatically.
-	Path string `json:"path,omitempty" jsonschema:"Path to load mock files from (optional). Omit unless user explicitly wants a specific path. If omitted, replay service selects latest mock set automatically."`
+	Command string `json:"command" jsonschema:"Command to run with sandbox replay (e.g. 'go test -v', 'npm test', or any other command)."`
+	// Path is the sandbox location directory.
+	Path string `json:"path,omitempty" jsonschema:"Sandbox location directory (default: .)."`
+	// Name is the sandbox file prefix.
+	Name string `json:"name,omitempty" jsonschema:"Sandbox file prefix (default: keploy, final file: <name>.sb.yaml)."`
 	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches (optional, default: false).
-	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no mock matches (default: false)"`
+	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no sandbox entry matches (default: false)."`
 }
 
 // MockReplayOutput defines the output of the mock replay tool.
@@ -83,10 +88,10 @@ type PromptTestIntegrationInput struct {
 
 // PromptPipelineInput defines input for keploy_prompt_pipeline_creation.
 type PromptPipelineInput struct {
-	// AppCommand is the app/test command used in keploy mock test.
+	// AppCommand is the app/test command used in keploy sandbox replay.
 	AppCommand string `json:"appCommand,omitempty" jsonschema:"Optional app/test command for pipeline prompt."`
-	// MockPath is the path passed to mock test in CI.
-	MockPath string `json:"mockPath,omitempty" jsonschema:"Optional mock path for pipeline prompt (default: ./keploy)."`
+	// MockPath is the location passed to sandbox replay in CI.
+	MockPath string `json:"mockPath,omitempty" jsonschema:"Optional sandbox location for pipeline prompt (default: .)."`
 }
 
 // PromptOutput is raw text prompt output for prompt helper tools.
@@ -103,6 +108,7 @@ type PromptOutput struct {
 type ReplayConfiguration struct {
 	Command        string `json:"command"`
 	Path           string `json:"path"`
+	Name           string `json:"name"`
 	FallBackOnMiss bool   `json:"fallBackOnMiss"`
 }
 
@@ -111,6 +117,7 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	s.logger.Info("Mock record tool invoked",
 		zap.String("command", in.Command),
 		zap.String("path", in.Path),
+		zap.String("name", in.Name),
 	)
 
 	command := strings.TrimSpace(in.Command)
@@ -134,12 +141,17 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	// Parse and validate configuration
 	path := strings.TrimSpace(in.Path)
 	if path == "" {
-		path = "./keploy"
+		path = "."
+	}
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		name = "keploy"
 	}
 
 	config := &RecordConfiguration{
 		Command: command,
 		Path:    path,
+		Name:    name,
 	}
 
 	// Check if mock recorder is available
@@ -156,12 +168,14 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	s.logger.Info("Starting mock recording with configuration",
 		zap.String("command", command),
 		zap.String("path", path),
+		zap.String("name", name),
 	)
 
 	// Execute recording
 	result, err := s.mockRecorder.Record(ctx, models.RecordOptions{
 		Command: command,
 		Path:    path,
+		Name:    name,
 	})
 	if err != nil {
 		s.logger.Error("Mock recording failed", zap.Error(err))
@@ -204,7 +218,7 @@ func (s *Server) elicitRecordCommand(ctx context.Context) (string, error) {
 	s.logger.Info("Eliciting mock record command from user")
 	result, err := session.Elicit(ctx, &sdkmcp.ElicitParams{
 		Mode: "form",
-		Message: "Please provide the command for `keploy mock record`.\n\n" +
+		Message: "Please provide the command for `keploy sandbox record`.\n\n" +
 			"Policy:\n" +
 			"- Prefer test commands over run commands.\n" +
 			"- For Go projects, prefer `go test` commands (for example `go test -v -run \"TestA|TestB\"` or `go test -v ./...`).\n" +
@@ -246,6 +260,7 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	s.logger.Info("Mock replay tool invoked",
 		zap.String("command", in.Command),
 		zap.String("path", in.Path),
+		zap.String("name", in.Name),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
@@ -259,8 +274,14 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	}
 	path := strings.TrimSpace(in.Path)
 	if req != nil && !hasArgument(req, "path") {
-		// If caller omitted "path", keep it empty so replay service resolves latest mock set.
-		path = ""
+		path = "."
+	}
+	if path == "" {
+		path = "."
+	}
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		name = "keploy"
 	}
 
 	// Check if mock replayer is available
@@ -274,12 +295,14 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	config := &ReplayConfiguration{
 		Command:        command,
 		Path:           path,
+		Name:           name,
 		FallBackOnMiss: in.FallBackOnMiss,
 	}
 
 	s.logger.Info("Starting mock replay with configuration",
 		zap.String("command", command),
 		zap.String("path", path),
+		zap.String("name", name),
 		zap.Bool("fallBackOnMiss", in.FallBackOnMiss),
 	)
 
@@ -287,6 +310,7 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	result, err := s.mockReplayer.Replay(ctx, models.ReplayOptions{
 		Command:        command,
 		Path:           path,
+		Name:           name,
 		FallBackOnMiss: in.FallBackOnMiss,
 	})
 	if err != nil {
@@ -363,7 +387,7 @@ func (s *Server) handlePromptTestCommand(_ context.Context, _ *sdkmcp.CallToolRe
 	}, nil
 }
 
-// handlePromptTestIntegration returns a raw prompt for automatic start-session integration in test files.
+// handlePromptTestIntegration returns a raw prompt for automatic sandbox scope integration in test files.
 func (s *Server) handlePromptTestIntegration(_ context.Context, _ *sdkmcp.CallToolRequest, in PromptTestIntegrationInput) (*sdkmcp.CallToolResult, PromptOutput, error) {
 	prompt := buildTestIntegrationPrompt(in.Command, in.ScopePath)
 	return nil, PromptOutput{

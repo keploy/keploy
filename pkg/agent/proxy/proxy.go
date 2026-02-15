@@ -127,8 +127,8 @@ func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
 }
 
-func (p *Proxy) StartMockSession(ctx context.Context, name string) error {
-	p.logger.Debug("Updating session name in proxy", zap.String("name", name))
+func (p *Proxy) StartSandboxScope(ctx context.Context, scopeFilePath string) error {
+	p.logger.Debug("Updating sandbox scope file path in proxy", zap.String("scopeFilePath", scopeFilePath))
 	// Get current session
 	session, ok := p.sessions.Get(uint64(0))
 	if !ok {
@@ -138,14 +138,14 @@ func (p *Proxy) StartMockSession(ctx context.Context, name string) error {
 	// Create a new session with updated name
 	// We shallow copy the struct first
 	newSession := *session
-	newSession.OutgoingOptions.Name = name
+	newSession.OutgoingOptions.Name = scopeFilePath
 
 	// Update the map
 	p.sessions.Set(uint64(0), &newSession)
 	return nil
 }
 
-func (p *Proxy) GetCurrentSessionName(_ context.Context) string {
+func (p *Proxy) GetCurrentScopeFilePath(_ context.Context) string {
 	session, ok := p.sessions.Get(uint64(0))
 	if !ok || session == nil {
 		return ""

@@ -1697,3 +1697,21 @@ func GetFullCommandUsed() string {
 
 	return cmdStr
 }
+
+// BuildSandboxFilePath constructs a sandbox file path from a location and name.
+// It ensures the name has the correct extension and handles default values.
+func BuildSandboxFilePath(location, name string) string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		location = "."
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "keploy"
+	}
+	name = strings.TrimSuffix(name, ".sb.yaml")
+	name = strings.TrimSuffix(name, ".sb.yml")
+
+	return filepath.Clean(filepath.Join(location, name+".sb.yaml"))
+}

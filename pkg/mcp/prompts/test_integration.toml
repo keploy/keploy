@@ -14,12 +14,21 @@ You must inject TWO kinds of calls:
 (1) SCOPE INIT (runs once per scope)
 - For every test scope (folder/package/project) that TEST_COMMAND runs, add an init-style function/hook that runs once before any tests in that scope.
 - That init must call:
-  StartKeploySession("<SCOPE_PATH>/kMocks/mocks.yml")
+  StartKeploySession("<SCOPE_PATH>", "keploy")
   Note: <SCOPE_PATH> must be relative to the project root (e.g., "pkg/service/agent").
+
+IMPORTANT: ONLY inject scope init if at least one test in that scope makes outgoing calls.
+- If a scope contains ONLY pure logic/unit tests, do NOT inject scope init.
+- If you are unsure, err on the side of injecting it.
 
 (2) PER-TEST CALL (runs for every test case)
 - Before every individual test case runs, call:
-  StartKeploySession("<SCOPE_PATH>/kMocks/<TESTCASE_NAME>.yml")
+  StartKeploySession("<SCOPE_PATH>", "<TESTCASE_NAME>")
+
+IMPORTANT: ONLY inject per-test calls if the test actually makes outgoing calls (network, database, etc.).
+- Analyze the test body.
+- If the test is purely logic/unit test (e.g. only asserts variable values, no I/O), do NOT inject StartKeploySession.
+- If you are unsure, err on the side of injecting it (e.g. if it calls a function that might do I/O).
 
 If a framework does NOT have a true “before each test case” hook, inject the per-test call as the FIRST LINE inside each test case body.
 
@@ -33,8 +42,7 @@ SYNCHRONOUS GUARANTEE
 Therefore, you do NOT need any file markers, locks, or complex once-guards.
 
 CONSTANTS (must be literal)
-- KMOCKS_DIR = "kMocks"
-- MAPPING_FILE = "mocks.yml"
+- MAPPING_FILE = "keploy"
 
 IMPORTANT ORDERING REQUIREMENT (NEW)
 - The SCOPE INIT must run as the absolute first thing for that scope.
@@ -45,8 +53,8 @@ IMPORTANT ORDERING REQUIREMENT (NEW)
 - Therefore, you MUST choose a scope-init mechanism that is guaranteed by that framework/runner to execute before any test case in that scope begins.
 - If the framework has multiple “global/setup” layers (e.g., root config setup vs folder setup), you must ensure your injected SCOPE INIT is placed in the earliest possible layer that still remains within the TARGET SET scope.
 
-Also add ".yml" extension when referencing the mock file path in the StartKeploySession call.
-For example: StartKeploySession("path/to/kMocks/mocks.yml")
+Do NOT add ".sb.yaml" extension when referencing the mock file path in the StartKeploySession call.
+For example: StartKeploySession("path/to", "keploy")
 
 =====================================================================
 ABSOLUTE FIRST STEP (DO THIS BEFORE ANY EDITS)
@@ -237,13 +245,13 @@ If StartKeploySession is NOT found:
 - Implement it in the SCOPE INIT FILE (or implement once in a shared test util and import it from each SCOPE INIT FILE if that is cleaner).
 
 StartKeploySession requirements:
-- Signature: StartKeploySession(pathString)
+- Signature: StartKeploySession(location, name)
 - Fail-safe: If the agent/server is unreachable or call fails, tests MUST continue. Log warning and return.
 - Minimal dependencies: Do not add heavy libraries. If a language/framework cannot easily compute paths/names without new deps, hardcode strings instead.
 
 PSEUDOCODE (language-agnostic)
-function StartKeploySession(pathString):
-    if pathString is empty:
+function StartKeploySession(locationString, nameString):
+    if locationString is empty or nameString is empty:
         return
 
     agentURI = getenv("KEPLOY_AGENT_URI") or getenv("KEPLOY_MCP_URI") or ""
@@ -251,8 +259,8 @@ function StartKeploySession(pathString):
         log("Keploy session skipped: agent URI not set")
         return
 
-    endpoint = normalize(agentURI) + "/hooks/start-session"  (or repo’s known endpoint)
-    payload = { "name": pathString }
+    endpoint = normalize(agentURI) + "/sandbox/scope"  (or repo’s known endpoint)
+    payload = { "location": locationString, "name": nameString }
 
     try:
         httpPost(endpoint, json(payload), timeout=2-5s)
@@ -276,8 +284,8 @@ Instead:
 - Prefer the simplest approach. If computing is even slightly unclear or would require extra dependencies, hardcode.
 
 The two required argument shapes are ALWAYS:
-- "<SCOPE_PATH>/kMocks/mocks.yml"
-- "<SCOPE_PATH>/kMocks/<TESTCASE_NAME>.yml"
+- StartKeploySession("<SCOPE_PATH>", "keploy")
+- StartKeploySession("<SCOPE_PATH>", "<TESTCASE_NAME>")
 
 =====================================================================
 CALL SITES YOU MUST INJECT (DETAILED)
@@ -286,27 +294,30 @@ CALL SITES YOU MUST INJECT (DETAILED)
 A) Scope init call site (runs ONCE per scope)
 - It MUST run once before any tests in that scope.
 - It MUST be located in the SCOPE INIT FILE.
+- SKIP scopes that clearly have NO tests making outgoing calls.
+
 - It MUST call StartKeploySession with the inline argument:
-  StartKeploySession("<SCOPE_PATH>/kMocks/mocks.yml")
+  StartKeploySession("<SCOPE_PATH>", "keploy")
 
 PSEUDOCODE:
 function scopeInit():
-    StartKeploySession("<SCOPE_PATH>/kMocks/mocks.yml")
+    StartKeploySession("<SCOPE_PATH>", "keploy")
 
 B) Per-test call site (runs before EVERY test case)
 - Prefer a real per-test hook if the framework supports it.
 - Otherwise inject as the FIRST LINE in each test body.
+- SKIP tests that clearly do not make outgoing calls (pure unit tests).
 
 It MUST call StartKeploySession with the inline argument:
-  StartKeploySession("<SCOPE_PATH>/kMocks/<TESTCASE_NAME>.yml")
+  StartKeploySession("<SCOPE_PATH>", "<TESTCASE_NAME>")
 
 PSEUDOCODE (hook form):
 beforeEachTest():
-    StartKeploySession("<SCOPE_PATH>/kMocks/<TESTCASE_NAME>.yml")
+    StartKeploySession("<SCOPE_PATH>", "<TESTCASE_NAME>")
 
 PSEUDOCODE (first-line injection form):
 testCaseBody():
-    StartKeploySession("<SCOPE_PATH>/kMocks/<HARDCODED_TEST_NAME>.yml")
+    StartKeploySession("<SCOPE_PATH>", "<HARDCODED_TEST_NAME>")
     ... existing test code ...
 
 =====================================================================
@@ -317,7 +328,7 @@ GO (testing)
 Scope init:
 - In each targeted package folder, in the SCOPE INIT FILE:
   - Add TestMain(m *testing.M)
-  - Call StartKeploySession("<SCOPE_PATH>/kMocks/mocks.yml") once before m.Run()
+  - Call StartKeploySession("<SCOPE_PATH>", "keploy") once before m.Run()
 
 Per-test:
 - Inject as FIRST LINE inside:
@@ -325,7 +336,7 @@ Per-test:
   - each t.Run subtest body
 - Prefer TESTCASE_NAME = t.Name()
 - Call inline:
-  StartKeploySession("<SCOPE_PATH>/kMocks/" + t.Name() + ".yml") OR hardcode if needed.
+  StartKeploySession("<SCOPE_PATH>", t.Name()) OR hardcode if needed.
 - Do NOT introduce helper functions.
 
 Scope path:
@@ -336,11 +347,11 @@ PYTEST (Python)
 Scope init:
 - In each targeted test folder, create/modify conftest.py (SCOPE INIT FILE):
   - autouse fixture with scope="package" calls:
-    StartKeploySession("<SCOPE_PATH>/kMocks/mocks.yml")
+    StartKeploySession("<SCOPE_PATH>", "keploy")
 
 Per-test:
 - autouse fixture with scope="function" calls:
-  StartKeploySession("<SCOPE_PATH>/kMocks/<testName>.yml")
+  StartKeploySession("<SCOPE_PATH>", "<testName>")
 - Prefer TESTCASE_NAME = request.node.nodeid (more unique) or request.node.name
 - Compute or hardcode "<SCOPE_PATH>" inline, no helpers.
 
@@ -351,7 +362,7 @@ Scope init:
 - Put the scope init call in a setup file loaded by runner config for that scope OR use projects/workspaces OR use a simple wrapper script that runs scopes sequentially.
 - The scope init call must happen once per scope (since run is synchronous, a single config-level setup per scope is enough).
 - Call inline:
-  StartKeploySession("<SCOPE_PATH>/kMocks/mocks.yml")
+  StartKeploySession("<SCOPE_PATH>", "keploy")
 
 Per-test:
 - Use beforeEach in the runner’s supported setup:
@@ -360,7 +371,7 @@ Per-test:
   - Mocha: required setup file + beforeEach
   - Playwright: test.beforeEach
 - Call inline in the hook:
-  StartKeploySession("<SCOPE_PATH>/kMocks/<TESTCASE_NAME>.yml")
+  StartKeploySession("<SCOPE_PATH>", "<TESTCASE_NAME>")
 - If a beforeEach hook cannot be applied without per-file imports, inject first-line calls into each test callback (wrap or direct injection).
 
 TESTCASE_NAME:
@@ -378,13 +389,13 @@ Scope init:
   - a package-local base class if repo already uses base tests
 - Place/init logic in the package’s SCOPE INIT FILE (package-local support file) or a shared helper applied only to target scopes.
 - Call inline:
-  StartKeploySession("<SCOPE_PATH>/kMocks/mocks.yml")
+  StartKeploySession("<SCOPE_PATH>", "keploy")
 
 Per-test:
 - Prefer @BeforeEach (JUnit) / @BeforeMethod (TestNG)
 - Else inject first line inside each @Test method.
 - Call inline:
-  StartKeploySession("<SCOPE_PATH>/kMocks/<TESTCASE_NAME>.yml")
+  StartKeploySession("<SCOPE_PATH>", "<TESTCASE_NAME>")
 
 TESTCASE_NAME:
 - Prefer runtime TestInfo display name if easy

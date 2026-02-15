@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -55,22 +54,27 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		if r.cfg != nil && r.cfg.Path != "" {
 			basePath = r.cfg.Path
 		} else {
-			basePath = "./keploy"
+			basePath = "."
 		}
 	}
+	basePath = filepath.Clean(basePath)
 
-	resolvedPath, err := resolveMockSetPath(basePath)
-	if err != nil {
-		return nil, err
-	}
-	basePath = resolvedPath
+	mockFilePath := utils.BuildSandboxFilePath(basePath, opts.Name)
+	filePrefix := strings.TrimSuffix(filepath.Base(mockFilePath), ".sb.yaml")
 
-	sessionID := fmt.Sprintf("mock-%d", time.Now().Unix())
-	mockFilePath := filepath.Join(basePath, "mocks.yaml")
+	sessionID := fmt.Sprintf("sandbox-%d", time.Now().Unix())
 
 	db := r.mockDB
-	if db == nil || opts.Path != "" {
-		db = mockdb.New(r.logger, basePath, "")
+	if db == nil || opts.Path != "" || opts.Name != "" {
+		db = mockdb.New(r.logger, basePath, filePrefix+".sb")
+	}
+
+	// Sandbox files can be created in nested directories.
+	if err := utils.AddToGitIgnore(r.logger, ".", "**/*.sb.yaml"); err != nil {
+		utils.LogError(r.logger, err, "failed to add **/*.sb.yaml to .gitignore")
+	}
+	if err := utils.AddToGitIgnore(r.logger, ".", "**/*.sb.yml"); err != nil {
+		utils.LogError(r.logger, err, "failed to add **/*.sb.yml to .gitignore")
 	}
 
 	collector := newMetadataCollector()
@@ -126,64 +130,6 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		AppExitCode:  appExitCode,
 		Output:       "",
 	}, nil
-}
-
-func resolveMockSetPath(basePath string) (string, error) {
-	basePath = filepath.Clean(strings.TrimSpace(basePath))
-	if basePath == "" {
-		basePath = "./keploy"
-	}
-
-	// If user explicitly passes a specific mock-set directory, use it as-is.
-	if _, ok := parseMockSetID(filepath.Base(basePath)); ok {
-		return basePath, nil
-	}
-
-	nextSetName, err := getNextMockSetName(basePath)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(basePath, nextSetName), nil
-}
-
-func getNextMockSetName(basePath string) (string, error) {
-	entries, err := os.ReadDir(basePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "mock-set-0", nil
-		}
-		return "", fmt.Errorf("failed to read mock base path %q: %w", basePath, err)
-	}
-
-	maxSetID := -1
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if setID, ok := parseMockSetID(entry.Name()); ok && setID > maxSetID {
-			maxSetID = setID
-		}
-	}
-
-	return fmt.Sprintf("mock-set-%d", maxSetID+1), nil
-}
-
-func parseMockSetID(name string) (int, bool) {
-	const prefix = "mock-set-"
-	if !strings.HasPrefix(name, prefix) {
-		return 0, false
-	}
-
-	rawID := strings.TrimPrefix(name, prefix)
-	if rawID == "" {
-		return 0, false
-	}
-
-	setID, err := strconv.Atoi(rawID)
-	if err != nil || setID < 0 {
-		return 0, false
-	}
-	return setID, true
 }
 
 func exitCodeFromAppError(appErr models.AppError) int {

@@ -22,8 +22,6 @@ func Mock(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 
 	cmd.AddCommand(DownloadMocks(ctx, logger, serviceFactory, cmdConfigurator))
 	cmd.AddCommand(UploadMocks(ctx, logger, serviceFactory, cmdConfigurator))
-	cmd.AddCommand(MockRecord(ctx, logger, cfg, serviceFactory, cmdConfigurator))
-	cmd.AddCommand(MockTest(ctx, logger, cfg, serviceFactory, cmdConfigurator))
 	for _, subCmd := range cmd.Commands() {
 		err := cmdConfigurator.AddFlags(subCmd)
 		if err != nil {

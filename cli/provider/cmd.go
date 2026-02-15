@@ -256,7 +256,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 
-	case "record", "test", "rerecord":
+	case "record", "test", "replay", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
@@ -265,24 +265,27 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
 			return nil
 		}
-		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		if cmd.Parent() != nil && (cmd.Parent().Name() == "mock" || cmd.Parent().Name() == "sandbox") {
 			if cmd.Name() == "record" {
-				pathDefault := c.cfg.Path
-				if pathDefault == "" {
-					pathDefault = "./keploy"
+				locationDefault := c.cfg.Path
+				if locationDefault == "" {
+					locationDefault = "."
 				}
 				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-				cmd.Flags().StringP("path", "p", pathDefault, "Path to store mock files")
+				cmd.Flags().String("location", locationDefault, "Location directory to store sandbox files")
+				cmd.Flags().String("name", "keploy", "Sandbox file prefix (final file: <name>.sb.yaml)")
+				cmd.Flags().String("tag", "", "Optional sandbox reference tag for config/registry workflows")
 				cmd.Flags().Duration("duration", 0, "Recording duration (e.g., \"60s\")")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 				return nil
 			}
-			if cmd.Name() == "test" {
+			if cmd.Name() == "replay" {
 				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-				cmd.Flags().StringP("path", "p", "", "Path to mock files (optional). If omitted, latest run is used")
-				cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during replay")
+				cmd.Flags().String("location", ".", "Location directory to read sandbox files")
+				cmd.Flags().String("name", "keploy", "Sandbox file prefix (final file: <name>.sb.yaml)")
+				cmd.Flags().Bool("local", false, "Local-only sandbox replay mode")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
@@ -835,7 +838,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		config.SetSelectedTests(c.cfg, testSets)
 
 	case "generate", "download":
-		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		if cmd.Name() == "download" && cmd.Parent() != nil && (cmd.Parent().Name() == "mock" || cmd.Parent().Name() == "sandbox") {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				errMsg := "failed to get the path"
@@ -844,7 +847,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
+			testSets, err := cmd.Flags().GetStringSlice("test-sets")
 			if err != nil {
 				errMsg := "failed to get the testsets"
 				utils.LogError(c.logger, err, errMsg)
@@ -913,7 +916,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-	case "record", "test", "rerecord":
+	case "record", "test", "replay", "rerecord":
 
 		if cmd.Name() == "rerecord" {
 			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
@@ -965,14 +968,21 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
 		}
-		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+		if cmd.Parent() != nil && cmd.Parent().Name() == "sandbox" {
 			if c.cfg.Command == "" {
 				return c.noCommandError()
 			}
 
 			if cmd.Name() == "record" {
-				if c.cfg.Path == "" {
-					c.cfg.Path = "./keploy"
+				location, err := cmd.Flags().GetString("location")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get location flag")
+					return errors.New("failed to get location flag")
+				}
+				c.cfg.Path, err = utils.GetAbsPath(location)
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get absolute path")
+					return errors.New("failed to get absolute path")
 				}
 
 				duration, err := cmd.Flags().GetDuration("duration")
@@ -984,14 +994,50 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return nil
 			}
 
+			if cmd.Name() == "replay" {
+				location, err := cmd.Flags().GetString("location")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get location flag")
+					return errors.New("failed to get location flag")
+				}
+				c.cfg.Path, err = utils.GetAbsPath(location)
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get absolute path")
+					return errors.New("failed to get absolute path")
+				}
+				return nil
+			}
+		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+			if c.cfg.Command == "" {
+				return c.noCommandError()
+			}
+			if cmd.Name() == "record" {
+				if c.cfg.Path == "" {
+					c.cfg.Path = "./keploy"
+				}
+				path, err := cmd.Flags().GetString("path")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get path flag")
+					return errors.New("failed to get path flag")
+				}
+				c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+				duration, err := cmd.Flags().GetDuration("duration")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get duration flag")
+					return errors.New("failed to get duration flag")
+				}
+				c.cfg.Record.RecordTimer = duration
+				return nil
+			}
 			if cmd.Name() == "test" {
 				path, err := cmd.Flags().GetString("path")
 				if err != nil {
 					utils.LogError(c.logger, err, "failed to get path flag")
 					return errors.New("failed to get path flag")
 				}
-				// Keep empty path when omitted so replay service can resolve latest run.
-				c.cfg.Path = strings.TrimSpace(path)
+				c.cfg.Path = utils.ToAbsPath(c.logger, path)
 				return nil
 			}
 		}
