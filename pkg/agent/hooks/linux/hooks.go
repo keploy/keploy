@@ -161,9 +161,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// ---------------
 
 	// ----- used in case of wsl -----
-	socket, err := link.Kprobe("sys_socket", objs.SyscallProbeEntrySocket, nil)
+	socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_socket")
+		utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
 		return err
 	}
 	h.socket = socket
