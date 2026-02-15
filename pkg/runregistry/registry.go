@@ -1,4 +1,3 @@
-// registry.go
 package runregistry
 
 import (
