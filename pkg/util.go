@@ -155,7 +155,7 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32, urlReplacements map[string]string) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -212,52 +212,68 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
-	// Determine which port to use for test execution
-	// Priority: 1. Config port (from flag/config file) 2. Test case AppPort 3. Original URL port (defaults to 80 for HTTP, 443 for HTTPS)
+	// Determine which URL/port to use for test execution.
+	// Priority (each overrides the previous):
+	//   1. URL port from test case (fallback to 80/443 by scheme)
+	//   2. AppPort from test case
+	//   3. Config port (--port flag or config file)
+	//   4. replaceWith (URL substring replacement — highest priority, applied last)
 	testURL := tc.HTTPReq.URL
-	parsedURL, parseErr := url.Parse(tc.HTTPReq.URL)
+
+	parsedURL, parseErr := url.Parse(testURL)
 	if parseErr != nil {
 		utils.LogError(logger, parseErr, "failed to parse test case URL")
 		return nil, parseErr
 	}
 
-	// Get the port from URL (returns empty string if not specified, meaning default 80/443)
-	urlPort := parsedURL.Port()
+	// Step 1: Start with the URL's own port (or scheme default).
+	// Go's http.Client already defaults to 80/443 when no port is present,
+	// so we only log for visibility — no mutation needed here.
+	if parsedURL.Port() == "" {
+		defaultPort := "80"
+		if parsedURL.Scheme == "https" {
+			defaultPort = "443"
+		}
+		logger.Debug("URL has no explicit port, will use scheme default",
+			zap.String("url", testURL), zap.String("default_port", defaultPort))
+	}
 
+	// Step 2: Override with AppPort if present.
+	if tc.AppPort > 0 {
+		host := parsedURL.Hostname()
+		parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
+		testURL = parsedURL.String()
+		logger.Debug("Overriding port with app_port from test case",
+			zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
+	}
+
+	// Step 3: Override with config port if provided (takes precedence over AppPort).
 	if configPort > 0 {
-		// Config port takes highest priority - use it for all test cases
 		host := parsedURL.Hostname()
 		parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
 		testURL = parsedURL.String()
 
-		// Warn if config port differs from recorded app_port (may cause test failures)
 		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-			logger.Info("Using port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
+			logger.Info("Config port overrides recorded app_port",
 				zap.Uint32("config_port", configPort),
 				zap.Uint16("recorded_app_port", tc.AppPort),
 				zap.String("url", testURL))
 		} else {
-			logger.Debug("Using port from config/flag", zap.Uint32("port", configPort), zap.String("url", testURL))
+			logger.Debug("Using port from config/flag",
+				zap.Uint32("port", configPort), zap.String("url", testURL))
 		}
-	} else if tc.AppPort > 0 {
-		// Use test case AppPort if no config port is provided
-		host := parsedURL.Hostname()
-		parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
-		testURL = parsedURL.String()
-		logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
-	} else {
-		// Neither configPort nor AppPort is set - use original URL
-		// If URL has no explicit port, Go's http.Client uses scheme defaults (80 for HTTP, 443 for HTTPS)
-		if urlPort == "" {
-			defaultPort := "80"
-			if parsedURL.Scheme == "https" {
-				defaultPort = "443"
+	}
+
+	// Step 4: Apply replaceWith URL substitutions (highest priority, applied last).
+	if len(urlReplacements) > 0 {
+		for substr, replacement := range urlReplacements {
+			if strings.Contains(testURL, substr) {
+				testURL = strings.Replace(testURL, substr, replacement, 1)
+				logger.Debug("Applied replaceWith URL substitution",
+					zap.String("find", substr),
+					zap.String("replace", replacement),
+					zap.String("result_url", testURL))
 			}
-			logger.Debug("No port specified in config or test case. Using URL as-is with default port.",
-				zap.String("url", testURL),
-				zap.String("default_port", defaultPort))
-		} else {
-			logger.Debug("Using port from URL", zap.String("url", testURL), zap.String("port", urlPort))
 		}
 	}
 

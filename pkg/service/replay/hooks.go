@@ -44,6 +44,23 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
+	// Extract URL replacements: merge global + per-test-set (test-set level overrides global for same key)
+	var urlReplacements map[string]string
+	rw := h.cfg.Test.ReplaceWith
+	if len(rw.Global.URL) > 0 || len(rw.TestSets) > 0 {
+		urlReplacements = make(map[string]string)
+		// Start with global replacements
+		for k, v := range rw.Global.URL {
+			urlReplacements[k] = v
+		}
+		// Override/add with per-test-set replacements
+		if tsRW, ok := rw.TestSets[testSetID]; ok {
+			for k, v := range tsRW.URL {
+				urlReplacements[k] = v
+			}
+		}
+	}
+
 	switch tc.Kind {
 	case models.HTTP:
 
@@ -52,7 +69,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout, h.cfg.Test.Port)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout, h.cfg.Test.Port, urlReplacements)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
@@ -66,7 +83,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, h.cfg.Test.GRPCPort)
+		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, h.cfg.Test.GRPCPort, urlReplacements)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))

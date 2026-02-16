@@ -35,6 +35,9 @@ test:
   globalNoise:
     global: {}
     test-sets: {}
+  replaceWith:
+    global: {}
+    test-sets: {}
   delay: 5
   host: ""
   port: 0
