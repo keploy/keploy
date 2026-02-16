@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -529,17 +528,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 				authority = strings.Replace(authority, substr, replacement, 1)
 
 				// Check if the replacement value explicitly defines a port.
-				// Heuristic: check for a colon that usually separates host:port.
+				// Heuristic: check if the string contains a port using `hasExplicitPort`, which handles IPv6.
 				// For gRPC authority, it's typically just host:port, so finding a colon is a strong signal.
-				if strings.Contains(replacement, ":") {
-					lastColon := strings.LastIndex(replacement, ":")
-					if lastColon != -1 && lastColon < len(replacement)-1 {
-						// check if characters after colon are digits
-						portPart := replacement[lastColon+1:]
-						if _, err := strconv.Atoi(portPart); err == nil {
-							replacementHasPort = true
-						}
-					}
+				if hasExplicitPort(replacement) {
+					replacementHasPort = true
 				}
 
 				logger.Debug("Applied replaceWith substitution for gRPC",
@@ -547,6 +539,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 					zap.String("replace", replacement),
 					zap.String("result_authority", authority),
 					zap.Bool("replacement_has_port", replacementHasPort))
+				break
 			}
 		}
 	}
@@ -555,11 +548,12 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	if !replacementHasPort {
 		// 2a. Override with configHost if provided (and replaceWith matched nothing)
 		if !replacementMatched && configHost != "" {
-			port := ""
-			if colonIdx := strings.LastIndex(authority, ":"); colonIdx != -1 {
-				port = authority[colonIdx:] // including colon
+			var err error
+			authority, err = utils.ReplaceGrpcHost(authority, configHost)
+			if err != nil {
+				utils.LogError(logger, err, "failed to replace authority host with config host")
+				return nil, err
 			}
-			authority = configHost + port
 			logger.Debug("Replaced authority host with config host", zap.String("host", configHost), zap.String("authority", authority))
 		}
 
