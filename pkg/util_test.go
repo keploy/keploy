@@ -261,7 +261,7 @@ func TestHasExplicitPort_IPv6_777(t *testing.T) {
 		{"IPv6WithoutBrackets", "::1", false}, // Invalid for SplitHostPort, so false
 		{"HostnameWithPort", "localhost:8080", true},
 		{"HostnameWithoutPort", "localhost", false},
-		{"InvalidPort", "localhost:http", false}, // Non-numeric port
+		{"InvalidPort", "localhost:http", false},    // Non-numeric port
 		{"FullURL", "http://localhost:8080", false}, // SplitHostPort fails on scheme
 		{"IPv6ComplexWithPort", "[2001:db8::1]:8080", true},
 		{"IPv6ComplexWithoutPort", "[2001:db8::1]", false},
