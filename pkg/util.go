@@ -155,7 +155,7 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32, urlReplacements map[string]string) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, apiTimeout uint64, configPort uint32, configHost string, urlReplacements map[string]string) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -210,69 +210,107 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSetID)))
 
 	// Determine which URL/port to use for test execution.
-	// Priority (each overrides the previous):
-	//   1. URL port from test case (fallback to 80/443 by scheme)
-	//   2. AppPort from test case
-	//   3. Config port (--port flag or config file)
-	//   4. replaceWith (URL substring replacement — highest priority, applied last)
+	// Priority logic (refined):
+	// 1. Check replaceWith against the ORIGINAL test case URL.
+	//    If a match is found, apply it.
+	//    CRITICAL: If the replacement VALUE itself contains a port, treat it as the final authority (skip AppPort/ConfigPort).
+	//    If the replacement value is just a host, continue to apply AppPort/ConfigPort logic.
+	// 2. ConfigHost (if provided) overrides host (ONLY if replaceWith didn't match)
+	// 3. AppPort (if present) overrides port
+	// 4. ConfigPort (if present) overrides port
+
 	testURL := tc.HTTPReq.URL
+	replacementHasPort := false
+	replacementMatched := false
 
-	parsedURL, parseErr := url.Parse(testURL)
-	if parseErr != nil {
-		utils.LogError(logger, parseErr, "failed to parse test case URL")
-		return nil, parseErr
-	}
-
-	// Step 1: Start with the URL's own port (or scheme default).
-	// Go's http.Client already defaults to 80/443 when no port is present,
-	// so we only log for visibility — no mutation needed here.
-	if parsedURL.Port() == "" {
-		defaultPort := "80"
-		if parsedURL.Scheme == "https" {
-			defaultPort = "443"
-		}
-		logger.Debug("URL has no explicit port, will use scheme default",
-			zap.String("url", testURL), zap.String("default_port", defaultPort))
-	}
-
-	// Step 2: Override with AppPort if present.
-	if tc.AppPort > 0 {
-		host := parsedURL.Hostname()
-		parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
-		testURL = parsedURL.String()
-		logger.Debug("Overriding port with app_port from test case",
-			zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
-	}
-
-	// Step 3: Override with config port if provided (takes precedence over AppPort).
-	if configPort > 0 {
-		host := parsedURL.Hostname()
-		parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
-		testURL = parsedURL.String()
-
-		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-			logger.Info("Config port overrides recorded app_port",
-				zap.Uint32("config_port", configPort),
-				zap.Uint16("recorded_app_port", tc.AppPort),
-				zap.String("url", testURL))
-		} else {
-			logger.Debug("Using port from config/flag",
-				zap.Uint32("port", configPort), zap.String("url", testURL))
-		}
-	}
-
-	// Step 4: Apply replaceWith URL substitutions (highest priority, applied last).
+	// Step 1: Check replaceWith against original URL
 	if len(urlReplacements) > 0 {
 		for substr, replacement := range urlReplacements {
 			if strings.Contains(testURL, substr) {
+				replacementMatched = true
 				testURL = strings.Replace(testURL, substr, replacement, 1)
+
+				// Check if the replacement value explicitly defines a port.
+				// Heuristic: check for a colon that usually separates host:port.
+				// We don't use net.SplitHostPort strictly because replacement might be a partial string or full URL.
+				// If it looks like it has a port, we respect it and skip further overrides.
+				if strings.Contains(replacement, ":") && !strings.HasSuffix(replacement, "http://") && !strings.HasSuffix(replacement, "https://") {
+					// Exclude cases where colon is just part of scheme or empty port.
+					// Simple check: does it have digits after the last colon?
+					lastColon := strings.LastIndex(replacement, ":")
+					if lastColon != -1 && lastColon < len(replacement)-1 {
+						// check if characters after colon are digits
+						portPart := replacement[lastColon+1:]
+						if _, err := strconv.Atoi(portPart); err == nil {
+							replacementHasPort = true
+						}
+					}
+				}
+
 				logger.Debug("Applied replaceWith URL substitution",
 					zap.String("find", substr),
 					zap.String("replace", replacement),
-					zap.String("result_url", testURL))
+					zap.String("result_url", testURL),
+					zap.Bool("replacement_has_port", replacementHasPort))
+			}
+		}
+	}
+
+	// Step 2: If replacement didn't match, apply ConfigHost
+	if !replacementMatched && configHost != "" {
+		var err error
+		testURL, err = utils.ReplaceHost(testURL, configHost)
+		if err != nil {
+			utils.LogError(logger, err, "failed to replace host with config host")
+			return nil, err
+		}
+		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("url", testURL))
+	}
+
+	// Step 2: If replacement didn't define a port, use standard port resolution
+	if !replacementHasPort {
+		parsedURL, parseErr := url.Parse(testURL)
+		if parseErr != nil {
+			utils.LogError(logger, parseErr, "failed to parse test case URL")
+			return nil, parseErr
+		}
+
+		// 2a. Start with URL's own port (Go defaults to 80/443 when absent)
+		if parsedURL.Port() == "" {
+			defaultPort := "80"
+			if parsedURL.Scheme == "https" {
+				defaultPort = "443"
+			}
+			logger.Debug("URL has no explicit port, will use scheme default",
+				zap.String("url", testURL), zap.String("default_port", defaultPort))
+		}
+
+		// 2b. Override with AppPort
+		if tc.AppPort > 0 {
+			host := parsedURL.Hostname()
+			parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
+			testURL = parsedURL.String()
+			logger.Debug("Overriding port with app_port from test case",
+				zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
+		}
+
+		// 2c. Override with ConfigPort
+		if configPort > 0 {
+			host := parsedURL.Hostname()
+			parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
+			testURL = parsedURL.String()
+
+			if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
+				logger.Info("Config port overrides recorded app_port",
+					zap.Uint32("config_port", configPort),
+					zap.Uint16("recorded_app_port", tc.AppPort),
+					zap.String("url", testURL))
+			} else {
+				logger.Debug("Using port from config/flag",
+					zap.Uint32("port", configPort), zap.String("url", testURL))
 			}
 		}
 	}
@@ -286,7 +324,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
-	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
+	req.Header.Set("KEPLOY-TEST-SET-ID", testSetID)
 	// send if its the last testcase
 	if tc.IsLast {
 		req.Header.Set("KEPLOY-LAST-TESTCASE", "true")
