@@ -72,6 +72,10 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
+// getAlias constructs the docker run command.
+// Note: The container runs with --cap-add=NET_ADMIN to configure its own private network namespace.
+// Due to Docker's network isolation (namespaces), this capability is strictly confined to the container
+// and CANNOT access or modify the Host System's network interfaces or configuration.
 func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
