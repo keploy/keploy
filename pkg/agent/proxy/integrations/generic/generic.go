@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -42,7 +43,20 @@ func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn
 		return err
 	}
 
-	err = encodeGeneric(ctx, logger, reqBuf, src, dst, mocks, opts)
+	// Forward initial request to destination (proxy-level write)
+	if _, err := dst.Write(reqBuf); err != nil {
+		utils.LogError(logger, err, "failed to forward initial request to destination")
+		return err
+	}
+
+	// Create read-only connection wrappers with auto-forwarding:
+	// - clientReadConn: reads from client auto-forward to dest
+	// - destReadConn: reads from dest auto-forward to client
+	// The parser ONLY reads — all writes happen transparently inside Read()
+	clientReadConn := orchestrator.NewForwardingReadOnlyConn(src, dst)
+	destReadConn := orchestrator.NewForwardingReadOnlyConn(dst, src)
+
+	err = encodeGeneric(ctx, logger, reqBuf, clientReadConn, destReadConn, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the generic message into the yaml")
 		return err

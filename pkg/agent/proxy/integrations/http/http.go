@@ -13,6 +13,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -69,7 +70,21 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, src, dst, mocks, opts)
+
+	// Forward initial request to destination (proxy-level write)
+	if _, err := dst.Write(reqBuf); err != nil {
+		utils.LogError(logger, err, "failed to forward initial request to destination")
+		return err
+	}
+
+	// Create read-only connection wrappers with auto-forwarding:
+	// - clientReadConn: reads from client auto-forward to dest
+	// - destReadConn: reads from dest auto-forward to client
+	// The parser ONLY reads — all writes happen transparently inside Read()
+	clientReadConn := orchestrator.NewForwardingReadOnlyConn(src, dst)
+	destReadConn := orchestrator.NewForwardingReadOnlyConn(dst, src)
+
+	err = h.encodeHTTP(ctx, reqBuf, clientReadConn, destReadConn, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
