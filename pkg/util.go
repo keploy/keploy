@@ -205,6 +205,44 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
 
+	// If the request body was offloaded to an asset file (>1MB), load it back
+	if tc.HTTPReq.BodyRef.Path != "" {
+		bodyData, readErr := os.ReadFile(tc.HTTPReq.BodyRef.Path)
+		if readErr != nil {
+			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", tc.HTTPReq.BodyRef.Path))
+			return nil, readErr
+		}
+		reqBody = bodyData
+		logger.Debug("loaded request body from asset file",
+			zap.String("path", tc.HTTPReq.BodyRef.Path),
+			zap.Int("size", len(bodyData)))
+	}
+
+	// If form field values were offloaded to asset files (>1MB) and they were not actual files (json,html,xml,txt etc...), load them back
+	for i, form := range tc.HTTPReq.Form {
+		if len(form.FileNames) == 0 && len(form.Paths) > 0 && len(form.Values) > 0 {
+			for j, value := range form.Values {
+				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
+					valData, readErr := os.ReadFile(form.Paths[j])
+					if readErr != nil {
+						utils.LogError(logger, readErr, "failed to read form value from asset file",
+							zap.String("path", form.Paths[j]),
+							zap.String("key", form.Key))
+						return nil, readErr
+					}
+					tc.HTTPReq.Form[i].Values[j] = string(valData)
+					logger.Debug("loaded form value from asset file",
+						zap.String("key", form.Key),
+						zap.String("path", form.Paths[j]),
+						zap.Int("size", len(valData)))
+				}
+			}
+			// Clear Paths after restoring values so the multipart builder
+			// doesn't treat these asset paths as file uploads.
+			tc.HTTPReq.Form[i].Paths = nil
+		}
+	}
+
 	contentType := tc.HTTPReq.Header["Content-Type"]
 	if strings.HasPrefix(contentType, "multipart/form-data") && len(tc.HTTPReq.Form) > 0 {
 		var body bytes.Buffer

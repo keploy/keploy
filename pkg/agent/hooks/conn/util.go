@@ -33,6 +33,10 @@ var CaptureHook CaptureFunc = Capture
 // MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 
+// LargeBodyThreshold is the size threshold (1MB) above which response bodies
+// are skipped during recording and only body size is stored.
+const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
 	var reqBody []byte
 	if req.Body != nil { // Read
@@ -104,15 +108,28 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.String("method", req.Method))
 		return
 	}
-  
-  hasBinaryFile := false
+
+	// If response body exceeds 1MB, mark it as skipped and store only the size
+	var respBodySkipped bool
+	var respBodySize int64
+	if len(respBody) > LargeBodyThreshold {
+		respBodySkipped = true
+		respBodySize = int64(len(respBody))
+		logger.Info("response body exceeds 1MB during recording, storing only body size",
+			zap.Int64("body_size_bytes", respBodySize),
+			zap.String("url", req.URL.String()),
+			zap.String("method", req.Method))
+		respBody = []byte{} // clear the body — only size is stored
+	}
+
+	hasBinaryFile := false
 	for _, fd := range formData {
 		if len(fd.Paths) > 0 {
 			hasBinaryFile = true
 			logger.Debug("Detected binary file in request form data", zap.String("key", fd.Key), zap.Strings("paths", fd.Paths))
 			break
-		}  
-  }  
+		}
+	}
 
 	testCase := &models.TestCase{
 		Version:       models.GetVersion(),
@@ -135,6 +152,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			StatusCode:    resp.StatusCode,
 			Header:        pkg.ToYamlHTTPHeader(resp.Header),
 			Body:          string(respBody),
+			BodySkipped:   respBodySkipped,
+			BodySize:      respBodySize,
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},

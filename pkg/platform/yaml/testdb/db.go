@@ -40,7 +40,10 @@ type tcsInfo struct {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
-	tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
+	// Skip curl generation for either form data requests or large body (>1MB)
+	if len(tc.HTTPReq.Body) <= LargeBodyThreshold && len(tc.HTTPReq.Form) == 0 {
+		tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
+	}
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
@@ -328,12 +331,102 @@ func extractTestNumber(name string) int {
 	return num
 }
 
+// LargeBodyThreshold is the size threshold (1MB) above which request bodies
+// are offloaded to the assets directory and response bodies are stored as hashes.
+const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
+
 func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName string) error {
+	// 1. Offload large request body (>1MB) to assets directory
+	if len(tc.HTTPReq.Body) > LargeBodyThreshold {
+		assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName)
+		if err := os.MkdirAll(assetDir, 0o755); err != nil {
+			utils.LogError(ts.logger, err, "failed to create assets directory for body", zap.String("path", assetDir))
+			return err
+		}
+		bodyPath := filepath.Join(assetDir, "body.txt")
+		bodyBytes := []byte(tc.HTTPReq.Body)
+		if err := os.WriteFile(bodyPath, bodyBytes, 0o644); err != nil {
+			utils.LogError(ts.logger, err, "failed to write request body asset", zap.String("path", bodyPath))
+			return err
+		}
+		tc.HTTPReq.BodyRef = models.BodyRef{
+			Path: bodyPath,
+			Size: int64(len(bodyBytes)),
+		}
+		tc.HTTPReq.Body = "" // clear the body since it's now stored in assets
+		ts.logger.Info("offloaded large request body to assets",
+			zap.String("testcase", tcsName),
+			zap.Int64("size", tc.HTTPReq.BodyRef.Size),
+			zap.String("path", bodyPath))
+	}
+
+	// 2. Skip large response body (>1MB) — save only metadata, not the body
+	if len(tc.HTTPResp.Body) > LargeBodyThreshold {
+		contentType := tc.HTTPResp.Header["Content-Type"]
+		if contentType == "" {
+			contentType = "unknown"
+		}
+		tc.HTTPResp.BodySize = int64(len(tc.HTTPResp.Body))
+		tc.HTTPResp.BodySkipped = true
+		ts.logger.Info("response body exceeds 1MB, skipping body storage",
+			zap.String("testcase", tcsName),
+			zap.Int64("body_size_bytes", tc.HTTPResp.BodySize),
+			zap.String("content_type", contentType),
+			zap.Int("status_code", tc.HTTPResp.StatusCode))
+		tc.HTTPResp.Body = ""
+	}
+
+	// 3. Handle form data assets (files and large values)
 	if tc.HTTPReq.Form == nil {
 		return nil
 	}
 
 	for i, form := range tc.HTTPReq.Form {
+		// 3a. Offload large form field values (>1MB) to assets (that are not actual files)
+		if len(form.FileNames) == 0 && len(form.Paths) == 0 {
+			hasLargeValue := false
+			for _, value := range form.Values {
+				if len(value) > LargeBodyThreshold {
+					hasLargeValue = true
+					break
+				}
+			}
+			if hasLargeValue {
+				// Pre-initialize Paths to same length as Values so indices stay aligned
+				tc.HTTPReq.Form[i].Paths = make([]string, len(form.Values))
+				for j, value := range form.Values {
+					if len(value) > LargeBodyThreshold {
+						formKey := filepath.Base(form.Key)
+						if formKey == "." || formKey == string(filepath.Separator) || formKey == "" {
+							formKey = "form"
+						}
+						assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
+						if err := os.MkdirAll(assetDir, 0o755); err != nil {
+							utils.LogError(ts.logger, err, "failed to create assets directory for form value", zap.String("path", assetDir))
+							return err
+						}
+						fileName := fmt.Sprintf("value_%d.txt", j)
+						destPath := filepath.Join(assetDir, fileName)
+						if err := os.WriteFile(destPath, []byte(value), 0o644); err != nil {
+							utils.LogError(ts.logger, err, "failed to write large form value asset", zap.String("path", destPath))
+							return err
+						}
+						// Replace value with empty string and store path at the same index
+						tc.HTTPReq.Form[i].Values[j] = ""
+						tc.HTTPReq.Form[i].Paths[j] = destPath
+						ts.logger.Info("offloaded large form value to assets",
+							zap.String("testcase", tcsName),
+							zap.String("key", form.Key),
+							zap.Int("size", len(value)),
+							zap.String("path", destPath))
+					}
+					// Small values: Paths[j] stays "" — no offload needed
+				}
+			}
+			continue
+		}
+
+		// 3b. Handle file-based form data (existing logic)
 		if len(form.FileNames) > 0 {
 			formKey := filepath.Base(form.Key)
 			if formKey == "." || formKey == string(filepath.Separator) || formKey == "" {
