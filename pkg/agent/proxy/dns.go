@@ -226,7 +226,8 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 		return nil, false
 	}
 
-	for {
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
 		mocks, err := mgr.GetUnFilteredMocksByKind(models.DNS)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to get dns mocks")
@@ -254,6 +255,19 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 			if p.updateDNSMock(mgr, matchedMock) {
 				return answers, true
 			}
+			p.logger.Debug("DNS mock update failed (filtered), retrying",
+				zap.String("mockName", matchedMock.Name),
+				zap.Int("attempt", attempt+1),
+				zap.Int("maxRetries", maxRetries),
+			)
+			// On final retry, return the answers anyway to avoid blocking the DNS response
+			if attempt == maxRetries-1 {
+				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+					zap.String("mockName", matchedMock.Name),
+					zap.String("query", question.Name),
+				)
+				return answers, true
+			}
 			continue
 		}
 
@@ -261,11 +275,26 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 			if p.updateDNSMock(mgr, matchedMock) {
 				return answers, true
 			}
+			p.logger.Debug("DNS mock update failed (unfiltered), retrying",
+				zap.String("mockName", matchedMock.Name),
+				zap.Int("attempt", attempt+1),
+				zap.Int("maxRetries", maxRetries),
+			)
+			// On final retry, return the answers anyway to avoid blocking the DNS response
+			if attempt == maxRetries-1 {
+				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+					zap.String("mockName", matchedMock.Name),
+					zap.String("query", question.Name),
+				)
+				return answers, true
+			}
 			continue
 		}
 
 		return nil, false
 	}
+
+	return nil, false
 }
 
 func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, []dns.RR) {
