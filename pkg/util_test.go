@@ -245,3 +245,32 @@ func TestFilterMocks_678(t *testing.T) {
 		assert.Equal(t, "mock3", result[4].Name)
 	})
 }
+
+// TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
+// including IPv4, IPv6, and hostnames, both with and without ports.
+func TestHasExplicitPort_IPv6_777(t *testing.T) {
+	testCases := []struct {
+		name     string
+		host     string
+		expected bool
+	}{
+		{"IPv4WithPort", "127.0.0.1:8080", true},
+		{"IPv4WithoutPort", "127.0.0.1", false},
+		{"IPv6WithPort", "[::1]:8080", true},
+		{"IPv6WithoutPort", "[::1]", false},
+		{"IPv6WithoutBrackets", "::1", false}, // Invalid for SplitHostPort, so false
+		{"HostnameWithPort", "localhost:8080", true},
+		{"HostnameWithoutPort", "localhost", false},
+		{"InvalidPort", "localhost:http", false}, // Non-numeric port
+		{"FullURL", "http://localhost:8080", false}, // SplitHostPort fails on scheme
+		{"IPv6ComplexWithPort", "[2001:db8::1]:8080", true},
+		{"IPv6ComplexWithoutPort", "[2001:db8::1]", false},
+		{"ColonInPath", "localhost:8080/foo", false}, // SplitHostPort fails
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, hasExplicitPort(tc.host))
+		})
+	}
+}
