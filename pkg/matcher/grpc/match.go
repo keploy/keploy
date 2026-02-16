@@ -15,7 +15,7 @@ import (
 
 // Match compares an expected gRPC response with an actual response and returns whether they match
 // along with detailed comparison results
-func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),
@@ -363,14 +363,16 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 
 		// Print the differences
-		_, err := newLogger.Printf(logs)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
-		}
+		if emitFailureLogs {
+			_, err := newLogger.Printf(logs)
+			if err != nil {
+				utils.LogError(logger, err, "failed to print the logs")
+			}
 
-		err = logDiffs.Render()
-		if err != nil {
-			utils.LogError(logger, err, "failed to render the diffs")
+			err = logDiffs.Render()
+			if err != nil {
+				utils.LogError(logger, err, "failed to render the diffs")
+			}
 		}
 	} else {
 		// Display success message
