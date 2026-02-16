@@ -579,7 +579,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			authority = fmt.Sprintf("%s:%d", host, tc.AppPort)
 			logger.Debug("Overriding port with app_port from test case",
 				zap.Uint16("app_port", tc.AppPort), zap.String("authority", authority))
-	}
+		}
 
 		// 2c. Override with config port if provided (takes precedence over AppPort).
 		if configPort > 0 {
@@ -596,7 +596,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			}
 		}
 	}
-	
+
 	// Extract method path
 	path, ok := grpcReq.Headers.PseudoHeaders[":path"]
 	if !ok {
