@@ -234,19 +234,11 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSetID string, lo
 				testURL = strings.Replace(testURL, substr, replacement, 1)
 
 				// Check if the replacement value explicitly defines a port.
-				// Heuristic: check for a colon that usually separates host:port.
-				// We don't use net.SplitHostPort strictly because replacement might be a partial string or full URL.
+				// Heuristic: check if the string contains a port using `hasExplicitPort`, which handles IPv6.
 				// If it looks like it has a port, we respect it and skip further overrides.
-				if strings.Contains(replacement, ":") && !strings.HasPrefix(replacement, "http://") && !strings.HasPrefix(replacement, "https://") {
-					// Exclude cases where colon is just part of scheme or empty port.
-					// Simple check: does it have digits after the last colon?
-					lastColon := strings.LastIndex(replacement, ":")
-					if lastColon != -1 && lastColon < len(replacement)-1 {
-						// check if characters after colon are digits
-						portPart := replacement[lastColon+1:]
-						if _, err := strconv.Atoi(portPart); err == nil {
-							replacementHasPort = true
-						}
+				if !strings.HasPrefix(replacement, "http://") && !strings.HasPrefix(replacement, "https://") {
+					if hasExplicitPort(replacement) {
+						replacementHasPort = true
 					}
 				}
 
@@ -255,6 +247,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSetID string, lo
 					zap.String("replace", replacement),
 					zap.String("result_url", testURL),
 					zap.Bool("replacement_has_port", replacementHasPort))
+
+				break
 			}
 		}
 	}
@@ -1332,4 +1326,29 @@ func LooksLikeJSON(s string) bool {
 	}
 	return (strings.HasPrefix(s, "{") && strings.Contains(s, "}")) ||
 		(strings.HasPrefix(s, "[") && strings.Contains(s, "]"))
+}
+
+// hasExplicitPort checks if the given host string (or host:port)
+// has an explicit port defined. It handles IPv6 addresses (e.g. [::1]:8080) correctly.
+func hasExplicitPort(hostStr string) bool {
+	// Basic check: if no colon, definitely no port (unless it's a bare IPv6, but that doesn't have a port either)
+	if !strings.Contains(hostStr, ":") {
+		return false
+	}
+
+	// Attempt to split host/port
+	// net.SplitHostPort handles IPv6 addresses enclosed in brackets [::1]:8080
+	_, port, err := net.SplitHostPort(hostStr)
+	if err != nil {
+		return false
+	}
+
+	// If a port is found, verify it is numeric
+	if port != "" {
+		if _, err := strconv.Atoi(port); err == nil {
+			return true
+		}
+	}
+
+	return false
 }
