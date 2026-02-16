@@ -27,7 +27,7 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	bodyType := models.Plain
 	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
@@ -379,14 +379,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true
-			_, err := newLogger.Printf(logs)
-			if err != nil {
-				utils.LogError(logger, err, "failed to print the logs")
-			}
+			if emitFailureLogs {
+				_, err := newLogger.Printf(logs)
+				if err != nil {
+					utils.LogError(logger, err, "failed to print the logs")
+				}
 
-			err = logDiffs.Render()
-			if err != nil {
-				utils.LogError(logger, err, "failed to render the diffs")
+				err = logDiffs.Render()
+				if err != nil {
+					utils.LogError(logger, err, "failed to render the diffs")
+				}
 			}
 		} else {
 			pass = true
