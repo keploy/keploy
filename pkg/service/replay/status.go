@@ -7,6 +7,7 @@ type TestRunReport struct {
 	Total     int
 	Passed    int
 	Failed    int
+	Obsolete  int
 	Ignored   int
 	Status    bool
 	Duration  time.Duration
@@ -24,6 +25,7 @@ func GetCompleteTestRunReport() map[string]TestRunReport {
 			Total:     val.total,
 			Passed:    val.passed,
 			Failed:    val.failed,
+			Obsolete:  val.obsolete,
 			Ignored:   val.ignored,
 			Status:    val.status,
 			Duration:  val.duration,

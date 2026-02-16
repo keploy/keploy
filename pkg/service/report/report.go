@@ -156,14 +156,14 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 
 // printSummary prints the grand summary + per test-set table.
 func (r *Report) printSummary(reports map[string]*models.TestReport) error {
-	var total, passed, failed int
+	var total, passed, failed, obsolete int
 	var highRisk, mediumRisk, lowRisk int
 	categoryCounts := make(map[models.FailureCategory]int)
 
 	type row struct {
-		name              string
-		total, pass, fail int
-		dur               time.Duration
+		name                        string
+		total, pass, fail, obsolete int
+		dur                         time.Duration
 	}
 	rows := make([]row, 0, len(reports))
 
@@ -171,6 +171,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		total += rep.Total
 		passed += rep.Success
 		failed += rep.Failure
+		obsolete += rep.Obsolete
 
 		// Count risk levels and categories for failed tests
 		for _, test := range rep.Tests {
@@ -201,7 +202,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 			dur = estimateDuration(rep.Tests)
 		}
 
-		rows = append(rows, row{name: name, total: rep.Total, pass: rep.Success, fail: rep.Failure, dur: dur})
+		rows = append(rows, row{name: name, total: rep.Total, pass: rep.Success, fail: rep.Failure, obsolete: rep.Obsolete, dur: dur})
 	}
 
 	// Sort by name for determinism
@@ -217,6 +218,9 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintf(r.out, "\tTotal tests: %d\n", total)
 	fmt.Fprintf(r.out, "\tTotal test passed: %d\n", passed)
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
+	if obsolete > 0 {
+		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
+	}
 
 	// Add risk level statistics
 	if failed > 0 {
@@ -254,13 +258,22 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 
 	// Tabwriter over the same buffered writer.
 	w := tabwriter.NewWriter(r.out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "\tTest Suite\tTotal\tPassed\tFailed\tTime Taken\t")
+	header := "\tTest Suite\tTotal\tPassed\tFailed"
+	if obsolete > 0 {
+		header += "\tObsolete"
+	}
+	header += "\tTime Taken\t"
+	fmt.Fprintln(w, header)
 	for _, rrow := range rows {
 		tt := "N/A"
 		if rrow.dur > 0 {
 			tt = fmtDuration(rrow.dur)
 		}
-		fmt.Fprintf(w, "\t%s\t%d\t%d\t%d\t%s\t\n", rrow.name, rrow.total, rrow.pass, rrow.fail, tt)
+		if obsolete > 0 {
+			fmt.Fprintf(w, "\t%s\t%d\t%d\t%d\t%d\t%s\t\n", rrow.name, rrow.total, rrow.pass, rrow.fail, rrow.obsolete, tt)
+		} else {
+			fmt.Fprintf(w, "\t%s\t%d\t%d\t%d\t%s\t\n", rrow.name, rrow.total, rrow.pass, rrow.fail, tt)
+		}
 	}
 	_ = w.Flush()
 
@@ -492,24 +505,27 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 // processLegacySummary generates a summary report for legacy format
 func (r *Report) processLegacySummary(tests []models.TestResult) error {
-	total, pass, fail := len(tests), 0, 0
+	total, pass, fail, obsolete := len(tests), 0, 0, 0
 	var failedCases []string
 
 	for _, t := range tests {
-		if t.Status == models.TestStatusFailed {
+		switch t.Status {
+		case models.TestStatusFailed:
 			fail++
 			label := t.TestCaseID
 			if t.Name != "" {
 				label = fmt.Sprintf("%s (%s)", t.TestCaseID, t.Name)
 			}
 			failedCases = append(failedCases, label)
-		} else {
+		case models.TestStatusObsolete:
+			obsolete++
+		default:
 			pass++
 		}
 	}
 
 	totalTime := estimateDuration(tests)
-	printSingleSummaryTo(r.out, "file", total, pass, fail, totalTime, failedCases)
+	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, totalTime, failedCases)
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in processLegacySummary: %w", err)

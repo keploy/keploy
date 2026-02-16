@@ -10,6 +10,7 @@ type TestReport struct {
 	Status     string       `json:"status" yaml:"status"`
 	Success    int          `json:"success" yaml:"success"`
 	Failure    int          `json:"failure" yaml:"failure"`
+	Obsolete   int          `json:"obsolete,omitempty" yaml:"obsolete,omitempty"`
 	HighRisk   int          `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
 	MediumRisk int          `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
 	LowRisk    int          `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
@@ -184,11 +185,12 @@ type TestStatus string
 
 // constants for test status
 const (
-	TestStatusPending TestStatus = "PENDING"
-	TestStatusRunning TestStatus = "RUNNING"
-	TestStatusFailed  TestStatus = "FAILED"
-	TestStatusPassed  TestStatus = "PASSED"
-	TestStatusIgnored TestStatus = "IGNORED"
+	TestStatusPending  TestStatus = "PENDING"
+	TestStatusRunning  TestStatus = "RUNNING"
+	TestStatusFailed   TestStatus = "FAILED"
+	TestStatusPassed   TestStatus = "PASSED"
+	TestStatusIgnored  TestStatus = "IGNORED"
+	TestStatusObsolete TestStatus = "OBSOLETE"
 )
 
 type (
