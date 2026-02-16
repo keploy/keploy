@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// CheckCapabilities verifies if the current process has the specific capabilities
+// CheckRequiredPermissions verifies if the current process has the specific capabilities
 // required for Keploy to function correctly in Docker mode.
 // On non-Linux systems, this check remains a no-op as capabilities are Linux-specific.
-func CheckCapabilities() error {
+func CheckRequiredPermissions() error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
@@ -68,7 +68,7 @@ func CheckCapabilities() error {
 	}
 
 	if len(missing) > 0 {
-		return fmt.Errorf("missing required capabilities: %s.\n\nPlease ensure you run the container with:\n--cap-add=NET_ADMIN --cap-add=SYS_PTRACE --cap-add=SYS_RESOURCE --cap-add=BPF --cap-add=PERFMON", strings.Join(missing, ", "))
+		return fmt.Errorf("missing required capabilities: %s. Please ensure you have the permissions with: NET_ADMIN, SYS_PTRACE, SYS_RESOURCE, BPF, PERFMON", strings.Join(missing, ", "))
 	}
 
 	return nil

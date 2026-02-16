@@ -673,6 +673,11 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	}
 	opts.ExtraArgs = agent.StartupAgentHook.GetArgs(ctx)
 	if isDockerCmd {
+		// Helper check to ensure the binary running inside docker has the required capabilities
+		if err := utils.CheckRequiredPermissions(); err != nil {
+			a.logger.Error("Failed to start Keploy Agent", zap.Error(err))
+			return err
+		}
 		// Start the agent in Docker container using errgroup
 		grp.Go(func() error {
 			defer cancel() // Cancel agent context when Docker agent stops

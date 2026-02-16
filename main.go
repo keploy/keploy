@@ -60,13 +60,6 @@ func start(ctx context.Context) {
 		return
 	}
 
-	// Helper check to ensure the binary running inside docker has the required capabilities
-	if os.Getenv("BINARY_TO_DOCKER") == "true" {
-		if err := utils.CheckCapabilities(); err != nil {
-			logger.Fatal("Failed to start Keploy Agent", zap.Error(err))
-		}
-	}
-
 	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
 		if err != nil {
@@ -116,9 +109,9 @@ func start(ctx context.Context) {
 			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
 				return
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-				return
-			}
+			// if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+			// 	return
+			// }
 		}
 	}()
 	defer utils.Recover(logger)

@@ -338,9 +338,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
+	// ----- used in case of wsl -----
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the socket")
+			utils.LogError(h.logger, err, "failed to close the tracepoint hook on sys_socket")
 		}
 	}
 
@@ -401,11 +402,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 				utils.LogError(h.logger, err, "failed to close the cgBind6")
 			}
 		}
-		if h.bindEnter != nil {
-			if err := h.bindEnter.Close(); err != nil {
-				utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
-			}
-		}
+
 	}
 	h.logger.Debug("eBPF resources released successfully...")
 }
