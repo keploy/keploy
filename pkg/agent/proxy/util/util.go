@@ -382,7 +382,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 					if emptyReads >= maxEmptyReads {
 						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
 					}
-					time.Sleep(time.Millisecond * 10010) // Sleep before trying again
+					time.Sleep(time.Millisecond * 10) // Sleep before trying again
 					continue
 				}
 				return buffer, result.err

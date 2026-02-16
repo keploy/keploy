@@ -12,8 +12,55 @@ import (
 	"net"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
+	postgres "go.keploy.io/server/v3/pkg/models/postgres"
 	"go.uber.org/zap"
 )
+
+// NewPostgresSSLConfigMock creates a synthetic SSLRequest/SSLResponse config mock
+// for backward compatibility. The main branch replayer expects this config mock
+// to exist when it encounters SSLRequest during replay. Without it, mocks
+// recorded on branches with proxy-level SSL handling break when replayed on
+// main/latest.
+func NewPostgresSSLConfigMock(connID string) *models.Mock {
+	reqTimestamp := time.Now()
+	sslReqPacket := postgres.Packet{
+		Header: &postgres.PacketInfo{
+			Header: &postgres.Header{
+				PayloadLength: 8,
+			},
+			Type: "SSLRequest",
+		},
+		Message: map[string]interface{}{"code": SSLRequestCode},
+	}
+	sslRespPacket := postgres.Packet{
+		Header: &postgres.PacketInfo{
+			Header: &postgres.Header{
+				PayloadLength: 1,
+			},
+			Type: "SSLResponse",
+		},
+		Message: map[string]interface{}{"response": "S"},
+	}
+	return &models.Mock{
+		Version: models.GetVersion(),
+		Name:    "config",
+		Kind:    models.PostgresV2,
+		Spec: models.MockSpec{
+			PostgresRequestsV2:  []postgres.Request{{PacketBundle: postgres.PacketBundle{Packets: []postgres.Packet{sslReqPacket}}}},
+			PostgresResponsesV2: []postgres.Response{{PacketBundle: postgres.PacketBundle{Packets: []postgres.Packet{sslRespPacket}}}},
+			ReqTimestampMock:    reqTimestamp,
+			ResTimestampMock:    time.Now(),
+			Metadata: map[string]string{
+				"type":              "config",
+				"requestOperation":  "SSLRequest",
+				"responseOperation": "SSLResponse",
+				"connID":            connID,
+			},
+		},
+		ConnectionID: connID,
+	}
+}
 
 // PostgreSQL protocol constants
 const (

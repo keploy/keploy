@@ -686,6 +686,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
+		// Inject a synthetic SSLRequest/SSLResponse config mock for backward compatibility.
+		// The main branch replayer expects this config mock when it encounters SSLRequest
+		// during replay. Without it, mocks recorded with proxy-level SSL break on main.
+		connID := ""
+		if v, ok := parserCtx.Value(models.ClientConnectionIDKey).(string); ok {
+			connID = v
+		}
+		rule.MC <- pTls.NewPostgresSSLConfigMock(connID)
+		logger.Debug("Injected synthetic SSLRequest/SSLResponse config mock for backward compatibility")
+
 		// After SSL negotiation, we need to read the next packet (StartupMessage)
 		// and wrap it in the srcConn so parsers see it
 		nextBuf, err := util.ReadInitialBuf(parserCtx, logger, srcConn)
