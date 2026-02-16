@@ -5,21 +5,20 @@ FROM golang:1.24 AS build
 WORKDIR /app
 
 # Define build arguments for ldflags
-ARG SENTRY_DSN_DOCKER
 ARG VERSION
 ARG SERVER_URL
 
-# Copy the Go module files and vendor directory
+# Copy the Go module files and download dependencies
 COPY go.mod go.sum /app/
-COPY vendor /app/vendor
+RUN go mod download
 
 # Copy the contents of the current directory into the build container
 COPY . /app
 
-# Build the keploy binary using vendored dependencies
+# Build the keploy binary
 # setting GOMAXPROCS to avoid crashing qemu while building different arch with docker buildx
 # ref - https://github.com/golang/go/issues/70329#issuecomment-2559049444
-RUN GOMAXPROCS=2 go build -mod=vendor -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITTHUB_APP_CLIENT_ID" -o keploy .
+RUN GOMAXPROCS=2 go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITTHUB_APP_CLIENT_ID" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
