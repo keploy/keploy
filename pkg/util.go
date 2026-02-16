@@ -237,7 +237,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSetID string, lo
 				// Heuristic: check for a colon that usually separates host:port.
 				// We don't use net.SplitHostPort strictly because replacement might be a partial string or full URL.
 				// If it looks like it has a port, we respect it and skip further overrides.
-				if strings.Contains(replacement, ":") && !strings.HasSuffix(replacement, "http://") && !strings.HasSuffix(replacement, "https://") {
+				if strings.Contains(replacement, ":") && !strings.HasPrefix(replacement, "http://") && !strings.HasPrefix(replacement, "https://") {
 					// Exclude cases where colon is just part of scheme or empty port.
 					// Simple check: does it have digits after the last colon?
 					lastColon := strings.LastIndex(replacement, ":")
