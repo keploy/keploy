@@ -514,8 +514,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	//    If a match is found, apply it.
 	//    CRITICAL: If the replacement VALUE itself contains a port, treat it as the final authority (skip AppPort/ConfigPort).
 	//    If the replacement value is just a host, continue to apply AppPort/ConfigPort logic.
-	// 2. AppPort (if present) overrides port
-	// 3. ConfigPort (if present) overrides port
+	// 2. If no replaceWith match is found and configHost is set, override the host using configHost.
+	// 3. AppPort (if present) overrides port.
+	// 4. ConfigPort (if present) overrides port.
 
 	replacementHasPort := false
 	replacementMatched := false
