@@ -35,25 +35,37 @@ func fmtDuration(d time.Duration) string {
 }
 
 // printSingleSummaryTo is the buffered variant used internally.
-func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, dur time.Duration, failedCases []string) {
+func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail, obsolete int, dur time.Duration, failedCases []string) {
 	if models.IsAnsiDisabled {
 		fmt.Fprintln(w, "<=========================================>")
 		fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
 		fmt.Fprintf(w, "\tTotal tests: %d\n", total)
 		fmt.Fprintf(w, "\tTotal test passed: %d\n", pass)
 		fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
+		if obsolete > 0 {
+			fmt.Fprintf(w, "\tTotal test obsolete: %d\n", obsolete)
+		}
 		if dur > 0 {
 			fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
 		} else {
 			fmt.Fprintf(w, "\tTotal time taken: %q\n", "N/A")
 		}
-		fmt.Fprintln(w, "\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
+		header := "\tTest Suite\t\tTotal\tPassed\t\tFailed"
+		if obsolete > 0 {
+			header += "\t\tObsolete"
+		}
+		header += "\t\tTime Taken\t"
+		fmt.Fprintln(w, header)
 		tt := "N/A"
 		if dur > 0 {
 			tt = fmtDuration(dur)
 		}
 
-		fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
+		if obsolete > 0 {
+			fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, obsolete, tt)
+		} else {
+			fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
+		}
 
 		fmt.Fprintln(w, "\nFAILED TEST CASES:")
 		if fail == 0 || len(failedCases) == 0 {
@@ -84,13 +96,25 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, d
 	fmt.Fprintf(w, "\tTotal tests:       %s%d%s\n", blue, total, reset)
 	fmt.Fprintf(w, "\tTotal test passed: %s%d%s\n", blue, pass, reset)
 	fmt.Fprintf(w, "\tTotal test failed: %s%d%s\n", blue, fail, reset)
+	if obsolete > 0 {
+		fmt.Fprintf(w, "\tTotal test obsolete: %s%d%s\n", blue, obsolete, reset)
+	}
 
 	fmt.Fprintf(w, "\tTotal time taken:  %s%s%s\n", red, timeStr, reset)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "\tTest Suite\tTotal\tPassed\tFailed\tTime Taken")
+	header := "\tTest Suite\tTotal\tPassed\tFailed"
+	if obsolete > 0 {
+		header += "\tObsolete"
+	}
+	header += "\tTime Taken"
+	fmt.Fprintln(tw, header)
 
-	fmt.Fprintf(tw, "\t%s\t%d\t%d\t%d\t%s\n", name, total, pass, fail, timeStr)
+	if obsolete > 0 {
+		fmt.Fprintf(tw, "\t%s\t%d\t%d\t%d\t%d\t%s\n", name, total, pass, fail, obsolete, timeStr)
+	} else {
+		fmt.Fprintf(tw, "\t%s\t%d\t%d\t%d\t%s\n", name, total, pass, fail, timeStr)
+	}
 	tw.Flush()
 
 	fmt.Fprintln(w, "\nFAILED TEST CASES:")
