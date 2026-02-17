@@ -55,13 +55,6 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				}
 			}()
 
-			// Check required permissions before setting up the agent
-			if err := utils.CheckRequiredPermissions(); err != nil {
-				utils.LogError(logger, err, "missing required permissions for agent")
-				return err
-			}
-			logger.Info("All required permissions are available")
-
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")

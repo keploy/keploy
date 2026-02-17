@@ -72,9 +72,9 @@ type Hooks struct {
 	objects     bpfObjects
 	cgBind4     link.Link
 	cgBind6     link.Link
-	bindEnter   link.Link
-	BindEvents  *ebpf.Map
-	sockops     link.Link
+
+	BindEvents *ebpf.Map
+	sockops    link.Link
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -160,7 +160,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.objectsMutex.Unlock()
 	// ---------------
 
-	// ----- used in case of wsl -----
 	socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
@@ -338,7 +337,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
-	// ----- used in case of wsl -----
+
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the tracepoint hook on sys_socket")
