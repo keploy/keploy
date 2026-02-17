@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"time"
 
 	"go.keploy.io/server/v3/utils"
 
@@ -41,7 +42,9 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 				case <-ctx.Done():
 					break
 				default:
-					utils.ExecCancel()
+					if err := utils.ExecCancelWithTimeout(5 * time.Second); err != nil {
+						logger.Warn("graceful shutdown timed out", zap.Error(err))
+					}
 				}
 			}()
 			err = replay.Start(ctx)
