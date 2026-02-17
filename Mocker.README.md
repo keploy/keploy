@@ -59,7 +59,6 @@ POST /sandbox/scope
 }
 ```
 
-
 ### Sandbox Storage Structure
 
 After running `keploy sandbox record -c "go test -v" --tag v1.0.1`, sandboxes are saved locally with the `.sb.yaml` extension. A `.gitignore` entry is automatically created/updated to exclude these files from version control.
@@ -77,23 +76,181 @@ After running `keploy sandbox record -c "go test -v" --tag v1.0.1`, sandboxes ar
 
 ### Configuration
 
-Local sandboxes (.sb.yaml) are automatically added to `.gitignore` during record mode.
+Local sandboxes (`.sb.yaml`) are automatically added to `.gitignore` during record mode.
 
-**Test Commands:**
+Cloud smart-sync is driven by the **registry reference** (`sandbox.ref`) configured in `keploy.yaml` / `keploy.yml`.
+
+> If you want **purely local replay** (no registry lookup / downloads), use `--local`.
+
+### Test Commands
 
 | Command | Description |
 |---------|-------------|
-| `keploy sandbox replay --local` | Uses existing local sandboxes for testing |
-| `keploy sandbox replay` | Smart sync with registry (see below) |
+| `keploy sandbox replay --local` | Uses existing local sandboxes for testing (no cloud sync) |
+| `keploy sandbox replay` | Smart sync with registry (see below; requires `sandbox.ref`) |
 
-**`keploy sandbox replay` Behavior:**
+### `keploy sandbox replay` Behavior (summary)
 
-1. **Checks for reference tag** in config file (fails if not present)
-2. **Verifies tag exists** in registry:
-   - **If tag doesn't exist:** After successful replay, uploads sandbox to registry
-   - **If tag exists:**
-     - *No local sandbox:* Fetches all sandbox files from registry, saves them according to their paths, then runs tests
-     - *Local sandbox exists:* Compares file hashes — if hash matches, uses local; if different, fetches from registry and overrides local, then runs tests
+1. **Checks for `sandbox.ref`** in config file (fails if not present)
+2. **Verifies ref exists** in registry:
+- **If ref doesn't exist:** after successful replay, uploads sandbox to registry
+- **If ref exists:**
+  - *No local sandbox:* fetches sandbox files from registry, saves them according to their paths, then runs tests
+  - *Local sandbox exists:* compares file hashes — if hash matches, uses local; if different, fetches from registry and overrides local, then runs tests
+
+
+Keploy uses:
+
+* MongoDB to store a **tiny manifest** (fast lookup + verification data)
+* Azure Blob Storage to store the **heavy artifact zip** (MBs)
+
+### What is stored where?
+
+**MongoDB (Manifest)**
+
+* Stored **only in MongoDB**
+* **Not persisted on disk**
+* Contains:
+
+  * `ref` metadata (company, service/app, tag)
+  * List of files with their relative paths + content hashes (fingerprints)
+  * Any other minimal metadata needed to verify local state quickly
+
+**Azure Blob Storage (artifact.zip)**
+
+* Stores the zipped sandbox files (the “heavy” payload)
+* Downloaded only when local files are missing or dirty
+
+---
+
+## `keploy sandbox replay` Smart Sync Behavior
+
+### Step 1 — Start replay
+
+You run:
+
+```bash
+keploy sandbox replay
+```
+
+Keploy interprets this as:
+“I want to run tests using the sandbox reference in my config.”
+
+**First action:** Keploy reads `sandbox.ref` from `keploy.yaml` / `keploy.yml`.
+
+* If missing → **replay fails**
+* If present → continue
+
+---
+
+### Step 2 — Ask MongoDB for the manifest of `sandbox.ref`
+
+Keploy queries MongoDB:
+
+“Do you have a manifest for `sandbox.ref`?”
+
+Two paths:
+
+---
+
+## Path A — Upload Flow (ref does not exist in mongodb)
+
+This means: **this ref is new** and must be created.
+
+1. **Run tests locally**
+
+   * Keploy treats your current local sandbox files as the “source of truth.”
+
+2. **Did tests pass?**
+
+   * **No** → stop (don’t upload broken mocks)
+   * **Yes** → proceed
+
+3. **Compute hashes**
+
+   * Keploy hashes each sandbox file content.
+   * Any small change → hash changes.
+
+4. **Pack the box (zip)**
+
+   * Keploy zips sandbox files into `artifact.zip`
+   * **Maintains directory structure**
+   * **Does NOT include test source files** (`*_test.go`), only sandbox mocks
+
+Example (included vs excluded):
+
+```
+pkg1/
+  main_test.go          (exclude)
+  main_test1.yaml       (include)
+  main_test2.yaml       (include)
+
+pkg2/folder1/folder2/
+  api_test.go           (exclude)
+  api_test1.yaml        (include)
+  api_test2.yaml        (include)
+```
+
+5. **Upload artifact.zip to Azure Blob Storage**
+
+   * This is the heavy upload step.
+
+6. **Save manifest to MongoDB**
+
+   * Store manifest + company name + app/service name + tag
+   * ✅ **Crucial order:** MongoDB is updated **only after** Azure upload succeeds.
+
+---
+
+## Path B — Sync Flow (ref exists in cloud)
+
+MongoDB says:
+“Yes — here is the manifest for `sandbox.ref`.”
+
+### Step 1 — Download the manifest (tiny)
+
+Keploy downloads just the manifest (KBs), which is fast.
+
+### Step 2 — Verify local files first (no zip download yet)
+
+For each file listed in the manifest:
+
+* Keploy checks if the file exists locally at that path.
+* If it exists, Keploy hashes it and compares with the manifest hash.
+
+Three scenarios:
+
+**Scenario 1: Match**
+
+* File exists
+* Local hash == manifest hash
+  ✅ Keep local file. No download needed.
+
+**Scenario 2: Mismatch (dirty)**
+
+* File exists
+* Local hash != manifest hash
+  ⚠️ Mark for download.
+
+**Scenario 3: Missing**
+
+* File does not exist
+  ⚠️ Mark for download.
+
+### Step 3 — Verdict
+
+✅ If **all** files match:
+
+* Keploy runs tests immediately (fast path, no blob download)
+
+⚠️ If **any** file is missing/dirty:
+
+1. Download `artifact.zip` from Azure Blob Storage
+2. Unzip it **preserving directory structure**
+3. Overwrite local sandbox files so they match cloud exactly
+4. Run tests
+
+---
 
 **Registry Reference Configuration:**
 
