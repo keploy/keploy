@@ -749,6 +749,17 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 	sb.WriteString("\n")
 	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
+	// Body size comparison (when body was skipped during recording)
+	if test.Result.BodySizeResult.Expected != 0 || test.Result.BodySizeResult.Actual != 0 {
+		if !test.Result.BodySizeResult.Normal {
+			sb.WriteString(fmt.Sprintf("Body Size Mismatch:\n  Expected: %d bytes\n  Actual:   %d bytes\n\n",
+				test.Result.BodySizeResult.Expected, test.Result.BodySizeResult.Actual))
+		} else {
+			sb.WriteString(fmt.Sprintf("Body Size Match: %d bytes (body was too large to store, size compared instead)\n\n",
+				test.Result.BodySizeResult.Expected))
+		}
+	}
+
 	// Body diffs
 	for _, bodyResult := range test.Result.BodyResult {
 		if bodyResult.Normal {
@@ -901,6 +912,17 @@ func (r *Report) addHeaderDiffs(test models.TestResult, logDiffs *matcherUtils.D
 
 // addBodyDiffs adds body differences to the diff printer
 func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
+	// Handle body size comparison result (when body was skipped during recording)
+	if test.Result.BodySizeResult.Expected != 0 || test.Result.BodySizeResult.Actual != 0 {
+		if !test.Result.BodySizeResult.Normal {
+			logDiffs.PushBodyDiff(
+				fmt.Sprintf("body_size: %d bytes", test.Result.BodySizeResult.Expected),
+				fmt.Sprintf("body_size: %d bytes", test.Result.BodySizeResult.Actual),
+				nil,
+			)
+		}
+	}
+
 	for _, bodyResult := range test.Result.BodyResult {
 		if !bodyResult.Normal {
 			actualValue, err := r.renderTemplateValue(bodyResult.Actual)

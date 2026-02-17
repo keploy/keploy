@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -39,7 +40,10 @@ type tcsInfo struct {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
-	tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
+	// Skip curl generation for either form data requests or large body (>1MB)
+	if len(tc.HTTPReq.Body) <= LargeBodyThreshold && len(tc.HTTPReq.Form) == 0 {
+		tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
+	}
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
@@ -194,6 +198,12 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	} else {
 		tcsName = tc.Name
 	}
+
+	err := ts.saveAssets(testSetID, tc, tcsName)
+	if err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, err
+	}
+
 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
@@ -319,4 +329,208 @@ func extractTestNumber(name string) int {
 	}
 
 	return num
+}
+
+// LargeBodyThreshold is the size threshold (1MB) above which request bodies
+// are offloaded to the assets directory and response bodies are stored as hashes.
+const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
+
+func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName string) error {
+	// 1. Offload large request body (>1MB) to assets directory
+	if len(tc.HTTPReq.Body) > LargeBodyThreshold {
+		assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName)
+		if err := os.MkdirAll(assetDir, 0o755); err != nil {
+			utils.LogError(ts.logger, err, "failed to create assets directory for body", zap.String("path", assetDir))
+			return err
+		}
+		bodyPath := filepath.Join(assetDir, "body.txt")
+		bodyBytes := []byte(tc.HTTPReq.Body)
+		if err := os.WriteFile(bodyPath, bodyBytes, 0o644); err != nil {
+			utils.LogError(ts.logger, err, "failed to write request body asset", zap.String("path", bodyPath))
+			return err
+		}
+		// Store path relative to keploy directory so it stays portable
+		relBodyPath, relErr := filepath.Rel(ts.TcsPath, bodyPath)
+		if relErr != nil {
+			relBodyPath = bodyPath // fallback to absolute if Rel fails
+		}
+		tc.HTTPReq.BodyRef = models.BodyRef{
+			Path: relBodyPath,
+			Size: int64(len(bodyBytes)),
+		}
+		tc.HTTPReq.Body = "" // clear the body since it's now stored in assets
+		ts.logger.Debug("offloaded large request body to assets",
+			zap.String("testcase", tcsName),
+			zap.Int64("size", tc.HTTPReq.BodyRef.Size),
+			zap.String("path", bodyPath))
+	}
+
+	// 2. Skip large response body (>1MB) — save only metadata, not the body
+	if len(tc.HTTPResp.Body) > LargeBodyThreshold {
+		contentType := tc.HTTPResp.Header["Content-Type"]
+		if contentType == "" {
+			contentType = "unknown"
+		}
+		tc.HTTPResp.BodySize = int64(len(tc.HTTPResp.Body))
+		tc.HTTPResp.BodySkipped = true
+		ts.logger.Debug("response body exceeds 1MB, skipping body storage",
+			zap.String("testcase", tcsName),
+			zap.Int64("body_size_bytes", tc.HTTPResp.BodySize),
+			zap.String("content_type", contentType),
+			zap.Int("status_code", tc.HTTPResp.StatusCode))
+		tc.HTTPResp.Body = ""
+	}
+
+	// 3. Handle form data assets (files and large values)
+	if tc.HTTPReq.Form == nil {
+		return nil
+	}
+
+	for i, form := range tc.HTTPReq.Form {
+		// 3a. Offload large form field values (>1MB) to assets (that are not actual files)
+		if len(form.FileNames) == 0 && len(form.Paths) == 0 {
+			hasLargeValue := false
+			for _, value := range form.Values {
+				if len(value) > LargeBodyThreshold {
+					hasLargeValue = true
+					break
+				}
+			}
+			if hasLargeValue {
+				// Pre-initialize Paths to same length as Values so indices stay aligned
+				tc.HTTPReq.Form[i].Paths = make([]string, len(form.Values))
+				for j, value := range form.Values {
+					if len(value) > LargeBodyThreshold {
+						formKey := filepath.Base(form.Key)
+						if formKey == "." || formKey == string(filepath.Separator) || formKey == "" {
+							formKey = "form"
+						}
+						assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
+						if err := os.MkdirAll(assetDir, 0o755); err != nil {
+							utils.LogError(ts.logger, err, "failed to create assets directory for form value", zap.String("path", assetDir))
+							return err
+						}
+						fileName := fmt.Sprintf("value_%d.txt", j)
+						destPath := filepath.Join(assetDir, fileName)
+						if err := os.WriteFile(destPath, []byte(value), 0o644); err != nil {
+							utils.LogError(ts.logger, err, "failed to write large form value asset", zap.String("path", destPath))
+							return err
+						}
+						// Replace value with empty string and store relative path at the same index
+						tc.HTTPReq.Form[i].Values[j] = ""
+						relPath, relErr := filepath.Rel(ts.TcsPath, destPath)
+						if relErr != nil {
+							relPath = destPath
+						}
+						tc.HTTPReq.Form[i].Paths[j] = relPath
+						ts.logger.Debug("offloaded large form value to assets",
+							zap.String("testcase", tcsName),
+							zap.String("key", form.Key),
+							zap.Int("size", len(value)),
+							zap.String("path", destPath))
+					}
+					// Small values: Paths[j] stays "" — no offload needed
+				}
+			}
+			continue
+		}
+
+		// 3b. Handle file-based form data (existing logic)
+		if len(form.FileNames) > 0 {
+			formKey := filepath.Base(form.Key)
+			if formKey == "." || formKey == string(filepath.Separator) || formKey == "" {
+				formKey = "form"
+			}
+			assetDir := filepath.Join(ts.TcsPath, testSetID, "assets", tcsName, formKey)
+			if err := os.MkdirAll(assetDir, 0o755); err != nil {
+				utils.LogError(ts.logger, err, "failed to create assets directory", zap.String("path", assetDir))
+				return err
+			}
+
+			// We need to rebuild Paths to point to assets
+			var newPaths []string
+			allFilesPersisted := true
+
+			for j, fileName := range form.FileNames {
+				if fileName == "" {
+					continue
+				}
+				safeFileName := filepath.Base(fileName)
+				if safeFileName == "." || safeFileName == string(filepath.Separator) || safeFileName == "" {
+					safeFileName = "asset_file"
+				}
+				destPath := filepath.Join(assetDir, safeFileName)
+				wroteFile := false
+
+				// Case 1: File is in Paths (downloaded to local temp)
+				if j < len(form.Paths) && form.Paths[j] != "" {
+					srcPath := form.Paths[j]
+					// Check if srcPath exists
+					if _, err := os.Stat(srcPath); err == nil {
+						input, err := os.Open(srcPath)
+						if err != nil {
+							utils.LogError(ts.logger, err, "failed to open temp asset file", zap.String("path", srcPath))
+							return err
+						}
+						output, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+						if err != nil {
+							input.Close()
+							utils.LogError(ts.logger, err, "failed to create asset file", zap.String("path", destPath))
+							return err
+						}
+						if _, err := io.Copy(output, input); err != nil {
+							output.Close()
+							input.Close()
+							utils.LogError(ts.logger, err, "failed to copy asset file", zap.String("path", destPath))
+							return err
+						}
+						if err := output.Close(); err != nil {
+							input.Close()
+							utils.LogError(ts.logger, err, "failed to close asset file", zap.String("path", destPath))
+							return err
+						}
+						if err := input.Close(); err != nil {
+							utils.LogError(ts.logger, err, "failed to close temp asset file", zap.String("path", srcPath))
+							return err
+						}
+						wroteFile = true
+						// Cleanup temp
+						os.Remove(srcPath)
+					} else {
+						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
+					}
+				} else if j < len(form.Values) {
+					// Case 2: File content is in Values (legacy/text fallback)
+					content := []byte(form.Values[j])
+					if err := os.WriteFile(destPath, content, 0o644); err != nil {
+						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						return err
+					}
+					wroteFile = true
+				}
+
+				if wroteFile {
+					// Store path relative to keploy directory so it stays portable
+					relPath, relErr := filepath.Rel(ts.TcsPath, destPath)
+					if relErr != nil {
+						relPath = destPath
+					}
+					newPaths = append(newPaths, relPath)
+				} else {
+					allFilesPersisted = false
+					// Do not append non-existent paths to newPaths — they would
+					// cause replay failures when the system tries to read them.
+					utils.LogError(ts.logger, fmt.Errorf("file entry could not be persisted"), "skipping file entry - check that the source file exists and is accessible",
+						zap.String("fileName", form.FileNames[j]),
+						zap.String("key", form.Key))
+				}
+			}
+
+			tc.HTTPReq.Form[i].Paths = newPaths
+			if allFilesPersisted {
+				tc.HTTPReq.Form[i].Values = nil
+			}
+		}
+	}
+	return nil
 }
