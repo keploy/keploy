@@ -29,7 +29,6 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
-	runregistry "go.keploy.io/server/v3/pkg/runregistry"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1847,20 +1846,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 			fmt.Print("\n<=========================================> \n\n")
 		}
-	}
-	// ---- Register test run in local registry ----
-
-	run := runregistry.TestRun{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
-		Timestamp: time.Now(),
-		Total:     totalTestsSnapshot,
-		Passed:    totalTestPassedSnapshot,
-		Failed:    totalTestFailedSnapshot,
-		Duration:  totalTestTimeTakenSnapshot,
-	}
-
-	if err := runregistry.RegisterRun(run); err != nil {
-		r.logger.Warn("failed to register test run", zap.Error(err))
 	}
 }
 func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) models.AppError {

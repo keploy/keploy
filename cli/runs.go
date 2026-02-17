@@ -19,7 +19,7 @@ func init() {
 	Register("runs", Runs)
 }
 
-func Runs(ctx context.Context, logger *zap.Logger, _ *config.Config, _ ServiceFactory, _ CmdConfigurator) *cobra.Command {
+func Runs(_ context.Context, logger *zap.Logger, _ *config.Config, _ ServiceFactory, _ CmdConfigurator) *cobra.Command {
 
 	var runsCmd = &cobra.Command{
 		Use:   "runs",

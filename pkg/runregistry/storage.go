@@ -13,6 +13,7 @@ var mu sync.Mutex
 
 func loadRuns() ([]TestRun, error) {
 	file, err := os.ReadFile(registryFile)
+
 	if os.IsNotExist(err) {
 		return []TestRun{}, nil
 	}
@@ -22,7 +23,12 @@ func loadRuns() ([]TestRun, error) {
 
 	var runs []TestRun
 	if err := json.Unmarshal(file, &runs); err != nil {
-		return nil, err
+		// Backup corrupted file
+		backupPath := registryFile + ".backup"
+		_ = os.Rename(registryFile, backupPath)
+
+		// Return empty registry to recover gracefully
+		return []TestRun{}, nil
 	}
 
 	return runs, nil

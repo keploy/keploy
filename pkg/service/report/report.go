@@ -390,6 +390,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		if err := runregistry.RegisterRun(run); err != nil {
 			r.logger.Warn("failed to register test run", zap.Error(err))
 		}
+		return nil
 
 	}
 
