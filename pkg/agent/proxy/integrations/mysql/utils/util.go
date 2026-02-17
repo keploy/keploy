@@ -68,36 +68,30 @@ func ReadPacketStream(ctx context.Context, logger *zap.Logger, conn net.Conn, bu
 	}
 }
 
-// ReadPacketBuffer reads a MySQL packet from the connection
-func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
-	var packetBuffer []byte
-	// first read the header length
-	header, err := util.ReadRequiredBytes(ctx, logger, conn, 4)
-	if err != nil {
-		if err == io.EOF {
-			return nil, err
-		}
-		// return packetBuffer, fmt.Errorf("failed to read mysql packet header: %w", err)
-		return packetBuffer, err
+// ReadPacketBuffer reads a complete MySQL packet from the connection.
+// It uses io.ReadFull for efficient, zero-overhead reads — no goroutines,
+// no channels, no unnecessary allocations.
+func ReadPacketBuffer(_ context.Context, _ *zap.Logger, conn net.Conn) ([]byte, error) {
+	// Read the 4-byte MySQL packet header
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, err
 	}
 
-	packetBuffer = append(packetBuffer, header...)
-
-	// read the payload length
+	// Parse payload length from 3-byte little-endian field
 	payloadLength := GetPayloadLength(header[:3])
+
+	// Allocate a single buffer for the full packet (header + payload)
+	packet := make([]byte, 4+payloadLength)
+	copy(packet, header)
+
 	if payloadLength > 0 {
-		payload, err := util.ReadRequiredBytes(ctx, logger, conn, int(payloadLength))
-		if err != nil {
-			if err == io.EOF {
-				return nil, err
-			}
-			// return packetBuffer, fmt.Errorf("failed to read mysql packet payload: %w", err)
-			return packetBuffer, err
+		if _, err := io.ReadFull(conn, packet[4:]); err != nil {
+			return packet[:4], err
 		}
-		packetBuffer = append(packetBuffer, payload...)
 	}
 
-	return packetBuffer, nil
+	return packet, nil
 }
 
 // BytesToMySQLPacket converts a byte slice to a MySQL packet
