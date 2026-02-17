@@ -101,6 +101,17 @@ func setTCPQuickACK(tc *net.TCPConn) {
 	})
 }
 
+// tuneTCPConn applies low-latency TCP tuning to a connection:
+// - TCP_NODELAY: disable Nagle's algorithm
+// - TCP_QUICKACK: disable delayed ACKs
+// - Enlarged socket buffers: reduce TCP back-pressure on bursty traffic
+func tuneTCPConn(tc *net.TCPConn) {
+	_ = tc.SetNoDelay(true)
+	setTCPQuickACK(tc)
+	_ = tc.SetReadBuffer(2 * 1024 * 1024)  // 2 MB receive buffer
+	_ = tc.SetWriteBuffer(2 * 1024 * 1024) // 2 MB send buffer
+}
+
 // isNetworkClosedErr checks if the error is due to a closed network connection.
 // This includes broken pipe, connection reset by peer, and use of closed network connection errors.
 // These errors are expected during graceful shutdown and should not be logged as errors.
@@ -351,8 +362,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		}
 		// Disable Nagle's algorithm and enable quick ACKs for low-latency forwarding
 		if tc, ok := clientConn.(*net.TCPConn); ok {
-			_ = tc.SetNoDelay(true)
-			setTCPQuickACK(tc)
+			tuneTCPConn(tc)
 		}
 		clientConnErrGrp.Go(func() error {
 			defer util.Recover(p.logger, clientConn, nil)
@@ -497,7 +507,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 		if tc, ok := dstConn.(*net.TCPConn); ok {
-			_ = tc.SetNoDelay(true)
+			tuneTCPConn(tc)
 		}
 
 		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
@@ -520,8 +530,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 			if tc, ok := dstConn.(*net.TCPConn); ok {
-				_ = tc.SetNoDelay(true)
-				setTCPQuickACK(tc)
+				tuneTCPConn(tc)
 			}
 
 			dstCfg := &models.ConditionalDstCfg{
@@ -694,7 +703,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 		if tc, ok := dstConn.(*net.TCPConn); ok {
-			_ = tc.SetNoDelay(true)
+			tuneTCPConn(tc)
 		}
 
 		// Extract the underlying connection from the util.Conn wrapper
@@ -833,8 +842,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 			if tc, ok := dstConn.(*net.TCPConn); ok {
-				_ = tc.SetNoDelay(true)
-				setTCPQuickACK(tc)
+				tuneTCPConn(tc)
 			}
 		}
 		dstCfg.Addr = dstAddr

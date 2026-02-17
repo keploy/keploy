@@ -347,11 +347,7 @@ rowLoop:
 			}
 
 			// It must be a row data packet
-			row, _, err := rowscols.DecodeTextRow(ctx, logger, data, textResultSet.Columns)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode row data packet: %w", err)
-			}
-			textResultSet.Rows = append(textResultSet.Rows, row)
+			textResultSet.RawRowData = append(textResultSet.RawRowData, data)
 		}
 	}
 
@@ -456,11 +452,7 @@ rowLoop:
 			}
 
 			// It must be a row data packet
-			row, _, err := rowscols.DecodeBinaryRow(ctx, logger, data, binaryResultSet.Columns)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode row data packet: %w", err)
-			}
-			binaryResultSet.Rows = append(binaryResultSet.Rows, row)
+			binaryResultSet.RawRowData = append(binaryResultSet.RawRowData, data)
 		}
 	}
 

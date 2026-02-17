@@ -11,7 +11,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -36,9 +35,24 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		return errors.New("failed to get the error group from the context")
 	}
 
+	// Create rawMocks channel for async processing
+	rawMocks := make(chan *models.Mock, 100)
+
+	// Start the async worker to process raw mocks and send to final output
+	g.Go(func() error {
+		// Close rawMocks when this goroutine exits?
+		// No, producers should close rawMocks.
+		// But in this pattern, we want to ensure rawMocks is closed when the main logic finishes.
+		ProcessRawMocks(ctx, logger, rawMocks, mocks)
+		return nil
+	})
+
 	g.Go(func() error {
 		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
+
+		// Ensure rawMocks is closed when the main recording logic finishes
+		defer close(rawMocks)
 
 		// Helper struct for decoding packets
 		decodeCtx := &wire.DecodeContext{
@@ -64,44 +78,25 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		reqTimestamp := result.reqTimestamp
 		resTimestamp := result.resTimestamp
-		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, resTimestamp, opts)
+		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, rawMocks, reqTimestamp, resTimestamp, opts)
 
 		// reset the requests and responses
 		requests = []mysql.Request{}
 		responses = []mysql.Response{}
 
-		if decodeCtx.UseSSL {
-			if result.tlsClientConn == nil || result.tlsDestConn == nil {
-				utils.LogError(logger, err, "Expected Tls connections are nil", zap.Any("tlsClientConn", result.tlsClientConn), zap.Any("tlsDestConn", result.tlsDestConn))
-				errCh <- errors.New("tls connection is not established")
-				return nil
-			}
-			clientConn = result.tlsClientConn
-			destConn = result.tlsDestConn
-		}
+		// TeeForwardConns were created inside handleInitialHandshake right
+		// after SSL detection.  The auth phase already flowed through them
+		// at wire speed.  Reuse them for the command phase.
+		clientTeeConn := result.clientTeeConn
+		destTeeConn := result.destTeeConn
 
-		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
-		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
-
-		// Create TeeForwardConn wrappers for the query phase.
-		// These decouple forwarding from parsing — a background goroutine
-		// continuously reads from src and writes to dest at network speed,
-		// while the parser processes the buffered data independently.
-		// This significantly reduces latency for multi-packet responses.
-		clientTeeConn := orchestrator.NewTeeForwardConn(ctx, logger, clientConn, destConn)
-		destTeeConn := orchestrator.NewTeeForwardConn(ctx, logger, destConn, clientConn)
-
-		// Re-register decodeCtx map entries with the new TeeForwardConn key,
-		// since the query phase will use clientTeeConn as the map key.
-		if op, ok := decodeCtx.LastOp.Load(clientConn); ok {
-			decodeCtx.LastOp.Store(clientTeeConn, op)
-		}
-		if sg, ok := decodeCtx.ServerGreetings.Load(clientConn); ok {
-			decodeCtx.ServerGreetings.Store(clientTeeConn, sg)
+		if clientTeeConn == nil || destTeeConn == nil {
+			errCh <- errors.New("TeeForwardConns not created during handshake")
+			return nil
 		}
 
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientTeeConn, destTeeConn, mocks, decodeCtx, opts)
+		err = handleClientQueries(ctx, logger, clientTeeConn, destTeeConn, rawMocks, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")
