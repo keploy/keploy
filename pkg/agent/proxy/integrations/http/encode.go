@@ -24,7 +24,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	destPort := uint(remoteAddr.Port)
 
 	// NOTE: Initial reqBuf is already forwarded to dest in RecordOutgoing
-	// before wrapping connections with ForwardingReadOnlyConn.
+	// before wrapping connections with TeeForwardConn.
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -65,7 +65,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					return nil
 				}
 
-				// Response is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+				// Response is automatically forwarded to client by TeeForwardConn.
 
 				h.Logger.Debug("This is the response from the server after the expect header" + string(resp))
 
@@ -81,7 +81,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- err
 					return nil
 				}
-				// Request data is automatically forwarded to dest by ForwardingReadOnlyConn.Read()
+				// Request data is automatically forwarded to dest by TeeForwardConn.
 				finalReq = append(finalReq, reqBuf...)
 			}
 
@@ -105,7 +105,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					if len(resp) != 0 {
 						// Capturing the response timestamp
 						resTimestampMock := time.Now()
-						// Response is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+						// Response is automatically forwarded to client by TeeForwardConn.
 
 						// saving last request/response on this conn.
 						m := &FinalHTTP{
@@ -131,7 +131,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			// Capturing the response timestamp
 			resTimestampMock := time.Now()
 
-			// Response is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+			// Response is automatically forwarded to client by TeeForwardConn.
 			var finalResp []byte
 			finalResp = append(finalResp, resp...)
 			h.Logger.Debug("This is the initial response: " + string(resp))
@@ -194,7 +194,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				errCh <- err
 				return nil
 			}
-			// Request data is automatically forwarded to dest by ForwardingReadOnlyConn.Read()
+			// Request data is automatically forwarded to dest by TeeForwardConn.
 		}
 		return nil
 	})

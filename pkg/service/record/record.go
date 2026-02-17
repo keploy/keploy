@@ -438,7 +438,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
-	outgoingChan := make(chan *models.Mock)
+	outgoingChan := make(chan *models.Mock, 500) // buffered to avoid backpressure from InsertMock (YAML + I/O)
 	mappingChan := make(chan models.TestMockMapping)
 
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)

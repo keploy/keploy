@@ -72,9 +72,9 @@ func ReadPacketStream(ctx context.Context, logger *zap.Logger, conn net.Conn, bu
 // It uses io.ReadFull for efficient, zero-overhead reads — no goroutines,
 // no channels, no unnecessary allocations.
 func ReadPacketBuffer(_ context.Context, _ *zap.Logger, conn net.Conn) ([]byte, error) {
-	// Read the 4-byte MySQL packet header
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(conn, header); err != nil {
+	// Read the 4-byte MySQL packet header into a stack-allocated array.
+	var header [4]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil {
 		return nil, err
 	}
 
@@ -83,7 +83,7 @@ func ReadPacketBuffer(_ context.Context, _ *zap.Logger, conn net.Conn) ([]byte, 
 
 	// Allocate a single buffer for the full packet (header + payload)
 	packet := make([]byte, 4+payloadLength)
-	copy(packet, header)
+	copy(packet, header[:])
 
 	if payloadLength > 0 {
 		if _, err := io.ReadFull(conn, packet[4:]); err != nil {
@@ -94,15 +94,15 @@ func ReadPacketBuffer(_ context.Context, _ *zap.Logger, conn net.Conn) ([]byte, 
 	return packet, nil
 }
 
-// BytesToMySQLPacket converts a byte slice to a MySQL packet
+// BytesToMySQLPacket converts a byte slice to a MySQL packet.
+// Uses inline arithmetic to parse the 3-byte little-endian length,
+// avoiding a heap allocation for a temporary buffer.
 func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
 	if len(buffer) < 4 {
 		return mysql.Packet{}, errors.New("buffer is nil or too short to be a valid MySQL packet")
 	}
 
-	tempBuffer := make([]byte, 4)
-	copy(tempBuffer, buffer[:3])
-	length := binary.LittleEndian.Uint32(tempBuffer)
+	length := uint32(buffer[0]) | uint32(buffer[1])<<8 | uint32(buffer[2])<<16
 	sequenceID := buffer[3]
 
 	payload := buffer[4:]

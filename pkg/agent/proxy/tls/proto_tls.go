@@ -151,9 +151,9 @@ func HandlePostgresSSL(
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         dstURL,
-		MinVersion:         tls.VersionTLS10,
+		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tls.VersionTLS13,
-		CipherSuites:       getAllCipherSuites(),
+		CipherSuites:       getCompatibleCipherSuites(),
 	}
 	tlsServerConn := tls.Client(serverConn, tlsConfig)
 	if err := tlsServerConn.Handshake(); err != nil {
@@ -206,9 +206,9 @@ func UpgradeMySQLServerToTLS(
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         serverName,
-		MinVersion:         tls.VersionTLS10,
+		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tls.VersionTLS13,
-		CipherSuites:       getAllCipherSuites(),
+		CipherSuites:       getCompatibleCipherSuites(),
 	}
 	tlsServerConn := tls.Client(serverConn, tlsConfig)
 	if err := tlsServerConn.Handshake(); err != nil {
@@ -221,14 +221,18 @@ func UpgradeMySQLServerToTLS(
 	return tlsServerConn, nil
 }
 
-// getAllCipherSuites returns all available cipher suites, including insecure ones.
-func getAllCipherSuites() []uint16 {
+// getCompatibleCipherSuites returns secure cipher suites plus specific legacy ones
+// needed for MySQL compatibility (e.g. RSA-CBC), avoiding the blanket InsecureCipherSuites().
+func getCompatibleCipherSuites() []uint16 {
 	var ids []uint16
 	for _, cs := range tls.CipherSuites() {
 		ids = append(ids, cs.ID)
 	}
-	for _, cs := range tls.InsecureCipherSuites() {
-		ids = append(ids, cs.ID)
-	}
+	// Explicitly add CBC ciphers for MySQL 5.7 / Legacy device support
+	// These are technically "insecure" but often required for older database versions.
+	ids = append(ids,
+		tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+		tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+	)
 	return ids
 }

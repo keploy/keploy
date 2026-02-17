@@ -88,8 +88,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		// continuously reads from src and writes to dest at network speed,
 		// while the parser processes the buffered data independently.
 		// This significantly reduces latency for multi-packet responses.
-		clientTeeConn := orchestrator.NewTeeForwardConn(ctx, clientConn, destConn)
-		destTeeConn := orchestrator.NewTeeForwardConn(ctx, destConn, clientConn)
+		clientTeeConn := orchestrator.NewTeeForwardConn(ctx, logger, clientConn, destConn)
+		destTeeConn := orchestrator.NewTeeForwardConn(ctx, logger, destConn, clientConn)
 
 		// Re-register decodeCtx map entries with the new TeeForwardConn key,
 		// since the query phase will use clientTeeConn as the map key.
@@ -149,5 +149,12 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		return
 	}
 
-	mocks <- mysqlMock
+	// Non-blocking send: if the channel buffer is full, fall back to a
+	// goroutine so the parser loop (and hence forwarding) is never stalled
+	// waiting for the mock consumer to drain the channel.
+	select {
+	case mocks <- mysqlMock:
+	default:
+		go func() { mocks <- mysqlMock }()
+	}
 }

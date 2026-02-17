@@ -77,14 +77,13 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 		return err
 	}
 
-	// Create read-only connection wrappers with auto-forwarding:
-	// - clientReadConn: reads from client auto-forward to dest
-	// - destReadConn: reads from dest auto-forward to client
-	// The parser ONLY reads — all writes happen transparently inside Read()
-	clientReadConn := orchestrator.NewForwardingReadOnlyConn(src, dst)
-	destReadConn := orchestrator.NewForwardingReadOnlyConn(dst, src)
+	// Create TeeForwardConn wrappers for zero-latency forwarding.
+	// Dedicated goroutines read from src/dst and forward at wire speed,
+	// while the parser reads buffered copies asynchronously.
+	clientTee := orchestrator.NewTeeForwardConn(ctx, logger, src, dst)
+	destTee := orchestrator.NewTeeForwardConn(ctx, logger, dst, src)
 
-	err = h.encodeHTTP(ctx, reqBuf, clientReadConn, destReadConn, mocks, opts)
+	err = h.encodeHTTP(ctx, reqBuf, clientTee, destTee, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err

@@ -3,7 +3,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -33,6 +32,11 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// outgoingTLSSessionCache is shared across all outgoing TLS connections.
+// Without this, every proxy→destination dial does a full TLS handshake (~10-30 ms).
+// With it, repeat connections to the same host resume (~1-3 ms).
+var outgoingTLSSessionCache = tls.NewLRUClientSessionCache(256)
 
 type ParserPriority struct {
 	Priority   int
@@ -76,6 +80,21 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+}
+
+// setTCPQuickACK enables TCP_QUICKACK to disable delayed ACKs.
+// Delayed ACKs can add up to 40ms latency on Linux when the proxy only reads
+// from one connection and writes to another (piggyback ACK never triggers).
+// Note: TCP_QUICKACK resets after each ACK, but even setting it once helps
+// the first few packets on each connection which are latency-sensitive.
+func setTCPQuickACK(tc *net.TCPConn) {
+	rawConn, err := tc.SyscallConn()
+	if err != nil {
+		return
+	}
+	_ = rawConn.Control(func(fd uintptr) {
+		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_QUICKACK, 1)
+	})
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -307,45 +326,44 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		p.nsSwitchMutex.Unlock()
 	}()
 
+	// Close the listener when context is cancelled to unblock Accept().
+	// This avoids creating a goroutine + two channels per accept iteration.
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+
 	for {
-		clientConnCh := make(chan net.Conn, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			defer utils.Recover(p.logger)
-			conn, err := listener.Accept()
-			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
-					errCh <- nil
-					return
-				}
-				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-				errCh <- err
-				return
-			}
-			clientConnCh <- conn
-		}()
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-errCh:
-			return err
-		// handle the client connection
-		case clientConn := <-clientConnCh:
-			clientConnErrGrp.Go(func() error {
-				defer util.Recover(p.logger, clientConn, nil)
-				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil && err != io.EOF {
-					// Network closed errors are expected when client closes connection (e.g., app shutdown)
-					// Only log as error if it's not a shutdown/network closed error
-					if isShutdownError(err) || isNetworkClosedErr(err) {
-						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
-					} else {
-						utils.LogError(p.logger, err, "failed to handle the client connection")
-					}
-				}
+		clientConn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
 				return nil
-			})
+			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				return nil
+			}
+			utils.LogError(p.logger, err, "failed to accept connection to the proxy")
+			return err
 		}
+		// Disable Nagle's algorithm and enable quick ACKs for low-latency forwarding
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+			setTCPQuickACK(tc)
+		}
+		clientConnErrGrp.Go(func() error {
+			defer util.Recover(p.logger, clientConn, nil)
+			err := p.handleConnection(clientConnCtx, clientConn)
+			if err != nil && err != io.EOF {
+				// Network closed errors are expected when client closes connection (e.g., app shutdown)
+				// Only log as error if it's not a shutdown/network closed error
+				if isShutdownError(err) || isNetworkClosedErr(err) {
+					p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
+				} else {
+					utils.LogError(p.logger, err, "failed to handle the client connection")
+				}
+			}
+			return nil
+		})
 	}
 }
 
@@ -474,6 +492,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
 		}
+		if tc, ok := dstConn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+		}
 
 		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
 		if err != nil {
@@ -493,6 +514,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
+			}
+			if tc, ok := dstConn.(*net.TCPConn); ok {
+				_ = tc.SetNoDelay(true)
+				setTCPQuickACK(tc)
 			}
 
 			dstCfg := &models.ConditionalDstCfg{
@@ -531,28 +556,27 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
-	reader := bufio.NewReader(srcConn)
-	initialData := make([]byte, 5)
-	// reading the initial data from the client connection to determine if the connection is a TLS handshake
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
+	// Read 5 bytes directly instead of allocating a 4KB bufio.Reader just to peek.
+	peekBuf := make([]byte, 5)
+	n, peekErr := io.ReadFull(srcConn, peekBuf)
+	if n == 0 {
+		if peekErr == io.EOF || peekErr == io.ErrUnexpectedEOF {
+			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(peekErr))
 			return nil
 		}
-		// Network closed errors are expected when client closes connection (e.g., app shutdown)
-		if isShutdownError(err) || isNetworkClosedErr(err) {
-			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(err))
+		if isShutdownError(peekErr) || isNetworkClosedErr(peekErr) {
+			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(peekErr))
 		} else {
-			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+			utils.LogError(p.logger, peekErr, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		}
-		return err
+		return peekErr
 	}
+	testBuffer := peekBuf[:n]
 
-	multiReader := io.MultiReader(reader, srcConn)
+	// Prepend the consumed bytes back so downstream readers see the full stream.
 	srcConn = &util.Conn{
 		Conn:   srcConn,
-		Reader: multiReader,
+		Reader: io.MultiReader(bytes.NewReader(testBuffer), srcConn),
 		Logger: p.logger,
 	}
 
@@ -635,7 +659,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
 		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
 
-		moreBuf, err := util.ReadWithTimeout(srcConn, 150*time.Millisecond)
+		moreBuf, err := util.ReadWithTimeout(srcConn, 5*time.Millisecond)
 		if err != nil {
 			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
 			return err
@@ -664,6 +688,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial PostgreSQL server for SSL negotiation")
 			return err
+		}
+		if tc, ok := dstConn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
 		}
 
 		// Extract the underlying connection from the util.Conn wrapper
@@ -763,6 +790,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
 			NextProtos:         nextProtos,
+			ClientSessionCache: outgoingTLSSessionCache, // reuse TLS sessions with destination
 		}
 
 		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
@@ -799,6 +827,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
+			}
+			if tc, ok := dstConn.(*net.TCPConn); ok {
+				_ = tc.SetNoDelay(true)
+				setTCPQuickACK(tc)
 			}
 		}
 		dstCfg.Addr = dstAddr

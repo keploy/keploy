@@ -40,7 +40,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		})
 	}
 	// NOTE: Initial reqBuf is already forwarded to dest in RecordOutgoing
-	// before wrapping connections with ForwardingReadOnlyConn.
+	// before creating TeeForwardConn wrappers.
 	var genericResponses []models.Payload
 
 	clientBuffChan := make(chan []byte)
@@ -102,7 +102,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
-			// Data is automatically forwarded to dest by ForwardingReadOnlyConn.Read()
+			// Data is automatically forwarded to dest by TeeForwardConn's forwarding goroutine.
 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {

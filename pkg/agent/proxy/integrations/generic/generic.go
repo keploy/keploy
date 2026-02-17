@@ -43,20 +43,19 @@ func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn
 		return err
 	}
 
-	// Forward initial request to destination (proxy-level write)
+	// Forward initial request to destination (already read from src, needs explicit forward)
 	if _, err := dst.Write(reqBuf); err != nil {
 		utils.LogError(logger, err, "failed to forward initial request to destination")
 		return err
 	}
 
-	// Create read-only connection wrappers with auto-forwarding:
-	// - clientReadConn: reads from client auto-forward to dest
-	// - destReadConn: reads from dest auto-forward to client
-	// The parser ONLY reads — all writes happen transparently inside Read()
-	clientReadConn := orchestrator.NewForwardingReadOnlyConn(src, dst)
-	destReadConn := orchestrator.NewForwardingReadOnlyConn(dst, src)
+	// Create TeeForwardConn wrappers for zero-latency forwarding.
+	// Dedicated goroutines read from src/dst and forward at wire speed,
+	// while the parser reads buffered copies asynchronously.
+	clientTee := orchestrator.NewTeeForwardConn(ctx, logger, src, dst)
+	destTee := orchestrator.NewTeeForwardConn(ctx, logger, dst, src)
 
-	err = encodeGeneric(ctx, logger, reqBuf, clientReadConn, destReadConn, mocks, opts)
+	err = encodeGeneric(ctx, logger, reqBuf, clientTee, destTee, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the generic message into the yaml")
 		return err

@@ -144,6 +144,10 @@ func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.
 			}
 
 			go func(cc net.Conn) {
+				// Disable Nagle's algorithm for low-latency forwarding
+				if tc, ok := cc.(*net.TCPConn); ok {
+					_ = tc.SetNoDelay(true)
+				}
 				pm.handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, sem, appPort)
 			}(clientConn)
 		}
@@ -195,6 +199,10 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
+		}
+		// Disable Nagle's algorithm for low-latency forwarding
+		if tc, ok := upConn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
 		}
 
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort)
