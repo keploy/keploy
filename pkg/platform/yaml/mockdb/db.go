@@ -212,6 +212,9 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	}
 
 	// Write to buffer
+	if _, err := ys.writer.Write([]byte("---\n")); err != nil {
+		return err
+	}
 	if _, err := ys.writer.Write(data); err != nil {
 		return err
 	}
