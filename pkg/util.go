@@ -1433,12 +1433,12 @@ func hasExplicitPort(hostStr string) bool {
 // by applying replacement logic and precedence rules.
 //
 // Priority logic:
-// 1. Check urlReplacements against originalTarget.
-//    If match found, apply it.
-//    CRITICAL: If replacement has explicit port, it is FINAL (skip overrides).
-// 2. ConfigHost (if provided) overrides host (ONLY if replacement didn't match).
-// 3. AppPort (if present) overrides port.
-// 4. ConfigPort (if present) overrides port (takes precedence over AppPort).
+//  1. Check urlReplacements against originalTarget.
+//     If match found, apply it.
+//     CRITICAL: If replacement has explicit port, it is FINAL (skip overrides).
+//  2. ConfigHost (if provided) overrides host (ONLY if replacement didn't match).
+//  3. AppPort (if present) overrides port.
+//  4. ConfigPort (if present) overrides port (takes precedence over AppPort).
 func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
 	finalTarget := originalTarget
 	replacementHasPort := false
