@@ -27,7 +27,7 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult
@@ -425,14 +425,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				)
 			}
 
-			_, err := newLogger.Printf(logs)
-			if err != nil {
-				utils.LogError(logger, err, "failed to print the logs")
-			}
+			if emitFailureLogs {
+				_, err := newLogger.Printf(logs)
+				if err != nil {
+					utils.LogError(logger, err, "failed to print the logs")
+				}
 
-			err = logDiffs.Render()
-			if err != nil {
-				utils.LogError(logger, err, "failed to render the diffs")
+				err = logDiffs.Render()
+				if err != nil {
+					utils.LogError(logger, err, "failed to render the diffs")
+				}
 			}
 		} else {
 			pass = true
