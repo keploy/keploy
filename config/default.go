@@ -39,7 +39,7 @@ test:
     global: {}
     test-sets: {}
   delay: 5
-  host: ""
+  host: "localhost"
   port: 0
   grpcPort: 0
   apiTimeout: 5

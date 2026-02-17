@@ -508,88 +508,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	}
 
 	// Determine which port to use for test execution.
-	// Priority logic (refined):
-	// 1. Check replaceWith against the ORIGINAL authority (from header).
-	//    If a match is found, apply it.
-	//    CRITICAL: If the replacement VALUE itself contains a port, treat it as the final authority (skip AppPort/ConfigPort).
-	//    If the replacement value is just a host, continue to apply AppPort/ConfigPort logic.
-	// 2. If no replaceWith match is found and configHost is set, override the host using configHost.
-	// 3. AppPort (if present) overrides port.
-	// 4. ConfigPort (if present) overrides port.
-
-	replacementHasPort := false
-	replacementMatched := false
-
-	// Step 1: Check replaceWith against original authority
-	if len(urlReplacements) > 0 {
-		for substr, replacement := range urlReplacements {
-			if strings.Contains(authority, substr) {
-				replacementMatched = true
-				authority = strings.Replace(authority, substr, replacement, 1)
-
-				// Check if the replacement value explicitly defines a port.
-				// Heuristic: check if the string contains a port using `hasExplicitPort`, which handles IPv6.
-				// For gRPC authority, it's typically just host:port, so finding a colon is a strong signal.
-				if hasExplicitPort(replacement) {
-					replacementHasPort = true
-				}
-
-				logger.Debug("Applied replaceWith substitution for gRPC",
-					zap.String("find", substr),
-					zap.String("replace", replacement),
-					zap.String("result_authority", authority),
-					zap.Bool("replacement_has_port", replacementHasPort))
-				break
-			}
-		}
-	}
-
-	// Step 2: If replacement didn't define a port, use standard port resolution
-	if !replacementHasPort {
-		// 2a. Override with configHost if provided (and replaceWith matched nothing)
-		if !replacementMatched && configHost != "" {
-			var err error
-			authority, err = utils.ReplaceGrpcHost(authority, configHost)
-			if err != nil {
-				utils.LogError(logger, err, "failed to replace authority host with config host")
-				return nil, err
-			}
-			logger.Debug("Replaced authority host with config host", zap.String("host", configHost), zap.String("authority", authority))
-		}
-
-		// Helper: split authority into host and port.
-		host := authority
-		if colonIdx := strings.LastIndex(authority, ":"); colonIdx != -1 {
-			host = authority[:colonIdx]
-		}
-
-		// 2a. Start with the authority's own port (or default 443 for gRPC).
-		if !strings.Contains(authority, ":") {
-			logger.Debug("Authority has no explicit port, will use gRPC default",
-				zap.String("authority", authority), zap.String("default_port", "443"))
-		}
-
-		// 2b. Override with AppPort if present.
-		if tc.AppPort > 0 {
-			authority = fmt.Sprintf("%s:%d", host, tc.AppPort)
-			logger.Debug("Overriding port with app_port from test case",
-				zap.Uint16("app_port", tc.AppPort), zap.String("authority", authority))
-		}
-
-		// 2c. Override with config port if provided (takes precedence over AppPort).
-		if configPort > 0 {
-			authority = fmt.Sprintf("%s:%d", host, configPort)
-
-			if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-				logger.Info("Config grpc-port overrides recorded app_port",
-					zap.Uint32("config_grpc_port", configPort),
-					zap.Uint16("recorded_app_port", tc.AppPort),
-					zap.String("authority", authority))
-			} else {
-				logger.Debug("Using grpc-port from config/flag",
-					zap.Uint32("grpc_port", configPort), zap.String("authority", authority))
-			}
-		}
+	var err error
+	authority, err = ResolveTestTarget(authority, urlReplacements, configHost, tc.AppPort, configPort, false, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract method path

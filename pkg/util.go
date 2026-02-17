@@ -367,91 +367,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// 3. AppPort (if present) overrides port
 	// 4. ConfigPort (if present) overrides port
 
-	testURL := tc.HTTPReq.URL
-	replacementHasPort := false
-	replacementMatched := false
-
-	// Step 1: Check replaceWith against original URL
-	if len(urlReplacements) > 0 {
-		for substr, replacement := range urlReplacements {
-			if strings.Contains(testURL, substr) {
-				replacementMatched = true
-				testURL = strings.Replace(testURL, substr, replacement, 1)
-
-				// Check if the replacement value explicitly defines a port.
-				// Heuristic: check if the string contains a port using `hasExplicitPort`, which handles IPv6.
-				// If it looks like it has a port, we respect it and skip further overrides.
-				if !strings.HasPrefix(replacement, "http://") && !strings.HasPrefix(replacement, "https://") {
-					if hasExplicitPort(replacement) {
-						replacementHasPort = true
-					}
-				}
-
-				logger.Debug("Applied replaceWith URL substitution",
-					zap.String("find", substr),
-					zap.String("replace", replacement),
-					zap.String("result_url", testURL),
-					zap.Bool("replacement_has_port", replacementHasPort))
-
-				break
-			}
-		}
-	}
-
-	// Step 2: If replacement didn't match, apply ConfigHost
-	if !replacementMatched && configHost != "" {
-		var err error
-		testURL, err = utils.ReplaceHost(testURL, configHost)
-		if err != nil {
-			utils.LogError(logger, err, "failed to replace host with config host")
-			return nil, err
-		}
-		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("url", testURL))
-	}
-
-	// Step 2: If replacement didn't define a port, use standard port resolution
-	if !replacementHasPort {
-		parsedURL, parseErr := url.Parse(testURL)
-		if parseErr != nil {
-			utils.LogError(logger, parseErr, "failed to parse test case URL")
-			return nil, parseErr
-		}
-
-		// 2a. Start with URL's own port (Go defaults to 80/443 when absent)
-		if parsedURL.Port() == "" {
-			defaultPort := "80"
-			if parsedURL.Scheme == "https" {
-				defaultPort = "443"
-			}
-			logger.Debug("URL has no explicit port, will use scheme default",
-				zap.String("url", testURL), zap.String("default_port", defaultPort))
-		}
-
-		// 2b. Override with AppPort
-		if tc.AppPort > 0 {
-			host := parsedURL.Hostname()
-			parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
-			testURL = parsedURL.String()
-			logger.Debug("Overriding port with app_port from test case",
-				zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
-		}
-
-		// 2c. Override with ConfigPort
-		if configPort > 0 {
-			host := parsedURL.Hostname()
-			parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
-			testURL = parsedURL.String()
-
-			if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-				logger.Info("Config port overrides recorded app_port",
-					zap.Uint32("config_port", configPort),
-					zap.Uint16("recorded_app_port", tc.AppPort),
-					zap.String("url", testURL))
-			} else {
-				logger.Debug("Using port from config/flag",
-					zap.Uint32("port", configPort), zap.String("url", testURL))
-			}
-		}
+	// Step 1: Resolve the target URL/Authority using the helper
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, urlReplacements, configHost, tc.AppPort, configPort, true, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
@@ -1508,4 +1427,155 @@ func hasExplicitPort(hostStr string) bool {
 	}
 
 	return false
+}
+
+// ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
+// by applying replacement logic and precedence rules.
+//
+// Priority logic:
+// 1. Check urlReplacements against originalTarget.
+//    If match found, apply it.
+//    CRITICAL: If replacement has explicit port, it is FINAL (skip overrides).
+// 2. ConfigHost (if provided) overrides host (ONLY if replacement didn't match).
+// 3. AppPort (if present) overrides port.
+// 4. ConfigPort (if present) overrides port (takes precedence over AppPort).
+func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
+	finalTarget := originalTarget
+	replacementHasPort := false
+	replacementMatched := false
+
+	// Step 1: Check replaceWith
+	if len(urlReplacements) > 0 {
+		for substr, replacement := range urlReplacements {
+			if strings.Contains(finalTarget, substr) {
+				replacementMatched = true
+				finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
+
+				// Check if the replacement value explicitly defines a port.
+				// Heuristic: check if the string contains a port using `hasExplicitPort`.
+				// For HTTP/HTTPS, we usually ignore the scheme part for port detection,
+				// but `hasExplicitPort` expects "host:port".
+				checkStr := replacement
+				if isHTTP {
+					// Strip scheme for port check if present
+					if strings.HasPrefix(replacement, "http://") {
+						checkStr = strings.TrimPrefix(replacement, "http://")
+					} else if strings.HasPrefix(replacement, "https://") {
+						checkStr = strings.TrimPrefix(replacement, "https://")
+					}
+				}
+
+				if hasExplicitPort(checkStr) {
+					replacementHasPort = true
+				}
+
+				logger.Debug("Applied replaceWith substitution",
+					zap.String("find", substr),
+					zap.String("replace", replacement),
+					zap.String("result_target", finalTarget),
+					zap.Bool("replacement_has_port", replacementHasPort))
+				break
+			}
+		}
+	}
+
+	// If replacement defined a port, we are done
+	if replacementHasPort {
+		return finalTarget, nil
+	}
+
+	// Step 2a: ConfigHost override (if no replacement match)
+	if !replacementMatched && configHost != "" {
+		var err error
+		if isHTTP {
+			finalTarget, err = utils.ReplaceHost(finalTarget, configHost)
+		} else {
+			finalTarget, err = utils.ReplaceGrpcHost(finalTarget, configHost)
+		}
+		if err != nil {
+			utils.LogError(logger, err, "failed to replace host with config host")
+			return "", err
+		}
+		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("target", finalTarget))
+	}
+
+	// Step 2b: Port overrides (AppPort / ConfigPort)
+	// We need to parse valid host/port from finalTarget.
+	// For HTTP, it's a URL. For gRPC, it's usually "host:port" or just "host".
+
+	var host string
+	var port string
+	var scheme string // only for HTTP
+
+	if isHTTP {
+		parsedURL, parseErr := url.Parse(finalTarget)
+		if parseErr != nil {
+			utils.LogError(logger, parseErr, "failed to parse test case URL")
+			return "", parseErr
+		}
+		host = parsedURL.Hostname()
+		port = parsedURL.Port()
+		scheme = parsedURL.Scheme
+		if port == "" {
+			// Set default port if missing
+			if scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+			logger.Debug("URL has no explicit port, using scheme default",
+				zap.String("target", finalTarget), zap.String("default_port", port))
+		}
+	} else {
+		// gRPC Authority parsing
+		host = finalTarget
+		if colonIdx := strings.LastIndex(finalTarget, ":"); colonIdx != -1 {
+			// Check if it's not part of IPv6 brackets ??
+			// safest is SplitHostPort if possible, or manual logic
+			h, p, err := net.SplitHostPort(finalTarget)
+			if err == nil {
+				host = h
+				port = p
+			} else {
+				// Fallback or assume it's just host if Split failed or it's just host
+				// If no colon, port is empty
+			}
+		}
+		if port == "" {
+			logger.Debug("Authority has no explicit port, using gRPC default",
+				zap.String("target", finalTarget), zap.String("default_port", "443"))
+			port = "443" // Default for gRPC logic
+		}
+	}
+
+	// Apply overrides
+	// AppPort
+	if appPort > 0 {
+		port = fmt.Sprintf("%d", appPort)
+		logger.Debug("Overriding port with app_port",
+			zap.Uint16("app_port", appPort))
+	}
+
+	// ConfigPort (Precedence)
+	if configPort > 0 {
+		if appPort > 0 && uint32(appPort) != configPort {
+			logger.Info("Config port overrides recorded app_port",
+				zap.Uint32("config_port", configPort),
+				zap.Uint16("recorded_app_port", appPort))
+		}
+		port = fmt.Sprintf("%d", configPort)
+	}
+
+	// Reassemble
+	if isHTTP {
+		// For URL, we can reconstruct
+		u, _ := url.Parse(finalTarget) // assumed valid from before
+		u.Host = net.JoinHostPort(host, port)
+		finalTarget = u.String()
+	} else {
+		finalTarget = net.JoinHostPort(host, port)
+	}
+
+	logger.Debug("Final resolved target", zap.String("target", finalTarget))
+	return finalTarget, nil
 }
