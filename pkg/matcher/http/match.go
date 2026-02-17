@@ -28,6 +28,10 @@ var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+	if len(tc.HTTPResp.StreamEvents) > 0 {
+		return matchStreamingResponse(tc, actualResponse, logger, emitFailureLogs)
+	}
+
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult
@@ -458,6 +462,126 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	return pass, res
+}
+
+func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+	expectedBody := tc.HTTPResp.Body
+	if expectedBody == "" {
+		expectedBody = joinStreamEventData(tc.HTTPResp.StreamType, tc.HTTPResp.StreamEvents)
+	}
+
+	actualBody := actualResponse.Body
+	if actualBody == "" {
+		actualBody = joinStreamEventData(tc.HTTPResp.StreamType, actualResponse.StreamEvents)
+	}
+
+	res := &models.Result{
+		StatusCode: models.IntResult{
+			Normal:   tc.HTTPResp.StatusCode == actualResponse.StatusCode,
+			Expected: tc.HTTPResp.StatusCode,
+			Actual:   actualResponse.StatusCode,
+		},
+		BodyResult: []models.BodyResult{{
+			Normal:   true,
+			Type:     models.Plain,
+			Expected: expectedBody,
+			Actual:   actualBody,
+		}},
+	}
+
+	pass := res.StatusCode.Normal
+
+	headerNoise := map[string][]string{}
+	hRes := &[]models.HeaderResult{}
+	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
+		res.HeadersResult = *hRes
+		for i := range res.HeadersResult {
+			if strings.EqualFold(res.HeadersResult[i].Expected.Key, "content-length") {
+				res.HeadersResult[i].Normal = true
+			}
+			if !res.HeadersResult[i].Normal {
+				pass = false
+			}
+		}
+	} else {
+		res.HeadersResult = *hRes
+	}
+
+	expectedEvents := normalizeStreamEvents(tc.HTTPResp.StreamType, tc.HTTPResp.StreamEvents)
+	actualEvents := normalizeStreamEvents(tc.HTTPResp.StreamType, actualResponse.StreamEvents)
+	if len(actualEvents) != len(expectedEvents) {
+		pass = false
+		res.BodyResult[0].Normal = false
+		if emitFailureLogs {
+			logger.Error("stream event count mismatch",
+				zap.String("testcase", tc.Name),
+				zap.Int("expected_events", len(expectedEvents)),
+				zap.Int("actual_events", len(actualEvents)))
+		}
+	}
+
+	limit := min(len(expectedEvents), len(actualEvents))
+	for i := 0; i < limit; i++ {
+		if expectedEvents[i].Data != actualEvents[i].Data {
+			pass = false
+			res.BodyResult[0].Normal = false
+			if emitFailureLogs {
+				logger.Error("stream event mismatch",
+					zap.String("testcase", tc.Name),
+					zap.Int("event_index", i+1),
+					zap.String("expected", expectedEvents[i].Data),
+					zap.String("actual", actualEvents[i].Data))
+			}
+			break
+		}
+	}
+
+	if pass {
+		res.BodyResult[0].Normal = true
+	}
+
+	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
+		return AssertionMatch(tc, actualResponse, logger)
+	}
+
+	return pass, res
+}
+
+func normalizeStreamEvents(streamType models.HTTPStreamType, events []models.HTTPStreamEvent) []models.HTTPStreamEvent {
+	if len(events) == 0 {
+		return nil
+	}
+
+	out := make([]models.HTTPStreamEvent, len(events))
+	copy(out, events)
+	if streamType != models.HTTPStreamTypeSSE {
+		return out
+	}
+
+	for i := range out {
+		out[i].Data = pkg.NormalizeSSEEventData(out[i].Data)
+	}
+	return out
+}
+
+func joinStreamEventData(streamType models.HTTPStreamType, events []models.HTTPStreamEvent) string {
+	if len(events) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for idx, evt := range events {
+		switch streamType {
+		case models.HTTPStreamTypeSSE:
+			sb.WriteString(pkg.NormalizeSSEEventData(evt.Data))
+			if idx != len(events)-1 {
+				sb.WriteString("\n\n")
+			}
+		default:
+			sb.WriteString(evt.Data)
+		}
+	}
+	return sb.String()
 }
 
 // AssertionMatch checks the assertions in the test case against the actual response, if all of the assertions pass, it returns true, it doesn't care about other parameters of the response,

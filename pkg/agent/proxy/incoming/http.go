@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -131,12 +132,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Header.Set("Connection", "close")
 		}
 
-		respTimestamp := time.Now()
-		respData, err := httputil.DumpResponse(resp, true)
-		if err != nil {
-			logger.Error("Failed to dump response for capturing", zap.Error(err))
-			resp.Body.Close()
-			return
+		streamType, isStreaming := pkg.DetectHTTPStreamType(resp)
+		streamCapture := newResponseBodyCapture(isStreaming, streamType)
+		resp.Body = &capturingReadCloser{
+			ReadCloser: resp.Body,
+			onRead:     streamCapture.onChunk,
 		}
 
 		if err := resp.Write(clientConn); err != nil {
@@ -145,6 +145,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		resp.Body.Close() // Close explicitly
+		streamCapture.finalize()
+
+		respTimestamp := time.Now()
 
 		if chunked && pm.synchronous { // for chunked requests/responses, we will not capture test cases in case of pm.synchronous mode
 			return
@@ -154,21 +157,136 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if err != nil {
 			return
 		}
-		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
-		if err != nil {
-			return
-		}
+
+		parsedHTTPRes := cloneHTTPResponseForCapture(resp, streamCapture.bodyBytes())
 
 		go func() {
 			defer parsedHTTPReq.Body.Close()
-			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+			if parsedHTTPRes.Body != nil {
+				defer parsedHTTPRes.Body.Close()
+			}
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort, streamType, streamCapture.snapshotEvents())
 		}()
 
 		if pm.synchronous {
 			return
 		}
 	}
+}
+
+type capturingReadCloser struct {
+	io.ReadCloser
+	onRead func([]byte, time.Time)
+}
+
+func (c *capturingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	if n > 0 && c.onRead != nil {
+		chunk := make([]byte, n)
+		copy(chunk, p[:n])
+		c.onRead(chunk, time.Now())
+	}
+	return n, err
+}
+
+type responseBodyCapture struct {
+	streaming  bool
+	streamType models.HTTPStreamType
+
+	body   bytes.Buffer
+	events []models.HTTPStreamEvent
+
+	sequence int
+	sseBuf   []byte
+}
+
+func newResponseBodyCapture(streaming bool, streamType models.HTTPStreamType) *responseBodyCapture {
+	return &responseBodyCapture{
+		streaming:  streaming,
+		streamType: streamType,
+		events:     make([]models.HTTPStreamEvent, 0),
+	}
+}
+
+func (r *responseBodyCapture) onChunk(chunk []byte, timestamp time.Time) {
+	if len(chunk) == 0 {
+		return
+	}
+	r.body.Write(chunk)
+
+	if !r.streaming {
+		return
+	}
+
+	switch r.streamType {
+	case models.HTTPStreamTypeSSE:
+		r.sseBuf = append(r.sseBuf, chunk...)
+		parsed, remaining := pkg.ExtractSSEEvents(r.sseBuf)
+		r.sseBuf = remaining
+
+		for _, evt := range parsed {
+			r.sequence++
+			r.events = append(r.events, models.HTTPStreamEvent{
+				Sequence:  r.sequence,
+				Data:      evt,
+				Timestamp: timestamp,
+			})
+		}
+	default:
+		r.sequence++
+		r.events = append(r.events, models.HTTPStreamEvent{
+			Sequence:  r.sequence,
+			Data:      string(chunk),
+			Timestamp: timestamp,
+		})
+	}
+}
+
+func (r *responseBodyCapture) finalize() {
+	if !r.streaming || r.streamType != models.HTTPStreamTypeSSE {
+		return
+	}
+	if len(r.sseBuf) == 0 {
+		return
+	}
+
+	evt := pkg.NormalizeSSEEventData(string(r.sseBuf))
+	if evt == "" {
+		return
+	}
+	r.sequence++
+	r.events = append(r.events, models.HTTPStreamEvent{
+		Sequence:  r.sequence,
+		Data:      evt,
+		Timestamp: time.Now(),
+	})
+	r.sseBuf = nil
+}
+
+func (r *responseBodyCapture) bodyBytes() []byte {
+	return r.body.Bytes()
+}
+
+func (r *responseBodyCapture) snapshotEvents() []models.HTTPStreamEvent {
+	if len(r.events) == 0 {
+		return nil
+	}
+	out := make([]models.HTTPStreamEvent, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+func cloneHTTPResponseForCapture(resp *http.Response, body []byte) *http.Response {
+	if resp == nil {
+		return nil
+	}
+
+	clone := *resp
+	clone.Header = resp.Header.Clone()
+	clone.TransferEncoding = append([]string(nil), resp.TransferEncoding...)
+	clone.Body = io.NopCloser(bytes.NewReader(body))
+	clone.ContentLength = int64(len(body))
+	return &clone
 }
 
 func isChunked(te []string) bool {

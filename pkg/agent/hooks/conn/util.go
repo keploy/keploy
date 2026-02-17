@@ -26,7 +26,7 @@ import (
 
 var GlobalTestCounter int64
 
-type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16)
+type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16, streamType models.HTTPStreamType, streamEvents []models.HTTPStreamEvent)
 
 var CaptureHook CaptureFunc = Capture
 
@@ -37,7 +37,7 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16, streamType models.HTTPStreamType, streamEvents []models.HTTPStreamEvent) {
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -154,6 +154,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Body:          string(respBody),
 			BodySkipped:   respBodySkipped,
 			BodySize:      respBodySize,
+			StreamType:    streamType,
+			StreamEvents:  streamEvents,
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},

@@ -5,6 +5,12 @@ import (
 )
 
 type Method string
+type HTTPStreamType string
+
+const (
+	HTTPStreamTypeHTTP HTTPStreamType = "HTTP_STREAM"
+	HTTPStreamTypeSSE  HTTPStreamType = "SSE"
+)
 
 // BodyRef stores a reference to a large request body that has been offloaded
 // to the assets directory (bodies > 1MB). When BodyRef is set, Body will be empty.
@@ -52,9 +58,17 @@ type HTTPResp struct {
 	Body          string            `json:"body" yaml:"body"`
 	BodySkipped   bool              `json:"body_skipped,omitempty" yaml:"body_skipped,omitempty"` // true when body was >1MB and not saved
 	BodySize      int64             `json:"body_size,omitempty" yaml:"body_size,omitempty"`       // original body size in bytes when BodySkipped is true
+	StreamType    HTTPStreamType    `json:"stream_type,omitempty" yaml:"stream_type,omitempty"`
+	StreamEvents  []HTTPStreamEvent `json:"stream_events,omitempty" yaml:"stream_events,omitempty"`
 	StatusMessage string            `json:"status_message" yaml:"status_message"`
 	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
 	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
 	Binary        string            `json:"binary" yaml:"binary,omitempty"`
 	Timestamp     time.Time         `json:"timestamp" yaml:"timestamp"`
+}
+
+type HTTPStreamEvent struct {
+	Sequence  int       `json:"sequence" yaml:"sequence"`
+	Data      string    `json:"data" yaml:"data"`
+	Timestamp time.Time `json:"timestamp" yaml:"timestamp"`
 }

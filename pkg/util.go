@@ -488,13 +488,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}()
 
-	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
+	respBody, streamEvents, streamType, errReadRespBody := readHTTPResponseBodyWithStreamSupport(logger, httpResp, tc.HTTPResp, apiTimeout)
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
 	}
 
-	if httpResp.Header.Get("Content-Encoding") != "" {
+	if httpResp.Header.Get("Content-Encoding") != "" && streamType == "" {
 		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
@@ -509,6 +509,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		StatusMessage: statusMessage,
 		Body:          string(respBody),
 		Header:        ToYamlHTTPHeader(httpResp.Header),
+		StreamType:    streamType,
+		StreamEvents:  streamEvents,
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
