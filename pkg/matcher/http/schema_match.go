@@ -14,6 +14,34 @@ import (
 
 // MatchSchema checks if the actual response matches the expected response schema.
 func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
+	// If the response body was skipped during recording (>1MB), compute body size comparison
+	// and clear the actual body so the normal comparison runs (empty vs empty).
+	var bodySizeResult models.IntResult
+	if tc.HTTPResp.BodySkipped {
+		actualBodySize := int64(len(actualResponse.Body))
+		bodySizeMatch := tc.HTTPResp.BodySize == actualBodySize
+
+		logger.Info("response body was greater than 1MB during recording, comparing body size",
+			zap.String("testcase", tc.Name),
+			zap.Int64("expected_size", tc.HTTPResp.BodySize),
+			zap.Int64("actual_size", actualBodySize),
+			zap.Bool("size_match", bodySizeMatch))
+
+		// Log actual response body as debug before clearing
+		logger.Debug("actual response body (skipped during recording)",
+			zap.String("testcase", tc.Name),
+			zap.String("body", actualResponse.Body))
+
+		bodySizeResult = models.IntResult{
+			Normal:   bodySizeMatch,
+			Expected: int(tc.HTTPResp.BodySize),
+			Actual:   int(actualBodySize),
+		}
+
+		// Clear actual body so body comparison below runs as empty vs empty
+		actualResponse.Body = ""
+	}
+
 	pass := true
 	result := &models.Result{
 		StatusCode: models.IntResult{
@@ -26,6 +54,12 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 			Expected: tc.HTTPResp.Body,
 			Actual:   actualResponse.Body,
 		}},
+		BodySizeResult: bodySizeResult,
+	}
+
+	// If body size comparison failed, mark pass as false
+	if tc.HTTPResp.BodySkipped && !bodySizeResult.Normal {
+		pass = false
 	}
 
 	// Status Code Match

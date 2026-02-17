@@ -12,16 +12,19 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg/models"
@@ -155,7 +158,7 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32, keployPath string) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -201,6 +204,148 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
+
+	// If the request body was offloaded to an asset file (>1MB), load it back
+	if tc.HTTPReq.BodyRef.Path != "" {
+		bodyRefPath := tc.HTTPReq.BodyRef.Path
+		// Resolve relative paths against keployPath so assets work even if
+		// the keploy directory has been moved since recording.
+		if keployPath != "" && !filepath.IsAbs(bodyRefPath) {
+			bodyRefPath = filepath.Join(keployPath, bodyRefPath)
+		}
+		bodyData, readErr := os.ReadFile(bodyRefPath)
+		if readErr != nil {
+			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", bodyRefPath))
+			return nil, readErr
+		}
+		reqBody = bodyData
+		logger.Debug("loaded request body from asset file",
+			zap.String("path", bodyRefPath),
+			zap.Int("size", len(bodyData)))
+	}
+
+	// If form field values were offloaded to asset files (>1MB) and they were not actual files (json,html,xml,txt etc...), load them back
+	for i, form := range tc.HTTPReq.Form {
+		if len(form.FileNames) == 0 && len(form.Paths) > 0 && len(form.Values) > 0 {
+			for j, value := range form.Values {
+				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
+					formPath := form.Paths[j]
+					if keployPath != "" && !filepath.IsAbs(formPath) {
+						formPath = filepath.Join(keployPath, formPath)
+					}
+					valData, readErr := os.ReadFile(formPath)
+					if readErr != nil {
+						utils.LogError(logger, readErr, "failed to read form value from asset file",
+							zap.String("path", formPath),
+							zap.String("key", form.Key))
+						return nil, readErr
+					}
+					tc.HTTPReq.Form[i].Values[j] = string(valData)
+					logger.Debug("loaded form value from asset file",
+						zap.String("key", form.Key),
+						zap.String("path", formPath),
+						zap.Int("size", len(valData)))
+				}
+			}
+			// Clear Paths after restoring values so the multipart builder
+			// doesn't treat these asset paths as file uploads.
+			tc.HTTPReq.Form[i].Paths = nil
+		}
+	}
+
+	contentType := tc.HTTPReq.Header["Content-Type"]
+	if strings.HasPrefix(contentType, "multipart/form-data") && len(tc.HTTPReq.Form) > 0 {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		logger.Debug("building multipart body",
+			zap.Int("form_fields", len(tc.HTTPReq.Form)),
+			zap.String("content_type", contentType),
+		)
+		for _, field := range tc.HTTPReq.Form {
+			logger.Debug("multipart field",
+				zap.String("key", field.Key),
+				zap.Int("values", len(field.Values)),
+				zap.Int("paths", len(field.Paths)),
+			)
+			for _, path := range field.Paths {
+				// Resolve relative paths against keployPath
+				resolvedPath := path
+				if keployPath != "" && !filepath.IsAbs(path) {
+					resolvedPath = filepath.Join(keployPath, path)
+				}
+				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
+				file, ferr := os.Open(resolvedPath)
+				if ferr != nil {
+					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
+					return nil, ferr
+				}
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
+				if perr != nil {
+					file.Close()
+					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+					return nil, perr
+				}
+				if _, cerr := io.Copy(part, file); cerr != nil {
+					file.Close()
+					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", field.Key))
+					return nil, cerr
+				}
+				if cerr := file.Close(); cerr != nil {
+					utils.LogError(logger, cerr, "failed to close multipart file", zap.String("path", path))
+					return nil, cerr
+				}
+			}
+			for valueIndex, value := range field.Values {
+				logger.Debug("multipart field value",
+					zap.String("field", field.Key),
+					zap.Int("value_len", len(value)),
+					zap.Bool("looks_binary", looksBinary(value)),
+				)
+				isFileValue := false
+				fileName := ""
+				if len(field.Paths) == 0 && len(field.FileNames) > 0 {
+					isFileValue = true
+				} else if len(field.Paths) == 0 && len(field.FileNames) == 0 && looksBinary(value) {
+					isFileValue = true
+				}
+
+				if isFileValue {
+					if len(field.FileNames) > 0 && valueIndex < len(field.FileNames) {
+						fileName = field.FileNames[valueIndex]
+					}
+					if fileName == "" {
+						fileName = "upload.bin"
+					}
+					fileName = filepath.Base(fileName)
+					if fileName == "." || fileName == string(filepath.Separator) || fileName == "" {
+						fileName = "upload.bin"
+					}
+					part, perr := writer.CreateFormFile(field.Key, fileName)
+					if perr != nil {
+						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+						return nil, perr
+					}
+					if _, werr := part.Write([]byte(value)); werr != nil {
+						utils.LogError(logger, werr, "failed to write multipart file content", zap.String("field", field.Key))
+						return nil, werr
+					}
+					continue
+				}
+				if werr := writer.WriteField(field.Key, value); werr != nil {
+					utils.LogError(logger, werr, "failed to write multipart field", zap.String("field", field.Key))
+					return nil, werr
+				}
+			}
+		}
+		if cerr := writer.Close(); cerr != nil {
+			utils.LogError(logger, cerr, "failed to close multipart writer")
+			return nil, cerr
+		}
+		logger.Debug("multipart body built", zap.Int("body_len", body.Len()), zap.String("content_type", writer.FormDataContentType()))
+		reqBody = body.Bytes()
+		tc.HTTPReq.Header["Content-Type"] = writer.FormDataContentType()
+		delete(tc.HTTPReq.Header, "Content-Length")
+	}
 
 	if tc.HTTPReq.Header["Content-Encoding"] != "" {
 		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], reqBody)
@@ -384,6 +529,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 	return resp, errHTTPReq
+}
+
+func looksBinary(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateTemplateValuesFromHTTPResp checks the HTTP response body and the previous templatized response body
