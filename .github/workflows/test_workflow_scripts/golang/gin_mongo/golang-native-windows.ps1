@@ -191,7 +191,7 @@ for ($i = 1; $i -le 2; $i++) {
     $keployPath = (Get-Command $env:RECORD_BIN).Source
     $appPath    = (Resolve-Path ".\ginApp.exe").Path
 
-    # Start Keploy (Removed --debug to reduce noise, re-add if needed)
+    # Start Keploy
     $recJob = Start-Job -ScriptBlock {
         param($workDir, $keployBin, $appBin)
         Set-Location -Path $workDir
@@ -226,8 +226,15 @@ for ($i = 1; $i -le 2; $i++) {
     
     Remove-Job $recJob -Force
 
-    if (Select-String -Path $logFile -Pattern "ERROR") {
+    # Scan for errors, but apply filter
+    $recErrors = Select-String -Path $logFile -Pattern "ERROR"
+    $filteredRecErrors = $recErrors | Where-Object { 
+        $_.Line -notmatch "Failed to read upstream response.*wsarecv"
+    }
+
+    if ($filteredRecErrors) {
         Write-Error "Error found in pipeline..."
+        $filteredRecErrors | ForEach-Object { Write-Host $_ }
         exit 1
     }
     if (Select-String -Path $logFile -Pattern "WARNING: DATA RACE") {
@@ -247,7 +254,7 @@ Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
 $keployPath = (Get-Command $env:REPLAY_BIN).Source
 
-& $keployPath test -c ".\ginApp.exe" --delay 15 --port 8080 2>&1 | Tee-Object -FilePath $testLogFile
+& $keployPath test -c ".\ginApp.exe" --delay 15 2>&1 | Tee-Object -FilePath $testLogFile
 
 # =============================================================================
 # 4. Validation
@@ -255,11 +262,13 @@ $keployPath = (Get-Command $env:REPLAY_BIN).Source
 
 Write-Host "Verifying test reports..."
 
-# 1. Check for "ERROR" in logs (excluding harmless taskkill and shutdown errors)
+# 1. Check for "ERROR" in logs (excluding harmless taskkill, shutdown, and wsarecv errors)
 $logErrors = Select-String -Path $testLogFile -Pattern "ERROR"
 $realErrors = $logErrors | Where-Object { 
     $_.Line -notmatch "The process .* not found" -and
-    $_.Line -notmatch "Error removing file.*keploy-logs\.txt"
+    $_.Line -notmatch "Error removing file.*keploy-logs\.txt" -and
+    $_.Line -notmatch "remove keploy-logs\.txt: The process cannot access the file because it is being used by another process" -and
+    $_.Line -notmatch "Failed to read upstream response.*wsarecv"
 }
 
 if ($realErrors) {

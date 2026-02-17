@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -131,6 +133,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IsDocker:          opts.Agent.IsDocker,
 		mysqlDetectionStrategy: mysqlStrategy,
 	}
+
+	return proxy
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -557,12 +561,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	var clientPeerCert *x509.Certificate
+	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
+		}
+
+		if isMTLS {
+			if tlsConn, ok := srcConn.(*tls.Conn); ok {
+				state := tlsConn.ConnectionState()
+				if len(state.PeerCertificates) > 0 {
+					clientPeerCert = state.PeerCertificates[0]
+				}
+			}
 		}
 	}
 
@@ -611,6 +626,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		initialBuf = append(initialBuf, headerBuf...)
 	}
 
+	// For HTTP/2 connections, the initial buffer may only contain the client
+	// preface and SETTINGS frames. Protocol matchers (gRPC vs h2c) need to
+	// inspect the HEADERS frame's content-type to decide.
+	//
+	// We use a short timeout read instead of a blocking read because:
+	//  - h2c clients typically send preface+SETTINGS+HEADERS in quick succession
+	//  - gRPC clients send preface+SETTINGS, then WAIT for server SETTINGS_ACK
+	//    before sending HEADERS — a blocking read would deadlock.
+	//
+	// If HEADERS arrives within the timeout → matchers can inspect content-type.
+	// If it doesn't (gRPC pattern) → matchers treat missing HEADERS as gRPC.
+	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
+		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
+
+		moreBuf, err := util.ReadWithTimeout(srcConn, 150*time.Millisecond)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
+			return err
+		}
+		if len(moreBuf) > 0 {
+			initialBuf = append(initialBuf, moreBuf...)
+		}
+	}
+
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
@@ -642,9 +681,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		nextProtos := []string{"http/1.1"} // default safe
 
-		if !util.IsHTTPReq(initialBuf) {
+		isHTTP := util.IsHTTPReq(initialBuf)
+		isCONNECT := bytes.HasPrefix(initialBuf, []byte("CONNECT "))
+		logger.Debug("ALPN decision debug",
+			zap.Bool("isHTTPReq", isHTTP),
+			zap.Bool("isCONNECT", isCONNECT),
+			zap.Int("initialBufLen", len(initialBuf)),
+			zap.String("initialBufPrefix", string(initialBuf[:min(20, len(initialBuf))])),
+		)
+
+		// Allow H2 if:
+		// 1. It's not an HTTP/1.x request (could be gRPC/HTTP2 frames), OR
+		// 2. It's a CONNECT request (used by gRPC parser for tunneling, ALB requires H2)
+		if !isHTTP || isCONNECT {
 			// not an HTTP/1.x request line; could be HTTP/2 (gRPC) frames
 			nextProtos = []string{"h2", "http/1.1"}
+			logger.Debug("Offering H2 for ALPN", zap.Strings("nextProtos", nextProtos))
+		} else {
+			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
 		}
 
 		cfg := &tls.Config{
@@ -653,7 +707,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			NextProtos:         nextProtos,
 		}
 
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
+			err = p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
+			if err != nil {
+				return err
+			}
+		}
+
+		addr := dstAddr
+		if dstURL != "" {
+			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		}
+
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
@@ -664,7 +729,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			conn := dstConn.(*tls.Conn)
 			state := conn.ConnectionState()
 
-			p.logger.Info("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
+			p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -796,6 +861,48 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	}
 }
 
+func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certificate, tlsPrivateKey string) error {
+	if cfg == nil || clientPeerCert == nil {
+		return nil
+	}
+
+	if tlsPrivateKey == "" {
+		err := errors.New("failed to read private key from outgoing options")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	keyBytes := []byte(tlsPrivateKey)
+	block, _ := pem.Decode(keyBytes)
+	if block == nil {
+		err := errors.New("failed to decode PEM block containing private key")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	var privKey any
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		privKey = key
+	}
+
+	if privKey == nil {
+		err := errors.New("failed to parse private key from PEM")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	cfg.Certificates = []tls.Certificate{{
+		Certificate: [][]byte{clientPeerCert.Raw},
+		PrivateKey:  privKey,
+	}}
+	p.logger.Debug("Successfully constructed mTLS certificate using client peer cert and local key")
+	return nil
+}
+
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
@@ -843,6 +950,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
+		clearDNSCache()
 	}
 
 	return nil
@@ -855,24 +963,6 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
-}
-
-// DeleteMocks removes the specified mocks from the filtered tree only.
-// This allows for efficient incremental updates (O(k log N)) instead of full rebuilds (O(N log N)).
-// Note: We only delete from filtered tree because unfiltered mocks are config/reusable mocks
-// (like HTTP external API calls) that should remain available across tests.
-func (p *Proxy) DeleteMocks(_ context.Context, mocks []*models.Mock) error {
-	m, ok := p.MockManagers.Load(uint64(0))
-	if ok {
-		mgr := m.(*MockManager)
-		for _, mock := range mocks {
-			if mock != nil {
-				// Only delete from filtered tree - unfiltered mocks are reusable
-				mgr.DeleteFilteredMock(*mock)
-			}
-		}
-	}
-	return nil
 }
 
 // GetErrorChannel returns the error channel for external monitoring
@@ -894,6 +984,13 @@ func (p *Proxy) SendError(err error) {
 // CloseErrorChannel closes the error channel
 func (p *Proxy) CloseErrorChannel() {
 	close(p.errChannel)
+}
+
+func (p *Proxy) Mapping(ctx context.Context, mappingCh chan models.TestMockMapping) {
+	mgr := syncMock.Get()
+	if mgr != nil {
+		mgr.SetMappingChannel(mappingCh)
+	}
 }
 
 func isShutdownError(err error) bool {

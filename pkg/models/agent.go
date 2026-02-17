@@ -17,6 +17,11 @@ type AgentResp struct {
 	IsSuccess bool  `json:"isSuccess"`
 }
 
+type TestMockMapping struct {
+	TestName string   `json:"test_name"`
+	MockIDs  []string `json:"mock_ids"`
+}
+
 type SetMocksReq struct {
 	Filtered   []*Mock `json:"filtered"`
 	UnFiltered []*Mock `json:"unFiltered"`
@@ -33,7 +38,6 @@ type MockFilterParams struct {
 	MockMapping        []string             `json:"mockMapping,omitempty"`
 	UseMappingBased    bool                 `json:"useMappingBased"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
-	IsDiff             bool                 `json:"isDiff"`
 }
 
 type UpdateMockParamsReq struct {

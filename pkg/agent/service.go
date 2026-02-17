@@ -29,13 +29,13 @@ type Proxy interface {
 	Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
-	DeleteMocks(ctx context.Context, mocks []*models.Mock) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
+	Mapping(ctx context.Context, mappingCh chan models.TestMockMapping)
 }
 
 type IncomingProxy interface {

@@ -326,6 +326,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
+		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -361,6 +362,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
+			cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
+			cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 		}
 	}
 }
@@ -374,6 +377,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"delay":                 "delay",
 		"apiTimeout":            "api-timeout",
 		"mongoPassword":         "mongo-password",
+		"tlsPrivateKeyPath":     "tls-private-key-path",
 		"coverageReportPath":    "coverage-report-path",
 		"language":              "language",
 		"ignoreOrdering":        "ignore-ordering",
@@ -426,6 +430,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"protoInclude":          "proto-include",
 		"allowHighRisk":         "allow-high-risk",
 		"disableMapping":        "disable-mapping",
+		"compareAll":            "compare-all",
+		"schemaMatch":           "schema-match",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -534,15 +540,24 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		IsConfigFileFound = false
 		c.logger.Debug("config file not found; proceeding with flags only")
 	} else {
-		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the SAME configPath
+		// 6) Base exists → try merging <last-dir>.keploy.yml (override) from the application folder (current working directory)
 		lastDir, err := utils.GetLastDirectory()
 		if err != nil {
-			errMsg := fmt.Sprintf("failed to get last directory name for override config file in path '%s'", configPath)
+			errMsg := "failed to get last directory name for override config file"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		// overridePath is <configPath>/<lastDir>.keploy.yml
-		overridePath := filepath.Join(configPath, fmt.Sprintf("%s.keploy.yml", lastDir))
+
+		// Get current working directory (application folder) for override file
+		appDir, err := os.Getwd()
+		if err != nil {
+			errMsg := "failed to get current working directory for override config file"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		// overridePath is <appDir>/<lastDir>.keploy.yml (in application folder, not configPath)
+		overridePath := filepath.Join(appDir, fmt.Sprintf("%s.keploy.yml", lastDir))
 
 		if _, statErr := os.Stat(overridePath); statErr == nil {
 			viper.SetConfigFile(overridePath)
@@ -634,6 +649,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.logger.Info("Color encoding is disabled")
+	}
+
+	if cmd.Name() == "test" {
+		schemaMatch, _ := cmd.Flags().GetBool("schema-match")
+		if schemaMatch {
+			// since schemaMatch is not being set in the config from the flag, we are setting it here
+			c.cfg.Test.SchemaMatch = schemaMatch
+		}
 	}
 
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))

@@ -8,8 +8,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -75,16 +79,25 @@ func generateCacheKey(name string, qtype uint16) string {
 }
 
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-
 	p.logger.Debug("", zap.String("Source socket info", w.RemoteAddr().String()))
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
+
+	session, hasSession := p.sessions.Get(uint64(0))
+	mode := models.GetMode()
+	mockingEnabled := true
+	if hasSession && session != nil {
+		mode = session.Mode
+		mockingEnabled = session.Mocking
+	}
+
 	p.logger.Debug("Got some Dns queries")
 	for _, question := range r.Question {
 		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
 
 		key := generateCacheKey(question.Name, question.Qtype)
+		reqTimestamp := time.Now().UTC()
 
 		// Clear cache for MongoDB SRV queries to ensure fresh resolution
 		if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
@@ -93,80 +106,17 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			cache.Unlock()
 		}
 
-		// Check if the answer is cached
 		cache.RLock()
 		answers, found := cache.m[key]
 		cache.RUnlock()
 
 		if !found {
-			// If not found in cache, resolve the DNS query only in case of record mode
-			//TODO: Add support for passThrough here using the src<->dst mapping
-			if models.GetMode() == models.MODE_RECORD {
-				answers = resolveDNSQuery(p.logger, question.Name, question.Qtype)
-			}
+			answers = p.resolveUncachedDNSAnswers(question, mode, mockingEnabled, reqTimestamp, session)
 
-			if len(answers) == 0 {
-				switch question.Qtype {
-				// If the resolution failed, return a default A record with Proxy IP
-				// or AAAA record with Proxy IP6
-				case dns.TypeA:
-					answers = []dns.RR{&dns.A{
-						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-						A:   net.ParseIP(p.IP4),
-					}}
-					p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.String("proxy Ip", p.IP4))
-				case dns.TypeAAAA:
-					answers = []dns.RR{&dns.AAAA{
-						Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-						AAAA: net.ParseIP(p.IP6),
-					}}
-					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
-				case dns.TypeSRV:
-					// Special handling for MongoDB SRV queries
-					if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
-						baseDomain := strings.TrimPrefix(question.Name, "_mongodb._tcp.")
-						answers = []dns.RR{&dns.SRV{
-							Hdr:      dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
-							Priority: 0,
-							Weight:   0,
-							Port:     27017,
-							Target:   dns.Fqdn("mongodb." + baseDomain),
-						}}
-					} else {
-						answers = []dns.RR{&dns.SRV{
-							Hdr:      dns.RR_Header{Name: question.Name, Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
-							Priority: 0,
-							Weight:   0,
-							Port:     8080,
-							Target:   dns.Fqdn("keploy.proxy"),
-						}}
-					}
-					p.logger.Debug("sending default SRV record response")
-				case dns.TypeTXT:
-					// Always return no TXT records (empty answer). This avoids sending bogus
-					// TXT payloads that clients (e.g. mongodb+srv) might try to parse.
-					p.logger.Debug("skipping TXT answer (configured to always return empty TXT)")
-				// answers stays nil/empty so no TXT record will be returned.
-				case dns.TypeMX:
-					// Default MX record response
-					answers = []dns.RR{&dns.MX{
-						Hdr:        dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
-						Preference: 10,
-						Mx:         dns.Fqdn("mail." + question.Name),
-					}}
-					p.logger.Debug("sending default MX record response")
-				default:
-					p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
-				}
-
-			}
-			p.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
-
-			// Cache the answer
 			cache.Lock()
 			cache.m[key] = answers
 			cache.Unlock()
-			p.logger.Debug(fmt.Sprintf("Answers[after caching it]:\n%v\n", answers))
+			p.logger.Debug(fmt.Sprintf("Answers[after uncached resolution for query:%v]:\n%v\n", question.Qtype, answers))
 		}
 
 		p.logger.Debug(fmt.Sprintf("Answers[before appending to msg]:\n%v\n", answers))
@@ -183,22 +133,275 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
-// TODO: passThrough the dns queries rather than resolving them.
-func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
-	// Remove the last dot from the domain name if it exists
-	domain = strings.TrimSuffix(domain, ".")
-
-	// Use the default system resolver
-	resolver := net.DefaultResolver
-
-	ctx := context.Background()
-
+func (p *Proxy) resolveUncachedDNSAnswers(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) []dns.RR {
 	var answers []dns.RR
 
-	// Optimize resolution based on query type
-	switch qtype {
+	switch mode {
+	case models.MODE_TEST:
+		// In test mode, only use recorded DNS mocks.
+		// If a matching mock has an intentionally empty answer set (e.g. TXT),
+		// return it as-is and do not synthesize defaults.
+		mocked := false
+		if mockingEnabled {
+			answers, mocked = p.getMockedDNSAnswers(question)
+		}
+		if mocked {
+			return answers
+		}
+
+	case models.MODE_RECORD:
+		answers = p.recordDNSMock(question, reqTime, session)
+	}
+
+	if len(answers) > 0 {
+		return answers
+	}
+	return p.defaultDNSAnswers(question)
+}
+
+func (p *Proxy) defaultDNSAnswers(question dns.Question) []dns.RR {
+	switch question.Qtype {
+	case dns.TypeA:
+		p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.String("proxy Ip", p.IP4))
+		return []dns.RR{&dns.A{
+			Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+			A:   net.ParseIP(p.IP4),
+		}}
+
+	case dns.TypeAAAA:
+		// Do not synthesize AAAA fallback (::1/proxy IPv6). For environments that are IPv4-only
+		// (for example many docker bridge networks), returning a synthetic IPv6 answer can make
+		// clients prefer an unreachable ::1 destination.
+		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
+		return nil
+
 	case dns.TypeSRV:
-		// Handle MongoDB specific SRV queries
+		// Special handling for MongoDB SRV queries
+		if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
+			baseDomain := strings.TrimPrefix(question.Name, "_mongodb._tcp.")
+			return []dns.RR{&dns.SRV{
+				Hdr:      dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+				Priority: 0,
+				Weight:   0,
+				Port:     27017,
+				Target:   dns.Fqdn("mongodb." + baseDomain),
+			}}
+		}
+		p.logger.Debug("sending default SRV record response")
+		return []dns.RR{&dns.SRV{
+			Hdr:      dns.RR_Header{Name: question.Name, Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+			Priority: 0,
+			Weight:   0,
+			Port:     8080,
+			Target:   dns.Fqdn("keploy.proxy"),
+		}}
+
+	case dns.TypeTXT:
+		// Always return no TXT records (empty answer). This avoids sending bogus
+		// TXT payloads that clients (e.g. mongodb+srv) might try to parse.
+		p.logger.Debug("skipping TXT answer (configured to always return empty TXT)")
+		return nil
+
+	case dns.TypeMX:
+		p.logger.Debug("sending default MX record response")
+		return []dns.RR{&dns.MX{
+			Hdr:        dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
+			Preference: 10,
+			Mx:         dns.Fqdn("mail." + question.Name),
+		}}
+
+	default:
+		p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
+		return nil
+	}
+}
+
+func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
+	mgrIface, ok := p.MockManagers.Load(uint64(0))
+	if !ok {
+		return nil, false
+	}
+	mgr, ok := mgrIface.(*MockManager)
+	if !ok || mgr == nil {
+		return nil, false
+	}
+
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		mocks, err := mgr.GetUnFilteredMocksByKind(models.DNS)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to get dns mocks")
+			return nil, false
+		}
+		if len(mocks) == 0 {
+			return nil, false
+		}
+
+		var filteredMocks []*models.Mock
+		var unfilteredMocks []*models.Mock
+
+		for _, mock := range mocks {
+			if mock == nil {
+				continue
+			}
+			if mock.TestModeInfo.IsFiltered {
+				filteredMocks = append(filteredMocks, mock)
+			} else {
+				unfilteredMocks = append(unfilteredMocks, mock)
+			}
+		}
+
+		if matchedMock, answers := findDNSMock(filteredMocks, question, p.logger); matchedMock != nil {
+			if p.updateDNSMock(mgr, matchedMock) {
+				return answers, true
+			}
+			p.logger.Debug("DNS mock update failed (filtered), retrying",
+				zap.String("mockName", matchedMock.Name),
+				zap.Int("attempt", attempt+1),
+				zap.Int("maxRetries", maxRetries),
+			)
+			// On final retry, return the answers anyway to avoid blocking the DNS response
+			if attempt == maxRetries-1 {
+				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+					zap.String("mockName", matchedMock.Name),
+					zap.String("query", question.Name),
+				)
+				return answers, true
+			}
+			continue
+		}
+
+		if matchedMock, answers := findDNSMock(unfilteredMocks, question, p.logger); matchedMock != nil {
+			if p.updateDNSMock(mgr, matchedMock) {
+				return answers, true
+			}
+			p.logger.Debug("DNS mock update failed (unfiltered), retrying",
+				zap.String("mockName", matchedMock.Name),
+				zap.Int("attempt", attempt+1),
+				zap.Int("maxRetries", maxRetries),
+			)
+			// On final retry, return the answers anyway to avoid blocking the DNS response
+			if attempt == maxRetries-1 {
+				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+					zap.String("mockName", matchedMock.Name),
+					zap.String("query", question.Name),
+				)
+				return answers, true
+			}
+			continue
+		}
+
+		return nil, false
+	}
+
+	return nil, false
+}
+
+func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, []dns.RR) {
+	for _, mock := range mocks {
+		if mock == nil || mock.Spec.DNSReq == nil {
+			continue
+		}
+		if !dnsRequestMatches(mock.Spec.DNSReq, question) {
+			continue
+		}
+		var answers []dns.RR
+		if mock.Spec.DNSResp != nil {
+			answers = decodeDNSAnswers(logger, mock.Spec.DNSResp.Answers)
+		}
+		return mock, answers
+	}
+	return nil, nil
+}
+
+func dnsRequestMatches(recorded *models.DNSReq, question dns.Question) bool {
+	if recorded == nil {
+		return false
+	}
+	if recorded.Qtype != 0 && recorded.Qtype != question.Qtype {
+		return false
+	}
+	if recorded.Qclass != 0 && recorded.Qclass != question.Qclass {
+		return false
+	}
+	return strings.EqualFold(dns.Fqdn(recorded.Name), dns.Fqdn(question.Name))
+}
+
+func decodeDNSAnswers(logger *zap.Logger, answers []string) []dns.RR {
+	if len(answers) == 0 {
+		return nil
+	}
+	decoded := make([]dns.RR, 0, len(answers))
+	for _, raw := range answers {
+		rr, err := dns.NewRR(raw)
+		if err != nil {
+			if logger != nil {
+				logger.Debug("failed to parse dns answer", zap.String("answer", raw), zap.Error(err))
+			}
+			continue
+		}
+		decoded = append(decoded, rr)
+	}
+	return decoded
+}
+
+func encodeDNSAnswers(answers []dns.RR) []string {
+	if len(answers) == 0 {
+		return nil
+	}
+	encoded := make([]string, 0, len(answers))
+	for _, rr := range answers {
+		if rr == nil {
+			continue
+		}
+		encoded = append(encoded, rr.String())
+	}
+	return encoded
+}
+
+func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
+	if mgr == nil || matchedMock == nil {
+		return false
+	}
+	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
+	id, isFiltered, sortOrder := matchedMock.TestModeInfo.ID, matchedMock.TestModeInfo.IsFiltered, matchedMock.TestModeInfo.SortOrder
+
+	originalMatchedMock := &models.Mock{
+		Name: matchedMock.Name,
+		Kind: matchedMock.Kind,
+		TestModeInfo: models.TestModeInfo{
+			ID:         id,
+			IsFiltered: isFiltered,
+			SortOrder:  sortOrder,
+		},
+	}
+
+	updatedMock := &models.Mock{
+		Version:      matchedMock.Version,
+		Name:         matchedMock.Name,
+		Kind:         matchedMock.Kind,
+		Spec:         matchedMock.Spec,
+		ConnectionID: matchedMock.ConnectionID,
+		TestModeInfo: models.TestModeInfo{
+			ID:         id,
+			IsFiltered: false,
+			SortOrder:  pkg.GetNextSortNum(),
+		},
+	}
+
+	return mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
+}
+
+func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) []dns.RR {
+	// TODO: Add support for passThrough here using the src<->dst mapping.
+	domain := strings.TrimSuffix(question.Name, ".")
+	resolver := net.DefaultResolver
+	ctx := context.Background()
+	var answers []dns.RR
+
+	// Resolve DNS first, then record the resolved/defaulted answer set.
+	switch question.Qtype {
+	case dns.TypeSRV:
 		if strings.HasPrefix(domain, "_mongodb._tcp.") {
 			baseDomain := strings.TrimPrefix(domain, "_mongodb._tcp.")
 			_, addrs, err := resolver.LookupSRV(ctx, "mongodb", "tcp", baseDomain)
@@ -213,18 +416,18 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 					})
 				}
 				if len(answers) > 0 {
-					logger.Debug("resolved the dns records successfully")
+					p.logger.Debug("resolved the dns records successfully")
 				}
-				return answers
+			} else {
+				// If resolution fails, return a default SRV record
+				answers = []dns.RR{&dns.SRV{
+					Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+					Priority: 0,
+					Weight:   0,
+					Port:     27017, // Default MongoDB port
+					Target:   dns.Fqdn("mongodb." + baseDomain),
+				}}
 			}
-			// If resolution fails, return a default SRV record
-			return []dns.RR{&dns.SRV{
-				Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
-				Priority: 0,
-				Weight:   0,
-				Port:     27017, // Default MongoDB port
-				Target:   dns.Fqdn("mongodb." + baseDomain),
-			}}
 		}
 
 	case dns.TypeTXT:
@@ -238,9 +441,8 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 				})
 			}
 			if len(answers) > 0 {
-				logger.Debug("resolved the dns records successfully")
+				p.logger.Debug("resolved the dns records successfully")
 			}
-			return answers
 		}
 
 	case dns.TypeMX:
@@ -255,49 +457,90 @@ func resolveDNSQuery(logger *zap.Logger, domain string, qtype uint16) []dns.RR {
 				})
 			}
 			if len(answers) > 0 {
-				logger.Debug("resolved the dns records successfully")
+				p.logger.Debug("resolved the dns records successfully")
 			}
-			return answers
 		}
 
 	case dns.TypeA, dns.TypeAAAA:
 		// For A/AAAA records
 		ips, err := resolver.LookupIPAddr(ctx, domain)
 		if err != nil {
-			logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
-			return nil
-		}
-
-		for _, ip := range ips {
-			if ipv4 := ip.IP.To4(); ipv4 != nil {
-				// Only add A record if TypeA was requested
-				if qtype == dns.TypeA {
-					answers = append(answers, &dns.A{
-						Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-						A:   ipv4,
-					})
+			p.logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
+		} else {
+			for _, ip := range ips {
+				if ipv4 := ip.IP.To4(); ipv4 != nil {
+					// Only add A record if TypeA was requested
+					if question.Qtype == dns.TypeA {
+						answers = append(answers, &dns.A{
+							Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+							A:   ipv4,
+						})
+					}
+				} else {
+					// Only add AAAA record if TypeAAAA was requested
+					if question.Qtype == dns.TypeAAAA {
+						answers = append(answers, &dns.AAAA{
+							Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+							AAAA: ip.IP,
+						})
+					}
 				}
-			} else {
-				// Only add AAAA record if TypeAAAA was requested
-				if qtype == dns.TypeAAAA {
-					answers = append(answers, &dns.AAAA{
-						Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-						AAAA: ip.IP,
-					})
-				}
+			}
+			if len(answers) > 0 {
+				p.logger.Debug("resolved the dns records successfully")
 			}
 		}
 
-		if len(answers) > 0 {
-			logger.Debug("resolved the dns records successfully")
-		}
-
 	default:
-		logger.Debug("unsupported DNS query type for resolution", zap.Int("query type", int(qtype)))
-		return nil
+		p.logger.Debug("unsupported DNS query type for resolution", zap.Int("query type", int(question.Qtype)))
 	}
 
+	if len(answers) == 0 {
+		answers = p.defaultDNSAnswers(question)
+	}
+
+	if session == nil || session.MC == nil {
+		return answers
+	}
+
+	resTime := time.Now().UTC()
+	mock := &models.Mock{
+		Version: models.GetVersion(),
+		Name:    "mocks",
+		Kind:    models.DNS,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{
+				"name":  "DNS",
+				"qtype": dns.TypeToString[question.Qtype],
+			},
+			DNSReq: &models.DNSReq{
+				Name:   dns.Fqdn(question.Name),
+				Qtype:  question.Qtype,
+				Qclass: question.Qclass,
+			},
+			DNSResp: &models.DNSResp{
+				Answers: encodeDNSAnswers(answers),
+			},
+			ReqTimestampMock: reqTime,
+			ResTimestampMock: resTime,
+		},
+	}
+
+	if session.Synchronous {
+		if mgr := syncMock.Get(); mgr != nil {
+			mgr.SetOutputChannel(session.MC)
+			mgr.AddMock(mock)
+			return answers
+		}
+	}
+	session.MC <- mock
 	return answers
+}
+
+func clearDNSCache() {
+	cache.Lock()
+	cache.m = make(map[string][]dns.RR)
+	cache.Unlock()
 }
 
 func (p *Proxy) stopDNSServers(_ context.Context) error {

@@ -55,12 +55,12 @@ type Service interface {
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context, testSets []string) error
 
-	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	StoreMappings(ctx context.Context, mapping *models.Mapping) error
 
 	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
-	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result)
+	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result)
 	// CompareGRPCResp compares gRPC responses and returns match result with detailed diffs
-	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result)
+	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result)
 }
 
 type TestDB interface {
@@ -72,8 +72,8 @@ type TestDB interface {
 }
 
 type MockDB interface {
-	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
+	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
+	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
 }
 
@@ -95,7 +95,7 @@ type TestSetConfig interface {
 
 type Telemetry interface {
 	TestSetRun(success int, failure int, testSet string, runStatus string)
-	TestRun(success int, failure int, testSets int, runStatus string)
+	TestRun(success int, failure int, testSets int, runStatus string, metadata map[string]interface{})
 	MockTestRun(utilizedMocks int)
 }
 
@@ -120,6 +120,6 @@ type InstrumentState struct {
 }
 
 type MappingDB interface {
-	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	Insert(ctx context.Context, mapping *models.Mapping) error
 	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
 }
