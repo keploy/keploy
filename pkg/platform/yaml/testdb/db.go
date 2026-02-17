@@ -506,9 +506,11 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					newPaths = append(newPaths, destPath)
 				} else {
 					allFilesPersisted = false
-					if j < len(form.Paths) && form.Paths[j] != "" {
-						newPaths = append(newPaths, form.Paths[j])
-					}
+					// Do not append non-existent paths to newPaths — they would
+					// cause replay failures when the system tries to read them.
+					ts.logger.Warn("skipping file entry that could not be persisted",
+						zap.String("fileName", form.FileNames[j]),
+						zap.String("key", form.Key))
 				}
 			}
 

@@ -181,6 +181,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		if err := mw.Close(); err != nil {
 			a.logger.Error("failed to close multipart writer", zap.Error(err))
 		}
+		// Flush the final boundary so the client sees a clean EOF
+		// instead of "unexpected EOF" when the connection tears down.
+		flusher.Flush()
 	}()
 	w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
 	w.Header().Set("Cache-Control", "no-cache")
@@ -206,7 +209,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.logger.Debug("Streaming incoming test cases to client")
-
 
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()

@@ -128,7 +128,11 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 					break
 				}
 				if err != nil {
-					if ctx.Err() != nil || strings.Contains(err.Error(), "closed network connection") {
+					if ctx.Err() != nil ||
+						strings.Contains(err.Error(), "closed network connection") ||
+						errors.Is(err, io.ErrUnexpectedEOF) ||
+						strings.Contains(err.Error(), "unexpected EOF") {
+						a.logger.Debug("multipart stream ended", zap.Error(err))
 						break
 					}
 					utils.LogError(a.logger, err, "error reading stream part")
