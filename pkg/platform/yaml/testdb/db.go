@@ -349,8 +349,13 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 			utils.LogError(ts.logger, err, "failed to write request body asset", zap.String("path", bodyPath))
 			return err
 		}
+		// Store path relative to keploy directory so it stays portable
+		relBodyPath, relErr := filepath.Rel(ts.TcsPath, bodyPath)
+		if relErr != nil {
+			relBodyPath = bodyPath // fallback to absolute if Rel fails
+		}
 		tc.HTTPReq.BodyRef = models.BodyRef{
-			Path: bodyPath,
+			Path: relBodyPath,
 			Size: int64(len(bodyBytes)),
 		}
 		tc.HTTPReq.Body = "" // clear the body since it's now stored in assets
@@ -411,9 +416,13 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 							utils.LogError(ts.logger, err, "failed to write large form value asset", zap.String("path", destPath))
 							return err
 						}
-						// Replace value with empty string and store path at the same index
-						tc.HTTPReq.Form[i].Values[j] = ""
-						tc.HTTPReq.Form[i].Paths[j] = destPath
+					// Replace value with empty string and store relative path at the same index
+					tc.HTTPReq.Form[i].Values[j] = ""
+					relPath, relErr := filepath.Rel(ts.TcsPath, destPath)
+					if relErr != nil {
+						relPath = destPath
+					}
+					tc.HTTPReq.Form[i].Paths[j] = relPath
 						ts.logger.Info("offloaded large form value to assets",
 							zap.String("testcase", tcsName),
 							zap.String("key", form.Key),
@@ -503,7 +512,12 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 				}
 
 				if wroteFile {
-					newPaths = append(newPaths, destPath)
+					// Store path relative to keploy directory so it stays portable
+					relPath, relErr := filepath.Rel(ts.TcsPath, destPath)
+					if relErr != nil {
+						relPath = destPath
+					}
+					newPaths = append(newPaths, relPath)
 				} else {
 					allFilesPersisted = false
 					// Do not append non-existent paths to newPaths — they would

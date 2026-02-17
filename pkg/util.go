@@ -158,7 +158,7 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32, keployPath string) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -207,14 +207,20 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// If the request body was offloaded to an asset file (>1MB), load it back
 	if tc.HTTPReq.BodyRef.Path != "" {
-		bodyData, readErr := os.ReadFile(tc.HTTPReq.BodyRef.Path)
+		bodyRefPath := tc.HTTPReq.BodyRef.Path
+		// Resolve relative paths against keployPath so assets work even if
+		// the keploy directory has been moved since recording.
+		if keployPath != "" && !filepath.IsAbs(bodyRefPath) {
+			bodyRefPath = filepath.Join(keployPath, bodyRefPath)
+		}
+		bodyData, readErr := os.ReadFile(bodyRefPath)
 		if readErr != nil {
-			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", tc.HTTPReq.BodyRef.Path))
+			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", bodyRefPath))
 			return nil, readErr
 		}
 		reqBody = bodyData
 		logger.Debug("loaded request body from asset file",
-			zap.String("path", tc.HTTPReq.BodyRef.Path),
+			zap.String("path", bodyRefPath),
 			zap.Int("size", len(bodyData)))
 	}
 
@@ -223,17 +229,21 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if len(form.FileNames) == 0 && len(form.Paths) > 0 && len(form.Values) > 0 {
 			for j, value := range form.Values {
 				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
-					valData, readErr := os.ReadFile(form.Paths[j])
+					formPath := form.Paths[j]
+					if keployPath != "" && !filepath.IsAbs(formPath) {
+						formPath = filepath.Join(keployPath, formPath)
+					}
+					valData, readErr := os.ReadFile(formPath)
 					if readErr != nil {
 						utils.LogError(logger, readErr, "failed to read form value from asset file",
-							zap.String("path", form.Paths[j]),
+							zap.String("path", formPath),
 							zap.String("key", form.Key))
 						return nil, readErr
 					}
 					tc.HTTPReq.Form[i].Values[j] = string(valData)
 					logger.Debug("loaded form value from asset file",
 						zap.String("key", form.Key),
-						zap.String("path", form.Paths[j]),
+						zap.String("path", formPath),
 						zap.Int("size", len(valData)))
 				}
 			}
@@ -258,13 +268,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 				zap.Int("paths", len(field.Paths)),
 			)
 			for _, path := range field.Paths {
-				logger.Debug("multipart file path", zap.String("path", path), zap.String("field", field.Key))
-				file, ferr := os.Open(path)
+				// Resolve relative paths against keployPath
+				resolvedPath := path
+				if keployPath != "" && !filepath.IsAbs(path) {
+					resolvedPath = filepath.Join(keployPath, path)
+				}
+				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
+				file, ferr := os.Open(resolvedPath)
 				if ferr != nil {
-					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", path))
+					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
 					return nil, ferr
 				}
-				part, perr := writer.CreateFormFile(field.Key, filepath.Base(path))
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
 				if perr != nil {
 					file.Close()
 					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
