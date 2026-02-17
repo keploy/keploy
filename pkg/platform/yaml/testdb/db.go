@@ -359,7 +359,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 			Size: int64(len(bodyBytes)),
 		}
 		tc.HTTPReq.Body = "" // clear the body since it's now stored in assets
-		ts.logger.Info("offloaded large request body to assets",
+		ts.logger.Debug("offloaded large request body to assets",
 			zap.String("testcase", tcsName),
 			zap.Int64("size", tc.HTTPReq.BodyRef.Size),
 			zap.String("path", bodyPath))
@@ -373,7 +373,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 		}
 		tc.HTTPResp.BodySize = int64(len(tc.HTTPResp.Body))
 		tc.HTTPResp.BodySkipped = true
-		ts.logger.Info("response body exceeds 1MB, skipping body storage",
+		ts.logger.Debug("response body exceeds 1MB, skipping body storage",
 			zap.String("testcase", tcsName),
 			zap.Int64("body_size_bytes", tc.HTTPResp.BodySize),
 			zap.String("content_type", contentType),
@@ -416,14 +416,14 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 							utils.LogError(ts.logger, err, "failed to write large form value asset", zap.String("path", destPath))
 							return err
 						}
-					// Replace value with empty string and store relative path at the same index
-					tc.HTTPReq.Form[i].Values[j] = ""
-					relPath, relErr := filepath.Rel(ts.TcsPath, destPath)
-					if relErr != nil {
-						relPath = destPath
-					}
-					tc.HTTPReq.Form[i].Paths[j] = relPath
-						ts.logger.Info("offloaded large form value to assets",
+						// Replace value with empty string and store relative path at the same index
+						tc.HTTPReq.Form[i].Values[j] = ""
+						relPath, relErr := filepath.Rel(ts.TcsPath, destPath)
+						if relErr != nil {
+							relPath = destPath
+						}
+						tc.HTTPReq.Form[i].Paths[j] = relPath
+						ts.logger.Debug("offloaded large form value to assets",
 							zap.String("testcase", tcsName),
 							zap.String("key", form.Key),
 							zap.Int("size", len(value)),
@@ -497,9 +497,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 						// Cleanup temp
 						os.Remove(srcPath)
 					} else {
-						// If srcPath doesn't exist, we can't do much.
-						// Log warning?
-						ts.logger.Warn("asset source file not found", zap.String("path", srcPath))
+						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
 					}
 				} else if j < len(form.Values) {
 					// Case 2: File content is in Values (legacy/text fallback)
@@ -522,7 +520,7 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					allFilesPersisted = false
 					// Do not append non-existent paths to newPaths — they would
 					// cause replay failures when the system tries to read them.
-					ts.logger.Warn("skipping file entry that could not be persisted",
+					utils.LogError(ts.logger, fmt.Errorf("file entry could not be persisted"), "skipping file entry - check that the source file exists and is accessible",
 						zap.String("fileName", form.FileNames[j]),
 						zap.String("key", form.Key))
 				}

@@ -212,7 +212,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-	a.logger.Info("Incoming stream connection established and headers flushed")
+	a.logger.Debug("Incoming stream connection established and headers flushed")
 
 	// Keep the connection alive and stream data
 	for t := range tc {

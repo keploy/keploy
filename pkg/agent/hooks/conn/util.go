@@ -115,7 +115,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	if len(respBody) > LargeBodyThreshold {
 		respBodySkipped = true
 		respBodySize = int64(len(respBody))
-		logger.Info("response body exceeds 1MB during recording, storing only body size",
+		logger.Debug("response body exceeds 1MB during recording, storing only body size",
 			zap.Int64("body_size_bytes", respBodySize),
 			zap.String("url", req.URL.String()),
 			zap.String("method", req.Method))
