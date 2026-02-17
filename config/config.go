@@ -174,11 +174,11 @@ type Globalnoise struct {
 }
 
 type ReplaceWith struct {
-	Global   ReplaceWithURLMap            `json:"global" yaml:"global" mapstructure:"global"`
-	TestSets map[string]ReplaceWithURLMap `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+	Global   ReplaceWithMap            `json:"global" yaml:"global" mapstructure:"global"`
+	TestSets map[string]ReplaceWithMap `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
 }
 
-type ReplaceWithURLMap struct {
+type ReplaceWithMap struct {
 	URL map[string]string `json:"url" yaml:"url" mapstructure:"url"`
 }
 
