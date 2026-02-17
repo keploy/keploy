@@ -74,7 +74,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout, h.cfg.Test.Port, hostToUse, urlReplacements)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout, h.cfg.Test.Port, h.cfg.Path, hostToUse, urlReplacements)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))

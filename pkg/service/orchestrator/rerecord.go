@@ -457,7 +457,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout, o.config.ReRecord.Port, hostToUse, nil)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout, o.config.ReRecord.Port, o.config.Path, hostToUse, nil)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			if resp == nil {

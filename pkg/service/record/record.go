@@ -263,7 +263,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
-			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			// Skip curl generation for either form data requests or large body (>1MB)
+			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
+				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
 			if reRecordCfg.TestSet == "" {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
