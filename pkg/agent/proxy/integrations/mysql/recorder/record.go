@@ -95,8 +95,12 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			return nil
 		}
 
+		// Create packet pipelines for pre-fetching
+		clientPipe := newPacketPipeline(logger, clientTeeConn)
+		destPipe := newPacketPipeline(logger, destTeeConn)
+
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientTeeConn, destTeeConn, rawMocks, decodeCtx, opts)
+		err = handleClientQueries(ctx, logger, clientPipe, destPipe, rawMocks, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")

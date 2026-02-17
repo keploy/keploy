@@ -9,28 +9,30 @@ import (
 
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
-func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+// handleClientQueries processes the MySQL command phase using pre-fetching
+// pipelines. The pipelines drain the ring buffers asynchronously so packet
+// reads never block on parser processing.
+func handleClientQueries(ctx context.Context, logger *zap.Logger, clientPipe, destPipe *packetPipeline, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
 	)
+	// clientConn is the underlying TeeForwardConn, used only as decodeCtx map key
+	clientConn := clientPipe.conn
 
-	//for keeping conn alive
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-
-			// read the command from the client (auto-forwarded to dest via ForwardingReadOnlyConn)
-			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+			// Read pre-fetched command from client pipeline (instant if buffered)
+			command, err := clientPipe.ReadPacket()
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read command packet from client")
@@ -38,7 +40,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 
-			// Getting timestamp for the request
 			reqTimestamp := time.Now()
 
 			commandPkt, err := wire.DecodePayload(ctx, logger, command, clientConn, decodeCtx)
@@ -51,17 +52,15 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				PacketBundle: *commandPkt,
 			})
 
-			// handle no response commands like COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA, etc
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
-				// reset the requests and responses
 				requests = []mysql.Request{}
 				responses = []mysql.Response{}
 				logger.Debug("No response command", zap.Any("packet", commandPkt.Header.Type))
 				continue
 			}
 
-			commandRespPkt, resTimestamp, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
+			commandRespPkt, resTimestamp, err := handleQueryResponse(ctx, logger, clientConn, destPipe, decodeCtx)
 			if err != nil {
 				if err == io.EOF && commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
 					logger.Debug("server closed the connection without any response")
@@ -75,19 +74,18 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				PacketBundle: *commandRespPkt,
 			})
 
-			// record the mock
 			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp, resTimestamp, opts)
-
-			// reset the requests and responses
 			requests = []mysql.Request{}
 			responses = []mysql.Response{}
 		}
 	}
 }
 
-func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, time.Time, error) {
-	// read the command response from the destination server (auto-forwarded to client via ForwardingReadOnlyConn)
-	commandResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+// handleQueryResponse reads response packets from the dest pipeline.
+// clientConn is the TeeForwardConn used as decodeCtx map key only.
+func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, time.Time, error) {
+	// Read pre-fetched response from dest pipeline
+	commandResp, err := destPipe.ReadPacket()
 	if err != nil {
 		if err != io.EOF {
 			utils.LogError(logger, err, "failed to read command response from the server")
@@ -95,21 +93,17 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		return nil, time.Time{}, err
 	}
 
-	//decode the command response packet
 	commandRespPkt, err := wire.DecodePayload(ctx, logger, commandResp, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the command response packet")
 		return nil, time.Time{}, err
 	}
 
-	// check if the command response is an error or ok packet
 	if commandRespPkt.Header.Type == mysql.StatusToString(mysql.ERR) || commandRespPkt.Header.Type == mysql.StatusToString(mysql.OK) {
 		logger.Debug("command response packet", zap.Any("packet", commandRespPkt.Header.Type))
-		resTimestamp := time.Now()
-		return commandRespPkt, resTimestamp, nil
+		return commandRespPkt, time.Now(), nil
 	}
 
-	// Get the last operation in order to handle current packet if it is not an error or ok packet
 	lastOp, ok := decodeCtx.LastOp.Load(clientConn)
 	if !ok {
 		return nil, time.Time{}, fmt.Errorf("failed to get the last operation from the context while handling the query response")
@@ -120,347 +114,203 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 	switch lastOp {
 	case mysql.COM_QUERY:
 		logger.Debug("Handling text result set", zap.Any("lastOp", lastOp))
-		// handle the query response (TextResultSet)
-		queryResponsePkt, err = handleTextResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
+		queryResponsePkt, err = handleTextResultSet(ctx, logger, clientConn, destPipe, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, time.Time{}, fmt.Errorf("failed to handle the query response packet: %w", err)
 		}
-
 	case mysql.COM_STMT_PREPARE:
 		logger.Debug("Handling prepare Statement Response OK", zap.Any("lastOp", lastOp))
-		// handle the prepared statement response (COM_STMT_PREPARE_OK)
-		queryResponsePkt, err = handlePreparedStmtResponse(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
+		queryResponsePkt, err = handlePreparedStmtResponse(ctx, logger, clientConn, destPipe, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, time.Time{}, fmt.Errorf("failed to handle the prepared statement response: %w", err)
 		}
 	case mysql.COM_STMT_EXECUTE:
 		logger.Debug("Handling binary protocol result set", zap.Any("lastOp", lastOp))
-		// handle the statment execute response (BinaryProtocolResultSet)
-		queryResponsePkt, err = handleBinaryResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
+		queryResponsePkt, err = handleBinaryResultSet(ctx, logger, clientConn, destPipe, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, time.Time{}, fmt.Errorf("failed to handle the statement execute response: %w", err)
 		}
-
 	default:
 		return nil, time.Time{}, fmt.Errorf("unsupported operation: %x", lastOp)
 	}
-	resTimestamp := time.Now()
-	return queryResponsePkt, resTimestamp, nil
+	return queryResponsePkt, time.Now(), nil
 }
 
-func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, commandRespPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
-
-	//commandRespPkt is the response to prepare, there are parameters, intermediate EOF, columns, and EOF packets to be handled
-	//ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_prepare.html#sect_protocol_com_stmt_prepare_response_ok
-
+// handlePreparedStmtResponse reads param/column definition packets from the
+// dest pipeline and stores raw bytes for async decoding.
+func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, commandRespPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
 	responseOk, ok := commandRespPkt.Message.(*mysql.StmtPrepareOkPacket)
 	if !ok {
 		return nil, fmt.Errorf("expected StmtPrepareOkPacket, got %T", commandRespPkt.Message)
 	}
 
-	logger.Debug("Parsing the params and columns in the prepared statement response", zap.Any("responseOk", responseOk))
+	logger.Debug("Parsing params and columns in prepared statement response", zap.Any("responseOk", responseOk))
 
-	//See if there are any parameters
 	if responseOk.NumParams > 0 {
 		for i := uint16(0); i < responseOk.NumParams; i++ {
-
-			// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
-			colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			colData, err := destPipe.ReadPacket()
 			if err != nil {
 				if err != io.EOF {
-					utils.LogError(logger, err, "failed to read column data for parameter definition")
+					utils.LogError(logger, err, "failed to read param definition packet")
 				}
 				return nil, err
 			}
-
-			// Decode the column definition packet
-			column, _, err := rowscols.DecodeColumn(ctx, logger, colData)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode column definition packet: %w", err)
-			}
-
-			responseOk.ParamDefs = append(responseOk.ParamDefs, column)
+			responseOk.RawParamData = append(responseOk.RawParamData, colData)
 		}
 
-		logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
-
-		// Read the EOF packet for parameter definition (auto-forwarded to client)
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		eofData, err := destPipe.ReadPacket()
 		if err != nil {
 			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
+				utils.LogError(logger, err, "failed to read EOF packet for param definition")
 			}
 			return nil, err
 		}
-
-		// Validate the EOF packet for parameter definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
-		}
-
-		responseOk.EOFAfterParamDefs = eofData
-
-		logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
+		responseOk.RawEOFAfterParamDefs = eofData
 	}
 
-	//See if there are any columns
 	if responseOk.NumColumns > 0 {
 		for i := uint16(0); i < responseOk.NumColumns; i++ {
-
-			// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
-			colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			colData, err := destPipe.ReadPacket()
 			if err != nil {
 				if err != io.EOF {
-					utils.LogError(logger, err, "failed to read column data for column definition")
+					utils.LogError(logger, err, "failed to read column definition packet")
 				}
 				return nil, err
 			}
-
-			// Decode the column definition packet
-			column, _, err := rowscols.DecodeColumn(ctx, logger, colData)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode column definition packet: %w", err)
-			}
-
-			responseOk.ColumnDefs = append(responseOk.ColumnDefs, column)
+			responseOk.RawColumnDefData = append(responseOk.RawColumnDefData, colData)
 		}
 
-		logger.Debug("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
-
-		// Read the EOF packet for column definition (auto-forwarded to client)
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		eofData, err := destPipe.ReadPacket()
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read EOF packet for column definition")
 			}
 			return nil, err
 		}
-
-		// Validate the EOF packet for column definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling prepared statement response", eofData)
-		}
-
-		responseOk.EOFAfterColumnDefs = eofData
-
-		logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
+		responseOk.RawEOFAfterColumnDefs = eofData
 	}
 
-	//set the lastOp to COM_STMT_PREPARE_OK
 	decodeCtx.LastOp.Store(clientConn, mysql.OK)
-
-	// commandRespPkt.Message = responseOk // need to check whether this is necessary
-
 	return commandRespPkt, nil
 }
 
-//ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset.html
-
-func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, textResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
-
-	// colCountPkt is the first packet of the text result set, it is followed by column definition packets, intermediate eof, row data packets and final eof
-
+// handleTextResultSet reads column and row packets from the dest pipeline,
+// storing raw bytes for async decoding in ProcessRawMocks.
+func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, textResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
 	textResultSet, ok := textResultSetPkt.Message.(*mysql.TextResultSet)
 	if !ok {
 		return nil, fmt.Errorf("expected TextResultSet, got %T", textResultSetPkt.Message)
 	}
 
-	// Read the column count packet
 	colCount := textResultSet.ColumnCount
 
-	// Read the column definition packets
+	// Read column definition packets — store raw bytes for async decode
 	for i := uint64(0); i < colCount; i++ {
-		// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
-		colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		colData, err := destPipe.ReadPacket()
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read column definition packet")
 			}
 			return nil, err
 		}
-
-		// Decode the column definition packet
-		column, _, err := rowscols.DecodeColumn(ctx, logger, colData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode column definition packet: %w", err)
-		}
-
-		textResultSet.Columns = append(textResultSet.Columns, column)
+		textResultSet.RawColumnData = append(textResultSet.RawColumnData, colData)
 	}
 
 	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
-		logger.Debug("EOF packet is not deprecated while handling textResultSet")
-
-		// Read the EOF packet for column definition (auto-forwarded to client)
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		eofData, err := destPipe.ReadPacket()
 		if err != nil {
 			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for column definition")
+				utils.LogError(logger, err, "failed to read EOF for column definition")
 			}
 			return nil, err
 		}
-
-		// Validate the EOF packet for column definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling textResultSet", eofData)
-		}
-
-		textResultSet.EOFAfterColumns = eofData
-
+		textResultSet.RawEOFAfterColumns = eofData
 	}
-	// Read the row data packets
-rowLoop:
+
+	// Read row data packets until EOF
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
-
-			// Read the packet (auto-forwarded to client via ForwardingReadOnlyConn)
-			data, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			data, err := destPipe.ReadPacket()
 			if err != nil {
 				if err != io.EOF {
-					utils.LogError(logger, err, "failed to read data packet while reading row data")
+					utils.LogError(logger, err, "failed to read row data packet")
 				}
 				return nil, err
 			}
 
-			// // Break if the data packet is a generic response
-			// resp, ok := mysqlUtils.IsGenericResponse(data)
-			// if ok {
-			// 	textResultSet.FinalResponse = &mysql.GenericResponse{
-			// 		Data: data,
-			// 		Type: resp,
-			// 	}
-			// 	break rowLoop
-			// }
-
-			// Break if the data packet is an EOF packet, But we need to check for generic response
-			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
 			if mysqlUtils.IsEOFPacket(data) {
-				logger.Debug("Found EOF packet after row data in text resultset")
 				textResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
 					Type: mysql.StatusToString(mysql.EOF),
 				}
-				break rowLoop
+				decodeCtx.LastOp.Store(clientConn, wire.RESET)
+				return textResultSetPkt, nil
 			}
 
-			// It must be a row data packet
 			textResultSet.RawRowData = append(textResultSet.RawRowData, data)
 		}
 	}
-
-	// reset the last OP
-	decodeCtx.LastOp.Store(clientConn, wire.RESET)
-
-	return textResultSetPkt, nil
 }
 
-//ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html
-// (BinaryProtocolResultset)
-
-func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, binaryResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
-
-	// colCountPkt is the first packet of the binary result set, it is followed by column definition packets,intermediate eof, row data packets and final eof
-
+// handleBinaryResultSet reads column and row packets from the dest pipeline,
+// storing raw bytes for async decoding in ProcessRawMocks.
+func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, binaryResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
 	binaryResultSet, ok := binaryResultSetPkt.Message.(*mysql.BinaryProtocolResultSet)
 	if !ok {
-		return nil, fmt.Errorf("expected TextResultSet, got %T", binaryResultSetPkt.Message)
+		return nil, fmt.Errorf("expected BinaryProtocolResultSet, got %T", binaryResultSetPkt.Message)
 	}
 
-	// Read the column count packet
 	colCount := binaryResultSet.ColumnCount
+	logger.Debug("ColCount in handleBinaryResultSet", zap.Any("ColCount", colCount))
 
-	logger.Debug("ColCount in handleBinaryResultSet: ", zap.Any("ColCount", colCount))
-	// Read the column definition packets
+	// Read column definition packets — store raw bytes for async decode
 	for i := uint64(0); i < colCount; i++ {
-		// Read the column definition packet (auto-forwarded to client via ForwardingReadOnlyConn)
-		colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		colData, err := destPipe.ReadPacket()
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read column definition packet")
 			}
 			return nil, err
 		}
-
-		// Decode the column definition packet
-		column, _, err := rowscols.DecodeColumn(ctx, logger, colData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode column definition packet: %w", err)
-		}
-
-		binaryResultSet.Columns = append(binaryResultSet.Columns, column)
+		binaryResultSet.RawColumnData = append(binaryResultSet.RawColumnData, colData)
 	}
 
-	logger.Debug("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
-
-	// Read the EOF packet for column definition (auto-forwarded to client)
-	eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+	eofData, err := destPipe.ReadPacket()
 	if err != nil {
 		if err != io.EOF {
-			utils.LogError(logger, err, "failed to read EOF packet for column definition")
+			utils.LogError(logger, err, "failed to read EOF for column definition")
 		}
 		return nil, err
 	}
+	binaryResultSet.RawEOFAfterColumns = eofData
 
-	// Validate the EOF packet for column definition
-	if !mysqlUtils.IsEOFPacket(eofData) {
-		return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling BinaryProtocolResultSet", eofData)
-	}
-
-	binaryResultSet.EOFAfterColumns = eofData
-
-	// Read the row data packets
-rowLoop:
+	// Read row data packets until EOF
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
-
-			// Read the packet (auto-forwarded to client via ForwardingReadOnlyConn)
-			data, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			data, err := destPipe.ReadPacket()
 			if err != nil {
 				if err != io.EOF {
-					utils.LogError(logger, err, "failed to read data packet while reading row data")
+					utils.LogError(logger, err, "failed to read row data packet")
 				}
 				return nil, err
 			}
 
-			// Break if the data packet is a generic response
-			// resp, ok := mysqlUtils.IsGenericResponse(data)
-			// if ok {
-			// 	binaryResultSet.FinalResponse = &mysql.GenericResponse{
-			// 		Data: data,
-			// 		Type: resp,
-			// 	}
-			// 	//debug log
-			// 	fmt.Println("Found generic response after row data")
-			// 	break rowLoop
-			// }
-
-			// Break if the data packet is an EOF packet, But we need to check for generic response
-			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
 			if mysqlUtils.IsEOFPacket(data) {
-				logger.Debug("Found EOF packet after row data in binary resultset")
 				binaryResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
 					Type: mysql.StatusToString(mysql.EOF),
 				}
-				break rowLoop
+				decodeCtx.LastOp.Store(clientConn, wire.RESET)
+				return binaryResultSetPkt, nil
 			}
 
-			// It must be a row data packet
 			binaryResultSet.RawRowData = append(binaryResultSet.RawRowData, data)
 		}
 	}
-
-	logger.Debug("Rows: ", zap.Any("Rows", binaryResultSet.Rows))
-
-	// reset the last OP
-	decodeCtx.LastOp.Store(clientConn, wire.RESET)
-
-	return binaryResultSetPkt, nil
-
 }
