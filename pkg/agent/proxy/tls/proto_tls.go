@@ -151,6 +151,9 @@ func HandlePostgresSSL(
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         dstURL,
+		MinVersion:         tls.VersionTLS10,
+		MaxVersion:         tls.VersionTLS13,
+		CipherSuites:       getAllCipherSuites(),
 	}
 	tlsServerConn := tls.Client(serverConn, tlsConfig)
 	if err := tlsServerConn.Handshake(); err != nil {
@@ -203,6 +206,9 @@ func UpgradeMySQLServerToTLS(
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         serverName,
+		MinVersion:         tls.VersionTLS10,
+		MaxVersion:         tls.VersionTLS13,
+		CipherSuites:       getAllCipherSuites(),
 	}
 	tlsServerConn := tls.Client(serverConn, tlsConfig)
 	if err := tlsServerConn.Handshake(); err != nil {
@@ -213,4 +219,16 @@ func UpgradeMySQLServerToTLS(
 		zap.String("serverName", serverName))
 
 	return tlsServerConn, nil
+}
+
+// getAllCipherSuites returns all available cipher suites, including insecure ones.
+func getAllCipherSuites() []uint16 {
+	var ids []uint16
+	for _, cs := range tls.CipherSuites() {
+		ids = append(ids, cs.ID)
+	}
+	for _, cs := range tls.InsecureCipherSuites() {
+		ids = append(ids, cs.ID)
+	}
+	return ids
 }
