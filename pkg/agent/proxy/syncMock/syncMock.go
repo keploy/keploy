@@ -52,14 +52,19 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// storing startup mocks until first request is seen
 	if !m.firstReqSeen && m.outChan != nil {
-		m.outChan <- mock
+		// Don't block on channel send - dispatch async to prevent parser blocking.
+		// The parser must drain the ring buffer for the forwarder to continue,
+		// so blocking here creates back-pressure to the network forwarding path.
+		// Goroutine overhead (~2-3μs) is negligible compared to 40ms ACK delay.
+		m.mu.Unlock()
+		go func() { m.outChan <- mock }()
 		return
 	}
 	m.buffer = append(m.buffer, mock)
+	m.mu.Unlock()
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {

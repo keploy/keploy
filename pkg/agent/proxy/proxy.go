@@ -33,6 +33,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// TCP_QUICKACK is the Linux socket option to disable delayed ACKs.
+// This constant is not in the standard syscall package for all platforms.
+const TCP_QUICKACK = 12
+
 // outgoingTLSSessionCache is shared across all outgoing TLS connections.
 // Without this, every proxy→destination dial does a full TLS handshake (~10-30 ms).
 // With it, repeat connections to the same host resume (~1-3 ms).
@@ -93,7 +97,7 @@ func setTCPQuickACK(tc *net.TCPConn) {
 		return
 	}
 	_ = rawConn.Control(func(fd uintptr) {
-		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_QUICKACK, 1)
+		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, TCP_QUICKACK, 1)
 	})
 }
 

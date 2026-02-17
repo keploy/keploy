@@ -14,6 +14,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// TCP_QUICKACK is the Linux socket option to disable delayed ACKs.
+// This constant is not in the standard syscall package for all platforms.
+const TCP_QUICKACK = 12
+
 // ringBuf is a lock-free(ish) single-producer / single-consumer ring buffer
 // optimised for the TeeForwardConn use-case.  The writer (forwarder goroutine)
 // never blocks — if the buffer is full it sets the overflow flag.  The reader
@@ -239,6 +243,13 @@ func (t *TeeForwardConn) startForwarding() {
 						return
 					}
 
+					// Re-enable TCP_QUICKACK after write (Linux resets it after each ACK).
+					// This prevents delayed ACKs (up to 40ms) on subsequent packets.
+					// The syscall overhead (~microseconds) is negligible compared to
+					// the 20-40ms latency saved by avoiding delayed ACKs.
+					setTCPQuickACK(t.dest)
+					setTCPQuickACK(t.src)
+
 					// Buffer for parser — write into ring buffer (zero alloc).
 					if atomic.LoadInt32(&t.disabled) == 0 {
 						written, _ := t.ring.Write(readBuf[:n])
@@ -299,7 +310,7 @@ func setTCPQuickACK(conn net.Conn) {
 		return
 	}
 	_ = rawConn.Control(func(fd uintptr) {
-		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_QUICKACK, 1)
+		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, TCP_QUICKACK, 1)
 	})
 }
 
