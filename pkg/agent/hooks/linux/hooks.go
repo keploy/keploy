@@ -72,9 +72,9 @@ type Hooks struct {
 	objects     bpfObjects
 	cgBind4     link.Link
 	cgBind6     link.Link
-	bindEnter   link.Link
-	BindEvents  *ebpf.Map
-	sockops     link.Link
+
+	BindEvents *ebpf.Map
+	sockops    link.Link
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -154,16 +154,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_9a843c11001
-	h.agentRegistartionMap = objs.M_9a843c11002
+	h.clientRegistrationMap = objs.M_1770972393001
+	h.agentRegistartionMap = objs.M_1770972393002
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
 
-	// ----- used in case of wsl -----
-	socket, err := link.Kprobe("sys_socket", objs.SyscallProbeEntrySocket, nil)
+	socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_socket")
+		utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
 		return err
 	}
 	h.socket = socket
@@ -338,9 +337,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	// closing all events
 	//other
+
 	if h.socket != nil {
 		if err := h.socket.Close(); err != nil {
-			utils.LogError(h.logger, err, "failed to close the socket")
+			utils.LogError(h.logger, err, "failed to close the tracepoint hook on sys_socket")
 		}
 	}
 
@@ -401,11 +401,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 				utils.LogError(h.logger, err, "failed to close the cgBind6")
 			}
 		}
-		if h.bindEnter != nil {
-			if err := h.bindEnter.Close(); err != nil {
-				utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
-			}
-		}
+
 	}
 	h.logger.Debug("eBPF resources released successfully...")
 }
