@@ -111,6 +111,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		mysqlStrategy = mysqldetection.NewPortBasedDetection(logger, mysqlPorts)
 		logger.Debug("Using port-based MySQL detection", zap.Any("ports", mysqlPorts))
 	}
+	
 
 	return &Proxy{
 		logger:            logger,
