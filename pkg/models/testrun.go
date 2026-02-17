@@ -136,12 +136,13 @@ type FailureAssessment struct {
 }
 
 type Result struct {
-	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
-	FailureInfo   FailureInfo    `json:"-" yaml:"-"`
-	HeadersResult []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
-	BodyResult    []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
-	DepResult     []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
-	TrailerResult []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
+	StatusCode     IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
+	FailureInfo    FailureInfo    `json:"-" yaml:"-"`
+	HeadersResult  []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
+	BodyResult     []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
+	BodySizeResult IntResult      `json:"body_size_result,omitempty" bson:"body_size_result,omitempty" yaml:"body_size_result,omitempty"` // used when body was skipped (>1MB)
+	DepResult      []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
+	TrailerResult  []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
 }
 
 type DepResult struct {
