@@ -3,11 +3,13 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.keploy.io/server/v3/pkg/models"
+	sandboxsvc "go.keploy.io/server/v3/pkg/service/sandbox"
 	"go.uber.org/zap"
 )
 
@@ -45,6 +47,7 @@ type RecordConfiguration struct {
 	Path    string `json:"path"`
 	Name    string `json:"name"`
 	Tag     string `json:"tag,omitempty"`
+	Ref     string `json:"ref,omitempty"`
 }
 
 // MockReplayInput defines the input parameters for the mock replay tool.
@@ -57,6 +60,8 @@ type MockReplayInput struct {
 	Name string `json:"name,omitempty" jsonschema:"Sandbox file prefix (default: keploy, final file: <name>.sb.yaml)."`
 	// FallBackOnMiss indicates whether to fall back to real calls when no mock matches (optional, default: false).
 	FallBackOnMiss bool `json:"fallBackOnMiss,omitempty" jsonschema:"Whether to fall back to real calls when no sandbox entry matches (default: false)."`
+	// Local indicates local-only sandbox replay mode.
+	Local bool `json:"local,omitempty" jsonschema:"Local-only sandbox replay mode (skip cloud sync/upload, default: false)."`
 }
 
 // MockReplayOutput defines the output of the mock replay tool.
@@ -113,6 +118,8 @@ type ReplayConfiguration struct {
 	Path           string `json:"path"`
 	Name           string `json:"name"`
 	FallBackOnMiss bool   `json:"fallBackOnMiss"`
+	Local          bool   `json:"local,omitempty"`
+	Ref            string `json:"ref,omitempty"`
 }
 
 // handleMockRecord handles the keploy_mock_record tool invocation.
@@ -141,6 +148,12 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 			}, nil
 		}
 	}
+	if s.cfg == nil {
+		return nil, MockRecordOutput{
+			Success: false,
+			Message: "Recording failed: config is not available for sandbox record workflow.",
+		}, nil
+	}
 
 	// Parse and validate configuration
 	path := strings.TrimSpace(in.Path)
@@ -152,12 +165,42 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		name = "keploy"
 	}
 	tag := strings.TrimSpace(in.Tag)
+	if tag == "" {
+		return nil, MockRecordOutput{
+			Success: false,
+			Message: "Recording failed: 'tag' is required (semantic version, e.g. v1.0.0).",
+		}, nil
+	}
+	tag, err := sandboxsvc.ParseTag(tag)
+	if err != nil {
+		return nil, MockRecordOutput{
+			Success: false,
+			Message: fmt.Sprintf("Recording failed: invalid tag: %s", err.Error()),
+		}, nil
+	}
+
+	jwtToken, err := getSandboxJWTTokenFunc(ctx, s.logger, s.cfg)
+	if err != nil {
+		return nil, MockRecordOutput{
+			Success: false,
+			Message: fmt.Sprintf("Recording failed: failed to authenticate user for sandbox record: %s", err.Error()),
+		}, nil
+	}
+
+	ref, err := buildSandboxRefFromTag(s.logger, s.cfg, tag, jwtToken)
+	if err != nil {
+		return nil, MockRecordOutput{
+			Success: false,
+			Message: fmt.Sprintf("Recording failed: failed to infer sandbox ref from tag: %s", err.Error()),
+		}, nil
+	}
 
 	config := &RecordConfiguration{
 		Command: command,
 		Path:    path,
 		Name:    name,
 		Tag:     tag,
+		Ref:     ref,
 	}
 
 	// Check if mock recorder is available
@@ -180,9 +223,12 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 
 	// Execute recording
 	result, err := s.mockRecorder.Record(ctx, models.RecordOptions{
-		Command: command,
-		Path:    path,
-		Name:    name,
+		Command:   command,
+		Path:      path,
+		Name:      name,
+		Duration:  s.cfg.Record.RecordTimer,
+		ProxyPort: s.cfg.ProxyPort,
+		DNSPort:   s.cfg.DNSPort,
 	})
 	if err != nil {
 		s.logger.Error("Mock recording failed", zap.Error(err))
@@ -193,6 +239,17 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 			Message:       fmt.Sprintf("Recording failed: %s", err.Error()),
 		}, nil
 	}
+
+	s.cfg.Sandbox.Ref = ref
+	if err := updateSandboxRefInConfig(s.cfg, ref); err != nil {
+		return nil, MockRecordOutput{
+			Success:       false,
+			Protocols:     []string{},
+			Configuration: config,
+			Message:       fmt.Sprintf("Recording failed: failed to update sandbox ref in config: %s", err.Error()),
+		}, nil
+	}
+	s.logger.Info("Updated sandbox ref in config from MCP record flow", zap.String("ref", ref))
 
 	// Ensure protocols is never nil for JSON schema validation (must be array, not null)
 	protocols := []string{}
@@ -212,7 +269,7 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		MockCount:     result.MockCount,
 		Protocols:     protocols,
 		Configuration: config,
-		Message:       fmt.Sprintf("Successfully recorded %d mock(s) to '%s'. Detected protocols: %v", result.MockCount, result.MockFilePath, protocols),
+		Message:       fmt.Sprintf("Successfully recorded %d mock(s) to '%s'. Updated sandbox.ref to '%s'. Detected protocols: %v", result.MockCount, result.MockFilePath, ref, protocols),
 	}, nil
 }
 
@@ -290,6 +347,12 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 	if name == "" {
 		name = "keploy"
 	}
+	if s.cfg == nil {
+		return nil, MockReplayOutput{
+			Success: false,
+			Message: "Error: config is not available for sandbox replay workflow.",
+		}, nil
+	}
 
 	// Check if mock replayer is available
 	if s.mockReplayer == nil {
@@ -299,11 +362,65 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		}, nil
 	}
 
+	refInConfig := strings.TrimSpace(s.cfg.Sandbox.Ref)
+	if refInConfig == "" {
+		return nil, MockReplayOutput{
+			Success: false,
+			Message: "Error: sandbox ref not found in config (keploy.yml). Run 'keploy sandbox record --tag <tag>' first.",
+		}, nil
+	}
+
+	ref := refInConfig
+	if _, _, _, err := sandboxsvc.ParseRef(ref); err != nil {
+		return nil, MockReplayOutput{
+			Success: false,
+			Message: fmt.Sprintf("Error: invalid sandbox ref in config (expected <company>/<service>:<tag>): %s", err.Error()),
+		}, nil
+	}
+
 	config := &ReplayConfiguration{
 		Command:        command,
 		Path:           path,
 		Name:           name,
 		FallBackOnMiss: in.FallBackOnMiss,
+		Local:          in.Local,
+		Ref:            ref,
+	}
+
+	shouldUploadAfterReplay := false
+	var sbSvc sandboxsvc.Service
+	if in.Local {
+		s.logger.Info("Local-only sandbox replay enabled for MCP tool, skipping cloud sync")
+	} else if strings.TrimSpace(s.cfg.APIServerURL) != "" {
+		jwtToken, err := getSandboxJWTTokenFunc(ctx, s.logger, s.cfg)
+		if err != nil {
+			return nil, MockReplayOutput{
+				Success:       false,
+				Configuration: config,
+				Message:       fmt.Sprintf("Replay failed: failed to authenticate user for sandbox replay: %s", err.Error()),
+			}, nil
+		}
+
+		sbSvc = newSandboxServiceFunc(s.cfg.APIServerURL, jwtToken, s.logger)
+		err = sbSvc.Sync(ctx, ref, path)
+		if err != nil {
+			if errors.Is(err, sandboxsvc.ErrManifestNotFound) {
+				shouldUploadAfterReplay = true
+				s.logger.Info("sandbox manifest not found in cloud, proceeding with local sandbox replay",
+					zap.String("ref", ref),
+				)
+			} else {
+				return nil, MockReplayOutput{
+					Success:       false,
+					Configuration: config,
+					Message:       fmt.Sprintf("Replay failed: sandbox sync failed: %s", err.Error()),
+				}, nil
+			}
+		} else {
+			s.logger.Info("Sandbox synced from cloud for MCP replay", zap.String("ref", ref))
+		}
+	} else {
+		s.logger.Info("No API server URL configured, using local sandbox files only for MCP replay")
 	}
 
 	s.logger.Info("Starting mock replay with configuration",
@@ -318,6 +435,8 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		Command:        command,
 		Path:           path,
 		Name:           name,
+		ProxyPort:      s.cfg.ProxyPort,
+		DNSPort:        s.cfg.DNSPort,
 		FallBackOnMiss: in.FallBackOnMiss,
 	})
 	if err != nil {
@@ -350,6 +469,30 @@ func (s *Server) handleMockReplay(ctx context.Context, req *sdkmcp.CallToolReque
 		message = "Test passed! " + message
 	} else {
 		message = "Test completed with issues. " + message
+	}
+
+	if result.Success && shouldUploadAfterReplay {
+		if sbSvc == nil {
+			return nil, MockReplayOutput{
+				Success:       false,
+				Configuration: config,
+				Message:       "Replay failed: internal error, sandbox service unavailable for post-replay upload.",
+			}, nil
+		}
+		s.logger.Info("Uploading sandbox to cloud after successful local replay from MCP flow",
+			zap.String("ref", ref),
+		)
+		if err := sbSvc.Upload(ctx, ref, path); err != nil {
+			return nil, MockReplayOutput{
+				Success:       false,
+				Configuration: config,
+				Message:       fmt.Sprintf("Replay failed: sandbox upload after replay failed: %s", err.Error()),
+			}, nil
+		}
+		s.logger.Info("Sandbox uploaded to cloud successfully after MCP replay",
+			zap.String("ref", ref),
+		)
+		message = message + ", sandbox uploaded to cloud"
 	}
 
 	s.logger.Info("Mock replay completed",

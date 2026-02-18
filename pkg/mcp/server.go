@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/service/mockrecord"
 	"go.keploy.io/server/v3/pkg/service/mockreplay"
 	"go.uber.org/zap"
@@ -27,6 +28,7 @@ type Server struct {
 	server       *sdkmcp.Server
 	mockRecorder mockrecord.Service
 	mockReplayer mockreplay.Service
+	cfg          *config.Config
 	logger       *zap.Logger
 
 	// stdout is the writer for MCP JSON-RPC output. This is captured from os.Stdout
@@ -45,6 +47,8 @@ type ServerOptions struct {
 	MockRecorder mockrecord.Service
 	// MockReplayer is the service for replaying mocks.
 	MockReplayer mockreplay.Service
+	// Config is the active Keploy config used by sandbox record/replay flows.
+	Config *config.Config
 	// Stdout is the writer for MCP JSON-RPC output. If nil, uses os.Stdout.
 	// IMPORTANT: This should be the original os.Stdout captured before any
 	// stdout redirection, to ensure the MCP protocol can communicate properly.
@@ -90,6 +94,7 @@ func NewServer(opts *ServerOptions) *Server {
 	s := &Server{
 		mockRecorder: opts.MockRecorder,
 		mockReplayer: opts.MockReplayer,
+		cfg:          opts.Config,
 		logger:       opts.Logger,
 		stdout:       opts.Stdout,
 	}
@@ -235,6 +240,7 @@ Parameters:
 - command (required): Any command to run with sandbox replay (e.g., 'go test -v', 'npm test', './my-app')
 - path (optional): Sandbox location directory (default: .)
 - name (optional): Sandbox file prefix (default: keploy, final file is <name>.sb.yaml)
+- local (optional): Local-only sandbox replay mode (skip cloud sync/upload, default: false)
 - fallBackOnMiss (optional): Whether to make real calls when sandbox match is not found (default: false)`,
 	}, s.handleMockReplay)
 

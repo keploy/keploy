@@ -252,6 +252,7 @@ Example VS Code configuration:
 				Logger:       mcpLogger,
 				MockRecorder: recorder,
 				MockReplayer: replayer,
+				Config:       cfg,
 				Stdout:       mcpStdoutWriter, // Use the multi-writer for MCP (original stdout + log file)
 			})
 
