@@ -78,6 +78,8 @@ contract:
   download: false
   generate: false
 inCi: false
+sandbox:
+  ref: ""
 `, models.DefaultIncomingProxyPort)
 
 func GetDefaultConfig() string {
