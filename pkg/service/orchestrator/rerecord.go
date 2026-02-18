@@ -454,7 +454,13 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		}
 
 		hostToUse := o.config.Test.Host
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout, o.config.ReRecord.Port, o.config.Path, hostToUse, nil)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, pkg.SimulationConfig{
+			APITimeout:      o.config.Test.APITimeout,
+			ConfigPort:      o.config.ReRecord.Port,
+			KeployPath:      o.config.Path,
+			ConfigHost:      hostToUse,
+			URLReplacements: nil,
+		})
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			if resp == nil {

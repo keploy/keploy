@@ -74,7 +74,13 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout, h.cfg.Test.Port, h.cfg.Path, hostToUse, urlReplacements)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			APITimeout:      h.cfg.Test.APITimeout,
+			ConfigPort:      h.cfg.Test.Port,
+			KeployPath:      h.cfg.Path,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
+		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
@@ -92,7 +98,11 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
-		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, h.cfg.Test.GRPCPort, hostToUse, urlReplacements)
+		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			ConfigPort:      h.cfg.Test.GRPCPort,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
+		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))

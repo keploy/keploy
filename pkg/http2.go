@@ -459,7 +459,7 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a simplified version using gRPC client instead of manual HTTP/2 frame handling
-func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, configPort uint32, configHost string, urlReplacements map[string]string) (*models.GrpcResp, error) {
+func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger, cfg SimulationConfig) (*models.GrpcResp, error) {
 	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
@@ -509,7 +509,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Determine which port to use for test execution.
 	var err error
-	authority, err = ResolveTestTarget(authority, urlReplacements, configHost, tc.AppPort, configPort, false, logger)
+	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
 	if err != nil {
 		return nil, err
 	}

@@ -158,7 +158,15 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32, keployPath string, configHost string, urlReplacements map[string]string) (*models.HTTPResp, error) {
+type SimulationConfig struct {
+	APITimeout      uint64
+	ConfigPort      uint32
+	KeployPath      string
+	ConfigHost      string
+	URLReplacements map[string]string
+}
+
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 
@@ -210,8 +218,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		bodyRefPath := tc.HTTPReq.BodyRef.Path
 		// Resolve relative paths against keployPath so assets work even if
 		// the keploy directory has been moved since recording.
-		if keployPath != "" && !filepath.IsAbs(bodyRefPath) {
-			bodyRefPath = filepath.Join(keployPath, bodyRefPath)
+		if cfg.KeployPath != "" && !filepath.IsAbs(bodyRefPath) {
+			bodyRefPath = filepath.Join(cfg.KeployPath, bodyRefPath)
 		}
 		bodyData, readErr := os.ReadFile(bodyRefPath)
 		if readErr != nil {
@@ -230,8 +238,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			for j, value := range form.Values {
 				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
 					formPath := form.Paths[j]
-					if keployPath != "" && !filepath.IsAbs(formPath) {
-						formPath = filepath.Join(keployPath, formPath)
+					if cfg.KeployPath != "" && !filepath.IsAbs(formPath) {
+						formPath = filepath.Join(cfg.KeployPath, formPath)
 					}
 					valData, readErr := os.ReadFile(formPath)
 					if readErr != nil {
@@ -270,8 +278,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			for _, path := range field.Paths {
 				// Resolve relative paths against keployPath
 				resolvedPath := path
-				if keployPath != "" && !filepath.IsAbs(path) {
-					resolvedPath = filepath.Join(keployPath, path)
+				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
+					resolvedPath = filepath.Join(cfg.KeployPath, path)
 				}
 				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
 				file, ferr := os.Open(resolvedPath)
@@ -368,7 +376,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// 4. ConfigPort (if present) overrides port
 
 	// Step 1: Resolve the target URL/Authority using the helper
-	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, urlReplacements, configHost, tc.AppPort, configPort, true, logger)
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +414,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
 		logger.Debug("simulating request with conn:keep-alive")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: time.Second * time.Duration(cfg.APITimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -417,7 +425,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
 		logger.Debug("simulating request with conn:close")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: time.Second * time.Duration(cfg.APITimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -429,7 +437,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else {
 		logger.Debug("simulating request with conn:keep-alive (maxIdleConn=1)")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: time.Second * time.Duration(cfg.APITimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
