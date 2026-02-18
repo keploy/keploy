@@ -111,11 +111,27 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		cache.RUnlock()
 
 		if !found {
-			answers = p.resolveUncachedDNSAnswers(question, mode, mockingEnabled, reqTimestamp, session)
+			var stopFlow bool
+			answers, stopFlow = p.resolveUncachedDNSAnswers(question, mode, mockingEnabled, reqTimestamp, session)
+			if stopFlow {
+				msg.Rcode = dns.RcodeServerFailure
+				p.logger.Error("critical dns query failed in record mode; returning SERVFAIL",
+					zap.String("query", question.Name),
+					zap.String("qtype", dns.TypeToString[question.Qtype]),
+				)
+				err := w.WriteMsg(msg)
+				if err != nil {
+					utils.LogError(p.logger, err, "failed to write dns SERVFAIL response")
+				}
+				return
+			}
 
-			cache.Lock()
-			cache.m[key] = answers
-			cache.Unlock()
+			// In record mode, avoid caching empty answers produced after resolution failures.
+			if !(mode == models.MODE_RECORD && len(answers) == 0) {
+				cache.Lock()
+				cache.m[key] = answers
+				cache.Unlock()
+			}
 			p.logger.Debug(fmt.Sprintf("Answers[after uncached resolution for query:%v]:\n%v\n", question.Qtype, answers))
 		}
 
@@ -133,7 +149,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 
-func (p *Proxy) resolveUncachedDNSAnswers(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) []dns.RR {
+func (p *Proxy) resolveUncachedDNSAnswers(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) ([]dns.RR, bool) {
 	var answers []dns.RR
 
 	switch mode {
@@ -146,17 +162,32 @@ func (p *Proxy) resolveUncachedDNSAnswers(question dns.Question, mode models.Mod
 			answers, mocked = p.getMockedDNSAnswers(question)
 		}
 		if mocked {
-			return answers
+			return answers, false
 		}
 
 	case models.MODE_RECORD:
-		answers = p.recordDNSMock(question, reqTime, session)
+		recordedAnswers, err := p.recordDNSMock(question, reqTime, session)
+		if err != nil {
+			if question.Qtype == dns.TypeA || question.Qtype == dns.TypeAAAA || question.Qtype == dns.TypeSRV {
+				utils.LogError(p.logger, err, "critical DNS resolution failed in record mode",
+					zap.String("query", question.Name),
+					zap.String("qtype", dns.TypeToString[question.Qtype]),
+				)
+				return nil, true
+			}
+			utils.LogError(p.logger, err, "non-critical DNS resolution failed in record mode; continuing",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+			)
+			return nil, false
+		}
+		return recordedAnswers, false
 	}
 
 	if len(answers) > 0 {
-		return answers
+		return answers, false
 	}
-	return p.defaultDNSAnswers(question)
+	return p.defaultDNSAnswers(question), false
 }
 
 func (p *Proxy) defaultDNSAnswers(question dns.Question) []dns.RR {
@@ -392,115 +423,77 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 	return mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
 }
 
-func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) []dns.RR {
+func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) ([]dns.RR, error) {
 	// TODO: Add support for passThrough here using the src<->dst mapping.
-	domain := strings.TrimSuffix(question.Name, ".")
-	resolver := net.DefaultResolver
-	ctx := context.Background()
+	// domain := strings.TrimSuffix(question.Name, ".")
+	// resolver := net.DefaultResolver
+	// ctx := context.Background()
 	var answers []dns.RR
 
-	// Resolve DNS first, then record the resolved/defaulted answer set.
-	switch question.Qtype {
-	case dns.TypeSRV:
-		if strings.HasPrefix(domain, "_mongodb._tcp.") {
-			baseDomain := strings.TrimPrefix(domain, "_mongodb._tcp.")
-			_, addrs, err := resolver.LookupSRV(ctx, "mongodb", "tcp", baseDomain)
-			if err == nil && len(addrs) > 0 {
-				for _, addr := range addrs {
-					answers = append(answers, &dns.SRV{
-						Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
-						Priority: addr.Priority,
-						Weight:   addr.Weight,
-						Port:     addr.Port,
-						Target:   dns.Fqdn(addr.Target),
-					})
-				}
-				if len(answers) > 0 {
-					p.logger.Debug("resolved the dns records successfully")
-				}
-			} else {
-				// If resolution fails, return a default SRV record
-				answers = []dns.RR{&dns.SRV{
-					Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
-					Priority: 0,
-					Weight:   0,
-					Port:     27017, // Default MongoDB port
-					Target:   dns.Fqdn("mongodb." + baseDomain),
-				}}
-			}
-		}
+	// Resolve DNS and record only what was actually resolved in record mode.
+	// Do not synthesize defaults here.
 
-	case dns.TypeTXT:
-		// For TXT records, try to resolve them directly
-		txtRecords, err := resolver.LookupTXT(ctx, domain)
-		if err == nil && len(txtRecords) > 0 {
-			for _, txt := range txtRecords {
-				answers = append(answers, &dns.TXT{
-					Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
-					Txt: []string{txt},
-				})
-			}
-			if len(answers) > 0 {
-				p.logger.Debug("resolved the dns records successfully")
-			}
-		}
+	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	var servers []string
+	var port = "53"
 
-	case dns.TypeMX:
-		// For MX records, try to resolve them directly
-		mxRecords, err := resolver.LookupMX(ctx, domain)
-		if err == nil && len(mxRecords) > 0 {
-			for _, mx := range mxRecords {
-				answers = append(answers, &dns.MX{
-					Hdr:        dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
-					Preference: mx.Pref,
-					Mx:         dns.Fqdn(mx.Host),
-				})
-			}
-			if len(answers) > 0 {
-				p.logger.Debug("resolved the dns records successfully")
-			}
-		}
+	if err == nil {
+		servers = config.Servers
+		port = config.Port
+	} else {
+		// Fallback to Google DNS if resolv.conf fails (e.g. non-Linux or file missing)
+		servers = []string{"8.8.8.8", "1.1.1.1"}
+	}
 
-	case dns.TypeA, dns.TypeAAAA:
-		// For A/AAAA records
-		ips, err := resolver.LookupIPAddr(ctx, domain)
+	c := new(dns.Client)
+	c.Timeout = 5 * time.Second
+
+	m := new(dns.Msg)
+	m.SetQuestion(question.Name, question.Qtype)
+	m.RecursionDesired = true
+
+	var resolveErr error
+
+	for _, server := range servers {
+		addr := net.JoinHostPort(server, port)
+		c.Net = "udp"
+		in, _, err := c.Exchange(m, addr)
+
 		if err != nil {
-			p.logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
-		} else {
-			for _, ip := range ips {
-				if ipv4 := ip.IP.To4(); ipv4 != nil {
-					// Only add A record if TypeA was requested
-					if question.Qtype == dns.TypeA {
-						answers = append(answers, &dns.A{
-							Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
-							A:   ipv4,
-						})
-					}
-				} else {
-					// Only add AAAA record if TypeAAAA was requested
-					if question.Qtype == dns.TypeAAAA {
-						answers = append(answers, &dns.AAAA{
-							Hdr:  dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-							AAAA: ip.IP,
-						})
-					}
-				}
-			}
-			if len(answers) > 0 {
-				p.logger.Debug("resolved the dns records successfully")
+			resolveErr = err
+			continue
+		}
+
+		if in != nil && in.Truncated {
+			c.Net = "tcp"
+			in, _, err = c.Exchange(m, addr)
+			if err != nil {
+				resolveErr = err
+				continue
 			}
 		}
 
-	default:
-		p.logger.Debug("unsupported DNS query type for resolution", zap.Int("query type", int(question.Qtype)))
+		if in != nil {
+			answers = in.Answer
+			resolveErr = nil
+			break
+		}
+	}
+
+	if resolveErr != nil {
+		return nil, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
+	}
+
+	if len(answers) > 0 {
+		p.logger.Debug("resolved the dns records successfully")
 	}
 
 	if len(answers) == 0 {
-		answers = p.defaultDNSAnswers(question)
+		return nil, fmt.Errorf("no DNS answers resolved for query %s (%s)", question.Name, dns.TypeToString[question.Qtype])
 	}
 
 	if session == nil || session.MC == nil {
-		return answers
+		return answers, nil
 	}
 
 	resTime := time.Now().UTC()
@@ -530,11 +523,11 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		if mgr := syncMock.Get(); mgr != nil {
 			mgr.SetOutputChannel(session.MC)
 			mgr.AddMock(mock)
-			return answers
+			return answers, nil
 		}
 	}
 	session.MC <- mock
-	return answers
+	return answers, nil
 }
 
 func clearDNSCache() {
