@@ -1,0 +1,73 @@
+# .github/workflows/cherry-pick-pr-to-v2.yml
+
+name: Create Cherry-Pick PR to v2
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  create-cherry-pick-pr:
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Create Cherry-Pick Branch
+        run: |
+          # Replace slashes '/' with hyphens '-' for a valid branch name
+          SOURCE_BRANCH_NAME=$(echo "${{ github.event.pull_request.head.ref }}" | sed 's/\//-/g')
+          BRANCH_NAME="cherry-pick/${SOURCE_BRANCH_NAME}"
+          
+          # Create the new branch based on the latest 'v2'
+          git checkout -b $BRANCH_NAME origin/v2
+          
+          # Export the branch name for subsequent steps
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_ENV
+
+      - name: Cherry-pick the merged commit
+        run: |
+          echo "Cherry-picking merge commit ${{ github.event.pull_request.merge_commit_sha }}"
+          git cherry-pick ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Prepare PR Title and Body
+        id: prep_pr
+        run: |
+          # Get the full merge commit SHA
+          FULL_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          
+          # Get the short SHA (first 7 characters)
+          SHORT_SHA=$(echo $FULL_SHA | cut -c1-7)
+          
+          # Construct the title string in the requested format
+          PR_TITLE="cherry pick chore: cherry pick $SHORT_SHA from main to v2"
+          
+          # Construct the body with a link to the original PR
+          PR_BODY="This PR was automatically created to cherry-pick the changes from #${{ github.event.pull_request.number }} into the \`v2\` branch. Original PR: ${{ github.event.pull_request.html_url }}"
+          
+          # Export the title and body for the next step
+          echo "title=$PR_TITLE" >> $GITHUB_ENV
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$PR_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: cherry-pick changes from #${{ github.event.pull_request.number }}"
+          title: ${{ env.title }}
+          body: ${{ steps.prep_pr.outputs.body }}
+          branch: ${{ env.branch_name }}
+          base: v2
+          labels: |
+            cherry-pick
+            automated-pr
