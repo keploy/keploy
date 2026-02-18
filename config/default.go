@@ -68,6 +68,12 @@ record:
   recordTimer: 0s
   filters: []
   sync: false
+stub:
+  name: ""
+  path: ""
+  recordTimer: 0s
+  mongoPassword: "default@123"
+  ports: []
 configPath: ""
 bypassRules: []
 disableMapping: true
