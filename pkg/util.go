@@ -513,6 +513,15 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		StreamEvents:  streamEvents,
 	}
 
+	if len(streamEvents) > 0 {
+		comparableBody, convErr := StreamEventsToComparableBody(streamType, streamEvents)
+		if convErr != nil {
+			logger.Debug("failed to convert stream events to comparable body", zap.Error(convErr))
+		} else if comparableBody != "" {
+			resp.Body = comparableBody
+		}
+	}
+
 	// Centralized template update: if response body present and templates exist, update them.
 	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))

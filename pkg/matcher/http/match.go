@@ -29,7 +29,7 @@ var jsonUnmarshal234 = json.Unmarshal
 
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	if len(tc.HTTPResp.StreamEvents) > 0 {
-		return matchStreamingResponse(tc, actualResponse, logger, emitFailureLogs)
+		return matchStreamingResponse(tc, actualResponse, noiseConfig, compareAll, logger, emitFailureLogs)
 	}
 
 	// If the response body was skipped during recording (>1MB), compute body size comparison
@@ -464,7 +464,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	return pass, res
 }
 
-func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	expectedBody := tc.HTTPResp.Body
 	if expectedBody == "" {
 		expectedBody = joinStreamEventData(tc.HTTPResp.StreamType, tc.HTTPResp.StreamEvents)
@@ -489,6 +489,11 @@ func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp
 		}},
 	}
 
+	streamType := tc.HTTPResp.StreamType
+	if streamType == "" {
+		streamType = actualResponse.StreamType
+	}
+
 	pass := res.StatusCode.Normal
 
 	headerNoise := map[string][]string{}
@@ -507,8 +512,8 @@ func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp
 		res.HeadersResult = *hRes
 	}
 
-	expectedEvents := normalizeStreamEvents(tc.HTTPResp.StreamType, tc.HTTPResp.StreamEvents)
-	actualEvents := normalizeStreamEvents(tc.HTTPResp.StreamType, actualResponse.StreamEvents)
+	expectedEvents := normalizeStreamEvents(streamType, tc.HTTPResp.StreamEvents)
+	actualEvents := normalizeStreamEvents(streamType, actualResponse.StreamEvents)
 	if len(actualEvents) != len(expectedEvents) {
 		pass = false
 		res.BodyResult[0].Normal = false
@@ -522,22 +527,51 @@ func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp
 
 	limit := min(len(expectedEvents), len(actualEvents))
 	for i := 0; i < limit; i++ {
-		if expectedEvents[i].Data != actualEvents[i].Data {
-			pass = false
-			res.BodyResult[0].Normal = false
-			if emitFailureLogs {
-				logger.Error("stream event mismatch",
-					zap.String("testcase", tc.Name),
-					zap.Int("event_index", i+1),
-					zap.String("expected", expectedEvents[i].Data),
-					zap.String("actual", actualEvents[i].Data))
+		if streamType == models.HTTPStreamTypeSSE {
+			expType := pkg.SSEEventType(expectedEvents[i].Data)
+			actType := pkg.SSEEventType(actualEvents[i].Data)
+			if expType != "" && actType != "" && expType != actType {
+				pass = false
+				res.BodyResult[0].Normal = false
+				if emitFailureLogs {
+					logger.Error("stream event type mismatch",
+						zap.String("testcase", tc.Name),
+						zap.Int("event_index", i+1),
+						zap.String("expected_event", expType),
+						zap.String("actual_event", actType))
+				}
+				break
 			}
-			break
+			continue
 		}
+
+		// For non-SSE stream events we defer payload comparison to the
+		// comparable JSON body matching logic below so body-noise can apply.
 	}
 
-	if pass {
-		res.BodyResult[0].Normal = true
+	tcCopy := *tc
+	actualCopy := *actualResponse
+
+	tcCopy.HTTPResp.StreamEvents = nil
+	tcCopy.HTTPResp.StreamType = ""
+	actualCopy.StreamEvents = nil
+	actualCopy.StreamType = ""
+
+	if comparableExpected, err := pkg.StreamEventsToComparableBody(streamType, expectedEvents); err == nil && comparableExpected != "" {
+		tcCopy.HTTPResp.Body = comparableExpected
+	}
+	if comparableActual, err := pkg.StreamEventsToComparableBody(streamType, actualEvents); err == nil && comparableActual != "" {
+		actualCopy.Body = comparableActual
+	}
+
+	// Stream sequence should remain order-sensitive even when global ignoreOrdering is enabled.
+	bodyPass, baseRes := Match(&tcCopy, &actualCopy, noiseConfig, false, compareAll, logger, emitFailureLogs)
+	if baseRes != nil {
+		res = baseRes
+	}
+	pass = pass && bodyPass
+	if !pass && res != nil && len(res.BodyResult) > 0 {
+		res.BodyResult[0].Normal = false
 	}
 
 	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {

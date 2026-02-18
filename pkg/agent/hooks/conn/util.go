@@ -97,6 +97,15 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}
 
+	if len(streamEvents) > 0 {
+		comparableBody, convErr := pkg.StreamEventsToComparableBody(streamType, streamEvents)
+		if convErr != nil {
+			logger.Debug("failed to convert stream events to comparable body", zap.Error(convErr))
+		} else if comparableBody != "" {
+			respBody = []byte(comparableBody)
+		}
+	}
+
 	// Check if combined request and response size exceeds 5MB limit (after decompression)
 	totalSize := len(reqBody) + len(respBody)
 	if totalSize > MaxTestCaseSize {

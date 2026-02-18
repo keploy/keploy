@@ -3,6 +3,7 @@ package pkg
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -93,4 +94,99 @@ func findSSEDelimiter(data []byte) (int, int) {
 	default:
 		return idxCRLF, 4
 	}
+}
+
+// StreamEventsToComparableBody converts stream events to deterministic JSON so
+// normal response comparison and body-noise assertions can be reused.
+func StreamEventsToComparableBody(streamType models.HTTPStreamType, events []models.HTTPStreamEvent) (string, error) {
+	if len(events) == 0 {
+		return "", nil
+	}
+
+	switch streamType {
+	case models.HTTPStreamTypeSSE:
+		return sseEventsToJSON(events)
+	default:
+		return httpStreamEventsToJSON(events)
+	}
+}
+
+func sseEventsToJSON(events []models.HTTPStreamEvent) (string, error) {
+	out := make([]map[string]interface{}, 0, len(events))
+	for _, evt := range events {
+		parsed := parseSSEEvent(evt.Data)
+		out = append(out, parsed)
+	}
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func httpStreamEventsToJSON(events []models.HTTPStreamEvent) (string, error) {
+	out := make([]interface{}, 0, len(events))
+	for _, evt := range events {
+		data := strings.TrimSpace(evt.Data)
+		var parsed interface{}
+		if json.Valid([]byte(data)) && json.Unmarshal([]byte(data), &parsed) == nil {
+			out = append(out, parsed)
+		} else {
+			out = append(out, evt.Data)
+		}
+	}
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func parseSSEEvent(event string) map[string]interface{} {
+	res := map[string]interface{}{}
+	lines := strings.Split(NormalizeSSEEventData(event), "\n")
+	dataLines := make([]string, 0, 1)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		key := strings.TrimSpace(parts[0])
+		val := ""
+		if len(parts) == 2 {
+			val = strings.TrimLeft(parts[1], " ")
+		}
+
+		if key == "data" {
+			dataLines = append(dataLines, val)
+			continue
+		}
+		res[key] = val
+	}
+
+	if len(dataLines) > 0 {
+		joined := strings.Join(dataLines, "\n")
+		var parsed interface{}
+		if json.Valid([]byte(joined)) && json.Unmarshal([]byte(joined), &parsed) == nil {
+			res["data"] = parsed
+		} else {
+			res["data"] = joined
+		}
+	}
+
+	if len(res) == 0 {
+		res["raw"] = NormalizeSSEEventData(event)
+	}
+	return res
+}
+
+func SSEEventType(event string) string {
+	parsed := parseSSEEvent(event)
+	v, _ := parsed["event"].(string)
+	return v
 }
