@@ -274,7 +274,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 				cmd.Flags().String("location", locationDefault, "Location directory to store sandbox files")
 				cmd.Flags().String("name", "keploy", "Sandbox file prefix (final file: <name>.sb.yaml)")
-				cmd.Flags().String("tag", "", "Optional sandbox reference tag for config/registry workflows")
+				cmd.Flags().String("tag", "", "Sandbox tag (format: <semver>, e.g. v1.0.0). Full ref is inferred as <username>/<appName>:<tag>")
 				cmd.Flags().Duration("duration", 0, "Recording duration (e.g., \"60s\")")
 				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
 				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
