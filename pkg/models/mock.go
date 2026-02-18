@@ -2,7 +2,6 @@ package models
 
 import (
 	"encoding/gob"
-	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -23,6 +22,7 @@ type Kind string
 
 const (
 	HTTP        Kind = "Http"
+	HTTP2       Kind = "Http2"
 	GENERIC     Kind = "Generic"
 	REDIS       Kind = "Redis"
 	MySQL       Kind = "MySQL"
@@ -46,29 +46,6 @@ type TestModeInfo struct {
 	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
 	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
-	// mu protects concurrent access to IsFiltered
-	mu sync.RWMutex `json:"-" bson:"-"`
-}
-
-// Snapshot returns a consistent view of test mode fields.
-func (t *TestModeInfo) Snapshot() (id int, isFiltered bool, sortOrder int64) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.ID, t.IsFiltered, t.SortOrder
-}
-
-// SetIsFiltered safely sets the IsFiltered field
-func (t *TestModeInfo) SetIsFiltered(val bool) {
-	t.mu.Lock()
-	t.IsFiltered = val
-	t.mu.Unlock()
-}
-
-// GetIsFiltered safely gets the IsFiltered field
-func (t *TestModeInfo) GetIsFiltered() bool {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.IsFiltered
 }
 
 func (m *Mock) GetKind() string {
@@ -86,19 +63,20 @@ type MockSpec struct {
 	Created             int64               `json:"Created,omitempty" bson:"created,omitempty"`
 	MongoRequests       []MongoRequest      `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
 	MongoResponses      []MongoResponse     `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
-	PostgresRequests    []Backend           `json:"postgresRequests,omitempty" bson:"postgres_requests,omitempty"`
-	PostgresResponses   []Frontend          `json:"postgresResponses,omitempty" bson:"postgres_responses,omitempty"`
 	PostgresRequestsV2  []postgres.Request  `json:"PostgresRequestsV2,omitempty" bson:"postgres_requests_v2,omitempty"`
 	PostgresResponsesV2 []postgres.Response `json:"PostgresResponsesV2,omitempty" bson:"postgres_responses_v2,omitempty"`
 	// gRPC
-	GRPCReq          *GrpcReq         `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
-	GRPCResp         *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
-	MySQLRequests    []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
-	MySQLResponses   []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
-	DNSReq           *DNSReq          `json:"dnsReq,omitempty" bson:"dns_req,omitempty"`
-	DNSResp          *DNSResp         `json:"dnsResp,omitempty" bson:"dns_resp,omitempty"`
-	ReqTimestampMock time.Time        `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
-	ResTimestampMock time.Time        `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+	GRPCReq        *GrpcReq         `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
+	GRPCResp       *GrpcResp        `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
+	MySQLRequests  []mysql.Request  `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
+	MySQLResponses []mysql.Response `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	DNSReq         *DNSReq          `json:"dnsReq,omitempty" bson:"dns_req,omitempty"`
+	DNSResp        *DNSResp         `json:"dnsResp,omitempty" bson:"dns_resp,omitempty"`
+	// HTTP/2
+	HTTP2Req         *HTTP2Req  `json:"http2Req,omitempty" bson:"http2_req,omitempty"`
+	HTTP2Resp        *HTTP2Resp `json:"http2Resp,omitempty" bson:"http2_resp,omitempty"`
+	ReqTimestampMock time.Time  `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
+	ResTimestampMock time.Time  `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
 
 // OutputBinary store the encoded binary output of the egress calls as base64-encoded strings
@@ -140,7 +118,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	// Copy top-level fields explicitly to avoid copying embedded lock fields.
-	id, isFiltered, sortOrder := m.TestModeInfo.Snapshot()
+	id, isFiltered, sortOrder := m.TestModeInfo.ID, m.TestModeInfo.IsFiltered, m.TestModeInfo.SortOrder
 	c := Mock{
 		Version: m.Version,
 		Name:    m.Name,
@@ -182,12 +160,6 @@ func (m *Mock) DeepCopy() *Mock {
 	c.Spec.MongoResponses = make([]MongoResponse, len(m.Spec.MongoResponses))
 	copy(c.Spec.MongoResponses, m.Spec.MongoResponses)
 
-	c.Spec.PostgresRequests = make([]Backend, len(m.Spec.PostgresRequests))
-	copy(c.Spec.PostgresRequests, m.Spec.PostgresRequests)
-
-	c.Spec.PostgresResponses = make([]Frontend, len(m.Spec.PostgresResponses))
-	copy(c.Spec.PostgresResponses, m.Spec.PostgresResponses)
-
 	c.Spec.MySQLRequests = make([]mysql.Request, len(m.Spec.MySQLRequests))
 	copy(c.Spec.MySQLRequests, m.Spec.MySQLRequests)
 
@@ -222,6 +194,33 @@ func (m *Mock) DeepCopy() *Mock {
 			copy(dnsRespCopy.Answers, m.Spec.DNSResp.Answers)
 		}
 		c.Spec.DNSResp = &dnsRespCopy
+	}
+
+	if m.Spec.HTTP2Req != nil {
+		http2ReqCopy := *m.Spec.HTTP2Req
+		if m.Spec.HTTP2Req.Headers != nil {
+			http2ReqCopy.Headers = make(map[string]string, len(m.Spec.HTTP2Req.Headers))
+			for k, v := range m.Spec.HTTP2Req.Headers {
+				http2ReqCopy.Headers[k] = v
+			}
+		}
+		c.Spec.HTTP2Req = &http2ReqCopy
+	}
+	if m.Spec.HTTP2Resp != nil {
+		http2RespCopy := *m.Spec.HTTP2Resp
+		if m.Spec.HTTP2Resp.Headers != nil {
+			http2RespCopy.Headers = make(map[string]string, len(m.Spec.HTTP2Resp.Headers))
+			for k, v := range m.Spec.HTTP2Resp.Headers {
+				http2RespCopy.Headers[k] = v
+			}
+		}
+		if m.Spec.HTTP2Resp.Trailers != nil {
+			http2RespCopy.Trailers = make(map[string]string, len(m.Spec.HTTP2Resp.Trailers))
+			for k, v := range m.Spec.HTTP2Resp.Trailers {
+				http2RespCopy.Trailers[k] = v
+			}
+		}
+		c.Spec.HTTP2Resp = &http2RespCopy
 	}
 
 	return &c

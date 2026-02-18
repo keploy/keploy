@@ -621,6 +621,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		initialBuf = append(initialBuf, headerBuf...)
 	}
 
+	// For HTTP/2 connections, the initial buffer may only contain the client
+	// preface and SETTINGS frames. Protocol matchers (gRPC vs h2c) need to
+	// inspect the HEADERS frame's content-type to decide.
+	//
+	// We use a short timeout read instead of a blocking read because:
+	//  - h2c clients typically send preface+SETTINGS+HEADERS in quick succession
+	//  - gRPC clients send preface+SETTINGS, then WAIT for server SETTINGS_ACK
+	//    before sending HEADERS — a blocking read would deadlock.
+	//
+	// If HEADERS arrives within the timeout → matchers can inspect content-type.
+	// If it doesn't (gRPC pattern) → matchers treat missing HEADERS as gRPC.
+	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
+		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
+
+		moreBuf, err := util.ReadWithTimeout(srcConn, 150*time.Millisecond)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
+			return err
+		}
+		if len(moreBuf) > 0 {
+			initialBuf = append(initialBuf, moreBuf...)
+		}
+	}
+
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
@@ -934,24 +958,6 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
-}
-
-// DeleteMocks removes the specified mocks from the filtered tree only.
-// This allows for efficient incremental updates (O(k log N)) instead of full rebuilds (O(N log N)).
-// Note: We only delete from filtered tree because unfiltered mocks are config/reusable mocks
-// (like HTTP external API calls) that should remain available across tests.
-func (p *Proxy) DeleteMocks(_ context.Context, mocks []*models.Mock) error {
-	m, ok := p.MockManagers.Load(uint64(0))
-	if ok {
-		mgr := m.(*MockManager)
-		for _, mock := range mocks {
-			if mock != nil {
-				// Only delete from filtered tree - unfiltered mocks are reusable
-				mgr.DeleteFilteredMock(*mock)
-			}
-		}
-	}
-	return nil
 }
 
 // GetErrorChannel returns the error channel for external monitoring

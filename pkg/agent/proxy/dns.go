@@ -169,11 +169,11 @@ func (p *Proxy) defaultDNSAnswers(question dns.Question) []dns.RR {
 		}}
 
 	case dns.TypeAAAA:
-		p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
-		return []dns.RR{&dns.AAAA{
-			Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
-			AAAA: net.ParseIP(p.IP6),
-		}}
+		// Do not synthesize AAAA fallback (::1/proxy IPv6). For environments that are IPv4-only
+		// (for example many docker bridge networks), returning a synthetic IPv6 answer can make
+		// clients prefer an unreachable ::1 destination.
+		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
+		return nil
 
 	case dns.TypeSRV:
 		// Special handling for MongoDB SRV queries
@@ -226,7 +226,8 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 		return nil, false
 	}
 
-	for {
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
 		mocks, err := mgr.GetUnFilteredMocksByKind(models.DNS)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to get dns mocks")
@@ -254,6 +255,19 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 			if p.updateDNSMock(mgr, matchedMock) {
 				return answers, true
 			}
+			p.logger.Debug("DNS mock update failed (filtered), retrying",
+				zap.String("mockName", matchedMock.Name),
+				zap.Int("attempt", attempt+1),
+				zap.Int("maxRetries", maxRetries),
+			)
+			// On final retry, return the answers anyway to avoid blocking the DNS response
+			if attempt == maxRetries-1 {
+				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+					zap.String("mockName", matchedMock.Name),
+					zap.String("query", question.Name),
+				)
+				return answers, true
+			}
 			continue
 		}
 
@@ -261,11 +275,26 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 			if p.updateDNSMock(mgr, matchedMock) {
 				return answers, true
 			}
+			p.logger.Debug("DNS mock update failed (unfiltered), retrying",
+				zap.String("mockName", matchedMock.Name),
+				zap.Int("attempt", attempt+1),
+				zap.Int("maxRetries", maxRetries),
+			)
+			// On final retry, return the answers anyway to avoid blocking the DNS response
+			if attempt == maxRetries-1 {
+				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+					zap.String("mockName", matchedMock.Name),
+					zap.String("query", question.Name),
+				)
+				return answers, true
+			}
 			continue
 		}
 
 		return nil, false
 	}
+
+	return nil, false
 }
 
 func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, []dns.RR) {
@@ -335,7 +364,7 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 		return false
 	}
 	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
-	id, isFiltered, sortOrder := matchedMock.TestModeInfo.Snapshot()
+	id, isFiltered, sortOrder := matchedMock.TestModeInfo.ID, matchedMock.TestModeInfo.IsFiltered, matchedMock.TestModeInfo.SortOrder
 
 	originalMatchedMock := &models.Mock{
 		Name: matchedMock.Name,

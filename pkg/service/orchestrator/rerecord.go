@@ -453,7 +453,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 		}
 
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout, o.config.ReRecord.Port)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout, o.config.ReRecord.Port, o.config.Path)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			if resp == nil {
@@ -585,7 +585,7 @@ func (o *Orchestrator) showResponseDiff(originalTC *models.TestCase, newResp *mo
 	switch originalTC.Kind {
 	case models.HTTP:
 		// Use the HTTP matcher to compare responses - this will automatically show diffs
-		matched, _ := o.replay.CompareHTTPResp(originalTC, newResp, testSetID)
+		matched, _ := o.replay.CompareHTTPResp(originalTC, newResp, testSetID, true)
 		if !matched {
 			o.logger.Info("Response differences detected during re-record",
 				zap.String("testcase", originalTC.Name),
