@@ -496,7 +496,28 @@ func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp
 
 	pass := res.StatusCode.Normal
 
-	headerNoise := map[string][]string{}
+	noise := tc.Noise
+	if noise == nil {
+		noise = map[string][]string{}
+	}
+	bodyNoise := noiseConfig["body"]
+	headerNoise := noiseConfig["header"]
+	if bodyNoise == nil {
+		bodyNoise = map[string][]string{}
+	}
+	if headerNoise == nil {
+		headerNoise = map[string][]string{}
+	}
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise[strings.ToLower(x)] = regexArr
+		} else if a[0] == "header" {
+			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
+		}
+	}
+
 	hRes := &[]models.HeaderResult{}
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
 		res.HeadersResult = *hRes
@@ -545,34 +566,49 @@ func matchStreamingResponse(tc *models.TestCase, actualResponse *models.HTTPResp
 			continue
 		}
 
-		// For non-SSE stream events we defer payload comparison to the
-		// comparable JSON body matching logic below so body-noise can apply.
+		if expectedEvents[i].Data != actualEvents[i].Data {
+			pass = false
+			res.BodyResult[0].Normal = false
+			if emitFailureLogs {
+				logger.Error("stream event mismatch",
+					zap.String("testcase", tc.Name),
+					zap.Int("event_index", i+1),
+					zap.String("expected", expectedEvents[i].Data),
+					zap.String("actual", actualEvents[i].Data))
+			}
+			break
+		}
 	}
-
-	tcCopy := *tc
-	actualCopy := *actualResponse
-
-	tcCopy.HTTPResp.StreamEvents = nil
-	tcCopy.HTTPResp.StreamType = ""
-	actualCopy.StreamEvents = nil
-	actualCopy.StreamType = ""
 
 	if comparableExpected, err := pkg.StreamEventsToComparableBody(streamType, expectedEvents); err == nil && comparableExpected != "" {
-		tcCopy.HTTPResp.Body = comparableExpected
+		res.BodyResult[0].Expected = comparableExpected
 	}
 	if comparableActual, err := pkg.StreamEventsToComparableBody(streamType, actualEvents); err == nil && comparableActual != "" {
-		actualCopy.Body = comparableActual
+		res.BodyResult[0].Actual = comparableActual
 	}
 
-	// Stream sequence should remain order-sensitive even when global ignoreOrdering is enabled.
-	bodyPass, baseRes := Match(&tcCopy, &actualCopy, noiseConfig, false, compareAll, logger, emitFailureLogs)
-	if baseRes != nil {
-		res = baseRes
+	bodyPass := true
+	cleanExp, cleanAct := res.BodyResult[0].Expected, res.BodyResult[0].Actual
+	if json.Valid([]byte(cleanExp)) && json.Valid([]byte(cleanAct)) {
+		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
+		if err != nil {
+			bodyPass = false
+		} else if validatedJSON.IsIdentical() {
+			jsonComparisonResult, err := matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, false)
+			if err != nil {
+				bodyPass = false
+			} else {
+				bodyPass = jsonComparisonResult.IsExact()
+			}
+		} else {
+			bodyPass = false
+		}
+	} else if compareAll {
+		bodyPass = cleanExp == cleanAct
 	}
+
+	res.BodyResult[0].Normal = bodyPass
 	pass = pass && bodyPass
-	if !pass && res != nil && len(res.BodyResult) > 0 {
-		res.BodyResult[0].Normal = false
-	}
 
 	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
 		return AssertionMatch(tc, actualResponse, logger)
