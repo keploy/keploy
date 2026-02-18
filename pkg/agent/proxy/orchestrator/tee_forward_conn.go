@@ -99,10 +99,11 @@ func (rb *ringBuf) Write(p []byte) (int, error) {
 
 	n := int64(len(p))
 	if n > free {
-		n = free
+		// All-or-nothing: don't write partial data that could split a
+		// MySQL packet in the middle, causing garbled framing for the
+		// pipeline reader.  Return 0 so the caller knows nothing was
+		// written and can close the ring for a clean EOF.
 		rb.overflow.Store(true)
-	}
-	if n == 0 {
 		return 0, nil
 	}
 
@@ -374,12 +375,16 @@ func (t *TeeForwardConn) startForwarding() {
 					}
 
 					// Buffer for parser — write into ring buffer (zero alloc).
+					// All-or-nothing: if the ring can't hold the full chunk,
+					// drop it entirely and close the ring so the pipeline gets
+					// a clean EOF instead of garbled mid-packet data.
 					if atomic.LoadInt32(&t.disabled) == 0 {
 						written, _ := t.ring.Write(readBuf[:n])
 						if written < n {
-							// Ring buffer full — disable recording to prevent
-							// blocking network forwarding.
+							// Ring buffer full — disable recording and close
+							// the ring to unblock the pipeline immediately.
 							atomic.StoreInt32(&t.disabled, 1)
+							t.ring.Close()
 							if t.logger != nil {
 								t.logger.Warn("TeeForwardConn ring buffer full, disabling recording for this connection",
 									zap.String("src", t.src.RemoteAddr().String()))

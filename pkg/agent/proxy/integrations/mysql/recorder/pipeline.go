@@ -1,10 +1,10 @@
 package recorder
 
 import (
-	"bufio"
 	"context"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -12,6 +12,50 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
+
+// ── Memory ballast ────────────────────────────────────────────────────
+// A memory ballast is a large pre-allocated byte slice that's never used.
+// It tricks the GC into thinking the live heap is larger than it is, which
+// reduces GC frequency (GC triggers at 2x live heap by default).
+// 64MB ballast → GC won't trigger until heap reaches ~128MB.
+//
+//nolint:gochecknoglobals
+var ballast = make([]byte, 64<<20) // 64 MB
+
+// Keep ballast alive - the compiler can't optimize it away.
+func init() { _ = ballast }
+
+// ── sync.Pool for RawMockEntry ───────────────────────────────────
+// Pool hot-path objects to reduce allocation rate.
+//
+//nolint:gochecknoglobals
+var rawMockEntryPool = sync.Pool{
+	New: func() any {
+		return &RawMockEntry{
+			ReqPackets:  make([][]byte, 0, 1),
+			RespPackets: make([][]byte, 0, 16),
+		}
+	},
+}
+
+func acquireRawMockEntry() *RawMockEntry {
+	e := rawMockEntryPool.Get().(*RawMockEntry)
+	e.ReqPackets = e.ReqPackets[:0]
+	e.RespPackets = e.RespPackets[:0]
+	return e
+}
+
+func releaseRawMockEntry(e *RawMockEntry) {
+	if e == nil {
+		return
+	}
+	// Clear slices but keep capacity.
+	e.ReqPackets = e.ReqPackets[:0]
+	e.RespPackets = e.RespPackets[:0]
+	e.CmdType = 0
+	e.MockType = ""
+	rawMockEntryPool.Put(e)
+}
 
 // ── Slab allocator ──────────────────────────────────────────────────────
 // pktSlab batches per-packet []byte allocations into large slabs.
@@ -27,7 +71,7 @@ type pktSlab struct {
 	off int
 }
 
-const slabSize = 256 * 1024 // 256KB per slab
+const slabSize = 1024 * 1024 // 1MB per slab — larger slab = fewer allocations
 
 func newPktSlab() *pktSlab {
 	return &pktSlab{buf: make([]byte, slabSize)}
@@ -49,25 +93,35 @@ func (s *pktSlab) alloc(n int) []byte {
 	return p
 }
 
-// ── Merged pipeline ─────────────────────────────────────────────────────
+// ── peekReader interface ────────────────────────────────────────────────
 
-// runRecordPipeline is the merged reassembler+decoder goroutine.
-// It reads from the two TeeForwardConn ring buffers (via io.Reader),
-// frames MySQL packets, decodes them INLINE, and sends mocks to the
-// output channel.
+// peekReader is satisfied by both *bufio.Reader and *orchestrator.TeeForwardConn.
+// Using TeeForwardConn directly avoids double-buffering (TeeForwardConn already
+// wraps its ring buffer in a 64 KB bufio.Reader).
+type peekReader interface {
+	io.Reader
+	Peek(n int) ([]byte, error)
+}
+
+// ── Record pipeline ─────────────────────────────────────────────────────
+
+// runRecordPipeline reads from the two TeeForwardConn ring buffers,
+// frames MySQL packets using slab allocation, and hands them off to a
+// separate decode goroutine.  This architecture ensures:
 //
-// This eliminates:
-//   - The rawMocksCh intermediate channel (and its synchronization)
-//   - One goroutine per connection (decoder goroutine)
-//   - RawMockEntry struct allocations for command-phase packets
+//   - The read loop is ALLOCATION-FREE (slab only) and runs in a tight loop
+//   - Decode allocations happen ASYNCHRONOUSLY in a separate goroutine
+//   - GC pressure from decode cannot slow the read loop or forwarding
+//   - Constant memory footprint (no unbounded raw packet buffering)
+//   - Mocks flow continuously to the consumer (InsertMock)
 //
-// Packet memory is allocated from a slab allocator (~1 allocation per 256KB
-// of packet data instead of ~1 per packet), dramatically reducing GC pressure.
+// The rawCh channel between read and decode goroutines provides back-pressure
+// if decode falls behind, but is buffered (256) to absorb short bursts.
 func runRecordPipeline(
 	ctx context.Context,
 	logger *zap.Logger,
-	clientSrc io.Reader, // typically *TeeForwardConn
-	serverSrc io.Reader, // typically *TeeForwardConn
+	clientSrc peekReader, // *TeeForwardConn — avoids double-buffering
+	serverSrc peekReader, // *TeeForwardConn — avoids double-buffering
 	mocks chan<- *models.Mock,
 	opts models.OutgoingOptions,
 	hs handshakeState,
@@ -78,42 +132,83 @@ func runRecordPipeline(
 		}
 	}()
 
-	clientReader := bufio.NewReaderSize(clientSrc, reassemblerBufSize)
-	serverReader := bufio.NewReaderSize(serverSrc, reassemblerBufSize)
-	slab := newPktSlab()
-
-	// Per-connection decode context — seeded with the server greeting
-	// from the handshake phase so the fast-path decoder can use it.
-	decodeCtx := &wire.DecodeContext{
-		Mode:               models.MODE_RECORD,
-		LastOp:             wire.NewLastOpMap(),
-		ServerGreetings:    wire.NewGreetings(),
-		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-		LastOpValue:        wire.RESET,
-		ServerGreeting:     hs.ServerGreeting,
-		ClientCapabilities: hs.ClientCaps,
-		ServerCaps:         hs.ServerCaps,
-		PluginName:         hs.PluginName,
-		UseSSL:             hs.UseSSL,
-	}
-	var connKey net.Conn
-
 	connID := ""
 	if v := ctx.Value(models.ClientConnectionIDKey); v != nil {
 		connID = v.(string)
 	}
 
+	// ── Async decode goroutine ──────────────────────────────────────────
+	// Buffered channel between read loop and decode goroutine.
+	// The 1024 buffer absorbs burst traffic so read loop doesn't block.
+	rawCh := make(chan *RawMockEntry, 1024)
+
+	// Spawn decode goroutine — all decode allocations happen here,
+	// completely decoupled from the read loop.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("recovered from panic in decode goroutine", zap.Any("panic", r))
+			}
+		}()
+
+		// Per-connection decode context — seeded with handshake state.
+		decodeCtx := &wire.DecodeContext{
+			Mode:               models.MODE_RECORD,
+			LastOp:             wire.NewLastOpMap(),
+			ServerGreetings:    wire.NewGreetings(),
+			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+			LastOpValue:        wire.RESET,
+			ServerGreeting:     hs.ServerGreeting,
+			ClientCapabilities: hs.ClientCaps,
+			ServerCaps:         hs.ServerCaps,
+			PluginName:         hs.PluginName,
+			UseSSL:             hs.UseSSL,
+		}
+		var connKey net.Conn
+		// Pre-populate the ServerGreetings map so DecodePayload can find it.
+		if hs.ServerGreeting != nil {
+			decodeCtx.ServerGreetings.Store(connKey, hs.ServerGreeting)
+		}
+
+		for entry := range rawCh {
+			mock, err := decodeRawMockEntry(ctx, logger, *entry, decodeCtx, connKey)
+			releaseRawMockEntry(entry) // Return to pool after decode
+			if err != nil {
+				logger.Debug("failed to decode mock entry", zap.Error(err))
+				continue
+			}
+			setConnID(mock, connID)
+			// Non-blocking send with select — if channel would block, try once more then skip.
+			// Mocks channel is 50K buffered so this almost never happens.
+			select {
+			case mocks <- mock:
+			default:
+				// Channel full — try one more time with context check.
+				select {
+				case mocks <- mock:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// ── Read loop (allocation-free) ────────────────────────────────────
+	slab := newPktSlab()
+
 	for {
 		if ctx.Err() != nil {
+			close(rawCh)
 			return
 		}
 
 		// ── 1. Read one command packet from the client ──
-		cmdPacket, err := readMySQLPacketSlab(clientReader, slab)
+		cmdPacket, err := readMySQLPacketSlab(clientSrc, slab)
 		if err != nil {
 			if err != io.EOF && ctx.Err() == nil {
 				logger.Debug("record pipeline: client read error", zap.Error(err))
 			}
+			close(rawCh)
 			return
 		}
 
@@ -121,64 +216,43 @@ func runRecordPipeline(
 
 		if len(cmdPacket) < 5 {
 			logger.Warn("record pipeline: command packet too short", zap.Int("len", len(cmdPacket)))
+			close(rawCh)
 			return
 		}
 		cmdType := cmdPacket[4]
 
 		// ── 2. Handle no-response commands ──
 		if isNoResponseCmd(cmdType) {
-			entry := RawMockEntry{
-				ReqPackets:   [][]byte{cmdPacket},
-				CmdType:      cmdType,
-				MockType:     "mocks",
-				ReqTimestamp: reqTimestamp,
-				ResTimestamp: time.Now(),
-			}
-			mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
-			if err != nil {
-				logger.Debug("failed to decode no-response command", zap.Error(err))
-				continue
-			}
-			setConnID(mock, connID)
-			recordMockDirect(ctx, mock, mocks, opts)
+			entry := acquireRawMockEntry()
+			entry.ReqPackets = append(entry.ReqPackets, cmdPacket)
+			entry.CmdType = cmdType
+			entry.MockType = "mocks"
+			entry.ReqTimestamp = reqTimestamp
+			entry.ResTimestamp = time.Now()
+			rawCh <- entry
 			continue
 		}
 
 		// ── 3. Read the full response from the server ──
-		respPackets, err := readFullResponseSlab(ctx, logger, serverReader, cmdType, hs, slab)
+		respPackets, err := readFullResponseSlab(ctx, logger, serverSrc, cmdType, hs, slab)
 		if err != nil {
 			if err != io.EOF && ctx.Err() == nil {
 				logger.Debug("record pipeline: server response error", zap.Error(err))
 			}
+			close(rawCh)
 			return
 		}
 
-		resTimestamp := time.Now()
-
-		// ── 4. Decode inline (no intermediate channel) ──
-		entry := RawMockEntry{
-			ReqPackets:   [][]byte{cmdPacket},
-			RespPackets:  respPackets,
-			CmdType:      cmdType,
-			MockType:     "mocks",
-			ReqTimestamp: reqTimestamp,
-			ResTimestamp: resTimestamp,
-		}
-
-		mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
-		if err != nil {
-			logger.Debug("failed to decode mock entry", zap.Error(err))
-			continue
-		}
-		setConnID(mock, connID)
-
-		// ── 5. Send to final mocks channel ──
-		recordMockDirect(ctx, mock, mocks, opts)
-
-		// The packet bytes (from slab) and the RawMockEntry are now
-		// unreferenced locals — they become garbage immediately.
-		// The slab backing array stays alive until all slices from it
-		// are collected, but that's ONE GC object per 256KB vs hundreds.
+		// ── 4. Send raw entry to decode goroutine (no decode here) ──
+		// The read loop uses pool to avoid per-request allocations.
+		entry := acquireRawMockEntry()
+		entry.ReqPackets = append(entry.ReqPackets, cmdPacket)
+		entry.RespPackets = append(entry.RespPackets, respPackets...)
+		entry.CmdType = cmdType
+		entry.MockType = "mocks"
+		entry.ReqTimestamp = reqTimestamp
+		entry.ResTimestamp = time.Now()
+		rawCh <- entry
 	}
 }
 
@@ -192,7 +266,7 @@ func setConnID(mock *models.Mock, connID string) {
 // ── Slab-based packet reading ───────────────────────────────────────────
 
 // readMySQLPacketSlab reads a complete MySQL wire packet using slab allocation.
-func readMySQLPacketSlab(r *bufio.Reader, slab *pktSlab) ([]byte, error) {
+func readMySQLPacketSlab(r peekReader, slab *pktSlab) ([]byte, error) {
 	hdr, err := r.Peek(4)
 	if err != nil {
 		return nil, err
@@ -209,7 +283,7 @@ func readMySQLPacketSlab(r *bufio.Reader, slab *pktSlab) ([]byte, error) {
 }
 
 // readFullResponseSlab reads the complete server response using slab allocation.
-func readFullResponseSlab(ctx context.Context, logger *zap.Logger, serverReader *bufio.Reader, cmdType byte, hs handshakeState, slab *pktSlab) ([][]byte, error) {
+func readFullResponseSlab(ctx context.Context, logger *zap.Logger, serverReader peekReader, cmdType byte, hs handshakeState, slab *pktSlab) ([][]byte, error) {
 	first, err := readMySQLPacketSlab(serverReader, slab)
 	if err != nil {
 		return nil, err
@@ -241,7 +315,7 @@ func readFullResponseSlab(ctx context.Context, logger *zap.Logger, serverReader 
 	}
 }
 
-func readResultSetPacketsSlab(ctx context.Context, serverReader *bufio.Reader, firstPkt []byte, hs handshakeState, slab *pktSlab) ([][]byte, error) {
+func readResultSetPacketsSlab(ctx context.Context, serverReader peekReader, firstPkt []byte, hs handshakeState, slab *pktSlab) ([][]byte, error) {
 	colCount := decodeLenEncInt(firstPkt[4:])
 	// Pre-allocate: 1 (metadata) + colCount (col defs) + 1 (EOF) + estimated rows.
 	cap := int(colCount) + 16
@@ -288,7 +362,7 @@ func readResultSetPacketsSlab(ctx context.Context, serverReader *bufio.Reader, f
 	}
 }
 
-func readStmtPrepareResponseSlab(ctx context.Context, serverReader *bufio.Reader, firstPkt []byte, hs handshakeState, slab *pktSlab) ([][]byte, error) {
+func readStmtPrepareResponseSlab(ctx context.Context, serverReader peekReader, firstPkt []byte, hs handshakeState, slab *pktSlab) ([][]byte, error) {
 	packets := make([][]byte, 1, 16)
 	packets[0] = firstPkt
 

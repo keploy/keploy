@@ -1,18 +1,18 @@
 package recorder
 
 import (
-"context"
-"fmt"
-"net"
-"time"
+	"context"
+	"fmt"
+	"net"
+	"time"
 
-mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
-"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
-intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
-"go.keploy.io/server/v3/pkg/models"
-"go.keploy.io/server/v3/pkg/models/mysql"
-"go.uber.org/zap"
+	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query/rowscols"
+	intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
 )
 
 // ProcessRawMocks is the legacy async worker for the old pipeline.
@@ -81,7 +81,7 @@ func ProcessRawMocksV2(ctx context.Context, logger *zap.Logger, rawMocks <-chan 
 		mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
 		if err != nil {
 			logger.Error("failed to decode raw mock entry",
-zap.Error(err), zap.String("mockType", entry.MockType))
+				zap.Error(err), zap.String("mockType", entry.MockType))
 			continue
 		}
 
@@ -103,37 +103,24 @@ func decodeRawMockEntry(ctx context.Context, logger *zap.Logger, entry RawMockEn
 	var requestOperation string
 	var responseOperation string
 
-	// For the handshake config mock, we use the slow decoder since it handles
-	// the full protocol state machine.  For command-phase mocks, we use the
-	// fast decoder.
+	// For the handshake config mock, we use raw packet representation.
+	// The handshake was already successfully decoded during handleHandshake;
+	// re-decoding here would fail because the packets are stored in separate
+	// ReqPackets/RespPackets slices but the MySQL handshake is interleaved
+	// (server→client→server→client) and the state machine gets confused.
 	isConfig := entry.MockType == "config"
 
 	if isConfig {
-		// Decode all handshake packets using the state-tracking decoder.
+		// Use raw packet bundles for handshake — no re-decode needed.
 		for _, pkt := range entry.ReqPackets {
-			decoded, err := wire.DecodePayload(ctx, logger, pkt, connKey, decodeCtx)
-			if err != nil {
-				logger.Warn("failed to decode handshake request packet", zap.Error(err))
-				// Fall back to raw base64 representation.
-				decoded = rawPacketBundle(pkt)
-			}
+			decoded := rawPacketBundle(pkt)
 			requests = append(requests, mysql.Request{PacketBundle: *decoded})
 			requestOperation = decoded.Header.Type
 		}
 		for _, pkt := range entry.RespPackets {
-			decoded, err := wire.DecodePayload(ctx, logger, pkt, connKey, decodeCtx)
-			if err != nil {
-				logger.Warn("failed to decode handshake response packet", zap.Error(err))
-				decoded = rawPacketBundle(pkt)
-			}
+			decoded := rawPacketBundle(pkt)
 			responses = append(responses, mysql.Response{PacketBundle: *decoded})
 			responseOperation = decoded.Header.Type
-
-			// If this is a HandshakeV10, store the server greeting in context.
-			if sg, ok := decoded.Message.(*mysql.HandshakeV10Packet); ok {
-				decodeCtx.ServerGreetings.Store(connKey, sg)
-				decodeCtx.ServerGreeting = sg
-			}
 		}
 	} else {
 		// Command-phase: decode the command and its response.
@@ -164,13 +151,13 @@ func decodeRawMockEntry(ctx context.Context, logger *zap.Logger, entry RawMockEn
 // decodeCommandPhase decodes command-phase packets (requests and responses)
 // using the fast decoder and handles result-set assembly.
 func decodeCommandPhase(
-ctx context.Context,
-logger *zap.Logger,
-entry RawMockEntry,
-decodeCtx *wire.DecodeContext,
-connKey net.Conn,
-requests *[]mysql.Request,
-responses *[]mysql.Response,
+	ctx context.Context,
+	logger *zap.Logger,
+	entry RawMockEntry,
+	decodeCtx *wire.DecodeContext,
+	connKey net.Conn,
+	requests *[]mysql.Request,
+	responses *[]mysql.Response,
 ) (requestOp, responseOp string) {
 	// Start with a clean last-op for each command.
 	decodeCtx.LastOpValue = wire.RESET

@@ -522,10 +522,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 			cancel()
 		}()
 
+		// Normal forwarding loop.
 		for {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				goto drain
 			case m, ok := <-outgoingStream:
 				if !ok {
 					return nil
@@ -533,11 +534,31 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				select {
 				case <-ctx.Done():
 					outgoingChan <- m
-					return ctx.Err()
+					goto drain
 				case outgoingChan <- m:
 				}
 			}
 		}
+
+	drain:
+		// Parent context cancelled — drain all buffered mocks from
+		// outgoingStream.  With inline decode, mocks are sent continuously
+		// during recording, so at shutdown we only need to drain whatever
+		// is currently buffered in the 50K channel.  No two-phase complexity
+		// needed — just read until channel closes or idle timeout.
+		for {
+			select {
+			case m, ok := <-outgoingStream:
+				if !ok {
+					return ctx.Err()
+				}
+				outgoingChan <- m
+			case <-time.After(5 * time.Second):
+				// Idle timeout — no more mocks arriving, done draining.
+				return ctx.Err()
+			}
+		}
+		return ctx.Err()
 	})
 
 	// MAPPINGS

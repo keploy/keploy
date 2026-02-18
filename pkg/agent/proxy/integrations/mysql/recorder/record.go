@@ -68,16 +68,24 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		serverTee := orchestrator.NewTeeForwardConn(ctx, logger, cmdDestConn, cmdClientConn)
 
 		// ── Phase 3: Merged reassembler+decoder (single goroutine) ──
-		// Decode handshake mocks first via ProcessRawMocksV2 (one-shot).
+		// Send handshake mocks directly. Config mocks use raw packet representation
+		// (no decode needed - handshake was already decoded during handleHandshake).
 		if len(hsResult.Mocks) > 0 {
-			hsMocksCh := make(chan RawMockEntry, len(hsResult.Mocks))
-			for _, m := range hsResult.Mocks {
-				hsMocksCh <- m
+			connID := ""
+			if v := ctx.Value(models.ClientConnectionIDKey); v != nil {
+				connID = v.(string)
 			}
-			close(hsMocksCh)
-			ProcessRawMocksV2(ctx, logger, hsMocksCh, mocks, opts)
+			for _, entry := range hsResult.Mocks {
+				mock, err := decodeRawMockEntry(ctx, logger, entry, nil, nil)
+				if err != nil {
+					logger.Debug("failed to decode handshake mock", zap.Error(err))
+					continue
+				}
+				setConnID(mock, connID)
+				mocks <- mock
+			}
 		}
-
+		
 		// The command-phase is handled by a SINGLE merged goroutine that
 		// reads from both ring buffers, frames packets using slab allocation,
 		// decodes inline, and sends mocks. This eliminates:
