@@ -61,6 +61,9 @@ test:
   protoDir: ""
   protoInclude: []
   compareAll: false
+  customMatchers:
+    global: {}
+    test-sets: {}
 record:
   recordTimer: 0s
   filters: []

@@ -27,7 +27,7 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, customMatchers ...map[string]models.CustomMatcher) (bool, *models.Result) {
 	bodyType := models.Plain
 	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
@@ -87,7 +87,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			return false, res
 		}
 		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, customMatchers...)
 			pass = jsonComparisonResult.IsExact()
 			if err != nil {
 				return false, res
@@ -283,7 +283,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
-					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering, customMatchers...)
 					if err != nil {
 						return false, res
 					}

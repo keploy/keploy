@@ -1690,7 +1690,15 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger)
+
+	// Resolve custom matchers from config (global + test-set-specific).
+	customMatchers := matcherUtils.ResolveCustomMatchers(
+		r.config.Test.CustomMatchers.Global,
+		r.config.Test.CustomMatchers.Testsets,
+		testSetID,
+	)
+
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, customMatchers)
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {

@@ -125,6 +125,7 @@ type Normalize struct {
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	CustomMatchers      CustomMatcherConfig `json:"customMatchers" yaml:"customMatchers" mapstructure:"customMatchers"`
 	Delay               uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	Host                string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                uint32              `json:"port" yaml:"port" mapstructure:"port"`
@@ -178,6 +179,19 @@ type (
 	GlobalNoise  map[string]map[string][]string
 	TestsetNoise map[string]map[string]map[string][]string
 )
+
+// CustomMatcherConfig holds configurable custom matchers for replay comparisons.
+// Mirrors the Globalnoise pattern: global matchers + per-test-set overrides.
+type CustomMatcherConfig struct {
+	Global   CustomMatcherNoise        `json:"global" yaml:"global" mapstructure:"global"`
+	Testsets CustomMatcherTestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+}
+
+// CustomMatcherNoise maps: section ("body"/"header") → field path → CustomMatcher.
+type CustomMatcherNoise map[string]map[string]models.CustomMatcher
+
+// CustomMatcherTestsetNoise maps: testset → section → field path → CustomMatcher.
+type CustomMatcherTestsetNoise map[string]map[string]map[string]models.CustomMatcher
 
 func SetByPassPorts(conf *Config, ports []uint) {
 	for _, port := range ports {

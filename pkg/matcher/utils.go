@@ -106,7 +106,8 @@ func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool
 
 // JSONDiffWithNoiseControl compares JSON with support for both Path-based noise (e.g. "body.user.id")
 // and Global noise (e.g. "timestamp") to be ignored everywhere.
-func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
+// customMatchers maps field paths to CustomMatcher definitions for field-level custom matching.
+func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool, customMatchers ...map[string]models.CustomMatcher) (JSONComparisonResult, error) {
 	// Split noise into Path-based (contains dots) and Global (no dots)
 	pathNoise := make(map[string][]string)
 	globalKeys := make(map[string]bool)
@@ -121,13 +122,37 @@ func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]st
 		}
 	}
 
+	// Merge optional custom matchers into a single map.
+	var cm map[string]models.CustomMatcher
+	if len(customMatchers) > 0 && customMatchers[0] != nil {
+		cm = customMatchers[0]
+	}
+
 	idx := buildNoiseIndex(pathNoise)
-	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering)
+	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, globalKeys, ignoreOrdering, cm)
 }
 
-// matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth.
-func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string]bool, ignoreOrdering bool) (JSONComparisonResult, error) {
+// matchJSONWithNoiseHandlingIndexed now accepts globalKeys to skip specific keys at any depth,
+// and customMatchers for field-level custom matching (regex, tolerance, presence, type).
+func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, globalKeys map[string]bool, ignoreOrdering bool, customMatchers map[string]models.CustomMatcher) (JSONComparisonResult, error) {
 	var out JSONComparisonResult
+
+	// Check if a custom matcher is defined for this field path.
+	if len(customMatchers) > 0 && key != "" {
+		if cm, ok := customMatchers[strings.ToLower(key)]; ok {
+			matched, err := ApplyCustomMatcher(cm, expected, actual)
+			if err != nil {
+				return out, err
+			}
+			if matched {
+				out.matches, out.isExact = true, true
+				return out, nil
+			}
+			// Custom matcher defined but didn't match — this is a real diff.
+			return out, nil
+		}
+	}
+
 	// Type check fast-path (JSON unmarshal produces these concrete types).
 	switch e := expected.(type) {
 	case nil:
@@ -215,7 +240,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 				continue
 			}
 
-			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering)
+			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, globalKeys, ignoreOrdering, customMatchers)
 			if err != nil || !res.matches {
 				return out, nil
 			}
@@ -264,7 +289,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ignoreOrdering {
 			isExact := true
 			for i := 0; i < len(e); i++ {
-				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering)
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, globalKeys, ignoreOrdering, customMatchers)
 				if err != nil || !res.matches {
 					return out, nil
 				}
@@ -293,7 +318,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 						continue
 					}
 					childKey := key
-					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering)
+					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, globalKeys, ignoreOrdering, customMatchers)
 					if err == nil && res.matches {
 						if !res.isExact {
 							isExact = false

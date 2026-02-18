@@ -134,6 +134,14 @@ type FailureAssessment struct {
 	Reasons       []string          `json:"reasons,omitempty" yaml:"reasons,omitempty"`
 }
 
+// CustomMatcher defines a configurable field-level matcher for replay comparisons.
+// Type can be: "regex", "numeric_tolerance", "presence", "type".
+// Value holds the matcher parameter (regex pattern, tolerance, expected type, etc).
+type CustomMatcher struct {
+	Type  string `json:"type" yaml:"type" mapstructure:"type"`
+	Value string `json:"value,omitempty" yaml:"value,omitempty" mapstructure:"value"`
+}
+
 type Result struct {
 	StatusCode    IntResult      `json:"status_code" bson:"status_code" yaml:"status_code"`
 	FailureInfo   FailureInfo    `json:"-" yaml:"-"`
