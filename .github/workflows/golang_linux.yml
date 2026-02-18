@@ -195,3 +195,54 @@ jobs:
         run: |
           cd dns-mock-test
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/dns_mock/golang-linux.sh
+
+  golang_linux_replay:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - name: http-sse
+            path: http-sse
+          - name: simple-grpc
+            path: simple-grpc
+        config:
+          - job: replay_latest
+            replay_src: latest
+          - job: replay_build
+            replay_src: build
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Install yq
+        run: |
+          curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+      - name: Run ${{ matrix.app.name }} application
+        env:
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          $REPLAY_BIN test --port 8000 --api-timeout 200

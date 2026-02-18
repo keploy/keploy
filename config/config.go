@@ -128,6 +128,7 @@ type Normalize struct {
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
+	ReplaceWith         ReplaceWith         `json:"replaceWith" yaml:"replaceWith" mapstructure:"replaceWith"`
 	Delay               uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	Host                string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                uint32              `json:"port" yaml:"port" mapstructure:"port"`
@@ -170,6 +171,15 @@ type Report struct {
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
 	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+}
+
+type ReplaceWith struct {
+	Global   ReplaceWithMap            `json:"global" yaml:"global" mapstructure:"global"`
+	TestSets map[string]ReplaceWithMap `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
+}
+
+type ReplaceWithMap struct {
+	URL map[string]string `json:"url" yaml:"url" mapstructure:"url"`
 }
 
 type SelectedTests struct {

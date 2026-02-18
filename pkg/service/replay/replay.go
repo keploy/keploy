@@ -1154,34 +1154,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		// Handle host replacement - use user-provided host or default to localhost
-		// This is necessary because the agent architecture doesn't intercept the test runner's
-		// network requests (unlike the eBPF approach in v2), so we need to explicitly
-		// replace the recorded hostname with a reachable address.
-		hostToUse := r.config.Test.Host
-		if hostToUse == "" {
-			hostToUse = "localhost"
-		}
-		err = r.replaceHostInTestCase(testCase, hostToUse, "target host")
-		if err != nil {
-			break
-		}
-
-		// Handle user-provided http port replacement
-		if r.config.Test.Port != 0 && testCase.Kind == models.HTTP {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.Port)))
-			if err != nil {
-				break
-			}
-		}
-
-		// Handle user-provided grpc port replacement
-		if r.config.Test.GRPCPort != 0 && testCase.Kind == models.GRPC_EXPORT {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.GRPCPort)))
-			if err != nil {
-				break
-			}
-		}
+		// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
+		// This ensures that replaceWith configuration takes precedence over global host/port overrides.
 
 		started := time.Now().UTC()
 
