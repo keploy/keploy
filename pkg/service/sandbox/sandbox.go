@@ -245,38 +245,7 @@ func ParseRef(ref string) (company, appName, tag string, err error) {
 	return company, appName, tag, nil
 }
 
-// isMockFile returns true if the file should be included in the sandbox (mock files only).
-// Test files (e.g., *_test.go, *_test.py) are excluded.
-func isMockFile(path string) bool {
-	base := filepath.Base(path)
-
-	// Exclude test files.
-	if strings.HasSuffix(base, "_test.go") {
-		return false
-	}
-	if strings.HasSuffix(base, "_test.py") {
-		return false
-	}
-	if strings.HasSuffix(base, ".test.js") || strings.HasSuffix(base, ".test.ts") {
-		return false
-	}
-	if strings.HasSuffix(base, ".spec.js") || strings.HasSuffix(base, ".spec.ts") {
-		return false
-	}
-	if base == "main_test.go" {
-		return false
-	}
-
-	// Include YAML mock files (.yaml, .yml, .sb.yaml, .sb.yml).
-	ext := filepath.Ext(base)
-	if ext == ".yaml" || ext == ".yml" {
-		return true
-	}
-
-	return false
-}
-
-// scanAndHash walks the base directory and computes SHA-256 hashes for all mock files.
+// scanAndHash walks the base directory and computes SHA-256 hashes for sandbox mock files.
 func scanAndHash(basePath string) ([]models.SandboxFileHash, error) {
 	var fileHashes []models.SandboxFileHash
 
@@ -288,7 +257,8 @@ func scanAndHash(basePath string) ([]models.SandboxFileHash, error) {
 			return nil
 		}
 
-		if !isMockFile(path) {
+		base := filepath.Base(path)
+		if !strings.HasSuffix(base, ".sb.yaml") && !strings.HasSuffix(base, ".sb.yml") {
 			return nil
 		}
 

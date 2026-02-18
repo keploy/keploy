@@ -132,7 +132,7 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 
 			// Always overwrite the sandbox ref in keploy.yml during mock recording.
 			cfg.Sandbox.Ref = ref
-			if err := updateSandboxRefInConfig(logger, cfg, ref); err != nil {
+			if err := updateSandboxRefInConfig(cfg, ref); err != nil {
 				utils.LogError(logger, err, "failed to update sandbox ref in config")
 				return nil
 			}
@@ -152,8 +152,7 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 
 				err := sbSvc.Upload(ctx, ref, basePath)
 				if err != nil {
-					utils.LogError(logger, err, "failed to upload sandbox to cloud")
-					logger.Warn("sandbox recorded locally but cloud upload failed")
+					utils.LogError(logger, err, "failed to upload sandbox to cloud; sandbox recorded locally")
 				} else {
 					logger.Info("Sandbox uploaded to cloud successfully",
 						zap.String("ref", ref),
@@ -284,7 +283,7 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 
 // updateSandboxRefInConfig writes the sandbox ref to the keploy.yml config file.
 // It always overwrites the sandbox.ref value.
-func updateSandboxRefInConfig(logger *zap.Logger, cfg *config.Config, ref string) error {
+func updateSandboxRefInConfig(cfg *config.Config, ref string) error {
 	configPath := cfg.ConfigPath
 	if configPath == "" {
 		configPath = "."
