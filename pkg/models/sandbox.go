@@ -13,8 +13,6 @@ type SandboxManifest struct {
 	Tag string `json:"tag" yaml:"tag" bson:"tag"`
 	// Files contains the file path to hash mapping.
 	Files []SandboxFileHash `json:"files" yaml:"files" bson:"files"`
-	// ArtifactBlobPath is the path to the artifact zip in blob storage.
-	ArtifactBlobPath string `json:"artifactBlobPath" yaml:"artifactBlobPath" bson:"artifact_blob_path"`
 	// CreatedAt is the Unix timestamp of creation.
 	CreatedAt int64 `json:"createdAt" yaml:"createdAt" bson:"created_at"`
 	// UpdatedAt is the Unix timestamp of last update.
