@@ -152,12 +152,12 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 
 	if _, err := os.Stat(yamlPath); err != nil {
 		if ctx.Err() == nil || ctx.Err() == context.Canceled {
-			err = os.MkdirAll(filepath.Join(path), 0777)
+			err = os.MkdirAll(filepath.Join(path), models.DirPermDefault)
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
-			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
+			file, err := os.OpenFile(yamlPath, os.O_CREATE, models.FilePermReadWrite)
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
