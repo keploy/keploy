@@ -19,6 +19,8 @@ type MockRecordInput struct {
 	Path string `json:"path,omitempty" jsonschema:"Sandbox location directory (default: .)."`
 	// Name is the sandbox file prefix (final file: <name>.sb.yaml).
 	Name string `json:"name,omitempty" jsonschema:"Sandbox file prefix (default: keploy, final file: <name>.sb.yaml)."`
+	// Tag is the semantic version tag for sandbox record workflows.
+	Tag string `json:"tag,omitempty" jsonschema:"Semantic version tag for sandbox record workflows (for example 'v1.0.0'). AI should generate this when not provided by user."`
 }
 
 // MockRecordOutput defines the output of the mock record tool.
@@ -42,6 +44,7 @@ type RecordConfiguration struct {
 	Command string `json:"command"`
 	Path    string `json:"path"`
 	Name    string `json:"name"`
+	Tag     string `json:"tag,omitempty"`
 }
 
 // MockReplayInput defines the input parameters for the mock replay tool.
@@ -118,6 +121,7 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		zap.String("command", in.Command),
 		zap.String("path", in.Path),
 		zap.String("name", in.Name),
+		zap.String("tag", in.Tag),
 	)
 
 	command := strings.TrimSpace(in.Command)
@@ -147,11 +151,13 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	if name == "" {
 		name = "keploy"
 	}
+	tag := strings.TrimSpace(in.Tag)
 
 	config := &RecordConfiguration{
 		Command: command,
 		Path:    path,
 		Name:    name,
+		Tag:     tag,
 	}
 
 	// Check if mock recorder is available
@@ -169,6 +175,7 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		zap.String("command", command),
 		zap.String("path", path),
 		zap.String("name", name),
+		zap.String("tag", tag),
 	)
 
 	// Execute recording

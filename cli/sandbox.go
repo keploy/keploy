@@ -21,6 +21,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var (
+	getSandboxJWTTokenFunc = getSandboxJWTToken
+	newSandboxServiceFunc  = func(apiServerURL, jwtToken string, logger *zap.Logger) sandbox.Service {
+		cloudClient := sandbox.NewCloudClient(apiServerURL, jwtToken, logger)
+		return sandbox.New(cloudClient, logger)
+	}
+	newMockReplayServiceFunc = func(logger *zap.Logger, cfg *config.Config, runtime mockreplay.Runtime) mockreplay.Service {
+		return mockreplay.New(logger, cfg, runtime)
+	}
+)
+
 func init() {
 	Register("sandbox", Sandbox)
 }
@@ -70,7 +81,7 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				return fmt.Errorf("invalid --tag value: %w", err)
 			}
 
-			jwtToken, err := getSandboxJWTToken(ctx, logger, cfg)
+			jwtToken, err := getSandboxJWTTokenFunc(ctx, logger, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to authenticate user for sandbox record")
 				return fmt.Errorf("failed to authenticate user for sandbox record: %w", err)
@@ -140,26 +151,6 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				zap.String("ref", ref),
 			)
 
-			// Upload to cloud if API server is configured.
-			if cfg.APIServerURL != "" {
-				cloudClient := sandbox.NewCloudClient(cfg.APIServerURL, jwtToken, logger)
-				sbSvc := sandbox.New(cloudClient, logger)
-
-				basePath := cfg.Path
-				if basePath == "" {
-					basePath = "."
-				}
-
-				err := sbSvc.Upload(ctx, ref, basePath)
-				if err != nil {
-					utils.LogError(logger, err, "failed to upload sandbox to cloud; sandbox recorded locally")
-				} else {
-					logger.Info("Sandbox uploaded to cloud successfully",
-						zap.String("ref", ref),
-					)
-				}
-			}
-
 			return nil
 		},
 	}
@@ -196,30 +187,39 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				return errors.New("failed to get local flag")
 			}
 
+			shouldUploadAfterReplay := false
+			var sbSvc sandbox.Service
+			basePath := cfg.Path
+			if basePath == "" {
+				basePath = "."
+			}
+
 			// Step 2: Sync from cloud if API server is configured.
 			if localOnly {
 				logger.Info("Local-only sandbox replay enabled, skipping cloud sync")
 			} else if cfg.APIServerURL != "" {
-				jwtToken, err := getSandboxJWTToken(ctx, logger, cfg)
+				jwtToken, err := getSandboxJWTTokenFunc(ctx, logger, cfg)
 				if err != nil {
 					utils.LogError(logger, err, "failed to authenticate user for sandbox replay")
 					return fmt.Errorf("failed to authenticate user for sandbox replay: %w", err)
 				}
 
-				cloudClient := sandbox.NewCloudClient(cfg.APIServerURL, jwtToken, logger)
-				sbSvc := sandbox.New(cloudClient, logger)
-
-				basePath := cfg.Path
-				if basePath == "" {
-					basePath = "."
-				}
+				sbSvc = newSandboxServiceFunc(cfg.APIServerURL, jwtToken, logger)
 
 				err = sbSvc.Sync(ctx, ref, basePath)
 				if err != nil {
-					utils.LogError(logger, err, "failed to sync sandbox from cloud")
-					return fmt.Errorf("sandbox sync failed: %w", err)
+					if errors.Is(err, sandbox.ErrManifestNotFound) {
+						shouldUploadAfterReplay = true
+						logger.Info("sandbox manifest not found in cloud, proceeding with local sandbox replay",
+							zap.String("ref", ref),
+						)
+					} else {
+						utils.LogError(logger, err, "failed to sync sandbox from cloud")
+						return fmt.Errorf("sandbox sync failed: %w", err)
+					}
+				} else {
+					logger.Info("Sandbox synced from cloud", zap.String("ref", ref))
 				}
-				logger.Info("Sandbox synced from cloud", zap.String("ref", ref))
 			} else {
 				logger.Info("No API server URL configured, using local sandbox files only")
 			}
@@ -243,7 +243,7 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				return errors.New("failed to get name flag")
 			}
 
-			replayer := mockreplay.New(logger, cfg, runtime)
+			replayer := newMockReplayServiceFunc(logger, cfg, runtime)
 			result, err := replayer.Replay(ctx, models.ReplayOptions{
 				Command:   cfg.Command,
 				Path:      cfg.Path,
@@ -272,6 +272,20 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 
 			if !result.Success {
 				return errors.New("sandbox replay failed: tests did not pass")
+			}
+
+			if shouldUploadAfterReplay {
+				logger.Info("Uploading sandbox to cloud after successful local replay",
+					zap.String("ref", ref),
+				)
+				err = sbSvc.Upload(ctx, ref, basePath)
+				if err != nil {
+					utils.LogError(logger, err, "failed to upload sandbox to cloud after replay")
+					return fmt.Errorf("sandbox upload after replay failed: %w", err)
+				}
+				logger.Info("Sandbox uploaded to cloud successfully after replay",
+					zap.String("ref", ref),
+				)
 			}
 
 			return nil

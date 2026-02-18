@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+// ErrManifestNotFound indicates that no sandbox manifest exists in cloud for the given ref.
+var ErrManifestNotFound = errors.New("sandbox manifest not found in cloud")
 
 // sandboxService implements the Service interface.
 type sandboxService struct {
@@ -139,7 +143,7 @@ func (s *sandboxService) Sync(ctx context.Context, ref string, basePath string) 
 
 	if manifest == nil {
 		// Path A: Manifest doesn't exist yet - this is handled by the caller (upload flow).
-		return fmt.Errorf("sandbox manifest not found for ref %q; run sandbox record first to create it", ref)
+		return fmt.Errorf("%w for ref %q; run sandbox record first to create it", ErrManifestNotFound, ref)
 	}
 
 	s.logger.Info("sandbox manifest found in cloud",

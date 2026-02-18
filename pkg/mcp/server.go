@@ -201,6 +201,8 @@ IMPORTANT: Before calling this tool, confirm the following with the user:
 - The command to run. Prefer deterministic test commands over app run commands.
 - For Go projects, default to go test commands first (for example 'go test -v -run "TestA|TestB"' or 'go test -v ./...').
 - Never default to 'go run main.go' for recording.
+- Provide a semantic-version tag in the tool argument 'tag' (for example 'v1.0.0').
+- The 'tag' value should be AI-generated when the user does not provide one.
 - Avoid long-running/watch-mode/interactive commands and commands that do not terminate.
 - If command is unknown, send command as empty; the server will resolve it via elicitation.
 - The sandbox location directory (default: .)
@@ -211,7 +213,8 @@ The tool will show the configuration and ask for confirmation before starting.
 Parameters:
 - command (optional): Command to run (prefer test commands like 'go test -v ./...' or 'npm test'). If empty, server elicits command and uses that value.
 - path (optional): Sandbox location directory (default: .)
-- name (optional): Sandbox file prefix (default: keploy, final file is <name>.sb.yaml)`,
+- name (optional): Sandbox file prefix (default: keploy, final file is <name>.sb.yaml)
+- tag (required for sandbox record workflows): Semantic version tag (for example 'v1.0.0'). AI should generate this when missing.`,
 	}, s.handleMockRecord)
 
 	// Register mock replay/test tool

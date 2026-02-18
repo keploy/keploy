@@ -91,10 +91,12 @@ Cloud smart-sync is driven by the **registry reference** (`sandbox.ref`) configu
 
 ### `keploy sandbox replay` Behavior (summary)
 
+`keploy sandbox record` is local capture only; registry creation for missing refs happens in replay after a successful local run.
+
 1. **Checks for `sandbox.ref`** in config file (fails if not present)
 2. **Verifies ref exists** in registry:
-- **If ref doesn't exist:** after successful replay, uploads sandbox to registry
-- **If ref exists:**
+- **If ref doesn't exist in manifest:** after successful replay, uploads sandbox to registry
+- **If ref exists in manifest:**
   - *No local sandbox:* fetches sandbox files from registry, saves them according to their paths, then runs tests
   - *Local sandbox exists:* compares file hashes — if hash matches, uses local; if different, fetches from registry and overrides local, then runs tests
 
