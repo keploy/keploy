@@ -32,6 +32,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          integration-ref: flipkart
 
       # Install the cosign tool
       - name: Install cosign
