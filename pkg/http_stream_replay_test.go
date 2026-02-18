@@ -58,7 +58,19 @@ func TestSimulateHTTP_SSEStopsAfterExpectedEvents(t *testing.T) {
 	}
 
 	start := time.Now()
-	resp, err := SimulateHTTP(context.Background(), tc, "test-set", zap.NewNop(), 5, 0, "")
+	resp, err := SimulateHTTP(
+		context.Background(),
+		tc,
+		"test-set",
+		zap.NewNop(),
+		SimulationConfig{
+			APITimeout:      5,
+			ConfigPort:      0,
+			KeployPath:      "",
+			ConfigHost:      "",
+			URLReplacements: nil,
+		},
+	)
 	require.NoError(t, err)
 	require.Less(t, time.Since(start), 2*time.Second)
 	require.Equal(t, models.HTTPStreamTypeSSE, resp.StreamType)
@@ -111,7 +123,19 @@ func TestSimulateHTTP_HTTPStreamMatchesRecordedEventBoundaries(t *testing.T) {
 	}
 
 	start := time.Now()
-	resp, err := SimulateHTTP(context.Background(), tc, "test-set", zap.NewNop(), 5, 0, "")
+	resp, err := SimulateHTTP(
+		context.Background(),
+		tc,
+		"test-set",
+		zap.NewNop(),
+		SimulationConfig{
+			APITimeout:      5,
+			ConfigPort:      0,
+			KeployPath:      "",
+			ConfigHost:      "",
+			URLReplacements: nil,
+		},
+	)
 	require.NoError(t, err)
 	require.Less(t, time.Since(start), 2*time.Second)
 	require.Equal(t, models.HTTPStreamTypeHTTP, resp.StreamType)

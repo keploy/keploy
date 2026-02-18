@@ -463,7 +463,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}()
 
-	respBody, streamEvents, streamType, errReadRespBody := readHTTPResponseBodyWithStreamSupport(logger, httpResp, tc.HTTPResp, apiTimeout)
+	respBody, streamEvents, streamType, errReadRespBody := readHTTPResponseBodyWithStreamSupport(logger, httpResp, tc.HTTPResp, cfg.APITimeout)
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
