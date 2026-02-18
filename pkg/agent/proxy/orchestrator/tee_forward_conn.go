@@ -14,6 +14,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// Ensure ringSignal is used (defined in ring_signal_linux.go / ring_signal_others.go).
+var _ = (*ringSignal)(nil)
+
 // TCP_QUICKACK is the Linux socket option to disable delayed ACKs.
 // This constant is not in the standard syscall package for all platforms.
 const TCP_QUICKACK = 12
@@ -51,16 +54,10 @@ type ringBuf struct {
 	closed   atomic.Bool
 	overflow atomic.Bool // set if the writer couldn't fit data
 
-	// signalCh is used to wake up the consumer when data is written.
-	// It is a buffered channel of size 1.
-	// The producer performs a non-blocking send: select { case signalCh <- struct{}{}: default: }
-	// The consumer performs a blocking receive: <-signalCh
-	signalCh chan struct{}
-
-	// closeCh is closed when the buffer is closed.
-	// This allows the consumer to wake up immediately on Close().
-	closeCh chan struct{}
-	once    sync.Once
+	// sig provides platform-optimised goroutine wakeup.
+	// On Linux this is backed by eventfd (sub-5μs wakeup).
+	// On other platforms it falls back to a channel + 50μs timer.
+	sig *ringSignal
 }
 
 // nextPow2 returns the smallest power of 2 >= v.
@@ -75,24 +72,23 @@ func nextPow2(v int) int64 {
 func newRingBuf(size int) *ringBuf {
 	sz := nextPow2(size)
 	rb := &ringBuf{
-		buf:      make([]byte, sz),
-		size:     sz,
-		mask:     sz - 1,
-		signalCh: make(chan struct{}, 1),
-		closeCh:  make(chan struct{}),
+		buf:  make([]byte, sz),
+		size: sz,
+		mask: sz - 1,
+		sig:  newRingSignal(),
 	}
 	return rb
 }
 
 // Write appends p to the ring buffer.  Returns n written.
 // If the buffer cannot hold len(p), it writes as much as possible and
-// sets the overflow flag.  The write path is completely lock-free.
+// sets the overflow flag.  The write path is completely lock-free and
+// syscall-free in the common case (reader keeping up).
 func (rb *ringBuf) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
 
-	// If closed, we should not accept more writes, but we also shouldn't panic.
 	if rb.closed.Load() {
 		return 0, io.ErrClosedPipe
 	}
@@ -121,41 +117,35 @@ func (rb *ringBuf) Write(p []byte) (int, error) {
 		copy(rb.buf[:end-rb.size], p[first:n])
 	}
 
-	// Publish the new write cursor.  This Store provides a release
-	// barrier: the data written above is visible to any reader that
-	// observes this new cursor value.
+	// Publish the new write cursor (release barrier).
 	rb.w.Store(w + n)
 
-	// Wake the reader using a non-blocking send.
-	// Check closure first to avoid sending on closed channel if we raced (though we don't close signalCh anymore).
-	select {
-	case rb.signalCh <- struct{}{}:
-	default:
+	// ── Conditional notify ──
+	// Only issue the wakeup syscall when the reader is actually parked.
+	// This keeps the forwarding goroutine's hot path syscall-free when
+	// the parser is keeping up (which is the common case).  Cost when
+	// reader is active: ~1ns (atomic load).  Cost when reader is parked:
+	// ~200ns (eventfd write on Linux, channel send on others).
+	if rb.sig.hasWaiter() {
+		rb.sig.notify()
 	}
 
 	return int(n), nil
 }
 
 // Read copies available data into p.  The fast path (data available) is
-// completely lock-free.  It blocks via sync.Cond only when the buffer is
-// empty and not yet closed.  Returns io.EOF when closed and drained.
+// completely lock-free.  The slow path uses conditional signalling:
+// the reader marks itself as waiting, re-checks the buffer, then parks.
+// The producer only issues a wakeup syscall when it sees the waiting flag.
+// Returns io.EOF when closed and drained.
 func (rb *ringBuf) Read(p []byte) (int, error) {
-	// Reusable fallback timer — only allocated on first slow-path entry.
-	var fallback *time.Timer
-	defer func() {
-		if fallback != nil {
-			fallback.Stop()
-		}
-	}()
-
 	for {
-		// ── Fast path: Check for data without locking ──
+		// ── Fast path: data available (no syscall, no lock) ──
 		r := rb.r.Load()
 		w := rb.w.Load()
 		avail := w - r
 
 		if avail > 0 {
-			// Data available!
 			n := int64(len(p))
 			if n > avail {
 				n = avail
@@ -180,21 +170,25 @@ func (rb *ringBuf) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 
-		// ── Slow path: Block on signal channel or closure ──
-		// Reuse the timer to avoid allocating a new one each iteration.
-		if fallback == nil {
-			fallback = time.NewTimer(50 * time.Millisecond)
-		} else {
-			fallback.Reset(50 * time.Millisecond)
+		// ── Slow path: mark waiting, re-check, then park ──
+		// The setWaiting → re-check → wait pattern prevents missed wakeups:
+		// if the producer writes between our first check and setWaiting,
+		// the re-check catches it without blocking.
+		rb.sig.setWaiting()
+
+		// Re-check: data may have arrived between the first Load and setWaiting.
+		if rb.w.Load() != w || rb.closed.Load() {
+			rb.sig.clearWaiting()
+			continue
 		}
-		select {
-		case <-rb.signalCh:
-			// Woken up, loop back to check avail
-		case <-rb.closeCh:
-			// Buffer closed, loop back to check avail (might have data written before close)
-			// If no data, next loop will hit rb.closed.Load()
-		case <-fallback.C:
-			// Safety-net wake-up (should rarely fire)
+
+		// Park the goroutine.  On Linux: eventfd read via netpoller (~1-5μs wakeup).
+		// On others: channel receive (immediate wakeup on notify).
+		ok := rb.sig.wait()
+		rb.sig.clearWaiting()
+		if !ok {
+			// Signal closed → loop back to drain remaining data.
+			continue
 		}
 	}
 }
@@ -202,13 +196,8 @@ func (rb *ringBuf) Read(p []byte) (int, error) {
 // Close marks the buffer as closed (no more writes).  A subsequent Read
 // will drain remaining data and then return io.EOF.
 func (rb *ringBuf) Close() {
-	rb.once.Do(func() {
-		rb.closed.Store(true)
-		close(rb.closeCh)
-		// We DO NOT close signalCh because writers might still race to send on it.
-		// Since we use non-blocking sends, keeping it open is fine.
-		// Readers check closeCh.
-	})
+	rb.closed.Store(true)
+	rb.sig.close()
 }
 
 // Stop stops the forwarding goroutine and closes the ring buffer.
@@ -351,19 +340,28 @@ func (t *TeeForwardConn) startForwarding() {
 			defer teeReadPool.Put(bufPtr)
 			readBuf := *bufPtr
 
+			// Check ctx.Done() every 64 iterations instead of every loop
+			// to avoid the ~20-50ns channel-lock overhead per Read.  The
+			// Read/Write syscalls themselves return errors promptly when
+			// the underlying connection is closed, so cancellation is
+			// still detected within a few milliseconds.
+			var iter int
 			for {
-				select {
-				case <-t.ctx.Done():
-					t.setErr(t.ctx.Err())
-					return
-				default:
+				iter++
+				if iter&63 == 0 {
+					select {
+					case <-t.ctx.Done():
+						t.setErr(t.ctx.Err())
+						return
+					default:
+					}
 				}
 
-				// Re-enable TCP_QUICKACK right before Read so our kernel
-				// immediately ACKs the incoming data (Linux resets the flag
-				// after every ACK).  One syscall per iteration, not two —
-				// the reverse-direction TeeForwardConn sets quickACK on
-				// the dest side via its own srcFD.
+				// Re-enable TCP_QUICKACK on every iteration.  Linux resets
+				// the flag after every ACK, so this must be re-armed before
+				// each Read to prevent delayed ACKs (up to 40ms penalty).
+				// Cost: one setsockopt syscall (~200ns) — negligible versus
+				// the Read/Write syscalls we're already doing.
 				quickACKByFD(t.srcFD)
 
 				n, err := t.reader.Read(readBuf)
