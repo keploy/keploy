@@ -15,24 +15,17 @@ import (
 	"go.uber.org/zap"
 )
 
-// handleClientQueries processes the MySQL command phase using pre-fetching
-// pipelines. The pipelines drain the ring buffers asynchronously so packet
-// reads never block on parser processing.
-func handleClientQueries(ctx context.Context, logger *zap.Logger, clientPipe, destPipe *packetPipeline, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
-	var (
-		requests  []mysql.Request
-		responses []mysql.Response
-	)
-	// clientConn is the underlying TeeForwardConn, used only as decodeCtx map key
-	clientConn := clientPipe.conn
-
+// handleClientQueries processes the MySQL command phase.
+// It reads directly from the TeeForwardConn (which uses a ring buffer) to avoid
+// extra channel overhead.
+func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			// Read pre-fetched command from client pipeline (instant if buffered)
-			command, err := clientPipe.ReadPacket()
+			// Read command from client connection (TeeForwardConn ring buffer)
+			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read command packet from client")
@@ -41,6 +34,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientPipe, de
 			}
 
 			reqTimestamp := time.Now()
+
+			// Create NEW slices for each iteration to avoid race conditions with async mock recording
+			requests := make([]mysql.Request, 0, 1)
+			responses := make([]mysql.Response, 0, 1)
 
 			commandPkt, err := wire.DecodePayload(ctx, logger, command, clientConn, decodeCtx)
 			if err != nil {
@@ -54,16 +51,12 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientPipe, de
 
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
-				requests = []mysql.Request{}
-				responses = []mysql.Response{}
-				logger.Debug("No response command", zap.Any("packet", commandPkt.Header.Type))
 				continue
 			}
 
-			commandRespPkt, resTimestamp, err := handleQueryResponse(ctx, logger, clientConn, destPipe, decodeCtx)
+			commandRespPkt, resTimestamp, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
 			if err != nil {
 				if err == io.EOF && commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
-					logger.Debug("server closed the connection without any response")
 					return err
 				}
 				utils.LogError(logger, err, "failed to handle the query response")
@@ -75,17 +68,15 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientPipe, de
 			})
 
 			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp, resTimestamp, opts)
-			requests = []mysql.Request{}
-			responses = []mysql.Response{}
 		}
 	}
 }
 
-// handleQueryResponse reads response packets from the dest pipeline.
+// handleQueryResponse reads response packets from the dest connection.
 // clientConn is the TeeForwardConn used as decodeCtx map key only.
-func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, time.Time, error) {
-	// Read pre-fetched response from dest pipeline
-	commandResp, err := destPipe.ReadPacket()
+func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, time.Time, error) {
+	// Read response from dest connection
+	commandResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		if err != io.EOF {
 			utils.LogError(logger, err, "failed to read command response from the server")
@@ -100,7 +91,6 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn net
 	}
 
 	if commandRespPkt.Header.Type == mysql.StatusToString(mysql.ERR) || commandRespPkt.Header.Type == mysql.StatusToString(mysql.OK) {
-		logger.Debug("command response packet", zap.Any("packet", commandRespPkt.Header.Type))
 		return commandRespPkt, time.Now(), nil
 	}
 
@@ -113,20 +103,17 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn net
 
 	switch lastOp {
 	case mysql.COM_QUERY:
-		logger.Debug("Handling text result set", zap.Any("lastOp", lastOp))
-		queryResponsePkt, err = handleTextResultSet(ctx, logger, clientConn, destPipe, commandRespPkt, decodeCtx)
+		queryResponsePkt, err = handleTextResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, time.Time{}, fmt.Errorf("failed to handle the query response packet: %w", err)
 		}
 	case mysql.COM_STMT_PREPARE:
-		logger.Debug("Handling prepare Statement Response OK", zap.Any("lastOp", lastOp))
-		queryResponsePkt, err = handlePreparedStmtResponse(ctx, logger, clientConn, destPipe, commandRespPkt, decodeCtx)
+		queryResponsePkt, err = handlePreparedStmtResponse(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, time.Time{}, fmt.Errorf("failed to handle the prepared statement response: %w", err)
 		}
 	case mysql.COM_STMT_EXECUTE:
-		logger.Debug("Handling binary protocol result set", zap.Any("lastOp", lastOp))
-		queryResponsePkt, err = handleBinaryResultSet(ctx, logger, clientConn, destPipe, commandRespPkt, decodeCtx)
+		queryResponsePkt, err = handleBinaryResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, time.Time{}, fmt.Errorf("failed to handle the statement execute response: %w", err)
 		}
@@ -137,18 +124,16 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn net
 }
 
 // handlePreparedStmtResponse reads param/column definition packets from the
-// dest pipeline and stores raw bytes for async decoding.
-func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, commandRespPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
+// dest connection and stores raw bytes for async decoding.
+func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, commandRespPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
 	responseOk, ok := commandRespPkt.Message.(*mysql.StmtPrepareOkPacket)
 	if !ok {
 		return nil, fmt.Errorf("expected StmtPrepareOkPacket, got %T", commandRespPkt.Message)
 	}
 
-	logger.Debug("Parsing params and columns in prepared statement response", zap.Any("responseOk", responseOk))
-
 	if responseOk.NumParams > 0 {
 		for i := uint16(0); i < responseOk.NumParams; i++ {
-			colData, err := destPipe.ReadPacket()
+			colData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read param definition packet")
@@ -158,7 +143,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 			responseOk.RawParamData = append(responseOk.RawParamData, colData)
 		}
 
-		eofData, err := destPipe.ReadPacket()
+		eofData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read EOF packet for param definition")
@@ -170,7 +155,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 	if responseOk.NumColumns > 0 {
 		for i := uint16(0); i < responseOk.NumColumns; i++ {
-			colData, err := destPipe.ReadPacket()
+			colData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read column definition packet")
@@ -180,7 +165,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 			responseOk.RawColumnDefData = append(responseOk.RawColumnDefData, colData)
 		}
 
-		eofData, err := destPipe.ReadPacket()
+		eofData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read EOF packet for column definition")
@@ -194,9 +179,9 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 	return commandRespPkt, nil
 }
 
-// handleTextResultSet reads column and row packets from the dest pipeline,
+// handleTextResultSet reads column and row packets from the dest connection,
 // storing raw bytes for async decoding in ProcessRawMocks.
-func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, textResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
+func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, textResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
 	textResultSet, ok := textResultSetPkt.Message.(*mysql.TextResultSet)
 	if !ok {
 		return nil, fmt.Errorf("expected TextResultSet, got %T", textResultSetPkt.Message)
@@ -206,7 +191,7 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn net
 
 	// Read column definition packets — store raw bytes for async decode
 	for i := uint64(0); i < colCount; i++ {
-		colData, err := destPipe.ReadPacket()
+		colData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read column definition packet")
@@ -217,7 +202,7 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn net
 	}
 
 	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
-		eofData, err := destPipe.ReadPacket()
+		eofData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read EOF for column definition")
@@ -233,7 +218,8 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn net
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
-			data, err := destPipe.ReadPacket()
+			// Read packet directly from the connection using pooled buffer
+			data, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read row data packet")
@@ -255,20 +241,19 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn net
 	}
 }
 
-// handleBinaryResultSet reads column and row packets from the dest pipeline,
+// handleBinaryResultSet reads column and row packets from the dest connection,
 // storing raw bytes for async decoding in ProcessRawMocks.
-func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn net.Conn, destPipe *packetPipeline, binaryResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
+func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, binaryResultSetPkt *mysql.PacketBundle, decodeCtx *wire.DecodeContext) (*mysql.PacketBundle, error) {
 	binaryResultSet, ok := binaryResultSetPkt.Message.(*mysql.BinaryProtocolResultSet)
 	if !ok {
 		return nil, fmt.Errorf("expected BinaryProtocolResultSet, got %T", binaryResultSetPkt.Message)
 	}
 
 	colCount := binaryResultSet.ColumnCount
-	logger.Debug("ColCount in handleBinaryResultSet", zap.Any("ColCount", colCount))
 
 	// Read column definition packets — store raw bytes for async decode
 	for i := uint64(0); i < colCount; i++ {
-		colData, err := destPipe.ReadPacket()
+		colData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read column definition packet")
@@ -278,7 +263,7 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn n
 		binaryResultSet.RawColumnData = append(binaryResultSet.RawColumnData, colData)
 	}
 
-	eofData, err := destPipe.ReadPacket()
+	eofData, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 	if err != nil {
 		if err != io.EOF {
 			utils.LogError(logger, err, "failed to read EOF for column definition")
@@ -293,7 +278,8 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn n
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
-			data, err := destPipe.ReadPacket()
+			// Read packet directly from the connection using pooled buffer
+			data, err := mysqlUtils.ReadPacketBufferPooled(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read row data packet")

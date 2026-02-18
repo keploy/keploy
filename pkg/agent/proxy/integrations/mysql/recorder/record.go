@@ -23,8 +23,8 @@ import (
 func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 
 	var (
-		requests  []mysql.Request
-		responses []mysql.Response
+		requests  = make([]mysql.Request, 0, 1)
+		responses = make([]mysql.Response, 0, 1)
 	)
 
 	errCh := make(chan error, 1)
@@ -81,8 +81,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, rawMocks, reqTimestamp, resTimestamp, opts)
 
 		// reset the requests and responses
-		requests = []mysql.Request{}
-		responses = []mysql.Response{}
+		requests = requests[:0]
+		responses = responses[:0]
 
 		// TeeForwardConns were created inside handleInitialHandshake right
 		// after SSL detection.  The auth phase already flowed through them
@@ -95,12 +95,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			return nil
 		}
 
-		// Create packet pipelines for pre-fetching
-		clientPipe := newPacketPipeline(logger, clientTeeConn)
-		destPipe := newPacketPipeline(logger, destTeeConn)
-
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientPipe, destPipe, rawMocks, decodeCtx, opts)
+		err = handleClientQueries(ctx, logger, clientTeeConn, destTeeConn, rawMocks, decodeCtx, opts)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")

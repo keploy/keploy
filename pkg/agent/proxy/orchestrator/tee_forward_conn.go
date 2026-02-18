@@ -51,14 +51,16 @@ type ringBuf struct {
 	closed   atomic.Bool
 	overflow atomic.Bool // set if the writer couldn't fit data
 
-	// waiting is set by the consumer before it enters cond.Wait().
-	// The producer checks this and only grabs mu + signals when set,
-	// keeping the fast write path entirely lock-free.
-	waiting atomic.Bool
+	// signalCh is used to wake up the consumer when data is written.
+	// It is a buffered channel of size 1.
+	// The producer performs a non-blocking send: select { case signalCh <- struct{}{}: default: }
+	// The consumer performs a blocking receive: <-signalCh
+	signalCh chan struct{}
 
-	// mu + cond are used ONLY for the blocking-wait case (buffer empty).
-	mu   sync.Mutex
-	cond *sync.Cond
+	// closeCh is closed when the buffer is closed.
+	// This allows the consumer to wake up immediately on Close().
+	closeCh chan struct{}
+	once    sync.Once
 }
 
 // nextPow2 returns the smallest power of 2 >= v.
@@ -73,11 +75,12 @@ func nextPow2(v int) int64 {
 func newRingBuf(size int) *ringBuf {
 	sz := nextPow2(size)
 	rb := &ringBuf{
-		buf:  make([]byte, sz),
-		size: sz,
-		mask: sz - 1,
+		buf:      make([]byte, sz),
+		size:     sz,
+		mask:     sz - 1,
+		signalCh: make(chan struct{}, 1),
+		closeCh:  make(chan struct{}),
 	}
-	rb.cond = sync.NewCond(&rb.mu)
 	return rb
 }
 
@@ -87,6 +90,11 @@ func newRingBuf(size int) *ringBuf {
 func (rb *ringBuf) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+
+	// If closed, we should not accept more writes, but we also shouldn't panic.
+	if rb.closed.Load() {
+		return 0, io.ErrClosedPipe
 	}
 
 	w := rb.w.Load()
@@ -118,14 +126,11 @@ func (rb *ringBuf) Write(p []byte) (int, error) {
 	// observes this new cursor value.
 	rb.w.Store(w + n)
 
-	// Wake the reader only if it is blocked.  The check-then-signal
-	// pattern is safe: if the reader sets waiting=true AFTER we read
-	// false here, the reader will re-check the cursors inside the
-	// mu-protected loop and see data without sleeping.
-	if rb.waiting.Load() {
-		rb.mu.Lock()
-		rb.cond.Signal()
-		rb.mu.Unlock()
+	// Wake the reader using a non-blocking send.
+	// Check closure first to avoid sending on closed channel if we raced (though we don't close signalCh anymore).
+	select {
+	case rb.signalCh <- struct{}{}:
+	default:
 	}
 
 	return int(n), nil
@@ -135,13 +140,22 @@ func (rb *ringBuf) Write(p []byte) (int, error) {
 // completely lock-free.  It blocks via sync.Cond only when the buffer is
 // empty and not yet closed.  Returns io.EOF when closed and drained.
 func (rb *ringBuf) Read(p []byte) (int, error) {
+	// Reusable fallback timer — only allocated on first slow-path entry.
+	var fallback *time.Timer
+	defer func() {
+		if fallback != nil {
+			fallback.Stop()
+		}
+	}()
+
 	for {
+		// ── Fast path: Check for data without locking ──
 		r := rb.r.Load()
 		w := rb.w.Load()
 		avail := w - r
 
 		if avail > 0 {
-			// ── fast path: data available, no lock needed ──
+			// Data available!
 			n := int64(len(p))
 			if n > avail {
 				n = avail
@@ -157,35 +171,68 @@ func (rb *ringBuf) Read(p []byte) (int, error) {
 				copy(p[first:n], rb.buf[:end-rb.size])
 			}
 
-			// Publish the new read cursor.
 			rb.r.Store(r + n)
 			return int(n), nil
 		}
 
-		// Buffer empty — check if producer is done.
+		// Buffer empty — check if closed
 		if rb.closed.Load() {
 			return 0, io.EOF
 		}
 
-		// ── slow path: block until data arrives or buffer closes ──
-		rb.mu.Lock()
-		rb.waiting.Store(true)
-		for rb.w.Load()-rb.r.Load() == 0 && !rb.closed.Load() {
-			rb.cond.Wait()
+		// ── Slow path: Block on signal channel or closure ──
+		// Reuse the timer to avoid allocating a new one each iteration.
+		if fallback == nil {
+			fallback = time.NewTimer(50 * time.Millisecond)
+		} else {
+			fallback.Reset(50 * time.Millisecond)
 		}
-		rb.waiting.Store(false)
-		rb.mu.Unlock()
-		// Loop back to the fast path to actually read the data.
+		select {
+		case <-rb.signalCh:
+			// Woken up, loop back to check avail
+		case <-rb.closeCh:
+			// Buffer closed, loop back to check avail (might have data written before close)
+			// If no data, next loop will hit rb.closed.Load()
+		case <-fallback.C:
+			// Safety-net wake-up (should rarely fire)
+		}
 	}
 }
 
 // Close marks the buffer as closed (no more writes).  A subsequent Read
 // will drain remaining data and then return io.EOF.
 func (rb *ringBuf) Close() {
-	rb.closed.Store(true)
-	rb.mu.Lock()
-	rb.cond.Signal()
-	rb.mu.Unlock()
+	rb.once.Do(func() {
+		rb.closed.Store(true)
+		close(rb.closeCh)
+		// We DO NOT close signalCh because writers might still race to send on it.
+		// Since we use non-blocking sends, keeping it open is fine.
+		// Readers check closeCh.
+	})
+}
+
+// Stop stops the forwarding goroutine and closes the ring buffer.
+// It returns any error that occurred during forwarding.
+// This is useful when switching the underlying connection (e.g. SSL upgrade)
+// and we need to discard the TeeForwardConn but keep the socket open.
+// Note: the i/o timeout caused by SetReadDeadline(time.Now()) to unblock the
+// reader is expected and is NOT returned as an error.
+func (t *TeeForwardConn) Stop() error {
+	t.cancel()
+	// Force the reader to unblock if it is stuck in Read()
+	if conn, ok := t.src.(net.Conn); ok {
+		_ = conn.SetReadDeadline(time.Now())
+	}
+	t.ring.Close()
+	t.wg.Wait()
+	err := t.getErr()
+	// The intentional deadline we set above causes an i/o timeout — filter it out.
+	if err != nil {
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return nil
+		}
+	}
+	return err
 }
 
 // TeeForwardConn reads from a source connection and immediately forwards the data
@@ -216,6 +263,7 @@ type TeeForwardConn struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	once     sync.Once
+	wg       sync.WaitGroup
 	logger   *zap.Logger
 
 	// Cached file descriptors for TCP_QUICKACK — avoids calling SyscallConn()
@@ -244,6 +292,7 @@ const (
 // goroutine starts immediately.
 func NewTeeForwardConn(ctx context.Context, logger *zap.Logger, src, dest net.Conn) *TeeForwardConn {
 	setTCPNoDelay(dest)
+	setTCPNoDelay(src)
 	setTCPQuickACK(src)
 	setTCPQuickACK(dest)
 	ctx, cancel := context.WithCancel(ctx)
@@ -292,7 +341,9 @@ func NewTeeForwardConnWithReader(ctx context.Context, logger *zap.Logger, src, d
 
 func (t *TeeForwardConn) startForwarding() {
 	t.once.Do(func() {
+		t.wg.Add(1)
 		go func() {
+			defer t.wg.Done()
 			defer t.ring.Close()
 
 			// Borrow one read buffer for the lifetime of this goroutine.
@@ -365,8 +416,9 @@ func (t *TeeForwardConn) getErr() error {
 // SetTCPNoDelay enables TCP_NODELAY on the connection if it is a TCP connection.
 // This eliminates Nagle's algorithm delay (~40ms) on small writes, which is
 // critical for forwarding performance.
+// Handles TLS-wrapped connections by unwrapping to the underlying *net.TCPConn.
 func SetTCPNoDelay(conn net.Conn) {
-	if tc, ok := conn.(*net.TCPConn); ok {
+	if tc := unwrapTCPConn(conn); tc != nil {
 		_ = tc.SetNoDelay(true)
 	}
 }
@@ -379,9 +431,10 @@ func setTCPNoDelay(conn net.Conn) { SetTCPNoDelay(conn) }
 // one connection and writes to another (the piggyback ACK path never fires).
 // NOTE: Linux resets TCP_QUICKACK after every ACK, so this must be called
 // repeatedly — ideally after every Write() that precedes a Read().
+// Handles TLS-wrapped connections by unwrapping to the underlying *net.TCPConn.
 func SetTCPQuickACK(conn net.Conn) {
-	tc, ok := conn.(*net.TCPConn)
-	if !ok {
+	tc := unwrapTCPConn(conn)
+	if tc == nil {
 		return
 	}
 	rawConn, err := tc.SyscallConn()
@@ -396,12 +449,35 @@ func SetTCPQuickACK(conn net.Conn) {
 // setTCPQuickACK is the package-internal alias (used by constructors).
 func setTCPQuickACK(conn net.Conn) { SetTCPQuickACK(conn) }
 
+// netConner is satisfied by *tls.Conn (and any other wrapper that exposes
+// the underlying net.Conn via NetConn()). Using an interface avoids importing
+// crypto/tls in this package.
+type netConner interface {
+	NetConn() net.Conn
+}
+
+// unwrapTCPConn traverses connection wrappers (TLS, custom middleware, etc.)
+// until it finds the underlying *net.TCPConn, or returns nil.
+func unwrapTCPConn(conn net.Conn) *net.TCPConn {
+	for {
+		switch c := conn.(type) {
+		case *net.TCPConn:
+			return c
+		case netConner:
+			conn = c.NetConn()
+		default:
+			return nil
+		}
+	}
+}
+
 // extractTCPfd extracts and caches the file descriptor from a TCP connection.
 // Returns -1 if the connection is not TCP. This avoids calling SyscallConn()
 // on every forwarded packet in the hot path.
+// Handles TLS-wrapped connections by unwrapping to the underlying *net.TCPConn.
 func extractTCPfd(conn net.Conn) int {
-	tc, ok := conn.(*net.TCPConn)
-	if !ok {
+	tc := unwrapTCPConn(conn)
+	if tc == nil {
 		return -1
 	}
 	rawConn, err := tc.SyscallConn()
@@ -440,6 +516,11 @@ func (t *TeeForwardConn) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	return n, err
+}
+
+// Peek returns the next n bytes without advancing the reader.
+func (t *TeeForwardConn) Peek(n int) ([]byte, error) {
+	return t.bufRing.Peek(n)
 }
 
 // Write is a no-op on TeeForwardConn — the forwarding goroutine already

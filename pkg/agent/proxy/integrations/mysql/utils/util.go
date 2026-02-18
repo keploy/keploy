@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -68,10 +69,92 @@ func ReadPacketStream(ctx context.Context, logger *zap.Logger, conn net.Conn, bu
 	}
 }
 
+// Peeker is an interface for connections that support peeking.
+type Peeker interface {
+	Peek(n int) ([]byte, error)
+}
+
+// PacketPool is a sync.Pool for recycling byte slices to reduce GC pressure.
+// We use a pool of 64KB buffers, which covers most MySQL packets.
+// Larger packets will be allocated normally.
+var PacketPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
+
+// GetPacketBuffer gets a buffer from the pool if size <= 64KB.
+// Otherwise it allocates a new slice.
+// Returns the slice with length=size, capacity >= size.
+func GetPacketBuffer(size int) []byte {
+	if size <= 64*1024 {
+		ptr := PacketPool.Get().(*[]byte)
+		b := *ptr
+		if cap(b) < size {
+			// Should not happen if we only put back 64KB buffers,
+			// but safety first.
+			return make([]byte, size)
+		}
+		return b[:size]
+	}
+	return make([]byte, size)
+}
+
+// PutPacketBuffer returns a buffer to the pool if it fits the criteria.
+func PutPacketBuffer(b []byte) {
+	if cap(b) == 64*1024 {
+		PacketPool.Put(&b)
+	}
+}
+
 // ReadPacketBuffer reads a complete MySQL packet from the connection.
 // It uses io.ReadFull for efficient, zero-overhead reads — no goroutines,
 // no channels, no unnecessary allocations.
 func ReadPacketBuffer(_ context.Context, _ *zap.Logger, conn net.Conn) ([]byte, error) {
+	return ReadPacketBufferOrdered(conn, true)
+}
+
+// ReadPacketBufferPooled acts like ReadPacketBuffer but attempts to use
+// the PacketPool for the payload buffer. The caller is responsible for
+// calling PutPacketBuffer() on the returned slice when done.
+func ReadPacketBufferPooled(_ context.Context, _ *zap.Logger, conn net.Conn) ([]byte, error) {
+	return ReadPacketBufferOrdered(conn, false)
+}
+
+// ReadPacketBufferOrdered reads a packet. If alloc is true, it always allocates.
+// If alloc is false, it uses GetPacketBuffer for the payload.
+func ReadPacketBufferOrdered(conn net.Conn, alloc bool) ([]byte, error) {
+	// Optimization: If the connection supports Peek (like TeeForwardConn),
+	// we can read the header without advancing the reader, then read the
+	// full packet in a single ReadFull call. This saves one Read call
+	// and one buffer copy per packet.
+	if peeker, ok := conn.(Peeker); ok {
+		header, err := peeker.Peek(4)
+		if err != nil {
+			return nil, err
+		}
+
+		// Parse payload length from 3-byte little-endian field
+		payloadLength := GetPayloadLength(header[:3])
+
+		totalLen := 4 + int(payloadLength)
+		var packet []byte
+
+		if alloc {
+			packet = make([]byte, totalLen)
+		} else {
+			packet = GetPacketBuffer(totalLen)
+		}
+
+		// Read the entire packet (header + payload) in one go
+		if _, err := io.ReadFull(conn, packet); err != nil {
+			return nil, err
+		}
+		return packet, nil
+	}
+
+	// Fallback for standard net.Conn:
 	// Read the 4-byte MySQL packet header into a stack-allocated array.
 	var header [4]byte
 	if _, err := io.ReadFull(conn, header[:]); err != nil {
@@ -81,12 +164,20 @@ func ReadPacketBuffer(_ context.Context, _ *zap.Logger, conn net.Conn) ([]byte, 
 	// Parse payload length from 3-byte little-endian field
 	payloadLength := GetPayloadLength(header[:3])
 
-	// Allocate a single buffer for the full packet (header + payload)
-	packet := make([]byte, 4+payloadLength)
+	totalLen := 4 + int(payloadLength)
+	var packet []byte
+
+	if alloc {
+		packet = make([]byte, totalLen)
+	} else {
+		packet = GetPacketBuffer(totalLen)
+	}
+
 	copy(packet, header[:])
 
 	if payloadLength > 0 {
 		if _, err := io.ReadFull(conn, packet[4:]); err != nil {
+			// If we fail to read payload, return what we have (header) and error
 			return packet[:4], err
 		}
 	}

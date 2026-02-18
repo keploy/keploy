@@ -43,27 +43,27 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		resp: make([]mysql.Response, 0),
 	}
 
-	// Re-enable TCP_QUICKACK before every read — Linux resets it after each ACK.
-	orchestrator.SetTCPQuickACK(destConn)
+	// ── Phase 1: Initial TeeForwardConn ──────────────────────────────
+	// Create TeeForwardConns immediately for the initial handshake phase.
+	// NOTE: We ONLY create it for the Destination (Server -> Client) direction initially.
+	// We CANNOT create it for Client -> Server key yet, because if the client sends
+	// SSLRequest followed immediately by ClientHello (TLS), a blind forwarder would
+	// send the ClientHello to the raw destination, preventing us from intercepting
+	// the TLS handshake (MITM).
+	destTeeConn := orchestrator.NewTeeForwardConn(ctx, logger, destConn, clientConn)
 
-	// Read the initial handshake from the server (server-greetings)
-	handshake, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+	// re-enable TCP_QUICKACK done inside TeeForwardConn loop for destConn.
+	// For clientConn, we might want to set it manually since we are reading synchronously initially.
+	orchestrator.SetTCPQuickACK(clientConn)
+
+	// 1. Read Server Greeting (from destTeeConn)
+	// This uses the ring buffer, decoupling the server's write from our parser.
+	handshake, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destTeeConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read initial handshake from server")
 		return res, err
 	}
-
-	// Write the initial handshake to the client
-	_, err = clientConn.Write(handshake)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write server greetings to the client")
-
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(clientConn)
+	// NO clientConn.Write needed (handled by destTeeConn forwarder).
 
 	// Set the timestamp of the initial request
 	res.reqTimestamp = time.Now()
@@ -92,10 +92,10 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		PacketBundle: *handshakePkt,
 	})
 
-	// Re-enable TCP_QUICKACK before reading client response.
+	// 2. Read Handshake Response (Synchronously from clientConn)
+	// We MUST read this synchronously to inspect if it is an SSL Request
+	// before we allow any further data (like ClientHello) to reach the server.
 	orchestrator.SetTCPQuickACK(clientConn)
-
-	// Handshake response from client (or SSL request)
 	handshakeResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		if err == io.EOF {
@@ -103,17 +103,17 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, err
 		}
 		utils.LogError(logger, err, "failed to read handshake response from client")
-
 		return res, err
 	}
 
+	// We manually write this to the destination because we don't have a clientTeeConn yet.
+	// Use destConn directly.
 	_, err = destConn.Write(handshakeResponse)
 	if err != nil {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to write handshake response to server")
-
 		return res, err
 	}
 	orchestrator.SetTCPQuickACK(destConn)
@@ -130,26 +130,19 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	})
 
 	// Handle the SSL request.
-	//
-	// NOTE: Unlike PostgreSQL where SSLRequest is a standalone packet that can be intercepted
-	// at the proxy level, MySQL SSL is tightly coupled with the protocol handshake:
-	// 1. Server sends initial handshake with SSL capability flag
-	// 2. Client responds with SSLRequest (handshake response with SSL flag but no auth)
-	// 3. Both sides upgrade to TLS
-	// 4. Client re-sends full handshake response with authentication over TLS
-	//
-	// This tight coupling means proxy-level MySQL SSL handling would require the proxy to:
-	// - Parse the MySQL handshake protocol
-	// - Track MySQL capability flags
-	// - Understand the multi-phase MySQL handshake
-	//
-	// For now, MySQL SSL handling remains in the parser. Future work may move this to
-	// the proxy level if needed.
-	//
-	// TODO: Consider moving MySQL SSL to proxy level when:
-	// - Heap-based TLS key extraction is implemented
-	// - MySQL protocol parsing is centralized in proxy
+	var clientTeeConn *orchestrator.TeeForwardConn
+
 	if decodeCtx.UseSSL {
+		// Stop the initial dest forwarder because we are about to upgrade the underlying socket.
+		// Use destTeeConn.Stop() to clean up the goroutine.
+		// Stop() filters expected i/o timeout errors caused by the deadline trick.
+		if err := destTeeConn.Stop(); err != nil {
+			logger.Debug("dest tee conn stop returned error during ssl upgrade", zap.Error(err))
+		}
+		// Reset the deadline on destConn, as Stop() might have set it to unblock the reader.
+		if err := destConn.SetReadDeadline(time.Time{}); err != nil {
+			logger.Warn("failed to reset read deadline on dest conn", zap.Error(err))
+		}
 
 		reader := bufio.NewReader(clientConn)
 		initialData := make([]byte, 5)
@@ -181,7 +174,6 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			}
 
 			// Upgrade server connection to TLS using centralized helper
-			// Note: Client is already upgraded above, only need to upgrade server side
 			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 			sourcePort := remoteAddr.Port
 			serverAddr := destConn.RemoteAddr().String()
@@ -199,7 +191,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		res.tlsClientConn = clientConn
 		res.tlsDestConn = destConn
 
-		// Store (Reset) the last operation for the upgraded client connection, because after ssl request the client will send the handshake response packet again.
+		// Store (Reset) the last operation for the upgraded client connection
 		decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
 
 		// Store the server greeting packet for the upgraded client connection
@@ -209,29 +201,26 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		}
 		decodeCtx.ServerGreetings.Store(clientConn, sg)
 
-		// Read the handshake response packet from the client
-		orchestrator.SetTCPQuickACK(clientConn)
-		handshakeResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+		// ── Phase 2: Create TeeForwardConns for TLS ──────────────────────
+		// Now that we have TLS connections, wrap them in NEW TeeForwardConns.
+		clientTeeConn = orchestrator.NewTeeForwardConn(ctx, logger, clientConn, destConn)
+		destTeeConn = orchestrator.NewTeeForwardConn(ctx, logger, destConn, clientConn)
+
+		// ALSO store the greeting for the wrapper `clientTeeConn` because record.go
+		// uses this wrapper to call DecodePayload later.
+		decodeCtx.ServerGreetings.Store(clientTeeConn, sg)
+
+		// Read the handshake response from Client (again, but over TLS)
+		handshakeResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientTeeConn)
 		if err != nil {
 			if err == io.EOF {
 				logger.Debug("received request buffer is empty in record mode for mysql call")
 				return res, err
 			}
 			utils.LogError(logger, err, "failed to read handshake response from client")
-
 			return res, err
 		}
-
-		_, err = destConn.Write(handshakeResponse)
-		if err != nil {
-			if ctx.Err() != nil {
-				return res, ctx.Err()
-			}
-			utils.LogError(logger, err, "failed to write handshake response to server")
-
-			return res, err
-		}
-		orchestrator.SetTCPQuickACK(destConn)
+		// NO destConn.Write needed.
 
 		// Decode client handshake response packet
 		handshakeResponsePkt, err := wire.DecodePayload(ctx, logger, handshakeResponse, clientConn, decodeCtx)
@@ -243,42 +232,26 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		res.req = append(res.req, mysql.Request{
 			PacketBundle: *handshakeResponsePkt,
 		})
+	} else {
+		// Non-SSL Path:
+		// We already have destTeeConn. We need to start clientTeeConn now.
+		clientTeeConn = orchestrator.NewTeeForwardConn(ctx, logger, clientConn, destConn)
+
+		// Access the greeting from the initial packet and store it for the new wrapper
+		if sg, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
+			decodeCtx.ServerGreetings.Store(clientTeeConn, sg)
+		} else {
+			logger.Warn("failed to type assert handshake packet to store for tee conn (non-ssl)")
+		}
 	}
-
-	// ── Phase 2: Create TeeForwardConns ──────────────────────────────
-	// SSL detection is done.  From this point the auth exchange can
-	// proceed at wire speed: a forwarding goroutine per direction
-	// copies bytes between src and dest without waiting for the parser.
-	// The parser reads already-forwarded data from the ring buffer.
-	// Write() is a no-op on TeeForwardConn, so the existing read→write→decode
-	// auth code below works unchanged.
-	rawClientConn := clientConn // keep ref for decodeCtx re-registration
-	clientTeeConn := orchestrator.NewTeeForwardConn(ctx, logger, clientConn, destConn)
-	destTeeConn := orchestrator.NewTeeForwardConn(ctx, logger, destConn, clientConn)
-
-	// Re-register decodeCtx entries with TeeForwardConn keys so the auth
-	// decoder can look them up under the connection it actually reads from.
-	if op, ok := decodeCtx.LastOp.Load(rawClientConn); ok {
-		decodeCtx.LastOp.Store(clientTeeConn, op)
-	}
-	if sg, ok := decodeCtx.ServerGreetings.Load(rawClientConn); ok {
-		decodeCtx.ServerGreetings.Store(clientTeeConn, sg)
-	}
-
-	// Switch to TeeForwardConns for the rest of the handshake.
-	clientConn = clientTeeConn
-	destConn = destTeeConn
-
-	// Store TeeForwardConns for the caller (Record) to use in command phase.
-	res.clientTeeConn = clientTeeConn
-	res.destTeeConn = destTeeConn
 
 	// Read the next auth packet,
 	// It can be either auth more data if authentication from both server and client are agreed.(caching_sha2_password)
 	// or auth switch request if the server wants to switch the auth mechanism
 	// or it can be OK packet in case of native password
 	orchestrator.SetTCPQuickACK(destConn)
-	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+	// Use destTeeConn to read. Forwarding to client is automatic.
+	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destTeeConn)
 	if err != nil {
 		if err == io.EOF {
 			logger.Debug("received request buffer is empty in record mode for mysql call")
@@ -292,14 +265,8 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// AuthSwitchRequest: If the server sends an AuthSwitchRequest, then there must be a diff auth type with its data
 	// AuthMoreData: If the server sends an AuthMoreData, then it tells the auth mechanism type for the initial plugin name or for the auth switch request.
 	// OK/ERR: If the server sends an OK/ERR packet, in case of native password.
-	_, err = clientConn.Write(authData)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write auth packet to client during handshake")
-		return res, err
-	}
+	// NO clientConn.Write needed.
+
 	orchestrator.SetTCPQuickACK(clientConn)
 
 	// Decode auth or final response packet
@@ -327,7 +294,8 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 		// read the auth switch response from the client
 		orchestrator.SetTCPQuickACK(clientConn)
-		authSwitchResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+		// Use clientTeeConn to read. Forwarding to server is automatic.
+		authSwitchResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientTeeConn)
 		if err != nil {
 			if err == io.EOF {
 				logger.Debug("received request buffer is empty in record mode for mysql call")
@@ -337,14 +305,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, err
 		}
 
-		_, err = destConn.Write(authSwitchResponse)
-		if err != nil {
-			if ctx.Err() != nil {
-				return res, ctx.Err()
-			}
-			utils.LogError(logger, err, "failed to write auth switch response to server")
-			return res, err
-		}
+		// NO destConn.Write needed.
 		orchestrator.SetTCPQuickACK(destConn)
 
 		// Decode the auth switch response packet
@@ -371,7 +332,8 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 		// read the further auth packet, now it can be either auth more data or OK packet
 		orchestrator.SetTCPQuickACK(destConn)
-		authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		// Use destTeeConn.
+		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, destTeeConn)
 		if err != nil {
 			if err == io.EOF {
 				logger.Debug("received request buffer is empty in record mode for mysql call")
@@ -382,14 +344,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, err
 		}
 
-		_, err = clientConn.Write(authData)
-		if err != nil {
-			if ctx.Err() != nil {
-				return res, ctx.Err()
-			}
-			utils.LogError(logger, err, "failed to write auth data to client after handling auth switch response")
-			return res, err
-		}
+		// NO clientConn.Write needed.
 		orchestrator.SetTCPQuickACK(clientConn)
 
 		// It can be either auth more data or OK packet
@@ -403,12 +358,13 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	var authRes handshakeRes
 	switch authDecider.Message.(type) {
 	case *mysql.AuthMoreDataPacket:
-		authRes, err = handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
+		// Pass TeeConns to handleAuth for continued forwarding support
+		authRes, err = handleAuth(ctx, logger, authDecider, clientTeeConn, destTeeConn, decodeCtx)
 		if err != nil {
 			return res, fmt.Errorf("failed to handle auth more data: %w", err)
 		}
 	case *mysql.OKPacket:
-		authRes, err = handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
+		authRes, err = handleAuth(ctx, logger, authDecider, clientTeeConn, destTeeConn, decodeCtx)
 		if err != nil {
 			return res, fmt.Errorf("failed to handle ok packet: %w", err)
 		}
@@ -417,6 +373,10 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	res.resTimestamp = time.Now()
 
 	setHandshakeResult(&res, authRes)
+
+	// Populate the TeeForwardConns in the result so record.go can use them
+	res.clientTeeConn = clientTeeConn
+	res.destTeeConn = destTeeConn
 
 	return res, nil
 }
@@ -515,10 +475,12 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn, 
 		resp: make([]mysql.Response, 0),
 	}
 
-	//As per wire shark capture, during fast auth success, server sends OK packet just after auth more data
+	// As per wire shark capture, during fast auth success, server sends OK packet just after auth more data.
+	// NOTE: When called with TeeForwardConns, reads come from the ring buffer
+	// (data already forwarded to peer) and writes are no-ops (forwarding goroutine
+	// already sent the data at wire speed). No manual Write needed.
 
 	// read the ok/err packet from the server after auth more data
-	orchestrator.SetTCPQuickACK(destConn)
 	finalResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		if err == io.EOF {
@@ -528,17 +490,6 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn, 
 		utils.LogError(logger, err, "failed to read final response packet from server")
 		return res, err
 	}
-
-	// write the ok/err packet to the client
-	_, err = clientConn.Write(finalResp)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write ok/err packet to client during fast auth mechanism")
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(clientConn)
 
 	finalPkt, err := wire.DecodePayload(ctx, logger, finalResp, clientConn, decodeCtx)
 	if err != nil {
@@ -578,22 +529,14 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		return res, nil
 	}
 
-	// read the public key request from the client
-	orchestrator.SetTCPQuickACK(clientConn)
+	// Read the public key request from the client.
+	// NOTE: With TeeForwardConns, the data is already forwarded to the server
+	// by the clientTeeConn goroutine. No manual Write needed.
 	publicKeyRequest, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read public key request from client")
 		return res, err
 	}
-	_, err = destConn.Write(publicKeyRequest)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write public key request to server")
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(destConn)
 
 	publicKeyReqPkt, err := wire.DecodePayload(ctx, logger, publicKeyRequest, clientConn, decodeCtx)
 	if err != nil {
@@ -605,22 +548,13 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		PacketBundle: *publicKeyReqPkt,
 	})
 
-	// read the "public key" as response from the server
-	orchestrator.SetTCPQuickACK(destConn)
+	// Read the public key response from the server.
+	// With TeeForwardConns, forwarding to client is automatic.
 	pubKey, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read public key from server")
 		return res, err
 	}
-	_, err = clientConn.Write(pubKey)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write public key response to client")
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(clientConn)
 
 	pubKeyPkt, err := wire.DecodePayload(ctx, logger, pubKey, clientConn, decodeCtx)
 	if err != nil {
@@ -636,23 +570,13 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		PacketBundle: *pubKeyPkt,
 	})
 
-	// read the encrypted password from the client
-	orchestrator.SetTCPQuickACK(clientConn)
+	// Read the encrypted password from the client.
+	// With TeeForwardConns, forwarding to server is automatic.
 	encryptPass, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read encrypted password from client")
-
 		return res, err
 	}
-	_, err = destConn.Write(encryptPass)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write encrypted password to server")
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(destConn)
 
 	encPass, err := mysqlUtils.BytesToMySQLPacket(encryptPass)
 	if err != nil {
@@ -672,26 +596,15 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		PacketBundle: *encryptPassPkt,
 	})
 
-	// read the final response from the server (ok or error)
-	orchestrator.SetTCPQuickACK(destConn)
+	// Read the final response from the server (ok or error).
+	// With TeeForwardConns, forwarding to client is automatic.
 	finalServerResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read final response from server")
 		return res, err
 	}
-	_, err = clientConn.Write(finalServerResponse)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write final response to client")
-
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(clientConn)
 
 	finalResPkt, err := wire.DecodePayload(ctx, logger, finalServerResponse, clientConn, decodeCtx)
-
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode final response packet during caching sha2 password full auth")
 		return res, err
@@ -714,22 +627,14 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 		resp: make([]mysql.Response, 0),
 	}
 
-	// read the plain password from the client
-	orchestrator.SetTCPQuickACK(clientConn)
+	// Read the plain password from the client.
+	// NOTE: With TeeForwardConns, reading from clientConn's ring buffer means
+	// the data was already forwarded to destConn by the tee goroutine.
 	plainPassBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read plain password from the client")
 		return res, err
 	}
-	_, err = destConn.Write(plainPassBuf)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write plain password to the server")
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(destConn)
 
 	plainPass, err := mysqlUtils.BytesToMySQLPacket(plainPassBuf)
 	if err != nil {
@@ -749,26 +654,15 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 		PacketBundle: *plainPassPkt,
 	})
 
-	// read the final response from the server (ok or error)
-	orchestrator.SetTCPQuickACK(destConn)
+	// Read the final response from the server (ok or error).
+	// With TeeForwardConns, forwarding to client is automatic.
 	finalServerResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read final response from server")
 		return res, err
 	}
-	_, err = clientConn.Write(finalServerResponse)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write final response to client")
-
-		return res, err
-	}
-	orchestrator.SetTCPQuickACK(clientConn)
 
 	finalResPkt, err := wire.DecodePayload(ctx, logger, finalServerResponse, clientConn, decodeCtx)
-
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode final response packet during caching sha2 password full auth (plain password)")
 		return res, err
