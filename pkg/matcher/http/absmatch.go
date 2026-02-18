@@ -2,7 +2,6 @@ package http
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"go.keploy.io/server/v3/config"
@@ -65,7 +64,7 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	// }
 
 	//compare http req
-	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, nil, logger)
+	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !reqPass {
 		logger.Info("test case http req is not equal", zap.Any("tcs1HttpReq", tcs1.HTTPReq), zap.Any("tcs2HttpReq", tcs2.HTTPReq))
 		pass = false
@@ -88,7 +87,7 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 }
 
 // CompareHTTPReq compares two http requests and returns a boolean value indicating whether they are equal or not.
-func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrdering bool, fieldMatchers map[string]config.FieldMatcher, logger *zap.Logger) (bool, models.ReqCompare) {
+func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, models.ReqCompare) {
 	pass := true
 	//compare http req
 	reqCompare := models.ReqCompare{
@@ -378,8 +377,8 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPResp.Body, tcs2.HTTPResp.Body
 	// ---- Custom field-level matchers (5.4) ----
-	if fieldMatchers != nil {
-		err := compareWithMatchers(
+	if fieldMatchers != nil && bodyType1 == models.JSON {
+		err := matcher.CompareWithMatchers(
 			[]byte(cleanExp),
 			[]byte(cleanAct),
 			fieldMatchers,
@@ -533,38 +532,4 @@ func parseCurlString(curlString string) (method, url string, headers map[string]
 		}
 	}
 	return
-}
-func compareWithMatchers(
-	expectedBody []byte,
-	actualBody []byte,
-	matchers map[string]config.FieldMatcher,
-) error {
-
-	var expected map[string]interface{}
-	var actual map[string]interface{}
-
-	if err := json.Unmarshal(expectedBody, &expected); err != nil {
-		return err
-	}
-	if err := json.Unmarshal(actualBody, &actual); err != nil {
-		return err
-	}
-
-	for path, cfg := range matchers {
-		expVal, _ := matcher.GetValueByPath(expected, path)
-		actVal, ok := matcher.GetValueByPath(actual, path)
-		if !ok {
-			return fmt.Errorf("missing field: %s", path)
-		}
-
-		m, err := matcher.BuildMatcher(cfg.Type, cfg.Pattern, cfg.Delta)
-		if err != nil {
-			return err
-		}
-
-		if err := m.Match(expVal, actVal); err != nil {
-			return err
-		}
-	}
-	return nil
 }

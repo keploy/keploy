@@ -1678,7 +1678,7 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
 	}
 
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.config.Test.ReplayMatchers.Body, r.logger, emitFailureLogs)
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {

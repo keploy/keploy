@@ -157,6 +157,7 @@ type Test struct {
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 	CompareAll          bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
 	SchemaMatch         bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
+	ReplayMatchers      ReplayMatchers      `json:"replayMatchers" yaml:"replayMatchers" mapstructure:"replayMatchers"`
 	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
 }
 
