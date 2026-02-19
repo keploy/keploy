@@ -7,9 +7,9 @@ import (
 	"net"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
+	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent"
@@ -41,7 +41,6 @@ func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 }
 
 func (p *Proxy) startUDPDNSServer(_ context.Context) error {
-
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
 	handler := p
@@ -50,7 +49,6 @@ func (p *Proxy) startUDPDNSServer(_ context.Context) error {
 		Net:       "udp",
 		Handler:   handler,
 		ReusePort: true,
-		// DisableBackground: true,
 	}
 
 	p.UDPDNSServer = server
@@ -64,25 +62,58 @@ func (p *Proxy) startUDPDNSServer(_ context.Context) error {
 	return nil
 }
 
-// For DNS caching
-var cache = struct {
-	sync.RWMutex
-	m map[string][]dns.RR
-}{m: make(map[string][]dns.RR)}
+type dnsCacheEntry struct {
+	*dns.Msg
+
+	// true if the response came from upstream resolution or a recorded mock.
+	// false if we synthesized defaults (fallback).
+	FromUpstream bool
+}
+
+const (
+	// dnsCacheMaxSize is the maximum number of entries in the DNS cache.
+	dnsCacheMaxSize = 256
+	// dnsCacheTTL is the default time-to-live for cached DNS entries.
+	// Entries expire automatically after this duration.
+	dnsCacheTTL = 30 * time.Second
+)
+
+// newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
+func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
+	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
+}
 
 func generateCacheKey(name string, qtype uint16) string {
-	// For MongoDB SRV queries, include "mongodb" in the cache key to differentiate from other SRV queries
-	if strings.HasPrefix(name, "_mongodb._tcp.") {
-		return fmt.Sprintf("mongodb-%s-%s", name, dns.TypeToString[qtype])
+	return fmt.Sprintf("%s-%s", dns.Fqdn(name), dns.TypeToString[qtype])
+}
+
+func mergeRcode(cur, next int) int {
+	// keep success unless we see a failure
+	if next == dns.RcodeSuccess {
+		return cur
 	}
-	return fmt.Sprintf("%s-%s", name, dns.TypeToString[qtype])
+	if cur == dns.RcodeSuccess {
+		return next
+	}
+
+	// severity preference (helpful for rare multi-question queries)
+	if cur == dns.RcodeServerFailure || next == dns.RcodeServerFailure {
+		return dns.RcodeServerFailure
+	}
+	if cur == dns.RcodeRefused || next == dns.RcodeRefused {
+		return dns.RcodeRefused
+	}
+	if cur == dns.RcodeNameError || next == dns.RcodeNameError {
+		return dns.RcodeNameError
+	}
+	return cur
 }
 
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	p.logger.Debug("", zap.String("Source socket info", w.RemoteAddr().String()))
+
 	msg := new(dns.Msg)
 	msg.SetReply(r)
-	msg.Authoritative = true
 
 	session, hasSession := p.sessions.Get(uint64(0))
 	mode := models.GetMode()
@@ -93,168 +124,163 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	p.logger.Debug("Got some Dns queries")
+
+	flagsSet := false
+
 	for _, question := range r.Question {
 		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
 
 		key := generateCacheKey(question.Name, question.Qtype)
 		reqTimestamp := time.Now().UTC()
 
-		// Clear cache for MongoDB SRV queries to ensure fresh resolution
-		if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
-			cache.Lock()
-			delete(cache.m, key)
-			cache.Unlock()
-		}
-
-		cache.RLock()
-		answers, found := cache.m[key]
-		cache.RUnlock()
-
+		resp, found := p.dnsCache.Get(key)
 		if !found {
-			var stopFlow bool
-			answers, stopFlow = p.resolveUncachedDNSAnswers(question, mode, mockingEnabled, reqTimestamp, session)
-			if stopFlow {
-				msg.Rcode = dns.RcodeServerFailure
-				p.logger.Error("critical dns query failed in record mode; returning SERVFAIL",
-					zap.String("query", question.Name),
-					zap.String("qtype", dns.TypeToString[question.Qtype]),
-				)
-				err := w.WriteMsg(msg)
-				if err != nil {
-					utils.LogError(p.logger, err, "failed to write dns SERVFAIL response")
-				}
-				return
-			}
+			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
-			// In record mode, avoid caching empty answers produced after resolution failures.
-			if !(mode == models.MODE_RECORD && len(answers) == 0) {
-				cache.Lock()
-				cache.m[key] = answers
-				cache.Unlock()
+			// In record mode, only cache real upstream/mocked responses (not synthesized fallbacks).
+			// This prevents "sticky" synthetic answers if upstream DNS was temporarily broken.
+			if !(mode == models.MODE_RECORD && !resp.FromUpstream) {
+				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
+				p.dnsCache.Add(key, cached)
 			}
-			p.logger.Debug(fmt.Sprintf("Answers[after uncached resolution for query:%v]:\n%v\n", question.Qtype, answers))
 		}
 
-		p.logger.Debug(fmt.Sprintf("Answers[before appending to msg]:\n%v\n", answers))
-		msg.Answer = append(msg.Answer, answers...)
-		p.logger.Debug(fmt.Sprintf("Answers[After appending to msg]:\n%v\n", msg.Answer))
+		// Apply flags from the first response (DNS messages normally contain a single question)
+		if !flagsSet {
+			msg.Authoritative = resp.Authoritative
+			msg.RecursionAvailable = resp.RecursionAvailable
+			msg.Truncated = resp.Truncated
+			flagsSet = true
+		}
+
+		// Merge rcode across questions (rare, but safe)
+		msg.Rcode = mergeRcode(msg.Rcode, resp.Rcode)
+
+		msg.Answer = append(msg.Answer, resp.Answer...)
+		msg.Ns = append(msg.Ns, resp.Ns...)
+		msg.Extra = append(msg.Extra, resp.Extra...)
 	}
 
-	// p.logger.Debug(fmt.Sprintf("dns msg sending back:\n%v\n", msg))
 	p.logger.Debug(fmt.Sprintf("dns msg RCODE sending back:\n%v\n", msg.Rcode))
 	p.logger.Debug("Writing dns info back to the client...")
+
 	err := w.WriteMsg(msg)
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to write dns info back to the client")
 	}
 }
 
-func (p *Proxy) resolveUncachedDNSAnswers(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) ([]dns.RR, bool) {
-	var answers []dns.RR
-
+func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) dnsCacheEntry {
 	switch mode {
 	case models.MODE_TEST:
-		// In test mode, only use recorded DNS mocks.
-		// If a matching mock has an intentionally empty answer set (e.g. TXT),
-		// return it as-is and do not synthesize defaults.
-		mocked := false
+		// Use recorded DNS mocks only.
 		if mockingEnabled {
-			answers, mocked = p.getMockedDNSAnswers(question)
+			if resp, mocked := p.getMockedDNSResponse(question); mocked {
+				return resp
+			}
 		}
-		if mocked {
-			return answers, false
-		}
+		return p.defaultDNSResponse(question)
 
 	case models.MODE_RECORD:
-		recordedAnswers, err := p.recordDNSMock(question, reqTime, session)
+		resp, err := p.recordDNSMock(question, reqTime, session)
 		if err != nil {
-			if question.Qtype == dns.TypeA || question.Qtype == dns.TypeSRV {
-				utils.LogError(p.logger, err, "critical DNS resolution failed in record mode",
-					zap.String("query", question.Name),
-					zap.String("qtype", dns.TypeToString[question.Qtype]),
-				)
-				return nil, true
-			}
-			p.logger.Debug("non-critical DNS resolution failed in record mode; continuing",
+			utils.LogError(p.logger, err, "DNS resolution failed in record mode",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 			)
-			return nil, false
+			return dnsCacheEntry{
+				Msg: &dns.Msg{
+					MsgHdr: dns.MsgHdr{Rcode: dns.RcodeServerFailure},
+				},
+				FromUpstream: false,
+			}
 		}
-		return recordedAnswers, false
+		return resp
+	default:
+		// any other mode -> best-effort defaults
+		return p.defaultDNSResponse(question)
 	}
-
-	if len(answers) > 0 {
-		return answers, false
-	}
-	return p.defaultDNSAnswers(question), false
 }
 
-func (p *Proxy) defaultDNSAnswers(question dns.Question) []dns.RR {
+func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
+	// Default synthesized responses should be NOERROR.
+	resp := dnsCacheEntry{
+		Msg: &dns.Msg{
+			MsgHdr: dns.MsgHdr{
+				Rcode:              dns.RcodeSuccess,
+				Authoritative:      true,
+				RecursionAvailable: true,
+			},
+		},
+		FromUpstream: false,
+	}
+
 	switch question.Qtype {
 	case dns.TypeA:
 		p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.String("proxy Ip", p.IP4))
-		return []dns.RR{&dns.A{
+		resp.Answer = []dns.RR{&dns.A{
 			Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
 			A:   net.ParseIP(p.IP4),
 		}}
+		return resp
 
 	case dns.TypeAAAA:
-		// Do not synthesize AAAA fallback (::1/proxy IPv6). For environments that are IPv4-only
-		// (for example many docker bridge networks), returning a synthetic IPv6 answer can make
-		// clients prefer an unreachable ::1 destination.
+		// Do not synthesize AAAA fallback (::1/proxy IPv6). Returning synthetic IPv6 can make
+		// clients prefer an unreachable ::1 destination in IPv4-only environments.
 		p.logger.Debug("no AAAA answer resolved; returning empty AAAA response")
-		return nil
+		return resp
 
 	case dns.TypeSRV:
 		// Special handling for MongoDB SRV queries
 		if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
 			baseDomain := strings.TrimPrefix(question.Name, "_mongodb._tcp.")
-			return []dns.RR{&dns.SRV{
+			resp.Answer = []dns.RR{&dns.SRV{
 				Hdr:      dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
 				Priority: 0,
 				Weight:   0,
 				Port:     27017,
 				Target:   dns.Fqdn("mongodb." + baseDomain),
 			}}
+			return resp
 		}
 		p.logger.Debug("sending default SRV record response")
-		return []dns.RR{&dns.SRV{
+		resp.Answer = []dns.RR{&dns.SRV{
 			Hdr:      dns.RR_Header{Name: question.Name, Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
 			Priority: 0,
 			Weight:   0,
 			Port:     8080,
 			Target:   dns.Fqdn("keploy.proxy"),
 		}}
+		return resp
 
 	case dns.TypeTXT:
-		// Always return no TXT records (empty answer). This avoids sending bogus
-		// TXT payloads that clients (e.g. mongodb+srv) might try to parse.
+		// Always return no TXT records (empty answer). Avoid bogus TXT payloads.
 		p.logger.Debug("skipping TXT answer (configured to always return empty TXT)")
-		return nil
+		return resp
 
 	case dns.TypeMX:
 		p.logger.Debug("sending default MX record response")
-		return []dns.RR{&dns.MX{
+		resp.Answer = []dns.RR{&dns.MX{
 			Hdr:        dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
 			Preference: 10,
 			Mx:         dns.Fqdn("mail." + question.Name),
 		}}
+		return resp
 
 	default:
 		p.logger.Warn("Ignoring unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
-		return nil
+		return resp
 	}
 }
 
-func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
+func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool) {
 	mgrIface, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
-		return nil, false
+		return dnsCacheEntry{}, false
 	}
 	mgr, ok := mgrIface.(*MockManager)
 	if !ok || mgr == nil {
-		return nil, false
+		return dnsCacheEntry{}, false
 	}
 
 	const maxRetries = 5
@@ -262,10 +288,10 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 		mocks, err := mgr.GetUnFilteredMocksByKind(models.DNS)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to get dns mocks")
-			return nil, false
+			return dnsCacheEntry{}, false
 		}
 		if len(mocks) == 0 {
-			return nil, false
+			return dnsCacheEntry{}, false
 		}
 
 		var filteredMocks []*models.Mock
@@ -282,53 +308,51 @@ func (p *Proxy) getMockedDNSAnswers(question dns.Question) ([]dns.RR, bool) {
 			}
 		}
 
-		if matchedMock, answers := findDNSMock(filteredMocks, question, p.logger); matchedMock != nil {
+		if matchedMock, resp := findDNSMock(filteredMocks, question, p.logger); matchedMock != nil {
 			if p.updateDNSMock(mgr, matchedMock) {
-				return answers, true
+				return resp, true
 			}
 			p.logger.Debug("DNS mock update failed (filtered), retrying",
 				zap.String("mockName", matchedMock.Name),
 				zap.Int("attempt", attempt+1),
 				zap.Int("maxRetries", maxRetries),
 			)
-			// On final retry, return the answers anyway to avoid blocking the DNS response
 			if attempt == maxRetries-1 {
-				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+				p.logger.Warn("DNS mock update exhausted retries, returning matched response to avoid DNS timeout",
 					zap.String("mockName", matchedMock.Name),
 					zap.String("query", question.Name),
 				)
-				return answers, true
+				return resp, true
 			}
 			continue
 		}
 
-		if matchedMock, answers := findDNSMock(unfilteredMocks, question, p.logger); matchedMock != nil {
+		if matchedMock, resp := findDNSMock(unfilteredMocks, question, p.logger); matchedMock != nil {
 			if p.updateDNSMock(mgr, matchedMock) {
-				return answers, true
+				return resp, true
 			}
 			p.logger.Debug("DNS mock update failed (unfiltered), retrying",
 				zap.String("mockName", matchedMock.Name),
 				zap.Int("attempt", attempt+1),
 				zap.Int("maxRetries", maxRetries),
 			)
-			// On final retry, return the answers anyway to avoid blocking the DNS response
 			if attempt == maxRetries-1 {
-				p.logger.Warn("DNS mock update exhausted retries, returning matched answers to avoid DNS timeout",
+				p.logger.Warn("DNS mock update exhausted retries, returning matched response to avoid DNS timeout",
 					zap.String("mockName", matchedMock.Name),
 					zap.String("query", question.Name),
 				)
-				return answers, true
+				return resp, true
 			}
 			continue
 		}
 
-		return nil, false
+		return dnsCacheEntry{}, false
 	}
 
-	return nil, false
+	return dnsCacheEntry{}, false
 }
 
-func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, []dns.RR) {
+func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, dnsCacheEntry) {
 	for _, mock := range mocks {
 		if mock == nil || mock.Spec.DNSReq == nil {
 			continue
@@ -336,13 +360,32 @@ func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger
 		if !dnsRequestMatches(mock.Spec.DNSReq, question) {
 			continue
 		}
-		var answers []dns.RR
-		if mock.Spec.DNSResp != nil {
-			answers = decodeDNSAnswers(logger, mock.Spec.DNSResp.Answers)
+
+		resp := dnsCacheEntry{
+			Msg: &dns.Msg{
+				MsgHdr: dns.MsgHdr{
+					Rcode:              dns.RcodeSuccess,
+					Authoritative:      true,
+					RecursionAvailable: true,
+				},
+			},
+			FromUpstream: true,
 		}
-		return mock, answers
+
+		if mock.Spec.DNSResp != nil {
+			resp.Rcode = mock.Spec.DNSResp.Rcode
+			resp.Authoritative = mock.Spec.DNSResp.Authoritative
+			resp.RecursionAvailable = mock.Spec.DNSResp.RecursionAvailable
+			resp.Truncated = mock.Spec.DNSResp.Truncated
+
+			resp.Answer = decodeDNSRRs(logger, mock.Spec.DNSResp.Answers)
+			resp.Ns = decodeDNSRRs(logger, mock.Spec.DNSResp.Ns)
+			resp.Extra = decodeDNSRRs(logger, mock.Spec.DNSResp.Extra)
+		}
+
+		return mock, resp
 	}
-	return nil, nil
+	return nil, dnsCacheEntry{}
 }
 
 func dnsRequestMatches(recorded *models.DNSReq, question dns.Question) bool {
@@ -358,16 +401,16 @@ func dnsRequestMatches(recorded *models.DNSReq, question dns.Question) bool {
 	return strings.EqualFold(dns.Fqdn(recorded.Name), dns.Fqdn(question.Name))
 }
 
-func decodeDNSAnswers(logger *zap.Logger, answers []string) []dns.RR {
-	if len(answers) == 0 {
+func decodeDNSRRs(logger *zap.Logger, rrs []string) []dns.RR {
+	if len(rrs) == 0 {
 		return nil
 	}
-	decoded := make([]dns.RR, 0, len(answers))
-	for _, raw := range answers {
+	decoded := make([]dns.RR, 0, len(rrs))
+	for _, raw := range rrs {
 		rr, err := dns.NewRR(raw)
 		if err != nil {
 			if logger != nil {
-				logger.Debug("failed to parse dns answer", zap.String("answer", raw), zap.Error(err))
+				logger.Debug("failed to parse dns rr", zap.String("rr", raw), zap.Error(err))
 			}
 			continue
 		}
@@ -376,12 +419,12 @@ func decodeDNSAnswers(logger *zap.Logger, answers []string) []dns.RR {
 	return decoded
 }
 
-func encodeDNSAnswers(answers []dns.RR) []string {
-	if len(answers) == 0 {
+func encodeDNSRRs(rrs []dns.RR) []string {
+	if len(rrs) == 0 {
 		return nil
 	}
-	encoded := make([]string, 0, len(answers))
-	for _, rr := range answers {
+	encoded := make([]string, 0, len(rrs))
+	for _, rr := range rrs {
 		if rr == nil {
 			continue
 		}
@@ -423,25 +466,16 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 	return mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
 }
 
-func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) ([]dns.RR, error) {
-	// TODO: Add support for passThrough here using the src<->dst mapping.
-	// domain := strings.TrimSuffix(question.Name, ".")
-	// resolver := net.DefaultResolver
-	// ctx := context.Background()
-	var answers []dns.RR
-
-	// Resolve DNS and record only what was actually resolved in record mode.
-	// Do not synthesize defaults here.
-
+func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
 	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	var servers []string
-	var port = "53"
+	port := "53"
 
 	if err == nil {
 		servers = config.Servers
 		port = config.Port
 	} else {
-		// Fallback to Google DNS if resolv.conf fails (e.g. non-Linux or file missing)
+		// Fallback to public DNS if resolv.conf fails
 		servers = []string{"8.8.8.8", "1.1.1.1"}
 	}
 
@@ -452,48 +486,52 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	m.SetQuestion(question.Name, question.Qtype)
 	m.RecursionDesired = true
 
-	var resolveErr error
+	var (
+		in         *dns.Msg
+		resolveErr error
+	)
 
 	for _, server := range servers {
 		addr := net.JoinHostPort(server, port)
-		c.Net = "udp"
-		in, _, err := c.Exchange(m, addr)
 
+		c.Net = "udp"
+		resp, _, err := c.Exchange(m, addr)
 		if err != nil {
 			resolveErr = err
 			continue
 		}
 
-		if in != nil && in.Truncated {
+		if resp != nil && resp.Truncated {
 			c.Net = "tcp"
-			in, _, err = c.Exchange(m, addr)
+			resp, _, err = c.Exchange(m, addr)
 			if err != nil {
 				resolveErr = err
 				continue
 			}
 		}
 
-		if in != nil {
-			answers = in.Answer
+		if resp != nil {
+			in = resp
 			resolveErr = nil
 			break
 		}
 	}
 
 	if resolveErr != nil {
-		return nil, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
+		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
+	}
+	if in == nil {
+		return dnsCacheEntry{}, fmt.Errorf("nil DNS response for %s", question.Name)
 	}
 
-	if len(answers) > 0 {
-		p.logger.Debug("resolved the dns records successfully")
+	resp := dnsCacheEntry{
+		Msg:          in,
+		FromUpstream: true,
 	}
 
-	if len(answers) == 0 {
-		return nil, fmt.Errorf("no DNS answers resolved for query %s (%s)", question.Name, dns.TypeToString[question.Qtype])
-	}
-
+	// If no session, we still return resolved response but skip recording.
 	if session == nil || session.MC == nil {
-		return answers, nil
+		return resp, nil
 	}
 
 	resTime := time.Now().UTC()
@@ -512,7 +550,13 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 				Qclass: question.Qclass,
 			},
 			DNSResp: &models.DNSResp{
-				Answers: encodeDNSAnswers(answers),
+				Rcode:              in.Rcode,
+				Authoritative:      in.Authoritative,
+				RecursionAvailable: in.RecursionAvailable,
+				Truncated:          in.Truncated,
+				Answers:            encodeDNSRRs(in.Answer),
+				Ns:                 encodeDNSRRs(in.Ns),
+				Extra:              encodeDNSRRs(in.Extra),
 			},
 			ReqTimestampMock: reqTime,
 			ResTimestampMock: resTime,
@@ -523,27 +567,18 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		if mgr := syncMock.Get(); mgr != nil {
 			mgr.SetOutputChannel(session.MC)
 			mgr.AddMock(mock)
-			return answers, nil
+			return resp, nil
 		}
 	}
 	session.MC <- mock
-	return answers, nil
-}
-
-func clearDNSCache() {
-	cache.Lock()
-	cache.m = make(map[string][]dns.RR)
-	cache.Unlock()
+	return resp, nil
 }
 
 func (p *Proxy) stopDNSServers(_ context.Context) error {
-	// stop tcp dns server
 	if err := p.stopTCPDNSServer(); err != nil {
 		return err
 	}
-	// stop udp dns server
-	err := p.stopUDPDNSServer()
-	return err
+	return p.stopUDPDNSServer()
 }
 
 func (p *Proxy) stopTCPDNSServer() error {
@@ -577,19 +612,15 @@ const (
 
 // setting up the dns routing for the linux system
 func (p *Proxy) setupNsswitchConfig() error {
-
-	// Check if the nsswitch.conf present for the system
 	if _, err := os.Stat(nsSwitchConfig); err == nil {
-		// Read the current nsswitch.conf
 		data, err := os.ReadFile(nsSwitchConfig)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to read the nsswitch.conf file from system")
 			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
 		}
-		// copy the data of the nsswitch.conf file in order to reset it back to the original state in the end
+
 		p.nsswitchData = data
 
-		// Replace the hosts field value if it exists
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
 			if strings.HasPrefix(line, "hosts:") {
@@ -599,7 +630,6 @@ func (p *Proxy) setupNsswitchConfig() error {
 
 		data = []byte(strings.Join(lines, "\n"))
 
-		// Write the modified nsswitch.conf back to the file
 		err = writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
 		if err != nil {
 			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
@@ -614,7 +644,6 @@ func (p *Proxy) setupNsswitchConfig() error {
 func (p *Proxy) resetNsSwitchConfig() error {
 	data := p.nsswitchData
 
-	// Write the original data back to the nsswitch.conf file
 	err := writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
 	if err != nil {
 		return errors.New("failed to reset the nsswitch.conf back to the original state")
