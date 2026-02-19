@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -13,62 +12,15 @@ import (
 	"go.uber.org/zap"
 )
 
-// ── Memory ballast ────────────────────────────────────────────────────
-// A memory ballast is a large pre-allocated byte slice that's never used.
-// It tricks the GC into thinking the live heap is larger than it is, which
-// reduces GC frequency (GC triggers at 2x live heap by default).
-// 64MB ballast → GC won't trigger until heap reaches ~128MB.
-//
-//nolint:gochecknoglobals
-var ballast = make([]byte, 64<<20) // 64 MB
-
-// Keep ballast alive - the compiler can't optimize it away.
-func init() { _ = ballast }
-
-// ── sync.Pool for RawMockEntry ───────────────────────────────────
-// Pool hot-path objects to reduce allocation rate.
-//
-//nolint:gochecknoglobals
-var rawMockEntryPool = sync.Pool{
-	New: func() any {
-		return &RawMockEntry{
-			ReqPackets:  make([][]byte, 0, 1),
-			RespPackets: make([][]byte, 0, 16),
-		}
-	},
-}
-
-func acquireRawMockEntry() *RawMockEntry {
-	e := rawMockEntryPool.Get().(*RawMockEntry)
-	e.ReqPackets = e.ReqPackets[:0]
-	e.RespPackets = e.RespPackets[:0]
-	return e
-}
-
-func releaseRawMockEntry(e *RawMockEntry) {
-	if e == nil {
-		return
-	}
-	// Clear slices but keep capacity.
-	e.ReqPackets = e.ReqPackets[:0]
-	e.RespPackets = e.RespPackets[:0]
-	e.CmdType = 0
-	e.MockType = ""
-	rawMockEntryPool.Put(e)
-}
-
 // ── Slab allocator ──────────────────────────────────────────────────────
 // pktSlab batches per-packet []byte allocations into large slabs.
 // Instead of calling make([]byte, n) per MySQL packet (~5-10 times per query),
-// it carves slices from a single pre-allocated slab (default 256KB).
+// it carves slices from a single pre-allocated slab (default 1MB).
 // This reduces allocation count by ~100-500x, dramatically lowering GC pressure.
-//
-// Slabs are referenced by packet slices until the decoder is done with them,
-// at which point the entire slab becomes garbage for the GC to collect as
-// ONE object instead of hundreds of small objects.
 type pktSlab struct {
-	buf []byte
-	off int
+	buf     []byte
+	off     int
+	prevBuf []byte // Keep previous slab alive to prevent premature GC
 }
 
 const slabSize = 1024 * 1024 // 1MB per slab — larger slab = fewer allocations
@@ -80,11 +32,15 @@ func newPktSlab() *pktSlab {
 // alloc returns a []byte of exactly n bytes carved from the slab.
 // If the current slab can't fit n, a new slab is allocated.
 // Oversized packets (> slabSize) get their own allocation.
+// The previous slab is kept alive for one more cycle to avoid
+// premature GC of data still being referenced by the pipeline.
 func (s *pktSlab) alloc(n int) []byte {
 	if n > slabSize {
 		return make([]byte, n)
 	}
 	if s.off+n > len(s.buf) {
+		// Keep old buffer alive — slices carved from it may still be in use
+		s.prevBuf = s.buf
 		s.buf = make([]byte, slabSize)
 		s.off = 0
 	}
@@ -106,17 +62,12 @@ type peekReader interface {
 // ── Record pipeline ─────────────────────────────────────────────────────
 
 // runRecordPipeline reads from the two TeeForwardConn ring buffers,
-// frames MySQL packets using slab allocation, and hands them off to a
-// separate decode goroutine.  This architecture ensures:
+// frames MySQL packets using slab allocation, decodes them inline,
+// and sends mocks to the channel.
 //
-//   - The read loop is ALLOCATION-FREE (slab only) and runs in a tight loop
-//   - Decode allocations happen ASYNCHRONOUSLY in a separate goroutine
-//   - GC pressure from decode cannot slow the read loop or forwarding
-//   - Constant memory footprint (no unbounded raw packet buffering)
-//   - Mocks flow continuously to the consumer (InsertMock)
-//
-// The rawCh channel between read and decode goroutines provides back-pressure
-// if decode falls behind, but is buffered (256) to absorb short bursts.
+// SIMPLE ARCHITECTURE: Single goroutine does read + decode + send.
+// This avoids channel overhead and copy overhead from async decode.
+// The mocks channel is 50K buffered which absorbs any backpressure.
 func runRecordPipeline(
 	ctx context.Context,
 	logger *zap.Logger,
@@ -132,73 +83,33 @@ func runRecordPipeline(
 		}
 	}()
 
+	slab := newPktSlab()
+
+	// Per-connection decode context — seeded with handshake state.
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+		LastOpValue:        wire.RESET,
+		ServerGreeting:     hs.ServerGreeting,
+		ClientCapabilities: hs.ClientCaps,
+		ServerCaps:         hs.ServerCaps,
+		PluginName:         hs.PluginName,
+		UseSSL:             hs.UseSSL,
+	}
+	var connKey net.Conn
+	if hs.ServerGreeting != nil {
+		decodeCtx.ServerGreetings.Store(connKey, hs.ServerGreeting)
+	}
+
 	connID := ""
 	if v := ctx.Value(models.ClientConnectionIDKey); v != nil {
 		connID = v.(string)
 	}
 
-	// ── Async decode goroutine ──────────────────────────────────────────
-	// Buffered channel between read loop and decode goroutine.
-	// The 1024 buffer absorbs burst traffic so read loop doesn't block.
-	rawCh := make(chan *RawMockEntry, 1024)
-
-	// Spawn decode goroutine — all decode allocations happen here,
-	// completely decoupled from the read loop.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Error("recovered from panic in decode goroutine", zap.Any("panic", r))
-			}
-		}()
-
-		// Per-connection decode context — seeded with handshake state.
-		decodeCtx := &wire.DecodeContext{
-			Mode:               models.MODE_RECORD,
-			LastOp:             wire.NewLastOpMap(),
-			ServerGreetings:    wire.NewGreetings(),
-			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-			LastOpValue:        wire.RESET,
-			ServerGreeting:     hs.ServerGreeting,
-			ClientCapabilities: hs.ClientCaps,
-			ServerCaps:         hs.ServerCaps,
-			PluginName:         hs.PluginName,
-			UseSSL:             hs.UseSSL,
-		}
-		var connKey net.Conn
-		// Pre-populate the ServerGreetings map so DecodePayload can find it.
-		if hs.ServerGreeting != nil {
-			decodeCtx.ServerGreetings.Store(connKey, hs.ServerGreeting)
-		}
-
-		for entry := range rawCh {
-			mock, err := decodeRawMockEntry(ctx, logger, *entry, decodeCtx, connKey)
-			releaseRawMockEntry(entry) // Return to pool after decode
-			if err != nil {
-				logger.Debug("failed to decode mock entry", zap.Error(err))
-				continue
-			}
-			setConnID(mock, connID)
-			// Non-blocking send with select — if channel would block, try once more then skip.
-			// Mocks channel is 50K buffered so this almost never happens.
-			select {
-			case mocks <- mock:
-			default:
-				// Channel full — try one more time with context check.
-				select {
-				case mocks <- mock:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-
-	// ── Read loop (allocation-free) ────────────────────────────────────
-	slab := newPktSlab()
-
 	for {
 		if ctx.Err() != nil {
-			close(rawCh)
 			return
 		}
 
@@ -208,7 +119,6 @@ func runRecordPipeline(
 			if err != io.EOF && ctx.Err() == nil {
 				logger.Debug("record pipeline: client read error", zap.Error(err))
 			}
-			close(rawCh)
 			return
 		}
 
@@ -216,20 +126,23 @@ func runRecordPipeline(
 
 		if len(cmdPacket) < 5 {
 			logger.Warn("record pipeline: command packet too short", zap.Int("len", len(cmdPacket)))
-			close(rawCh)
 			return
 		}
 		cmdType := cmdPacket[4]
 
 		// ── 2. Handle no-response commands ──
 		if isNoResponseCmd(cmdType) {
-			entry := acquireRawMockEntry()
-			entry.ReqPackets = append(entry.ReqPackets, cmdPacket)
-			entry.CmdType = cmdType
-			entry.MockType = "mocks"
-			entry.ReqTimestamp = reqTimestamp
-			entry.ResTimestamp = time.Now()
-			rawCh <- entry
+			entry := RawMockEntry{
+				ReqPackets:   [][]byte{cmdPacket},
+				CmdType:      cmdType,
+				MockType:     "mocks",
+				ReqTimestamp: reqTimestamp,
+				ResTimestamp: time.Now(),
+			}
+			if mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey); err == nil {
+				setConnID(mock, connID)
+				mocks <- mock
+			}
 			continue
 		}
 
@@ -239,20 +152,26 @@ func runRecordPipeline(
 			if err != io.EOF && ctx.Err() == nil {
 				logger.Debug("record pipeline: server response error", zap.Error(err))
 			}
-			close(rawCh)
 			return
 		}
 
-		// ── 4. Send raw entry to decode goroutine (no decode here) ──
-		// The read loop uses pool to avoid per-request allocations.
-		entry := acquireRawMockEntry()
-		entry.ReqPackets = append(entry.ReqPackets, cmdPacket)
-		entry.RespPackets = append(entry.RespPackets, respPackets...)
-		entry.CmdType = cmdType
-		entry.MockType = "mocks"
-		entry.ReqTimestamp = reqTimestamp
-		entry.ResTimestamp = time.Now()
-		rawCh <- entry
+		// ── 4. Decode and send mock ──
+		entry := RawMockEntry{
+			ReqPackets:   [][]byte{cmdPacket},
+			RespPackets:  respPackets,
+			CmdType:      cmdType,
+			MockType:     "mocks",
+			ReqTimestamp: reqTimestamp,
+			ResTimestamp: time.Now(),
+		}
+		mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
+		if err != nil {
+			logger.Debug("failed to decode mock entry", zap.Error(err))
+			continue
+		}
+
+		setConnID(mock, connID)
+		mocks <- mock
 	}
 }
 
@@ -295,6 +214,7 @@ func readFullResponseSlab(ctx context.Context, logger *zap.Logger, serverReader 
 
 	marker := first[4]
 
+	// Simple single-packet responses: OK, ERR, or standalone EOF
 	if marker == mysql.OK || marker == mysql.ERR {
 		return [][]byte{first}, nil
 	}
