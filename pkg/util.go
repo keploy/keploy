@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
+	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -36,6 +38,23 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 var SortCounter int64 = -1
+
+const maxSSEFrameSize = 10 * 1024 * 1024
+
+type httpStreamMode string
+
+const (
+	httpStreamModeNone      httpStreamMode = "none"
+	httpStreamModeSSE       httpStreamMode = "sse"
+	httpStreamModeNDJSON    httpStreamMode = "ndjson"
+	httpStreamModeMultipart httpStreamMode = "multipart"
+	httpStreamModePlainText httpStreamMode = "plain-text"
+)
+
+type httpStreamConfig struct {
+	Mode     httpStreamMode
+	Boundary string
+}
 
 func InitSortCounter(counter int64) {
 	atomic.StoreInt64(&SortCounter, counter)
@@ -463,31 +482,90 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}()
 
-	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
-	if errReadRespBody != nil {
-		utils.LogError(logger, errReadRespBody, "failed reading response body")
-		return nil, errReadRespBody
-	}
-
-	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
-		if err != nil {
-			utils.LogError(logger, err, "failed to decode response body")
-			return nil, err
-		}
-	}
-
 	statusMessage := http.StatusText(httpResp.StatusCode)
+	bodyForTemplateUpdate := []byte{}
 
-	resp = &models.HTTPResp{
-		StatusCode:    httpResp.StatusCode,
-		StatusMessage: statusMessage,
-		Body:          string(respBody),
-		Header:        ToYamlHTTPHeader(httpResp.Header),
+	streamCfg := detectHTTPStreamConfig(tc, httpResp)
+	if streamCfg.Mode != httpStreamModeNone {
+		logger.Debug("detected HTTP streaming response in test mode; validating stream incrementally",
+			zap.String("testcase", tc.Name),
+			zap.String("content_type", httpResp.Header.Get("Content-Type")),
+			zap.String("stream_mode", string(streamCfg.Mode)))
+
+		streamReader := io.Reader(httpResp.Body)
+		contentEncoding := strings.ToLower(strings.TrimSpace(httpResp.Header.Get("Content-Encoding")))
+		var streamReaderCloser io.Closer
+		switch contentEncoding {
+		case "gzip":
+			gzipReader, gzErr := gzip.NewReader(httpResp.Body)
+			if gzErr != nil {
+				utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+				return nil, gzErr
+			}
+			streamReader = gzipReader
+			streamReaderCloser = gzipReader
+		case "br":
+			streamReader = brotli.NewReader(httpResp.Body)
+		case "":
+			// no-op
+		default:
+			logger.Debug("unsupported content-encoding for stream; comparing raw response body",
+				zap.String("content_encoding", contentEncoding))
+		}
+		if streamReaderCloser != nil {
+			defer streamReaderCloser.Close()
+		}
+
+		streamMatched, capturedStreamBody, streamErr := compareHTTPStream(tc.HTTPResp.Body, streamReader, streamCfg, logger)
+		if streamErr != nil {
+			utils.LogError(logger, streamErr, "failed to read streaming response body")
+			return nil, streamErr
+		}
+
+		if !streamMatched {
+			logger.Warn("streaming response mismatch detected for testcase", zap.String("testcase", tc.Name), zap.String("mode", string(streamCfg.Mode)))
+		}
+
+		bodyForMatcher := capturedStreamBody
+		if streamMatched {
+			// Stream content is validated chunk-by-chunk above, so use the stored body to keep
+			// existing matcher semantics stable and avoid formatting drift false negatives.
+			bodyForMatcher = tc.HTTPResp.Body
+		}
+
+		resp = &models.HTTPResp{
+			StatusCode:    httpResp.StatusCode,
+			StatusMessage: statusMessage,
+			Body:          bodyForMatcher,
+			Header:        ToYamlHTTPHeader(httpResp.Header),
+		}
+		bodyForTemplateUpdate = []byte(capturedStreamBody)
+	} else {
+		respBody, errReadRespBody := io.ReadAll(httpResp.Body)
+		if errReadRespBody != nil {
+			utils.LogError(logger, errReadRespBody, "failed reading response body")
+			return nil, errReadRespBody
+		}
+
+		if httpResp.Header.Get("Content-Encoding") != "" {
+			respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+			if err != nil {
+				utils.LogError(logger, err, "failed to decode response body")
+				return nil, err
+			}
+		}
+
+		resp = &models.HTTPResp{
+			StatusCode:    httpResp.StatusCode,
+			StatusMessage: statusMessage,
+			Body:          string(respBody),
+			Header:        ToYamlHTTPHeader(httpResp.Header),
+		}
+		bodyForTemplateUpdate = respBody
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
-	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
+	if len(utils.TemplatizedValues) > 0 && len(bodyForTemplateUpdate) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
 
 		prev := make(map[string]interface{}, len(utils.TemplatizedValues))
@@ -496,14 +574,656 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 
 		// Compare the current response with previous template values and update if needed
-		if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
-			updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
+		if len(utils.TemplatizedValues) > 0 && len(bodyForTemplateUpdate) > 0 {
+			respForTemplate := *resp
+			respForTemplate.Body = string(bodyForTemplateUpdate)
+			updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, respForTemplate, utils.TemplatizedValues)
 			if updated {
 				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
 			}
 		}
 	}
 	return resp, errHTTPReq
+}
+
+func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStreamConfig {
+	contentType := ""
+	if resp != nil {
+		contentType = resp.Header.Get("Content-Type")
+	}
+	if contentType == "" && tc != nil {
+		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
+	}
+
+	mediaType := ""
+	params := map[string]string{}
+	if contentType != "" {
+		parsedType, parsedParams, err := mime.ParseMediaType(contentType)
+		if err == nil {
+			mediaType = strings.ToLower(strings.TrimSpace(parsedType))
+			params = parsedParams
+		} else {
+			mediaType = strings.ToLower(strings.TrimSpace(contentType))
+		}
+	}
+
+	switch mediaType {
+	case "text/event-stream":
+		if isSSETestCase(tc, resp) {
+			return httpStreamConfig{Mode: httpStreamModeSSE}
+		}
+		if tc != nil && looksLikeSSEPayload(tc.HTTPResp.Body) {
+			return httpStreamConfig{Mode: httpStreamModeSSE}
+		}
+		return httpStreamConfig{Mode: httpStreamModePlainText}
+	case "application/x-ndjson", "application/ndjson":
+		return httpStreamConfig{Mode: httpStreamModeNDJSON}
+	case "multipart/x-mixed-replace", "multipart/mixed":
+		boundary := strings.TrimSpace(params["boundary"])
+		if boundary == "" && tc != nil {
+			boundary = boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type"))
+		}
+		if boundary != "" {
+			return httpStreamConfig{Mode: httpStreamModeMultipart, Boundary: boundary}
+		}
+	case "text/plain":
+		if isLikelyStreamingHTTPResponse(tc, resp) {
+			return httpStreamConfig{Mode: httpStreamModePlainText}
+		}
+	}
+
+	if isSSETestCase(tc, resp) {
+		return httpStreamConfig{Mode: httpStreamModeSSE}
+	}
+
+	if tc != nil && isLikelyStreamingHTTPResponse(tc, resp) && looksLikeNDJSONPayload(tc.HTTPResp.Body) {
+		return httpStreamConfig{Mode: httpStreamModeNDJSON}
+	}
+
+	return httpStreamConfig{Mode: httpStreamModeNone}
+}
+
+func compareHTTPStream(expectedBody string, stream io.Reader, cfg httpStreamConfig, logger *zap.Logger) (bool, string, error) {
+	switch cfg.Mode {
+	case httpStreamModeSSE:
+		return compareSSEStream(expectedBody, stream, logger)
+	case httpStreamModeNDJSON:
+		return compareNDJSONStream(expectedBody, stream, logger)
+	case httpStreamModeMultipart:
+		return compareMultipartStream(expectedBody, stream, cfg.Boundary, logger)
+	case httpStreamModePlainText:
+		return comparePlainTextStream(expectedBody, stream, logger)
+	default:
+		return false, "", fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
+	}
+}
+
+func isSSETestCase(tc *models.TestCase, resp *http.Response) bool {
+	if tc != nil {
+		respContentType := getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
+		if hasSSEContentType(respContentType) {
+			return true
+		}
+		acceptHeader := getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept")
+		if hasSSEContentType(acceptHeader) {
+			return true
+		}
+	}
+	if resp != nil && hasSSEContentType(resp.Header.Get("Content-Type")) {
+		return true
+	}
+	return false
+}
+
+func getHeaderValueCaseInsensitive(headers map[string]string, key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for k, v := range headers {
+		if strings.ToLower(strings.TrimSpace(k)) == key {
+			return v
+		}
+	}
+	return ""
+}
+
+func hasSSEContentType(value string) bool {
+	return strings.Contains(strings.ToLower(value), "text/event-stream")
+}
+
+func boundaryFromContentTypeHeader(contentType string) string {
+	if contentType == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(params["boundary"])
+}
+
+func isLikelyStreamingHTTPResponse(tc *models.TestCase, resp *http.Response) bool {
+	if resp != nil {
+		for _, te := range resp.TransferEncoding {
+			if strings.EqualFold(strings.TrimSpace(te), "chunked") {
+				return true
+			}
+		}
+		if strings.Contains(strings.ToLower(resp.Header.Get("Transfer-Encoding")), "chunked") {
+			return true
+		}
+		if resp.ContentLength == -1 {
+			return true
+		}
+	}
+
+	if tc != nil {
+		respTE := strings.ToLower(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Transfer-Encoding"))
+		if strings.Contains(respTE, "chunked") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func looksLikeSSEPayload(body string) bool {
+	body = normalizeLineEndings(body)
+	return strings.Contains(body, "\n\n") && (strings.Contains(body, "\ndata:") || strings.HasPrefix(body, "data:") || strings.Contains(body, "\nevent:") || strings.HasPrefix(body, "event:"))
+}
+
+func looksLikeNDJSONPayload(body string) bool {
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+
+	nonEmpty := 0
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		nonEmpty++
+		var js interface{}
+		if json.Unmarshal([]byte(line), &js) != nil {
+			return false
+		}
+	}
+
+	return nonEmpty > 0
+}
+
+func compareSSEStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+	expectedQueue := splitSSEQueue(expectedBody)
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Split(splitSSEFrames)
+
+	for scanner.Scan() {
+		frame := canonicalizeSSEFrame(scanner.Text())
+		if frame == "" {
+			continue
+		}
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Warn("received additional SSE data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_frames", len(expectedQueue)))
+			break
+		}
+
+		actualQueue = append(actualQueue, frame)
+		expectedFrame := expectedQueue[nextExpected]
+		if frame != expectedFrame {
+			logger.Warn("SSE frame mismatch",
+				zap.Int("frame_index", nextExpected),
+				zap.String("expected_frame", expectedFrame),
+				zap.String("actual_frame", frame))
+			return false, strings.Join(actualQueue, "\n\n"), nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Warn("all expected SSE frames matched; closing stream capture early to avoid waiting for extra stream events",
+				zap.Int("matched_frames", nextExpected))
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, strings.Join(actualQueue, "\n\n"), err
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Warn("SSE stream ended before all expected frames were received",
+			zap.Int("expected_frames", len(expectedQueue)),
+			zap.Int("matched_frames", nextExpected))
+		return false, strings.Join(actualQueue, "\n\n"), nil
+	}
+
+	return true, strings.Join(actualQueue, "\n\n"), nil
+}
+
+func compareNDJSONStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+	expectedQueue := splitLineQueue(expectedBody, canonicalizeNDJSONLine, true)
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+
+	for scanner.Scan() {
+		line := canonicalizeNDJSONLine(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Warn("received additional NDJSON data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_frames", len(expectedQueue)))
+			break
+		}
+
+		actualQueue = append(actualQueue, line)
+		expected := expectedQueue[nextExpected]
+		if line != expected {
+			logger.Warn("NDJSON stream mismatch",
+				zap.Int("frame_index", nextExpected),
+				zap.String("expected_frame", expected),
+				zap.String("actual_frame", line))
+			return false, strings.Join(actualQueue, "\n"), nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Warn("all expected NDJSON frames matched; closing stream capture early to avoid waiting for extra stream events",
+				zap.Int("matched_frames", nextExpected))
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, strings.Join(actualQueue, "\n"), err
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Warn("NDJSON stream ended before all expected frames were received",
+			zap.Int("expected_frames", len(expectedQueue)),
+			zap.Int("matched_frames", nextExpected))
+		return false, strings.Join(actualQueue, "\n"), nil
+	}
+
+	return true, strings.Join(actualQueue, "\n"), nil
+}
+
+func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+	expectedQueue := splitLineQueue(expectedBody, canonicalizePlainTextLine, false)
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+
+	for scanner.Scan() {
+		line := canonicalizePlainTextLine(scanner.Text())
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Warn("received additional plain-text stream data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_frames", len(expectedQueue)))
+			break
+		}
+
+		actualQueue = append(actualQueue, line)
+		expected := expectedQueue[nextExpected]
+		if line != expected {
+			logger.Warn("plain-text stream mismatch",
+				zap.Int("frame_index", nextExpected),
+				zap.String("expected_frame", expected),
+				zap.String("actual_frame", line))
+			return false, strings.Join(actualQueue, "\n"), nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Warn("all expected plain-text frames matched; closing stream capture early to avoid waiting for extra stream events",
+				zap.Int("matched_frames", nextExpected))
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, strings.Join(actualQueue, "\n"), err
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Warn("plain-text stream ended before all expected frames were received",
+			zap.Int("expected_frames", len(expectedQueue)),
+			zap.Int("matched_frames", nextExpected))
+		return false, strings.Join(actualQueue, "\n"), nil
+	}
+
+	return true, strings.Join(actualQueue, "\n"), nil
+}
+
+func compareMultipartStream(expectedBody string, stream io.Reader, boundary string, logger *zap.Logger) (bool, string, error) {
+	if strings.TrimSpace(boundary) == "" {
+		return false, "", fmt.Errorf("missing multipart boundary for stream comparison")
+	}
+
+	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), boundary)
+	if err != nil {
+		return false, "", err
+	}
+
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+	reader := multipart.NewReader(stream, boundary)
+
+	for {
+		part, partErr := reader.NextPart()
+		if partErr == io.EOF {
+			break
+		}
+		if partErr != nil {
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), partErr
+		}
+
+		canonicalPart, canonicalErr := canonicalizeMultipartPart(part)
+		_ = part.Close()
+		if canonicalErr != nil {
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), canonicalErr
+		}
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Warn("received additional multipart stream data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_parts", len(expectedQueue)))
+			break
+		}
+
+		actualQueue = append(actualQueue, canonicalPart)
+		expected := expectedQueue[nextExpected]
+		if canonicalPart != expected {
+			logger.Warn("multipart stream mismatch",
+				zap.Int("part_index", nextExpected),
+				zap.String("expected_part", expected),
+				zap.String("actual_part", canonicalPart))
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Warn("all expected multipart parts matched; closing stream capture early to avoid waiting for extra stream parts",
+				zap.Int("matched_parts", nextExpected))
+			break
+		}
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Warn("multipart stream ended before all expected parts were received",
+			zap.Int("expected_parts", len(expectedQueue)),
+			zap.Int("matched_parts", nextExpected))
+		return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
+	}
+
+	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
+}
+
+func parseMultipartQueue(reader io.Reader, boundary string) ([]string, error) {
+	if strings.TrimSpace(boundary) == "" {
+		return nil, fmt.Errorf("multipart boundary is empty")
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	queue, parseErr := parseMultipartQueueBytes(data, boundary)
+	if parseErr == nil {
+		return queue, nil
+	}
+
+	closingBoundary := []byte("--" + boundary + "--")
+	if !bytes.Contains(data, closingBoundary) {
+		patchedData := append([]byte{}, data...)
+		patchedData = append(patchedData, []byte("\r\n--"+boundary+"--\r\n")...)
+		if patchedQueue, patchedErr := parseMultipartQueueBytes(patchedData, boundary); patchedErr == nil {
+			return patchedQueue, nil
+		}
+	}
+
+	return nil, parseErr
+}
+
+func parseMultipartQueueBytes(data []byte, boundary string) ([]string, error) {
+	mr := multipart.NewReader(bytes.NewReader(data), boundary)
+	queue := make([]string, 0)
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		canonicalPart, canonicalErr := canonicalizeMultipartPart(part)
+		_ = part.Close()
+		if canonicalErr != nil {
+			return nil, canonicalErr
+		}
+		queue = append(queue, canonicalPart)
+	}
+
+	return queue, nil
+}
+
+func canonicalizeMultipartPart(part *multipart.Part) (string, error) {
+	headers := make([]string, 0, len(part.Header))
+	for key, values := range part.Header {
+		normalizedValues := make([]string, 0, len(values))
+		for _, value := range values {
+			normalizedValues = append(normalizedValues, strings.TrimSpace(value))
+		}
+		headers = append(headers, strings.ToLower(strings.TrimSpace(key))+":"+strings.Join(normalizedValues, ","))
+	}
+	sort.Strings(headers)
+
+	bodyBytes, err := io.ReadAll(part)
+	if err != nil {
+		return "", err
+	}
+
+	body := canonicalizeMultipartBody(part.Header.Get("Content-Type"), bodyBytes)
+	return strings.Join(headers, "\n") + "\n\n" + body, nil
+}
+
+func canonicalizeMultipartBody(contentType string, body []byte) string {
+	mediaType := strings.ToLower(strings.TrimSpace(contentType))
+	if mediaType != "" {
+		if parsedType, _, err := mime.ParseMediaType(mediaType); err == nil {
+			mediaType = strings.ToLower(strings.TrimSpace(parsedType))
+		}
+	}
+
+	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
+		trimmed := strings.TrimSpace(string(body))
+		var parsed interface{}
+		if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+			if marshaled, err := json.Marshal(parsed); err == nil {
+				return string(marshaled)
+			}
+		}
+		return trimmed
+	}
+
+	if strings.HasPrefix(mediaType, "text/") || mediaType == "application/x-ndjson" || mediaType == "application/ndjson" || mediaType == "application/xml" {
+		normalized := normalizeLineEndings(string(body))
+		return strings.TrimSuffix(normalized, "\n")
+	}
+
+	return base64.StdEncoding.EncodeToString(body)
+}
+
+func splitLineQueue(body string, canonicalizer func(string) string, ignoreEmpty bool) []string {
+	scanner := bufio.NewScanner(strings.NewReader(normalizeLineEndings(body)))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+
+	queue := []string{}
+	for scanner.Scan() {
+		line := canonicalizer(scanner.Text())
+		if ignoreEmpty && line == "" {
+			continue
+		}
+		queue = append(queue, line)
+	}
+
+	return queue
+}
+
+func canonicalizeNDJSONLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+
+	var parsed interface{}
+	if json.Unmarshal([]byte(line), &parsed) == nil {
+		if marshaled, err := json.Marshal(parsed); err == nil {
+			return string(marshaled)
+		}
+	}
+
+	return line
+}
+
+func canonicalizePlainTextLine(line string) string {
+	return strings.TrimRight(normalizeLineEndings(line), "\n")
+}
+
+func splitSSEFrames(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+
+	doubleLFIdx := bytes.Index(data, []byte("\n\n"))
+	doubleCRLFIdx := bytes.Index(data, []byte("\r\n\r\n"))
+
+	switch {
+	case doubleLFIdx == -1 && doubleCRLFIdx == -1:
+		if atEOF {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	case doubleLFIdx == -1:
+		return doubleCRLFIdx + len("\r\n\r\n"), data[:doubleCRLFIdx], nil
+	case doubleCRLFIdx == -1:
+		return doubleLFIdx + len("\n\n"), data[:doubleLFIdx], nil
+	case doubleLFIdx < doubleCRLFIdx:
+		return doubleLFIdx + len("\n\n"), data[:doubleLFIdx], nil
+	default:
+		return doubleCRLFIdx + len("\r\n\r\n"), data[:doubleCRLFIdx], nil
+	}
+}
+
+func splitSSEQueue(body string) []string {
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Split(splitSSEFrames)
+
+	queue := []string{}
+	for scanner.Scan() {
+		frame := canonicalizeSSEFrame(scanner.Text())
+		if frame == "" {
+			continue
+		}
+		queue = append(queue, frame)
+	}
+
+	return queue
+}
+
+func canonicalizeSSEFrame(frame string) string {
+	frame = normalizeLineEndings(frame)
+	frame = strings.Trim(frame, "\n")
+	if strings.TrimSpace(frame) == "" {
+		return ""
+	}
+
+	lines := strings.Split(frame, "\n")
+	canonicalLines := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, ":") {
+			comment := strings.TrimSpace(strings.TrimPrefix(line, ":"))
+			canonicalLines = append(canonicalLines, ":"+comment)
+			continue
+		}
+
+		key, value, hasColon := strings.Cut(line, ":")
+		if !hasColon {
+			canonicalLines = append(canonicalLines, strings.ToLower(strings.TrimSpace(line)))
+			continue
+		}
+
+		key = strings.ToLower(strings.TrimSpace(key))
+		if strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+
+		switch key {
+		case "data":
+			value = canonicalizeSSEDataValue(value)
+		case "event", "id", "retry":
+			value = strings.TrimSpace(value)
+		default:
+			value = strings.TrimSpace(value)
+		}
+
+		canonicalLines = append(canonicalLines, key+":"+value)
+	}
+
+	return strings.Join(canonicalLines, "\n")
+}
+
+func canonicalizeSSEDataValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+
+	var parsed interface{}
+	if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+		marshaled, err := json.Marshal(parsed)
+		if err == nil {
+			return string(marshaled)
+		}
+	}
+
+	if strings.Contains(trimmed, ";base64,") {
+		prefix, encoded, ok := strings.Cut(trimmed, ",")
+		if ok {
+			if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
+				return prefix + "," + base64.StdEncoding.EncodeToString(decoded)
+			}
+			if decoded, err := base64.RawStdEncoding.DecodeString(encoded); err == nil {
+				return prefix + "," + base64.StdEncoding.EncodeToString(decoded)
+			}
+		}
+	}
+
+	return trimmed
+}
+
+func normalizeLineEndings(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return value
 }
 
 func looksBinary(s string) bool {

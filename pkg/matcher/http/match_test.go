@@ -266,6 +266,37 @@ func TestMatch_CompareAll_Disabled(t *testing.T) {
 	assert.True(t, result.BodyResult[0].Normal)
 }
 
+// TestMatch_StreamingBodyComparedWhenCompareAllDisabled ensures streaming response
+// bodies are still compared even if compareAll is false.
+func TestMatch_StreamingBodyComparedWhenCompareAllDisabled(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-streaming-body-compared",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Header: map[string]string{
+				"Content-Type": "application/x-ndjson",
+			},
+			Body: "{\"id\":1}\n{\"id\":2}\n",
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Header: map[string]string{
+			"Content-Type": "application/x-ndjson",
+		},
+		Body: "{\"id\":1}\n{\"id\":999}\n",
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	pass, result := Match(tc, actualResponse, noiseConfig, false, false, logger, true)
+
+	assert.False(t, pass, "Should fail because streaming bodies must be compared even when compareAll is false")
+	require.NotNil(t, result)
+	assert.True(t, result.StatusCode.Normal)
+	assert.False(t, result.BodyResult[0].Normal)
+}
+
 // TestMatch_CompareAll_Enabled tests that when compareAll is true,
 // non-JSON body differences cause the match to fail.
 func TestMatch_CompareAll_Enabled(t *testing.T) {
