@@ -131,10 +131,11 @@ func (s *Server) Run(ctx context.Context) error {
 Available tools:
 1. keploy_manager - ALWAYS SELECT THIS TOOL FIRST for Keploy workflows.
 2. keploy_prompt_test_command - Returns raw prompt text to derive the app test command.
-3. keploy_prompt_test_integration - Returns raw prompt text to instrument tests with sandbox scope hooks.
-4. keploy_mock_record - Records sandbox files.
-5. keploy_mock_test - Replays sandbox files.
-6. keploy_prompt_pipeline_creation - Returns raw prompt text to generate CI pipeline config.
+3. keploy_prompt_dependency_start - Returns raw prompt text to detect/start required dependencies before record.
+4. keploy_prompt_test_integration - Returns raw prompt text to instrument tests with sandbox scope hooks.
+5. keploy_mock_record - Records sandbox files.
+6. keploy_mock_test - Replays sandbox files.
+7. keploy_prompt_pipeline_creation - Returns raw prompt text to generate CI pipeline config.
 
 Tool routing rule (STRICT):
 - Always call keploy_manager for any Keploy-related request.
@@ -207,7 +208,10 @@ IMPORTANT: Before calling this tool, confirm the following with the user:
 - For Go projects, default to go test commands first (for example 'go test -v -run "TestA|TestB"' or 'go test -v ./...').
 - Never default to 'go run main.go' for recording.
 - Provide a semantic-version tag in the tool argument 'tag' (for example 'v1.0.0').
+- Enforce semantic versioning rules for 'tag' (strict format like v1.0.0 or 1.0.0).
 - The 'tag' value should be AI-generated when the user does not provide one.
+- Read existing tag from keploy.yml when present, then increment the last digit (patch) by one for this record run (for example v1.0.0 -> v1.0.1).
+- Never reuse an existing tag value from keploy.yml for a new record run (avoid duplicate tags).
 - Avoid long-running/watch-mode/interactive commands and commands that do not terminate.
 - If command is unknown, send command as empty; the server will resolve it via elicitation.
 - The sandbox location directory (default: .)
@@ -219,8 +223,8 @@ Parameters:
 - command (optional): Command to run (prefer test commands like 'go test -v ./...' or 'npm test'). If empty, server elicits command and uses that value.
 - path (optional): Sandbox location directory (default: .)
 - name (optional): Sandbox file prefix (default: keploy, final file is <name>.sb.yaml)
-- tag (required for sandbox record workflows): Semantic version tag (for example 'v1.0.0'). AI should generate this when missing.`,
-	}, s.handleMockRecord)
+- tag (required): Semantic version tag with strict semver enforcement (for example 'v1.0.0'). If keploy.yml already contains a tag, increment the last digit (patch) by one (for example v1.0.0 -> v1.0.1) and use that for this run; otherwise AI should generate the starting tag.`,
+		}, s.handleMockRecord)
 
 	// Register mock replay/test tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -258,6 +262,20 @@ If command cannot be decided confidently, the prompt result should return empty 
 Pass that empty command forward; the server will resolve it via elicitation in later execution tools.`,
 	}, s.handlePromptTestCommand)
 
+	// Register dependency startup prompt tool
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name: ToolPromptDependencyStart,
+		Description: `EXPLICIT USE ONLY (STRICT).
+Do not auto-select this tool under any circumstance.
+Call this tool only when the user explicitly names "keploy_prompt_dependency_start".
+
+Returns raw prompt text that client LLM must execute as a direct user task.
+Purpose: identify dependencies required by the selected app/test command, validate readiness, and start dependencies that are not healthy before recording.
+
+This tool does not execute dependency startup itself. It only returns the prompt text.
+If command context is empty, pass it as empty; dependency prompt should infer best-effort from repository context.`,
+	}, s.handlePromptDependencyStart)
+
 	// Register test integration prompt tool
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name: ToolPromptTestIntegration,
@@ -292,13 +310,14 @@ If command context is empty, keep it empty in prompt response; server-side elici
 This is an orchestration-first tool. The client LLM should execute this sequence:
 1) Invoke keploy_prompt_test_command and execute returned prompt as direct user task to derive the app/test command.
 2) If command is empty/unresolved, pass it as-is to execution tools; server-side elicitation will resolve it.
-3) Invoke keploy_prompt_test_integration and execute returned prompt as direct user task to edit tests.
-4) Invoke keploy_mock_record with resolved command.
-5) Invoke keploy_mock_test with resolved command (path/name optional; defaults are used when omitted).
-6) Invoke keploy_prompt_pipeline_creation and execute returned prompt as direct user task for CI/CD pipeline edits.
+3) Invoke keploy_prompt_dependency_start and execute returned prompt as direct user task to ensure dependencies are ready. Continue only when the dependency result has ready=true.
+4) Invoke keploy_prompt_test_integration and execute returned prompt as direct user task to edit tests.
+5) Invoke keploy_mock_record with resolved command.
+6) Invoke keploy_mock_test with resolved command (path/name optional; defaults are used when omitted).
+7) Invoke keploy_prompt_pipeline_creation and execute returned prompt as direct user task for CI/CD pipeline edits.
 
-CRITICAL: Execute ALL steps 1-6 in order. Do not stop after recording (step 4).
-You must proceed immediately to step 5 (replay) and step 6 (pipeline) in the same session.
+CRITICAL: Execute ALL steps 1-7 in order. Do not stop after recording (step 5).
+You must proceed immediately to step 6 (replay) and step 7 (pipeline) in the same session.
 Do not ask for user confirmation between steps unless an error occurs.`,
 	}, s.handleManager)
 
@@ -307,6 +326,7 @@ Do not ask for user confirmation between steps unless an error occurs.`,
 			ToolMockRecord,
 			ToolMockTest,
 			ToolPromptTestCommand,
+			ToolPromptDependencyStart,
 			ToolPromptTestIntegration,
 			ToolPromptPipelineCreation,
 			ToolManager,
@@ -329,5 +349,5 @@ func (s *Server) Close() error {
 
 // String returns a string representation of the server.
 func (s *Server) String() string {
-	return "KeployMCPServer{tools: [keploy_mock_record, keploy_mock_test, keploy_prompt_test_command, keploy_prompt_test_integration, keploy_prompt_pipeline_creation, keploy_manager]}"
+	return "KeployMCPServer{tools: [keploy_mock_record, keploy_mock_test, keploy_prompt_test_command, keploy_prompt_dependency_start, keploy_prompt_test_integration, keploy_prompt_pipeline_creation, keploy_manager]}"
 }

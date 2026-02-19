@@ -28,6 +28,22 @@ func buildTestCommandPrompt(testCommand string) string {
 	})
 }
 
+func buildDependencyStartPrompt(appCommand, scopePath string) string {
+	template, err := loadPromptTemplate("prompts/dependency_start.toml")
+	if err != nil || strings.TrimSpace(template) == "" {
+		return fmt.Sprintf("Failed to load dependency start prompt template: %v", err)
+	}
+
+	if strings.TrimSpace(scopePath) == "" {
+		scopePath = "."
+	}
+
+	return renderPromptTemplate(template, map[string]string{
+		"app_command": strings.TrimSpace(appCommand),
+		"scope_path":  strings.TrimSpace(scopePath),
+	})
+}
+
 func buildTestIntegrationPrompt(testCommand, scopePath string) string {
 	template, err := loadPromptTemplate("prompts/test_integration.toml")
 	if err != nil || strings.TrimSpace(template) == "" {

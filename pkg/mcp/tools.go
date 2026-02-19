@@ -22,7 +22,7 @@ type MockRecordInput struct {
 	// Name is the sandbox file prefix (final file: <name>.sb.yaml).
 	Name string `json:"name,omitempty" jsonschema:"Sandbox file prefix (default: keploy, final file: <name>.sb.yaml)."`
 	// Tag is the semantic version tag for sandbox record workflows.
-	Tag string `json:"tag,omitempty" jsonschema:"Semantic version tag for sandbox record workflows (for example 'v1.0.0'). AI should generate this when not provided by user."`
+	Tag string `json:"tag" jsonschema:"Semantic version tag for sandbox record workflows (for example 'v1.0.0'). AI should generate this when not provided by user."`
 }
 
 // MockRecordOutput defines the output of the mock record tool.
@@ -86,6 +86,14 @@ type PromptTestCommandInput struct {
 	TestCommand string `json:"testCommand,omitempty" jsonschema:"Optional existing test command context to refine/validate."`
 }
 
+// PromptDependencyStartInput defines input for keploy_prompt_dependency_start.
+type PromptDependencyStartInput struct {
+	// AppCommand is optional app/test command context for dependency discovery and startup checks.
+	AppCommand string `json:"appCommand,omitempty" jsonschema:"Optional app/test command context for dependency detection and startup checks."`
+	// ScopePath optionally narrows dependency discovery/startup to a subtree.
+	ScopePath string `json:"scopePath,omitempty" jsonschema:"Optional path scope for dependency checks/startup."`
+}
+
 // PromptTestIntegrationInput defines input for keploy_prompt_test_integration.
 type PromptTestIntegrationInput struct {
 	// Command provides optional command context to narrow test discovery scope.
@@ -136,22 +144,25 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 		elictedCommand, err := s.elicitRecordCommand(ctx)
 		if err != nil {
 			return nil, MockRecordOutput{
-				Success: false,
-				Message: fmt.Sprintf("Error: failed to get command via elicitation: %s", err.Error()),
+				Success:   false,
+				Protocols: []string{}, // Must be non-nil for JSON schema validation
+				Message:   fmt.Sprintf("Error: failed to get command via elicitation: %s", err.Error()),
 			}, nil
 		}
 		command = strings.TrimSpace(elictedCommand)
 		if command == "" {
 			return nil, MockRecordOutput{
-				Success: false,
-				Message: "Mock recording cancelled: no command provided.",
+				Success:   false,
+				Protocols: []string{}, // Must be non-nil for JSON schema validation
+				Message:   "Mock recording cancelled: no command provided.",
 			}, nil
 		}
 	}
 	if s.cfg == nil {
 		return nil, MockRecordOutput{
-			Success: false,
-			Message: "Recording failed: config is not available for sandbox record workflow.",
+			Success:   false,
+			Protocols: []string{}, // Must be non-nil for JSON schema validation
+			Message:   "Recording failed: config is not available for sandbox record workflow.",
 		}, nil
 	}
 
@@ -167,31 +178,35 @@ func (s *Server) handleMockRecord(ctx context.Context, req *sdkmcp.CallToolReque
 	tag := strings.TrimSpace(in.Tag)
 	if tag == "" {
 		return nil, MockRecordOutput{
-			Success: false,
-			Message: "Recording failed: 'tag' is required (semantic version, e.g. v1.0.0).",
+			Success:   false,
+			Protocols: []string{}, // Must be non-nil for JSON schema validation
+			Message:   "Recording failed: 'tag' is required (semantic version, e.g. v1.0.0).",
 		}, nil
 	}
 	tag, err := sandboxsvc.ParseTag(tag)
 	if err != nil {
 		return nil, MockRecordOutput{
-			Success: false,
-			Message: fmt.Sprintf("Recording failed: invalid tag: %s", err.Error()),
+			Success:   false,
+			Protocols: []string{}, // Must be non-nil for JSON schema validation
+			Message:   fmt.Sprintf("Recording failed: invalid tag: %s", err.Error()),
 		}, nil
 	}
 
 	jwtToken, err := getSandboxJWTTokenFunc(ctx, s.logger, s.cfg)
 	if err != nil {
 		return nil, MockRecordOutput{
-			Success: false,
-			Message: fmt.Sprintf("Recording failed: failed to authenticate user for sandbox record: %s", err.Error()),
+			Success:   false,
+			Protocols: []string{}, // Must be non-nil for JSON schema validation
+			Message:   fmt.Sprintf("Recording failed: failed to authenticate user for sandbox record: %s", err.Error()),
 		}, nil
 	}
 
 	ref, err := buildSandboxRefFromTag(s.logger, s.cfg, tag, jwtToken)
 	if err != nil {
 		return nil, MockRecordOutput{
-			Success: false,
-			Message: fmt.Sprintf("Recording failed: failed to infer sandbox ref from tag: %s", err.Error()),
+			Success:   false,
+			Protocols: []string{}, // Must be non-nil for JSON schema validation
+			Message:   fmt.Sprintf("Recording failed: failed to infer sandbox ref from tag: %s", err.Error()),
 		}, nil
 	}
 
@@ -534,6 +549,16 @@ func (s *Server) handlePromptTestCommand(_ context.Context, _ *sdkmcp.CallToolRe
 		Success: true,
 		Prompt:  prompt,
 		Message: "Generated test command prompt. Client LLM should execute this prompt as a direct user task.",
+	}, nil
+}
+
+// handlePromptDependencyStart returns a raw prompt for dependency discovery, health checks, and startup.
+func (s *Server) handlePromptDependencyStart(_ context.Context, _ *sdkmcp.CallToolRequest, in PromptDependencyStartInput) (*sdkmcp.CallToolResult, PromptOutput, error) {
+	prompt := buildDependencyStartPrompt(in.AppCommand, in.ScopePath)
+	return nil, PromptOutput{
+		Success: true,
+		Prompt:  prompt,
+		Message: "Generated dependency startup prompt. Client LLM should execute this prompt as a direct user task before mock recording.",
 	}, nil
 }
 

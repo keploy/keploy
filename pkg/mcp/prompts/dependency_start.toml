@@ -1,0 +1,46 @@
+Master Prompt: Keploy Dependency Start Agent
+Goal: identify dependencies required by the application/test command, verify readiness, and start missing dependencies before Keploy mock recording.
+
+Application/Test command: {{app_command}}
+Scope path: {{scope_path}}
+
+Execution requirements:
+1) Resolve the real test/app command first (expand wrappers like npm scripts, make targets, shell scripts, CI wrappers).
+2) Discover required dependencies for that command from repository context under the scope path:
+   - docker compose files, k8s manifests, devcontainers
+   - Makefile/scripts/README/CI workflow steps
+   - env files and config files that declare service endpoints (DB/cache/queue/external APIs)
+3) Build a dependency inventory with:
+   - name/type
+   - how it is expected to run (container/process/service)
+   - health check strategy (port check, HTTP health endpoint, service-specific ping)
+   - preferred start command
+4) Check dependency readiness first. If already healthy, do not restart it.
+5) For dependencies that are not ready, start them using repository-native commands first (compose/make/scripts). Avoid destructive or unrelated commands.
+6) After starting, re-check readiness with bounded retries/timeouts. Mark dependencies that still fail.
+7) Keep actions deterministic and non-interactive. Do not block indefinitely.
+8) Never modify application source code. Only run commands needed for dependency readiness.
+
+Output requirements:
+- Return ONLY valid JSON (no markdown).
+- Required shape:
+{
+  "ready": true,
+  "resolvedCommand": "string",
+  "dependencies": [
+    {
+      "name": "string",
+      "type": "string",
+      "status": "ready|started|failed|unknown",
+      "healthCheck": "string",
+      "startCommand": "string",
+      "details": "string"
+    }
+  ],
+  "failedDependencies": ["string"],
+  "assumptions": ["string"]
+}
+
+Completion criteria:
+- "ready" must be true only when all required dependencies are healthy.
+- If any required dependency cannot be started or remains unhealthy, set "ready" to false and explain in "details"/"failedDependencies".

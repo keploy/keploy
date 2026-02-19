@@ -8,6 +8,8 @@ const (
 	ToolMockTest = "keploy_mock_test"
 	// ToolPromptTestCommand returns an LLM prompt to derive the best serialized test command.
 	ToolPromptTestCommand = "keploy_prompt_test_command"
+	// ToolPromptDependencyStart returns an LLM prompt to detect, verify, and start dependencies.
+	ToolPromptDependencyStart = "keploy_prompt_dependency_start"
 	// ToolPromptTestIntegration returns an LLM prompt to instrument tests with sandbox scope hooks.
 	ToolPromptTestIntegration = "keploy_prompt_test_integration"
 	// ToolPromptPipelineCreation returns an LLM prompt to generate CI/CD pipeline files.
