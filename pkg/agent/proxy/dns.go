@@ -168,14 +168,14 @@ func (p *Proxy) resolveUncachedDNSAnswers(question dns.Question, mode models.Mod
 	case models.MODE_RECORD:
 		recordedAnswers, err := p.recordDNSMock(question, reqTime, session)
 		if err != nil {
-			if question.Qtype == dns.TypeA || question.Qtype == dns.TypeAAAA || question.Qtype == dns.TypeSRV {
+			if question.Qtype == dns.TypeA || question.Qtype == dns.TypeSRV {
 				utils.LogError(p.logger, err, "critical DNS resolution failed in record mode",
 					zap.String("query", question.Name),
 					zap.String("qtype", dns.TypeToString[question.Qtype]),
 				)
 				return nil, true
 			}
-			utils.LogError(p.logger, err, "non-critical DNS resolution failed in record mode; continuing",
+			p.logger.Debug("non-critical DNS resolution failed in record mode; continuing",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 			)
