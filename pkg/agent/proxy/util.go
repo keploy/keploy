@@ -2,14 +2,11 @@ package proxy
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"os"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -26,52 +23,36 @@ func writeNsswitchConfig(logger *zap.Logger, nsSwitchConfig string, data []byte,
 
 func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) error {
 
-	logger := p.logger.With(
-		zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)),
-		zap.String("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)),
-		zap.String("Client IP Address", client.RemoteAddr().String()),
-	)
+	// Use io.Copy for bidirectional forwarding. On Linux with *net.TCPConn
+	// pairs, Go's io.Copy internally uses splice(2) for zero-copy
+	// kernel-to-kernel forwarding, eliminating userspace buffer copies.
+	// This replaces the previous channel-based approach which allocated
+	// per-packet (make([]byte, n) + copy) and used channel send/receive
+	// overhead (~50-100ns per packet).
+	errCh := make(chan error, 2)
 
-	clientBuffChan := make(chan []byte)
-	destBuffChan := make(chan []byte)
-	errChan := make(chan error, 2)
+	// client → dest
+	go func() {
+		defer pUtil.Recover(p.logger, client, dest)
+		_, err := io.Copy(dest, client)
+		errCh <- err
+	}()
 
-	// read requests from client
-	err := pUtil.ReadFromPeer(ctx, logger, client, clientBuffChan, errChan, pUtil.Client)
-	if err != nil {
-		return fmt.Errorf("error reading from client:%v", err)
-	}
+	// dest → client
+	go func() {
+		defer pUtil.Recover(p.logger, client, dest)
+		_, err := io.Copy(client, dest)
+		errCh <- err
+	}()
 
-	// read responses from destination
-	err = pUtil.ReadFromPeer(ctx, logger, dest, destBuffChan, errChan, pUtil.Destination)
-	if err != nil {
-		return fmt.Errorf("error reading from destination:%v", err)
-	}
-
-	//write the request or response buffer to the respective destination
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case buffer := <-clientBuffChan:
-			// Write the request message to the destination
-			_, err := dest.Write(buffer)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write request message to the destination server")
-				return fmt.Errorf("error writing to destination")
-			}
-		case buffer := <-destBuffChan:
-			// Write the response message to the client
-			_, err := client.Write(buffer)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write response message to the client")
-				return fmt.Errorf("error writing to client")
-			}
-		case err := <-errChan:
-			if err == io.EOF {
-				return nil
-			}
-			return err
+	// Wait for first direction to complete or context cancellation.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		if err == io.EOF {
+			return nil
 		}
+		return err
 	}
 }

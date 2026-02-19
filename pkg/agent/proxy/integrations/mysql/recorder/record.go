@@ -57,13 +57,15 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		cmdClientConn := hsResult.ClientConn
 		cmdDestConn := hsResult.DestConn
 
-		// ── Phase 2: TeeForwardConn-based forwarding ─────────────
+		// ── Phase 2: TeeForwardConn-based forwarding ──
 		// Two TeeForwardConns: one per direction.
 		// Each reads from src, forwards to dest at wire speed, and
-		// buffers data in a 2MB pre-allocated ring buffer (ZERO heap
+		// buffers data in a 2 MB pre-allocated ring buffer (ZERO heap
 		// allocations in the forwarding goroutine).
 		//
 		// clientTee: client→server (captures requests)
+		//   → forwards queries to MySQL at wire speed BEFORE the pipeline
+		//     wakes up, which is critical for P50 latency.
 		// serverTee: server→client (captures responses)
 		clientTee := orchestrator.NewTeeForwardConn(ctx, logger, cmdClientConn, cmdDestConn)
 		serverTee := orchestrator.NewTeeForwardConn(ctx, logger, cmdDestConn, cmdClientConn)
@@ -89,18 +91,14 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		// The command-phase is handled by a SINGLE merged goroutine that
 		// reads from both ring buffers, frames packets using slab allocation,
-		// decodes inline, and sends mocks. This eliminates:
-		//   - The intermediate rawMocksCh channel
-		//   - 1 goroutine per connection (decoder)
-		//   - Per-packet heap allocations (slab: ~1 alloc per 256KB)
+		// decodes inline, and sends mocks.
 		pipelineDone := make(chan struct{})
 		go func() {
 			// Pin this goroutine to its own OS thread so the Go scheduler
 			// cannot time-slice it against the two TeeForwardConn forwarding
 			// goroutines.  Forwarding goroutines spend most of their time
 			// blocked on network I/O (handled by the netpoller, not an OS
-			// thread), so the extra thread here is low-cost. Unlocking on
-			// exit lets the runtime reuse the OS thread rather than killing it.
+			// thread), so the extra thread here is low-cost.
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
 			defer close(pipelineDone)

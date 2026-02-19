@@ -103,25 +103,14 @@ func decodeRawMockEntry(ctx context.Context, logger *zap.Logger, entry RawMockEn
 	var requestOperation string
 	var responseOperation string
 
-	// For the handshake config mock, we use raw packet representation.
-	// The handshake was already successfully decoded during handleHandshake;
-	// re-decoding here would fail because the packets are stored in separate
-	// ReqPackets/RespPackets slices but the MySQL handshake is interleaved
-	// (server→client→server→client) and the state machine gets confused.
 	isConfig := entry.MockType == "config"
 
 	if isConfig {
-		// Use raw packet bundles for handshake — no re-decode needed.
-		for _, pkt := range entry.ReqPackets {
-			decoded := rawPacketBundle(pkt)
-			requests = append(requests, mysql.Request{PacketBundle: *decoded})
-			requestOperation = decoded.Header.Type
-		}
-		for _, pkt := range entry.RespPackets {
-			decoded := rawPacketBundle(pkt)
-			responses = append(responses, mysql.Response{PacketBundle: *decoded})
-			responseOperation = decoded.Header.Type
-		}
+		// Re-decode handshake packets in the correct interleaved order
+		// (server→client→server→client) so the decoder's state machine
+		// tracks lastOp correctly.  This produces rich typed output
+		// (HandshakeV10, HandshakeResponse41, OK) instead of RAW_0x...
+		requestOperation, responseOperation = decodeHandshakeConfig(ctx, logger, entry, &requests, &responses)
 	} else {
 		// Command-phase: decode the command and its response.
 		requestOperation, responseOperation = decodeCommandPhase(ctx, logger, entry, decodeCtx, connKey, &requests, &responses)
@@ -490,6 +479,73 @@ func safeMarker(pkt []byte) byte {
 		return pkt[4]
 	}
 	return 0
+}
+
+// decodeHandshakeConfig re-decodes the handshake config packets in the
+// correct interleaved MySQL order (server→client→server→client→…) so the
+// wire decoder's state machine tracks lastOp correctly.
+//
+// The handshake exchange stored in a RawMockEntry looks like:
+//
+//	RespPackets[0] = Server Greeting   (HandshakeV10)
+//	ReqPackets[0]  = Client Response   (HandshakeResponse41 / SSLRequest)
+//	RespPackets[1] = Auth result       (OK / AuthSwitchRequest / AuthMoreData)
+//	ReqPackets[1]  = Auth client data  (optional)
+//	RespPackets[2] = Next auth result  (optional)
+//	…interleaved until final OK…
+//
+// We replay this sequence through wire.DecodePayload with a fresh
+// DecodeContext so every packet gets its rich typed representation.
+func decodeHandshakeConfig(
+	ctx context.Context,
+	logger *zap.Logger,
+	entry RawMockEntry,
+	requests *[]mysql.Request,
+	responses *[]mysql.Response,
+) (requestOp, responseOp string) {
+	// Fresh decode context — the handshake is self-contained.
+	decodeCtx := &wire.DecodeContext{
+		Mode:               models.MODE_RECORD,
+		LastOp:             wire.NewLastOpMap(),
+		ServerGreetings:    wire.NewGreetings(),
+		PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
+		LastOpValue:        wire.RESET,
+	}
+	// Use a nil net.Conn as the map key (single-connection context).
+	var connKey net.Conn
+
+	ri, qi := 0, 0 // resp index, req index
+
+	// Helper to decode one packet. On failure, falls back to rawPacketBundle.
+	decodePkt := func(pkt []byte) *mysql.PacketBundle {
+		decoded, err := wire.DecodePayload(ctx, logger, pkt, connKey, decodeCtx)
+		if err != nil {
+			logger.Debug("handshake config decode fallback to raw", zap.Error(err))
+			return rawPacketBundle(pkt)
+		}
+		return decoded
+	}
+
+	// Interleaved replay: server packet first, then client, alternating.
+	for ri < len(entry.RespPackets) || qi < len(entry.ReqPackets) {
+		// Server packet (response)
+		if ri < len(entry.RespPackets) {
+			decoded := decodePkt(entry.RespPackets[ri])
+			*responses = append(*responses, mysql.Response{PacketBundle: *decoded})
+			responseOp = decoded.Header.Type
+			ri++
+		}
+
+		// Client packet (request)
+		if qi < len(entry.ReqPackets) {
+			decoded := decodePkt(entry.ReqPackets[qi])
+			*requests = append(*requests, mysql.Request{PacketBundle: *decoded})
+			requestOp = decoded.Header.Type
+			qi++
+		}
+	}
+
+	return requestOp, responseOp
 }
 
 // processMock is the legacy decode function for the old pipeline.

@@ -23,7 +23,7 @@ type pktSlab struct {
 	prevBuf []byte // Keep previous slab alive to prevent premature GC
 }
 
-const slabSize = 1024 * 1024 // 1MB per slab — larger slab = fewer allocations
+const slabSize = 4 * 1024 * 1024 // 4MB per slab — larger slab = fewer allocations
 
 func newPktSlab() *pktSlab {
 	return &pktSlab{buf: make([]byte, slabSize)}
@@ -66,13 +66,13 @@ type peekReader interface {
 // and sends mocks to the channel.
 //
 // SIMPLE ARCHITECTURE: Single goroutine does read + decode + send.
-// This avoids channel overhead and copy overhead from async decode.
-// The mocks channel is 50K buffered which absorbs any backpressure.
+// The clientTee forwarding goroutine sends queries to MySQL at wire speed
+// (before the pipeline wakes up), which is critical for P50 latency.
 func runRecordPipeline(
 	ctx context.Context,
 	logger *zap.Logger,
-	clientSrc peekReader, // *TeeForwardConn — avoids double-buffering
-	serverSrc peekReader, // *TeeForwardConn — avoids double-buffering
+	clientSrc peekReader, // *TeeForwardConn — client queries
+	serverSrc peekReader, // *TeeForwardConn — server responses
 	mocks chan<- *models.Mock,
 	opts models.OutgoingOptions,
 	hs handshakeState,

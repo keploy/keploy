@@ -262,12 +262,15 @@ type TeeForwardConn struct {
 	destFD int // -1 if not TCP
 }
 
-// Pool of 64 KB read buffers for the forwarding goroutine.
-// Larger buffers mean fewer Read() syscalls per forwarded response,
-// which reduces context-switch overhead for bursty result sets.
+// Pool of 256 KB read buffers for the forwarding goroutine.
+// On loopback, MySQL sends entire responses atomically into the socket
+// receive buffer (set to 2 MB by tuneTCPConn).  A 256 KB read buffer
+// lets us transfer a 256 KB response in ONE Read+Write iteration instead
+// of four with a 64 KB buffer — reducing syscall count by 4× and
+// eliminating 3 goroutine preemption points per large response.
 var teeReadPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, 64*1024)
+		b := make([]byte, 256*1024)
 		return &b
 	},
 }
@@ -357,13 +360,6 @@ func (t *TeeForwardConn) startForwarding() {
 					default:
 					}
 				}
-
-				// Re-enable TCP_QUICKACK on every iteration.  Linux resets
-				// the flag after every ACK, so this must be re-armed before
-				// each Read to prevent delayed ACKs (up to 40ms penalty).
-				// Cost: one setsockopt syscall (~200ns) — negligible versus
-				// the Read/Write syscalls we're already doing.
-				quickACKByFD(t.srcFD)
 
 				n, err := t.reader.Read(readBuf)
 				if n > 0 {
