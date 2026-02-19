@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -94,6 +95,14 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		//   - Per-packet heap allocations (slab: ~1 alloc per 256KB)
 		pipelineDone := make(chan struct{})
 		go func() {
+			// Pin this goroutine to its own OS thread so the Go scheduler
+			// cannot time-slice it against the two TeeForwardConn forwarding
+			// goroutines.  Forwarding goroutines spend most of their time
+			// blocked on network I/O (handled by the netpoller, not an OS
+			// thread), so the extra thread here is low-cost. Unlocking on
+			// exit lets the runtime reuse the OS thread rather than killing it.
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
 			defer close(pipelineDone)
 			runRecordPipeline(ctx, logger, clientTee, serverTee, mocks, opts, hsResult.State)
 		}()
