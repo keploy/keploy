@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,12 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+
+	// Reduce GC frequency during recording to cut stop-the-world P99 spikes.
+	// GOGC=400 means GC triggers at 4× live heap (vs default 2×), halving GC
+	// frequency and the associated STW pauses. Automatically restored on exit.
+	prevGCPercent := debug.SetGCPercent(400)
+	defer debug.SetGCPercent(prevGCPercent)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
