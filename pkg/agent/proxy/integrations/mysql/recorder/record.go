@@ -48,7 +48,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		hsResult, err := handleHandshake(ctx, logger, clientConn, destConn, opts)
 		if err != nil {
 			if err != io.EOF {
-				logger.Error("handshake failed", zap.Error(err))
+				logger.Error("handshake failed. Check MySQL server credentials and ensure the server is accepting connections", zap.Error(err))
 			}
 			errCh <- err
 			return nil

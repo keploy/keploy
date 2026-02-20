@@ -130,13 +130,13 @@ func (ys *MockYaml) Close() error {
 
 	if ys.writer != nil {
 		if err := ys.writer.Flush(); err != nil {
-			utils.LogError(ys.Logger, err, "failed to flush mock file buffer")
+			utils.LogError(ys.Logger, err, "failed to flush mock file buffer. Check disk space and file permissions, then retry recording")
 		}
 		ys.writer = nil
 	}
 	if ys.file != nil {
 		if err := ys.file.Close(); err != nil {
-			utils.LogError(ys.Logger, err, "failed to close mock file")
+			utils.LogError(ys.Logger, err, "failed to close mock file. This may indicate a file system issue - verify the mock file was written correctly")
 		}
 		ys.file = nil
 	}

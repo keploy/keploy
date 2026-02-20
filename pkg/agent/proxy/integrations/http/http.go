@@ -73,7 +73,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 
 	// Forward initial request to destination (proxy-level write)
 	if _, err := dst.Write(reqBuf); err != nil {
-		utils.LogError(logger, err, "failed to forward initial request to destination")
+		utils.LogError(logger, err, "failed to forward initial request to destination. Check destination server connectivity and verify the address is correct")
 		return err
 	}
 

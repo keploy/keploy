@@ -818,7 +818,7 @@ func safeDecodeColumn(ctx context.Context, logger *zap.Logger, data []byte) *mys
 	}()
 	col, _, err := rowscols.DecodeColumn(ctx, logger, data)
 	if err != nil {
-		logger.Error("failed to decode column", zap.Error(err))
+		logger.Error("failed to decode column. Check if the MySQL packet format is valid or verify MySQL server version compatibility", zap.Error(err))
 		return nil
 	}
 	return col
@@ -833,7 +833,7 @@ func safeDecodeTextRow(ctx context.Context, logger *zap.Logger, data []byte, col
 	}()
 	row, _, err := rowscols.DecodeTextRow(ctx, logger, data, columns)
 	if err != nil {
-		logger.Error("failed to decode text row", zap.Error(err))
+		logger.Error("failed to decode text row. Check if the row data matches the expected column definitions or verify MySQL response format", zap.Error(err))
 		return nil
 	}
 	return row
@@ -848,7 +848,7 @@ func safeDecodeBinaryRow(ctx context.Context, logger *zap.Logger, data []byte, c
 	}()
 	row, _, err := rowscols.DecodeBinaryRow(ctx, logger, data, columns)
 	if err != nil {
-		logger.Error("failed to decode binary row", zap.Error(err))
+		logger.Error("failed to decode binary row. Check if the binary row data matches the expected column definitions or verify MySQL prepared statement response format", zap.Error(err))
 		return nil
 	}
 	return row

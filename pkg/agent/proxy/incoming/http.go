@@ -118,7 +118,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			reqBodyBytes, err = io.ReadAll(req.Body)
 			req.Body.Close()
 			if err != nil {
-				logger.Error("Failed to read request body", zap.Error(err))
+				logger.Error("Failed to read request body. Check if the client connection is still active or verify the request body format", zap.Error(err))
 				return
 			}
 		}
@@ -127,7 +127,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// The response has ALREADY been forwarded to the client at wire speed.
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			logger.Error("Failed to read upstream response", zap.Error(err))
+			logger.Error("Failed to read upstream response. Check if the upstream server is running or verify network connectivity to the upstream", zap.Error(err))
 			return
 		}
 
@@ -147,7 +147,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			respBodyBytes, err = io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if err != nil {
-				logger.Error("Failed to read response body", zap.Error(err))
+				logger.Error("Failed to read response body. Check if the response was truncated or verify the upstream server response format", zap.Error(err))
 				return
 			}
 		}

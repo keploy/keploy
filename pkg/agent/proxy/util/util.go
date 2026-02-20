@@ -175,7 +175,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				return
 			}
 			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read the packet message in proxy")
+				utils.LogError(logger, err, "failed to read the packet message in proxy. Check if the connection was closed unexpectedly or verify network stability")
 			}
 			errChannel <- err
 			return

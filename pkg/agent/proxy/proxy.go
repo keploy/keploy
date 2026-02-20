@@ -695,7 +695,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// Dial the destination server first
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
-			utils.LogError(logger, err, "failed to dial PostgreSQL server for SSL negotiation")
+			utils.LogError(logger, err, "failed to dial PostgreSQL server for SSL negotiation. Verify the server is running and accessible at the configured address")
 			return err
 		}
 		if tc, ok := dstConn.(*net.TCPConn); ok {
@@ -718,7 +718,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			initialBuf, sourcePort, rule.Backdate,
 		)
 		if err != nil {
-			utils.LogError(logger, err, "failed to handle PostgreSQL SSL negotiation")
+			utils.LogError(logger, err, "failed to handle PostgreSQL SSL negotiation. Check if the server supports SSL and the TLS configuration is correct")
 			return err
 		}
 
@@ -736,7 +736,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// and wrap it in the srcConn so parsers see it
 		nextBuf, err := util.ReadInitialBuf(parserCtx, logger, srcConn)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read post-SSL PostgreSQL packet")
+			utils.LogError(logger, err, "failed to read post-SSL PostgreSQL packet. The connection may have been closed unexpectedly - check server logs")
 			return err
 		}
 

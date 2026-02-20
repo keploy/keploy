@@ -40,7 +40,7 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 	// Use cached/parsed-once CA credentials instead of parsing PEM every time.
 	caPrivKey, caCertParsed, err := GetParsedCA()
 	if err != nil {
-		utils.LogError(logger, err, "Failed to get parsed CA credentials")
+		utils.LogError(logger, err, "Failed to get parsed CA credentials. Check file permissions on CA credentials or ensure they are properly initialized")
 		return nil, false, err
 	}
 
