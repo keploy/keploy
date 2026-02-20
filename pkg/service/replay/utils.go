@@ -2,6 +2,7 @@ package replay
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path"
@@ -13,6 +14,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -132,6 +134,104 @@ func removeFromMap(map1, map2 map[string][]string) map[string][]string {
 		delete(map1, key)
 	}
 	return map1
+}
+
+func testCaseRequestTimestamp(tc *models.TestCase) time.Time {
+	if tc == nil {
+		return time.Time{}
+	}
+	switch tc.Kind {
+	case models.HTTP:
+		return tc.HTTPReq.Timestamp
+	case models.GRPC_EXPORT:
+		return tc.GrpcReq.Timestamp
+	default:
+		return time.Time{}
+	}
+}
+
+func reorderForStreamingByRequestTime(testCases []*models.TestCase) ([]*models.TestCase, bool) {
+	if len(testCases) < 2 {
+		return testCases, false
+	}
+
+	hasStreaming := false
+	for _, tc := range testCases {
+		if tc != nil && tc.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(tc) {
+			hasStreaming = true
+			break
+		}
+	}
+	if !hasStreaming {
+		return testCases, false
+	}
+
+	ordered := append([]*models.TestCase(nil), testCases...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		ti := testCaseRequestTimestamp(ordered[i])
+		tj := testCaseRequestTimestamp(ordered[j])
+
+		if ti.IsZero() || tj.IsZero() {
+			if !ti.IsZero() && tj.IsZero() {
+				return true
+			}
+			if ti.IsZero() && !tj.IsZero() {
+				return false
+			}
+			return false
+		}
+		if ti.Equal(tj) {
+			return false
+		}
+		return ti.Before(tj)
+	})
+
+	changed := false
+	for i := range ordered {
+		if ordered[i] != testCases[i] {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return testCases, false
+	}
+	return ordered, true
+}
+
+func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
+
+	reqTs := tc.HTTPReq.Timestamp
+	respTs := tc.HTTPResp.Timestamp
+
+	timeoutSeconds := defaultAPITimeout
+	if timeoutSeconds == 0 {
+		timeoutSeconds = 10
+	}
+
+	if !reqTs.IsZero() && !respTs.IsZero() {
+		diff := respTs.Sub(reqTs)
+		if diff < 0 {
+			diff = -diff
+		}
+		timeoutSeconds = uint64(math.Ceil((diff + 10*time.Second).Seconds()))
+		if timeoutSeconds < 10 {
+			timeoutSeconds = 10
+		}
+	}
+
+	anchor := reqTs
+	if anchor.IsZero() || (!respTs.IsZero() && respTs.After(anchor)) {
+		anchor = respTs
+	}
+	if anchor.IsZero() {
+		anchor = time.Now().UTC()
+	}
+
+	return reqTs, anchor.Add(time.Duration(timeoutSeconds) * time.Second)
 }
 
 func timeWithUnits(duration time.Duration) string {

@@ -618,6 +618,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
+	reorderedTestCases, reordered := reorderForStreamingByRequestTime(testCases)
+	if reordered {
+		testCases = reorderedTestCases
+		r.logger.Info("reordered testcase execution by recorded request timestamps for streaming replay",
+			zap.String("test-set", testSetID))
+	}
 
 	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
 	if r.runDomainSet != nil {
@@ -1316,6 +1322,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		case models.GRPC_EXPORT:
 			reqTime = testCase.GrpcReq.Timestamp
 			respTime = testCase.GrpcResp.Timestamp
+		}
+		if testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+			reqTime, respTime = effectiveStreamMockWindow(testCase, r.config.Test.APITimeout)
 		}
 
 		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
