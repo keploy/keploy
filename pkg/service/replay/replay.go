@@ -1103,6 +1103,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
 	var asyncHTTPWG sync.WaitGroup
 	var activeAsyncStreaming int32
+	var asyncMockFilterPinned bool
 	var replayAnchorRecordedReqTime time.Time
 	var replayAnchorWallClock time.Time
 	hasAsyncStreaming := false
@@ -1342,6 +1343,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
+		streamingReplayActive := atomic.LoadInt32(&activeAsyncStreaming) > 0
+		if !streamingReplayActive {
+			asyncMockFilterPinned = false
+		}
+
+		isAsyncStreamingHTTP := testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
 		var testStatus models.TestStatus
 		var testResult *models.Result
 		var testPass bool
@@ -1355,21 +1362,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			reqTime = testCase.GrpcReq.Timestamp
 			respTime = testCase.GrpcResp.Timestamp
 		}
-		if testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+		skipMockFilterUpdate := false
+		if isAsyncStreamingHTTP {
 			reqTime, respTime = effectiveStreamMockWindow(testCase, r.config.Test.APITimeout)
-		} else if !useMappingBased && atomic.LoadInt32(&activeAsyncStreaming) > 0 {
+		} else if !useMappingBased && streamingReplayActive {
 			// During active async stream replay, keep a wide timestamp window to avoid
 			// narrowing agent-side mock set and starving in-flight stream dependencies.
 			reqTime = models.BaseTime
 			respTime = time.Now().UTC()
-			r.logger.Debug("using wide mock filter window because async stream replay is active",
-				zap.String("testcase", testCase.Name))
+			if asyncMockFilterPinned {
+				skipMockFilterUpdate = true
+				r.logger.Debug("skipping mock filter update because async stream replay is active and mock window is already pinned",
+					zap.String("testcase", testCase.Name))
+			} else {
+				r.logger.Debug("pinning wide mock filter window because async stream replay is active",
+					zap.String("testcase", testCase.Name))
+			}
 		}
 
-		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
-			break
+		if !skipMockFilterUpdate {
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+				break
+			}
+			if !useMappingBased && streamingReplayActive && !isAsyncStreamingHTTP {
+				asyncMockFilterPinned = true
+			}
 		}
 
 		// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
@@ -1377,7 +1396,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		isAsyncStreamingHTTP := testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
 		if isAsyncStreamingHTTP {
 			hasAsyncStreaming = true
 			if !sharedProxyErrMonitorStarted {
