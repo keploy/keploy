@@ -494,6 +494,17 @@ func safeMarker(pkt []byte) byte {
 	return 0
 }
 
+// pktHeader extracts the MySQL header struct from a raw 4-byte-header packet.
+func pktHeader(pkt []byte) *mysql.Header {
+	if len(pkt) < 4 {
+		return &mysql.Header{}
+	}
+	return &mysql.Header{
+		PayloadLength: payloadLen(pkt),
+		SequenceID:    pkt[3],
+	}
+}
+
 // decodeHandshakeConfig re-decodes the handshake config packets in the
 // correct MySQL protocol order so the wire decoder's state machine
 // tracks lastOp correctly.
@@ -594,16 +605,69 @@ func decodeHandshakeConfig(
 	// ── Step 3: Remaining auth exchange (alternating resp/req) ──
 	// After the greeting + client handshake, the auth exchange alternates:
 	// server response, client data, server response, ...
+	//
+	// Client packets like plain_password and encrypted_password have no
+	// dedicated case in wire.DecodePayload — they'd fall to the default
+	// handler and be stored with hex types (e.g. "0x72").  We track the
+	// auth state to classify them correctly.
+	expectFullAuth := false
 	for ri < len(entry.RespPackets) || qi < len(entry.ReqPackets) {
 		if ri < len(entry.RespPackets) {
 			decoded := decodePkt(entry.RespPackets[ri])
 			addResp(decoded)
 			ri++
+
+			// Track if the server requested full authentication.
+			if amd, ok := decoded.Message.(*mysql.AuthMoreDataPacket); ok {
+				mech, _ := wire.GetCachingSha2PasswordMechanism(amd.Data[0])
+				mechVal, _ := wire.StringToCachingSha2PasswordMechanism(mech)
+				expectFullAuth = (mechVal == mysql.PerformFullAuthentication)
+			}
 		}
 		if qi < len(entry.ReqPackets) {
-			decoded := decodePkt(entry.ReqPackets[qi])
-			addReq(decoded)
+			pkt := entry.ReqPackets[qi]
 			qi++
+
+			if expectFullAuth {
+				// The next client packet is auth data that DecodePayload
+				// doesn't understand.  Classify it manually.
+				if decodeCtx.UseSSL {
+					// SSL: plain password (null-terminated string)
+					addReq(&mysql.PacketBundle{
+						Header: &mysql.PacketInfo{
+							Header: pktHeader(pkt),
+							Type:   mysql.PlainPassword,
+						},
+						Message: string(intgUtils.EncodeBase64(pkt[4:])),
+					})
+				} else {
+					// Non-SSL: first is public key request (0x02), then encrypted password.
+					marker := safeMarker(pkt)
+					if marker == 0x02 && payloadLen(pkt) == 1 {
+						addReq(&mysql.PacketBundle{
+							Header: &mysql.PacketInfo{
+								Header: pktHeader(pkt),
+								Type:   mysql.CachingSha2PasswordToString(mysql.RequestPublicKey),
+							},
+							Message: "request_public_key",
+						})
+						// The next client packet is the encrypted password.
+						expectFullAuth = true // still in full auth
+					} else {
+						addReq(&mysql.PacketBundle{
+							Header: &mysql.PacketInfo{
+								Header: pktHeader(pkt),
+								Type:   mysql.EncryptedPassword,
+							},
+							Message: string(intgUtils.EncodeBase64(pkt[4:])),
+						})
+						expectFullAuth = false
+					}
+				}
+			} else {
+				decoded := decodePkt(pkt)
+				addReq(decoded)
+			}
 		}
 	}
 
