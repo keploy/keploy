@@ -115,7 +115,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	Volumes = Volumes + tlsVolumeMount
 
 	extraArgs := opts.ExtraArgs
-
 	switch osName {
 	case "linux":
 
