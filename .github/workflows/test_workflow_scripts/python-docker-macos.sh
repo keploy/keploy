@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # macOS variant. Requires Docker Desktop for Mac running.
-echo "System Kernel Version: $(uname -r)"
+
 set -euo pipefail
 
 # for the below shource make it such a way that if the file is not present or already present it does not error

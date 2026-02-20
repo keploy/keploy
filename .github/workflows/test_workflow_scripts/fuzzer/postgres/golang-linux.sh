@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-echo "System Kernel Version: $(uname -r)"
+
 
 # This script orchestrates the testing of the Postgres fuzzer with Keploy.
 # It handles setting up a Postgres instance for recording, generating Keploy tests and mocks,

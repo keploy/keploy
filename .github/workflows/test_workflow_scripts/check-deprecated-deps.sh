@@ -1,5 +1,4 @@
 #!/bin/bash
-echo "System Kernel Version: $(uname -r)"
 set -euo pipefail
 
 # -------------------------------

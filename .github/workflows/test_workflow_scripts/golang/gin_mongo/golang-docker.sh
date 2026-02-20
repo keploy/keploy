@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "System Kernel Version: $(uname -r)"
+
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 

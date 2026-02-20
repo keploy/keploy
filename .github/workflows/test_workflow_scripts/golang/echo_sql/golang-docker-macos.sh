@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # macOS variant for echo-sql (docker compose). Uses BSD sed.
-echo "System Kernel Version: $(uname -r)"
+
 set -euo pipefail
 
 # for the below source make it such a way that if the file is not present or already present it does not error

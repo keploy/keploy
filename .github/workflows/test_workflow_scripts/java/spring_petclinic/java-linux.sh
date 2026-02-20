@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-echo "System Kernel Version: $(uname -r)"
+
 # Safe, chatty CI script for Java + Postgres + Keploy with auto API-prefix detection
 
 set -Eeuo pipefail

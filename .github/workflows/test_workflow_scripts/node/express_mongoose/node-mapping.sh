@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-echo "System Kernel Version: $(uname -r)"
+
 # Safe, chatty CI script for Node + Mongo + Keploy
 
 set -Eeuo pipefail

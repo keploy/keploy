@@ -1,5 +1,5 @@
 #! /bin/bash
-echo "System Kernel Version: $(uname -r)"
+
 
 # Update the java version
 sudo apt update

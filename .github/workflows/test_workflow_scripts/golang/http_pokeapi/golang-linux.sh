@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "System Kernel Version: $(uname -r)"
+
 
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"

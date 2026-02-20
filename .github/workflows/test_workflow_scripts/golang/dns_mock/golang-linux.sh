@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-echo "System Kernel Version: $(uname -r)"
+
 set -Eeuxo pipefail
 
 # Ensure jq is installed

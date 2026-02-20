@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "System Kernel Version: $(uname -r)"
+
 
 # This script tests the grpc-secret sample application with Keploy's sanitize functionality.
 # It records gRPC requests with secrets in headers and body, sanitizes them, and validates test results.
