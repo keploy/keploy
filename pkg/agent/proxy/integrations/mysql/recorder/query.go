@@ -222,18 +222,35 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 		}
 
 		// Validate the EOF packet for parameter definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
+		if mysqlUtils.IsEOFPacket(eofData) {
+			responseOk.EOFAfterParamDefs = eofData
+		} else if responseOk.NumColumns > 0 && (decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF) != 0 {
+			// TiDB (and some MySQL 5.7.5+ compatible servers) can negotiate CLIENT_DEPRECATE_EOF and skip the
+			// intermediate EOF packet between parameter and column definitions in COM_STMT_PREPARE_OK.
+			// In that case, the next packet after the last param definition is the first column definition.
+			column, _, derr := rowscols.DecodeColumn(ctx, logger, eofData)
+			if derr != nil {
+				return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
+			}
+			logger.Debug("No EOF after parameter definitions; treating next packet as first column definition (CLIENT_DEPRECATE_EOF negotiated)",
+				zap.Uint16("numParams", responseOk.NumParams),
+				zap.Uint16("numColumns", responseOk.NumColumns),
+			)
+			responseOk.ColumnDefs = append(responseOk.ColumnDefs, column)
+			// Leave EOFAfterParamDefs empty because it was omitted on the wire.
+		} else {
 			return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
 		}
-
-		responseOk.EOFAfterParamDefs = eofData
 
 		logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
 	}
 
 	//See if there are any columns
 	if responseOk.NumColumns > 0 {
-		for i := uint16(0); i < responseOk.NumColumns; i++ {
+		// If we already consumed the first column definition while handling param EOF (TiDB CLIENT_DEPRECATE_EOF quirk),
+		// start reading from the remaining column definitions.
+		startIdx := uint16(len(responseOk.ColumnDefs))
+		for i := startIdx; i < responseOk.NumColumns; i++ {
 
 			// Read the column definition packet
 			colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
