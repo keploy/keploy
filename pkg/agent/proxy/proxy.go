@@ -586,17 +586,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	testBuffer := peekBuf[:n]
 
-	// Prepend the consumed bytes back so downstream readers see the full stream.
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(testBuffer), srcConn),
-		Logger: p.logger,
-	}
-
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
+		// Prepend the consumed peek bytes back so the TLS handler sees the full ClientHello.
+		srcConn = &util.Conn{
+			Conn:   srcConn,
+			Reader: io.MultiReader(bytes.NewReader(testBuffer), srcConn),
+			Logger: p.logger,
+		}
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
@@ -628,8 +627,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
-	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+	if isTLS {
+		// TLS: srcConn is a fresh tls.Conn after handshake, read normally.
+		initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+	} else {
+		// Non-TLS: the 5 peek bytes were consumed from the raw conn.
+		// Read the rest of the initial data from the raw conn and prepend
+		// the peek bytes to form the complete initial buffer.
+		// This avoids a MultiReader short-read issue where ReadBytes returns
+		// only the 5 prepended bytes (short read < 32KB buffer) instead of
+		// continuing to read from the actual connection.
+		restBuf, err2 := util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+		if err2 != nil {
+			err = err2
+		} else {
+			initialBuf = append(testBuffer, restBuf...)
+		}
+	}
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err

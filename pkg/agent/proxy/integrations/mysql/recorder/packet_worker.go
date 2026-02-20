@@ -618,10 +618,17 @@ func decodeHandshakeConfig(
 			ri++
 
 			// Track if the server requested full authentication.
-			if amd, ok := decoded.Message.(*mysql.AuthMoreDataPacket); ok {
-				mech, _ := wire.GetCachingSha2PasswordMechanism(amd.Data[0])
-				mechVal, _ := wire.StringToCachingSha2PasswordMechanism(mech)
-				expectFullAuth = (mechVal == mysql.PerformFullAuthentication)
+			// Only update on recognized mechanism bytes (0x03 = FastAuthSuccess,
+			// 0x04 = PerformFullAuthentication).  The public-key AuthMoreData
+			// has arbitrary data and must NOT reset the flag.
+			if amd, ok := decoded.Message.(*mysql.AuthMoreDataPacket); ok && len(amd.Data) == 1 {
+				mech, mErr := wire.GetCachingSha2PasswordMechanism(amd.Data[0])
+				if mErr == nil {
+					mechVal, mErr2 := wire.StringToCachingSha2PasswordMechanism(mech)
+					if mErr2 == nil {
+						expectFullAuth = (mechVal == mysql.PerformFullAuthentication)
+					}
+				}
 			}
 		}
 		if qi < len(entry.ReqPackets) {
