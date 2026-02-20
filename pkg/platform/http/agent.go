@@ -789,11 +789,6 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	}
 	opts.ExtraArgs = agent.StartupAgentHook.GetArgs(ctx)
 	if isDockerCmd {
-		cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=-1")
-		if err := cmd.Run(); err != nil {
-			a.logger.Warn("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
-			return err
-		}
 		// Helper check to ensure the binary running inside docker has the required capabilities
 		if err := utils.CheckRequiredPermissions(); err != nil {
 			a.logger.Error("Failed to start Keploy Agent", zap.Error(err))
@@ -1161,6 +1156,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				"Updated user command to allow Keploy to serve traffic before the app",
 				zap.String("cmd", cmd),
 			)
+		}
+		cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=-1")
+		if err := cmd.Run(); err != nil {
+			a.logger.Warn("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+			return err
 		}
 	}
 
