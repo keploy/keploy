@@ -1,4 +1,5 @@
 #!/bin/bash
+echo "System Kernel Version: $(uname -r)"
 
 # Standard Keploy test script pattern
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh

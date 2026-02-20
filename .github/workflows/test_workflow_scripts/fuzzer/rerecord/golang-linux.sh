@@ -1,4 +1,5 @@
 #!/bin/bash
+echo "System Kernel Version: $(uname -r)"
 
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail

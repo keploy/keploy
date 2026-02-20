@@ -1,4 +1,5 @@
 #!/bin/bash
+echo "System Kernel Version: $(uname -r)"
 
 # Expects:
 #   MODE                -> 'incoming' or 'outgoing'   (argv[1])

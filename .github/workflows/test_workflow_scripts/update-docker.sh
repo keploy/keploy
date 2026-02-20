@@ -1,4 +1,5 @@
 #!/bin/bash
+echo "System Kernel Version: $(uname -r)"
 set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"

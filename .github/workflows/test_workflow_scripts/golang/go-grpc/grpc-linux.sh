@@ -1,4 +1,5 @@
 #!/bin/bash
+echo "System Kernel Version: $(uname -r)"
 
 # This script tests the go-grpc sample application in two modes:
 # 'incoming': Tests the gRPC server by recording its incoming gRPC calls.

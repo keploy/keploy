@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+echo "System Kernel Version: $(uname -r)"
 
 # This script automates the testing of the risk profile identification feature.
 # It records test cases, validates the initial failure report, then tests the

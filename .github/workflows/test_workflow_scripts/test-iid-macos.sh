@@ -1,3 +1,4 @@
+echo "System Kernel Version: $(uname -r)"
 # Add fake installation-id for the workflow.
 if [ -d "$HOME/.keploy" ]; then
   echo "~/.keploy already exists, skipping installation-id setup."
