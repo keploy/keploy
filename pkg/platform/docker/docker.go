@@ -458,6 +458,7 @@ func (idc *Impl) generateKeployVolumes() []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
+			"/sys/kernel/tracing:/sys/kernel/tracing",	
 		)
 	case "darwin":
 		// macOS volumes
