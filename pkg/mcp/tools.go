@@ -106,8 +106,6 @@ type PromptTestIntegrationInput struct {
 type PromptPipelineInput struct {
 	// AppCommand is the app/test command used in keploy sandbox replay.
 	AppCommand string `json:"appCommand,omitempty" jsonschema:"Optional app/test command for pipeline prompt."`
-	// MockPath is the location passed to sandbox replay in CI.
-	MockPath string `json:"mockPath,omitempty" jsonschema:"Optional sandbox location for pipeline prompt (default: .)."`
 }
 
 // PromptOutput is raw text prompt output for prompt helper tools.
@@ -574,7 +572,7 @@ func (s *Server) handlePromptTestIntegration(_ context.Context, _ *sdkmcp.CallTo
 
 // handlePromptPipelineCreation returns a raw prompt for CI/CD pipeline generation.
 func (s *Server) handlePromptPipelineCreation(_ context.Context, _ *sdkmcp.CallToolRequest, in PromptPipelineInput) (*sdkmcp.CallToolResult, PromptOutput, error) {
-	prompt := buildPipelineCreationPrompt(in.AppCommand, in.MockPath)
+	prompt := buildPipelineCreationPrompt(in.AppCommand)
 	return nil, PromptOutput{
 		Success: true,
 		Prompt:  prompt,

@@ -56,26 +56,17 @@ func buildTestIntegrationPrompt(testCommand, scopePath string) string {
 	})
 }
 
-func buildPipelineCreationPrompt(testCommand, mockPath string) string {
+func buildPipelineCreationPrompt(testCommand string) string {
 	template, err := loadPromptTemplate("prompts/pipeline_creation.toml")
 	if err != nil || strings.TrimSpace(template) == "" {
 		return fmt.Sprintf("Failed to load pipeline creation prompt template: %v", err)
 	}
 
-	if strings.TrimSpace(mockPath) == "" {
-		mockPath = "."
-	}
 	trimmedCommand := strings.TrimSpace(testCommand)
 
 	return renderPromptTemplate(template, map[string]string{
-		"test_command":   trimmedCommand,
-		"mock_path":      mockPath,
-		"keploy_command": fmt.Sprintf("keploy sandbox replay -c \"%s\" --location \"%s\"", safePipelineCommand(trimmedCommand), mockPath),
+		"test_command": trimmedCommand,
 	})
-}
-
-func safePipelineCommand(appCommand string) string {
-	return strings.ReplaceAll(strings.TrimSpace(appCommand), "\"", "\\\"")
 }
 
 func renderPromptTemplate(tpl string, values map[string]string) string {
