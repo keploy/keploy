@@ -1164,7 +1164,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if runtime.GOOS == "linux" {
 			cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=2")
 			if err := cmd.Run(); err != nil {
-				a.logger.Warn("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+				a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
 				return err
 			}
 		}
