@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1101,6 +1102,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
 	var asyncHTTPWG sync.WaitGroup
+	var activeAsyncStreaming int32
+	var replayAnchorRecordedReqTime time.Time
+	var replayAnchorWallClock time.Time
 	hasAsyncStreaming := false
 	sharedProxyErrCancel := func() {}
 	sharedProxyErrMonitorStarted := false
@@ -1310,6 +1314,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
+		// Reproduce recorded temporal spacing between requests so async streams
+		// can establish subscriptions before publisher requests are replayed.
+		if reqTS := testCaseRequestTimestamp(testCase); !reqTS.IsZero() {
+			if replayAnchorRecordedReqTime.IsZero() {
+				replayAnchorRecordedReqTime = reqTS
+				replayAnchorWallClock = time.Now()
+			} else {
+				targetStart := replayAnchorWallClock.Add(reqTS.Sub(replayAnchorRecordedReqTime))
+				waitFor := time.Until(targetStart)
+				if waitFor > 0 {
+					r.logger.Debug("waiting to preserve recorded inter-request timing",
+						zap.String("testcase", testCase.Name),
+						zap.Duration("wait_for", waitFor))
+					timer := time.NewTimer(waitFor)
+					select {
+					case <-runTestSetCtx.Done():
+						timer.Stop()
+						loopErr = runTestSetCtx.Err()
+						break
+					case <-timer.C:
+					}
+				}
+			}
+		}
+		if loopErr != nil {
+			break
+		}
+
 		var testStatus models.TestStatus
 		var testResult *models.Result
 		var testPass bool
@@ -1325,6 +1357,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
 			reqTime, respTime = effectiveStreamMockWindow(testCase, r.config.Test.APITimeout)
+		} else if !useMappingBased && atomic.LoadInt32(&activeAsyncStreaming) > 0 {
+			// During active async stream replay, keep a wide timestamp window to avoid
+			// narrowing agent-side mock set and starving in-flight stream dependencies.
+			reqTime = models.BaseTime
+			respTime = time.Now().UTC()
+			r.logger.Debug("using wide mock filter window because async stream replay is active",
+				zap.String("testcase", testCase.Name))
 		}
 
 		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
@@ -1352,8 +1391,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedMocks := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
 
 			asyncHTTPWG.Add(1)
+			atomic.AddInt32(&activeAsyncStreaming, 1)
 			go func(tc models.TestCase, expectedMocks []string, started time.Time) {
 				defer asyncHTTPWG.Done()
+				defer atomic.AddInt32(&activeAsyncStreaming, -1)
 
 				asyncRes := asyncHTTPResult{
 					testCase:      &tc,
