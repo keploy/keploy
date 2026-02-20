@@ -214,8 +214,14 @@ func readFullResponseSlab(ctx context.Context, logger *zap.Logger, serverReader 
 
 	marker := first[4]
 
-	// Simple single-packet responses: OK, ERR, or standalone EOF
-	if marker == mysql.OK || marker == mysql.ERR {
+	// Simple single-packet responses: OK, ERR, or standalone EOF.
+	// EXCEPTION: COM_STMT_PREPARE_OK starts with 0x00 (same as mysql.OK)
+	// but is followed by param/column definition packets — it must NOT
+	// be treated as a simple single-packet response.
+	if marker == mysql.ERR {
+		return [][]byte{first}, nil
+	}
+	if marker == mysql.OK && cmdType != mysql.COM_STMT_PREPARE {
 		return [][]byte{first}, nil
 	}
 

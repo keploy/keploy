@@ -309,7 +309,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	defer func(listener net.Listener) {
 		err := listener.Close()
 
-		if err != nil {
+		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}
 		p.logger.Debug("proxy stopped...")

@@ -139,7 +139,13 @@ func readFullResponse(ctx context.Context, logger *zap.Logger, serverReader *buf
 	marker := first[4] // first payload byte
 
 	// OK (0x00) or ERR (0xFF): single-packet response.
-	if marker == mysql.OK || marker == mysql.ERR {
+	// EXCEPTION: COM_STMT_PREPARE_OK starts with 0x00 (same as mysql.OK)
+	// but is followed by param/column definition packets — it must NOT
+	// be treated as a simple single-packet response.
+	if marker == mysql.ERR {
+		return [][]byte{first}, nil
+	}
+	if marker == mysql.OK && cmdType != mysql.COM_STMT_PREPARE {
 		return [][]byte{first}, nil
 	}
 
