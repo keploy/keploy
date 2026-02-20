@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -116,10 +115,10 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	Volumes = Volumes + tlsVolumeMount
 
 	extraArgs := opts.ExtraArgs
-	cmd := exec.Command("sudo", "sysctl", "-w", "kernel.perf_event_paranoid=-1")
-	if err := cmd.Run(); err != nil {
-		log.Printf("Warning: failed to relax host perf_event_paranoid: %v. Tracepoints may fail.", err)
-	}
+	// cmd := exec.Command("sudo", "sysctl", "-w", "kernel.perf_event_paranoid=-1")
+	// if err := cmd.Run(); err != nil {
+	// 	log.Printf("Warning: failed to relax host perf_event_paranoid: %v. Tracepoints may fail.", err)
+	// }
 	Volumes += " -v /sys/kernel/tracing:/sys/kernel/tracing "
 	switch osName {
 	case "linux":
