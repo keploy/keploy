@@ -517,6 +517,40 @@ func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
 	}
 }
 
+func TestCompareSSEFrame_DataJSONTypeMismatch_322(t *testing.T) {
+	logger := zap.NewNop()
+	match, reason := compareSSEFrame(
+		"data:{\"value\":1}",
+		"data:not-json",
+		nil,
+		logger,
+	)
+
+	assert.False(t, match)
+	assert.Equal(t, "data-json-type mismatch", reason)
+}
+
+func TestComputeStreamingTimeoutSeconds_323(t *testing.T) {
+	now := time.Now().UTC()
+	tc := &models.TestCase{
+		HTTPReq: models.HTTPReq{
+			Timestamp: now,
+		},
+		HTTPResp: models.HTTPResp{
+			Timestamp: now.Add(1500 * time.Millisecond),
+		},
+	}
+
+	timeout := computeStreamingTimeoutSeconds(tc, 2)
+	assert.Equal(t, uint64(12), timeout)
+
+	fallback := computeStreamingTimeoutSeconds(&models.TestCase{}, 7)
+	assert.Equal(t, uint64(7), fallback)
+
+	defaultMin := computeStreamingTimeoutSeconds(&models.TestCase{}, 0)
+	assert.Equal(t, uint64(10), defaultMin)
+}
+
 // TestIsTime_VariousFormats_808 covers multiple scenarios for the IsTime function,
 // including standard date formats (RFC3339, UnixDate), numeric timestamps as strings,
 // and invalid inputs to ensure it correctly identifies time-like strings.

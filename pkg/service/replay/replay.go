@@ -1080,7 +1080,178 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 	}
 
+	type asyncHTTPResult struct {
+		testCase        *models.TestCase
+		started         time.Time
+		httpResp        *models.HTTPResp
+		testResult      *models.Result
+		testPass        bool
+		simErr          error
+		mockNames       []string
+		expectedMocks   []string
+		mockSetMismatch bool
+		consumedMocks   []models.MockState
+	}
+
+	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
+	var asyncHTTPWG sync.WaitGroup
+	hasAsyncStreaming := false
+	sharedProxyErrCancel := func() {}
+	sharedProxyErrMonitorStarted := false
+
+	processAsyncHTTPResult := func(asyncRes asyncHTTPResult) error {
+		if asyncRes.simErr != nil {
+			utils.LogError(r.logger, asyncRes.simErr, "failed to simulate async streaming request")
+			failure++
+			testSetStatus = models.TestSetStatusFailed
+			testCaseResult := r.CreateFailedTestResult(asyncRes.testCase, testSetID, asyncRes.started, asyncRes.simErr.Error())
+			return r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+		}
+
+		if asyncRes.httpResp == nil {
+			failure++
+			testSetStatus = models.TestSetStatusFailed
+			testCaseResult := r.CreateFailedTestResult(asyncRes.testCase, testSetID, asyncRes.started, "nil async streaming http response")
+			return r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+		}
+
+		if r.instrument {
+			for _, m := range asyncRes.consumedMocks {
+				totalConsumedMocks[m.Name] = m
+			}
+		}
+
+		if len(asyncRes.mockNames) > 0 {
+			found := false
+			for i, t := range actualTestMockMappings.Tests {
+				if t.ID == asyncRes.testCase.Name {
+					actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(actualTestMockMappings.Tests[i].Mocks.ToSlice(), asyncRes.mockNames...))
+					found = true
+					break
+				}
+			}
+			if !found {
+				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+					ID:    asyncRes.testCase.Name,
+					Mocks: models.FromSlice(asyncRes.mockNames),
+				})
+			}
+		}
+
+		r.logger.Debug("Consumed Mocks", zap.Any("mocks", asyncRes.consumedMocks))
+
+		if asyncRes.mockSetMismatch {
+			if asyncRes.testPass {
+				r.logger.Debug("mock mapping mismatch ignored because testcase passed",
+					zap.String("testcase", asyncRes.testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", asyncRes.expectedMocks),
+					zap.Strings("actualMocks", asyncRes.mockNames))
+			} else {
+				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete",
+					zap.String("testcase", asyncRes.testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", asyncRes.expectedMocks),
+					zap.Strings("actualMocks", asyncRes.mockNames))
+				mockMismatchFailures.AddFailure(testSetID, asyncRes.testCase.Name, asyncRes.expectedMocks, asyncRes.mockNames)
+			}
+		}
+
+		if !asyncRes.testPass {
+			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(asyncRes.testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(asyncRes.testPass)))
+		} else {
+			r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(asyncRes.testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(asyncRes.testPass)))
+		}
+
+		var testStatus models.TestStatus
+		if asyncRes.testPass {
+			testStatus = models.TestStatusPassed
+			success++
+		} else if asyncRes.mockSetMismatch {
+			testStatus = models.TestStatusObsolete
+			obsolete++
+		} else {
+			testStatus = models.TestStatusFailed
+			failure++
+			testSetStatus = models.TestSetStatusFailed
+		}
+
+		if asyncRes.testResult == nil {
+			return fmt.Errorf("test result is nil for async testcase: %s", asyncRes.testCase.Name)
+		}
+
+		testCaseResult := &models.TestResult{
+			Kind:       models.HTTP,
+			Name:       testSetID,
+			Status:     testStatus,
+			Started:    asyncRes.started.Unix(),
+			Completed:  time.Now().UTC().Unix(),
+			TestCaseID: asyncRes.testCase.Name,
+			Req: models.HTTPReq{
+				Method:     asyncRes.testCase.HTTPReq.Method,
+				ProtoMajor: asyncRes.testCase.HTTPReq.ProtoMajor,
+				ProtoMinor: asyncRes.testCase.HTTPReq.ProtoMinor,
+				URL:        asyncRes.testCase.HTTPReq.URL,
+				URLParams:  asyncRes.testCase.HTTPReq.URLParams,
+				Header:     asyncRes.testCase.HTTPReq.Header,
+				Body:       asyncRes.testCase.HTTPReq.Body,
+				Binary:     asyncRes.testCase.HTTPReq.Binary,
+				Form:       asyncRes.testCase.HTTPReq.Form,
+				Timestamp:  asyncRes.testCase.HTTPReq.Timestamp,
+			},
+			Res:          *asyncRes.httpResp,
+			TestCasePath: filepath.Join(r.config.Path, testSetID),
+			MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+			Noise:        asyncRes.testCase.Noise,
+			Result:       *asyncRes.testResult,
+			TimeTaken:    time.Since(asyncRes.started).String(),
+		}
+
+		if testStatus == models.TestStatusFailed && asyncRes.testResult.FailureInfo.Risk != models.None {
+			testCaseResult.FailureInfo.Risk = asyncRes.testResult.FailureInfo.Risk
+			testCaseResult.FailureInfo.Category = asyncRes.testResult.FailureInfo.Category
+		}
+
+		insertStart := time.Now()
+		err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+		if time.Since(insertStart) > 50*time.Millisecond {
+			r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+		}
+		return err
+	}
+
+	drainAsyncHTTPResults := func(block bool) error {
+		for {
+			if block {
+				asyncRes, ok := <-asyncHTTPResults
+				if !ok {
+					return nil
+				}
+				if err := processAsyncHTTPResult(asyncRes); err != nil {
+					return err
+				}
+				continue
+			}
+
+			select {
+			case asyncRes, ok := <-asyncHTTPResults:
+				if !ok {
+					return nil
+				}
+				if err := processAsyncHTTPResult(asyncRes); err != nil {
+					return err
+				}
+			default:
+				return nil
+			}
+		}
+	}
+
 	for idx, testCase := range testCases {
+		if err := drainAsyncHTTPResults(false); err != nil {
+			loopErr = err
+			break
+		}
 
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
@@ -1136,7 +1307,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testStatus models.TestStatus
 		var testResult *models.Result
 		var testPass bool
-		var loopErr error
 
 		var reqTime, respTime time.Time
 		switch testCase.Kind {
@@ -1159,8 +1329,80 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
-		go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
+		isAsyncStreamingHTTP := testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
+		if isAsyncStreamingHTTP {
+			hasAsyncStreaming = true
+			if !sharedProxyErrMonitorStarted {
+				sharedProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
+				sharedProxyErrCancel = cancel
+				sharedProxyErrMonitorStarted = true
+				go r.monitorProxyErrors(sharedProxyErrCtx, testSetID, "")
+			}
+
+			tcCopy := *testCase
+			expectedMocks := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
+
+			asyncHTTPWG.Add(1)
+			go func(tc models.TestCase, expectedMocks []string, started time.Time) {
+				defer asyncHTTPWG.Done()
+
+				asyncRes := asyncHTTPResult{
+					testCase:      &tc,
+					started:       started,
+					expectedMocks: expectedMocks,
+				}
+
+				resp, err := HookImpl.SimulateRequest(runTestSetCtx, &tc, testSetID)
+				if err != nil {
+					asyncRes.simErr = err
+					asyncHTTPResults <- asyncRes
+					return
+				}
+
+				httpResp, ok := resp.(*models.HTTPResp)
+				if !ok {
+					asyncRes.simErr = fmt.Errorf("invalid response type for HTTP test case")
+					asyncHTTPResults <- asyncRes
+					return
+				}
+				asyncRes.httpResp = httpResp
+
+				var localConsumedMocks []models.MockState
+				if r.instrument {
+					consumed, err := HookImpl.GetConsumedMocks(runTestSetCtx)
+					if err != nil {
+						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+					} else {
+						localConsumedMocks = consumed
+					}
+				}
+				asyncRes.consumedMocks = localConsumedMocks
+
+				mockNames := make([]string, 0, len(localConsumedMocks))
+				for _, m := range localConsumedMocks {
+					mockNames = append(mockNames, m.Name)
+				}
+				asyncRes.mockNames = mockNames
+
+				hasExpectedMocks := len(expectedMocks) > 0
+				if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
+					asyncRes.mockSetMismatch = !isMockSubset(mockNames, expectedMocks)
+				}
+
+				emitFailureLogs := !asyncRes.mockSetMismatch
+				asyncRes.testPass, asyncRes.testResult = r.CompareHTTPResp(&tc, httpResp, testSetID, emitFailureLogs)
+				asyncHTTPResults <- asyncRes
+			}(tcCopy, expectedMocks, started)
+
+			continue
+		}
+
+		testCaseProxyErrCancel := func() {}
+		if !hasAsyncStreaming {
+			testCaseProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
+			testCaseProxyErrCancel = cancel
+			go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
+		}
 
 		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
 
@@ -1410,6 +1652,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
 			time.Sleep(time.Second)
 		}
+	}
+
+	if loopErr != nil {
+		runTestSetCtxCancel()
+	}
+
+	asyncHTTPWG.Wait()
+	close(asyncHTTPResults)
+	if err := drainAsyncHTTPResults(true); err != nil && loopErr == nil {
+		loopErr = err
+	}
+	if sharedProxyErrMonitorStarted {
+		sharedProxyErrCancel()
 	}
 
 	timeTaken := time.Since(startTime)
@@ -1669,9 +1924,9 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
-	noiseConfig := r.config.Test.GlobalNoise.Global
+	noiseConfig := CloneGlobalNoise(r.config.Test.GlobalNoise.Global)
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
 	if r.config.Test.SchemaMatch {
@@ -1682,9 +1937,9 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
-	noiseConfig := r.config.Test.GlobalNoise.Global
+	noiseConfig := CloneGlobalNoise(r.config.Test.GlobalNoise.Global)
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
 	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs)

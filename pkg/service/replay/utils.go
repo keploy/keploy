@@ -28,7 +28,7 @@ type TestReportVerdict struct {
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
-	noise := globalNoise
+	noise := CloneGlobalNoise(globalNoise)
 
 	if _, ok := noise["body"]; !ok {
 		noise["body"] = make(map[string][]string)
@@ -51,12 +51,26 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	return noise
 }
 
+func CloneGlobalNoise(src config.GlobalNoise) config.GlobalNoise {
+	cloned := make(config.GlobalNoise, len(src))
+	for section, fields := range src {
+		fieldCopy := make(map[string][]string, len(fields))
+		for field, patterns := range fields {
+			patternCopy := make([]string, len(patterns))
+			copy(patternCopy, patterns)
+			fieldCopy[field] = patternCopy
+		}
+		cloned[section] = fieldCopy
+	}
+	return cloned
+}
+
 // PrepareHeaderNoiseConfig prepares the header noise configuration for mock matching.
 // It merges global and test-set specific noise, then extracts only the header noise.
 func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
-	noiseConfig := globalNoise
+	noiseConfig := CloneGlobalNoise(globalNoise)
 	if tsNoise, ok := testSetNoise[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
 	// Extract only header noise for mock matching

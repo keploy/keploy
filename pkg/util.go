@@ -13,6 +13,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -20,10 +21,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -38,6 +41,7 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 var SortCounter int64 = -1
+var templateValuesMu sync.RWMutex
 
 const maxSSEFrameSize = 10 * 1024 * 1024
 
@@ -49,6 +53,7 @@ const (
 	httpStreamModeNDJSON    httpStreamMode = "ndjson"
 	httpStreamModeMultipart httpStreamMode = "multipart"
 	httpStreamModePlainText httpStreamMode = "plain-text"
+	httpStreamModeBinary    httpStreamMode = "binary"
 )
 
 type httpStreamConfig struct {
@@ -178,11 +183,12 @@ func IsTime(stringDate string) bool {
 }
 
 type SimulationConfig struct {
-	APITimeout      uint64
-	ConfigPort      uint32
-	KeployPath      string
-	ConfigHost      string
-	URLReplacements map[string]string
+	APITimeout         uint64
+	ConfigPort         uint32
+	KeployPath         string
+	ConfigHost         string
+	URLReplacements    map[string]string
+	StreamingBodyNoise map[string][]string
 }
 
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
@@ -199,7 +205,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// convert testcase to string and render the template values.
 	// Render any template values in the test case before simulation.
 	// Render any template values in the test case before simulation.
-	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
+	templateValuesMu.RLock()
+	hasTemplateOrSecretValues := len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0
+	templateValuesMu.RUnlock()
+	if hasTemplateOrSecretValues {
 		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
@@ -207,6 +216,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 
 		// Build the template data
+		templateValuesMu.RLock()
 		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
 		for k, v := range utils.TemplatizedValues {
 			templateData[k] = v
@@ -214,6 +224,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if len(utils.SecretValues) > 0 {
 			templateData["secret"] = utils.SecretValues
 		}
+		templateValuesMu.RUnlock()
 
 		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
 		// ignoring LaTeX/HTML like {{\pi}}.
@@ -423,6 +434,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		req.Host = hostHeader
 	}
 
+	streamTimeoutSeconds := cfg.APITimeout
+	if detectHTTPStreamConfig(tc, nil).Mode != httpStreamModeNone {
+		streamTimeoutSeconds = computeStreamingTimeoutSeconds(tc, cfg.APITimeout)
+	}
+	requestTimeout := time.Second * time.Duration(streamTimeoutSeconds)
+
 	// Creating the client and disabling redirects
 	var client *http.Client
 
@@ -433,7 +450,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
 		logger.Debug("simulating request with conn:keep-alive")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(cfg.APITimeout),
+			Timeout: requestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -444,7 +461,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
 		logger.Debug("simulating request with conn:close")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(cfg.APITimeout),
+			Timeout: requestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -456,7 +473,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else {
 		logger.Debug("simulating request with conn:keep-alive (maxIdleConn=1)")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(cfg.APITimeout),
+			Timeout: requestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -516,7 +533,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			defer streamReaderCloser.Close()
 		}
 
-		streamMatched, capturedStreamBody, streamErr := compareHTTPStream(tc.HTTPResp.Body, streamReader, streamCfg, logger)
+		streamNoiseKeys := collectStreamingGlobalNoiseKeys(cfg.StreamingBodyNoise, tc.Noise)
+		streamMatched, capturedStreamBody, streamErr := compareHTTPStream(tc.HTTPResp.Body, streamReader, streamCfg, streamNoiseKeys, logger)
 		if streamErr != nil {
 			utils.LogError(logger, streamErr, "failed to read streaming response body")
 			return nil, streamErr
@@ -565,6 +583,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
+	templateValuesMu.Lock()
 	if len(utils.TemplatizedValues) > 0 && len(bodyForTemplateUpdate) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
 
@@ -583,6 +602,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			}
 		}
 	}
+	templateValuesMu.Unlock()
 	return resp, errHTTPReq
 }
 
@@ -630,6 +650,10 @@ func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStream
 		if isLikelyStreamingHTTPResponse(tc, resp) {
 			return httpStreamConfig{Mode: httpStreamModePlainText}
 		}
+	case "application/octet-stream":
+		if isLikelyStreamingHTTPResponse(tc, resp) {
+			return httpStreamConfig{Mode: httpStreamModeBinary}
+		}
 	}
 
 	if isSSETestCase(tc, resp) {
@@ -643,19 +667,88 @@ func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStream
 	return httpStreamConfig{Mode: httpStreamModeNone}
 }
 
-func compareHTTPStream(expectedBody string, stream io.Reader, cfg httpStreamConfig, logger *zap.Logger) (bool, string, error) {
+// IsHTTPStreamingTestCase returns true if the testcase response is identified as a stream format
+// supported by replay-time incremental validators.
+func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
+	if tc == nil {
+		return false
+	}
+	return detectHTTPStreamConfig(tc, nil).Mode != httpStreamModeNone
+}
+
+func compareHTTPStream(expectedBody string, stream io.Reader, cfg httpStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
 	switch cfg.Mode {
 	case httpStreamModeSSE:
-		return compareSSEStream(expectedBody, stream, logger)
+		return compareSSEStream(expectedBody, stream, jsonNoiseKeys, logger)
 	case httpStreamModeNDJSON:
-		return compareNDJSONStream(expectedBody, stream, logger)
+		return compareNDJSONStream(expectedBody, stream, jsonNoiseKeys, logger)
 	case httpStreamModeMultipart:
-		return compareMultipartStream(expectedBody, stream, cfg.Boundary, logger)
+		return compareMultipartStream(expectedBody, stream, cfg.Boundary, jsonNoiseKeys, logger)
 	case httpStreamModePlainText:
 		return comparePlainTextStream(expectedBody, stream, logger)
+	case httpStreamModeBinary:
+		return compareBinaryStream(expectedBody, stream, logger)
 	default:
 		return false, "", fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
+}
+
+func computeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
+	if tc == nil {
+		if defaultSeconds == 0 {
+			return 10
+		}
+		return defaultSeconds
+	}
+
+	reqTs := tc.HTTPReq.Timestamp
+	respTs := tc.HTTPResp.Timestamp
+	if reqTs.IsZero() || respTs.IsZero() {
+		if defaultSeconds == 0 {
+			return 10
+		}
+		return defaultSeconds
+	}
+
+	diff := respTs.Sub(reqTs)
+	if diff < 0 {
+		diff = -diff
+	}
+
+	timeout := diff + 10*time.Second
+	if timeout < 10*time.Second {
+		timeout = 10 * time.Second
+	}
+	timeoutSeconds := uint64(math.Ceil(timeout.Seconds()))
+	if timeoutSeconds < 10 {
+		return 10
+	}
+	return timeoutSeconds
+}
+
+func collectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNoise map[string][]string) map[string]struct{} {
+	keys := make(map[string]struct{})
+	add := func(candidate string) {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			return
+		}
+		if strings.HasPrefix(candidate, "body.") {
+			candidate = strings.TrimPrefix(candidate, "body.")
+		}
+		if strings.Contains(candidate, ".") {
+			return
+		}
+		keys[candidate] = struct{}{}
+	}
+
+	for k := range globalBodyNoise {
+		add(k)
+	}
+	for k := range tcNoise {
+		add(k)
+	}
+	return keys
 }
 
 func isSSETestCase(tc *models.TestCase, resp *http.Response) bool {
@@ -750,7 +843,7 @@ func looksLikeNDJSONPayload(body string) bool {
 	return nonEmpty > 0
 }
 
-func compareSSEStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
 	expectedQueue := splitSSEQueue(expectedBody)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -760,8 +853,9 @@ func compareSSEStream(expectedBody string, stream io.Reader, logger *zap.Logger)
 	scanner.Split(splitSSEFrames)
 
 	for scanner.Scan() {
-		frame := canonicalizeSSEFrame(scanner.Text())
-		if frame == "" {
+		rawFrame := normalizeLineEndings(scanner.Text())
+		frame := strings.Trim(rawFrame, "\n")
+		if strings.TrimSpace(frame) == "" {
 			continue
 		}
 
@@ -773,9 +867,11 @@ func compareSSEStream(expectedBody string, stream io.Reader, logger *zap.Logger)
 
 		actualQueue = append(actualQueue, frame)
 		expectedFrame := expectedQueue[nextExpected]
-		if frame != expectedFrame {
+		match, reason := compareSSEFrame(expectedFrame, frame, jsonNoiseKeys, logger)
+		if !match {
 			logger.Warn("SSE frame mismatch",
 				zap.Int("frame_index", nextExpected),
+				zap.String("reason", reason),
 				zap.String("expected_frame", expectedFrame),
 				zap.String("actual_frame", frame))
 			return false, strings.Join(actualQueue, "\n\n"), nil
@@ -803,8 +899,8 @@ func compareSSEStream(expectedBody string, stream io.Reader, logger *zap.Logger)
 	return true, strings.Join(actualQueue, "\n\n"), nil
 }
 
-func compareNDJSONStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
-	expectedQueue := splitLineQueue(expectedBody, canonicalizeNDJSONLine, true)
+func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+	expectedQueue := splitLineQueue(expectedBody, strings.TrimSpace, true)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
@@ -812,7 +908,7 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, logger *zap.Logg
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
 
 	for scanner.Scan() {
-		line := canonicalizeNDJSONLine(scanner.Text())
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -825,9 +921,15 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, logger *zap.Logg
 
 		actualQueue = append(actualQueue, line)
 		expected := expectedQueue[nextExpected]
-		if line != expected {
+		ok, cmpErr := compareJSONTextWithNoise(expected, line, jsonNoiseKeys)
+		if cmpErr != nil || !ok {
+			reason := "json mismatch"
+			if cmpErr != nil {
+				reason = cmpErr.Error()
+			}
 			logger.Warn("NDJSON stream mismatch",
 				zap.Int("frame_index", nextExpected),
+				zap.String("reason", reason),
 				zap.String("expected_frame", expected),
 				zap.String("actual_frame", line))
 			return false, strings.Join(actualQueue, "\n"), nil
@@ -874,11 +976,11 @@ func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.L
 
 		actualQueue = append(actualQueue, line)
 		expected := expectedQueue[nextExpected]
-		if line != expected {
+		if len(line) != len(expected) {
 			logger.Warn("plain-text stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.String("expected_frame", expected),
-				zap.String("actual_frame", line))
+				zap.Int("expected_size", len(expected)),
+				zap.Int("actual_size", len(line)))
 			return false, strings.Join(actualQueue, "\n"), nil
 		}
 
@@ -904,7 +1006,230 @@ func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.L
 	return true, strings.Join(actualQueue, "\n"), nil
 }
 
-func compareMultipartStream(expectedBody string, stream io.Reader, boundary string, logger *zap.Logger) (bool, string, error) {
+func compareBinaryStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+	expectedSize := len([]byte(expectedBody))
+	actualSize := 0
+	buffer := make([]byte, 32*1024)
+
+	for {
+		n, err := stream.Read(buffer)
+		if n > 0 {
+			actualSize += n
+			if actualSize >= expectedSize {
+				if actualSize > expectedSize {
+					logger.Warn("received additional binary stream data after expected size was matched; closing stream capture",
+						zap.Int("expected_size", expectedSize),
+						zap.Int("actual_size", actualSize))
+				}
+				break
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return false, strconv.Itoa(actualSize), err
+		}
+	}
+
+	if actualSize != expectedSize {
+		logger.Warn("binary stream size mismatch",
+			zap.Int("expected_size", expectedSize),
+			zap.Int("actual_size", actualSize))
+		return false, strconv.Itoa(actualSize), nil
+	}
+
+	return true, strconv.Itoa(actualSize), nil
+}
+
+type sseField struct {
+	key      string
+	value    string
+	hasValue bool
+	comment  bool
+}
+
+func parseSSEFrame(frame string) []sseField {
+	frame = normalizeLineEndings(frame)
+	frame = strings.Trim(frame, "\n")
+	if strings.TrimSpace(frame) == "" {
+		return nil
+	}
+
+	lines := strings.Split(frame, "\n")
+	fields := make([]sseField, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, ":") {
+			fields = append(fields, sseField{
+				key:      ":",
+				value:    strings.TrimPrefix(line, ":"),
+				hasValue: true,
+				comment:  true,
+			})
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			fields = append(fields, sseField{
+				key:      strings.ToLower(strings.TrimSpace(line)),
+				value:    "",
+				hasValue: false,
+			})
+			continue
+		}
+
+		if strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+		fields = append(fields, sseField{
+			key:      strings.ToLower(strings.TrimSpace(key)),
+			value:    value,
+			hasValue: true,
+		})
+	}
+	return fields
+}
+
+func compareSSEFrame(expectedFrame, actualFrame string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string) {
+	expectedFields := parseSSEFrame(expectedFrame)
+	actualFields := parseSSEFrame(actualFrame)
+
+	if len(expectedFields) != len(actualFields) {
+		return false, "field-count mismatch"
+	}
+
+	for i := range expectedFields {
+		e := expectedFields[i]
+		a := actualFields[i]
+
+		if e.comment {
+			if !a.comment {
+				return false, "comment-position mismatch"
+			}
+			if len(strings.TrimSpace(e.value)) != len(strings.TrimSpace(a.value)) {
+				logger.Debug("SSE comment size differs (ignored)",
+					zap.Int("frame_field_index", i),
+					zap.Int("expected_size", len(strings.TrimSpace(e.value))),
+					zap.Int("actual_size", len(strings.TrimSpace(a.value))))
+			}
+			continue
+		}
+
+		if e.key != a.key {
+			return false, "field-key-order mismatch"
+		}
+
+		if e.hasValue != a.hasValue {
+			return false, "field-value-presence mismatch"
+		}
+
+		if !e.hasValue {
+			continue
+		}
+
+		if e.key == "data" {
+			eVal := strings.TrimSpace(e.value)
+			aVal := strings.TrimSpace(a.value)
+			expJSON := json.Valid([]byte(eVal))
+			actJSON := json.Valid([]byte(aVal))
+			if expJSON || actJSON {
+				if !(expJSON && actJSON) {
+					return false, "data-json-type mismatch"
+				}
+				ok, err := compareJSONTextWithNoise(eVal, aVal, jsonNoiseKeys)
+				if err != nil {
+					return false, "data-json-parse-error"
+				}
+				if !ok {
+					return false, "data-json-mismatch"
+				}
+				continue
+			}
+
+			if detectScalarType(eVal) != detectScalarType(aVal) {
+				return false, "data-type mismatch"
+			}
+			if len(eVal) != len(aVal) {
+				return false, "data-size mismatch"
+			}
+			continue
+		}
+
+		eType := detectScalarType(strings.TrimSpace(e.value))
+		aType := detectScalarType(strings.TrimSpace(a.value))
+		if eType != aType {
+			return false, "field-type mismatch"
+		}
+	}
+
+	return true, ""
+}
+
+func detectScalarType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "empty"
+	}
+
+	if strings.EqualFold(value, "null") {
+		return "null"
+	}
+	if strings.EqualFold(value, "true") || strings.EqualFold(value, "false") {
+		return "bool"
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return "number"
+	}
+	return "string"
+}
+
+func compareJSONTextWithNoise(expected, actual string, jsonNoiseKeys map[string]struct{}) (bool, error) {
+	var exp any
+	var act any
+
+	if err := json.Unmarshal([]byte(expected), &exp); err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal([]byte(actual), &act); err != nil {
+		return false, err
+	}
+
+	exp = removeGlobalNoiseKeys(exp, jsonNoiseKeys)
+	act = removeGlobalNoiseKeys(act, jsonNoiseKeys)
+
+	return reflect.DeepEqual(exp, act), nil
+}
+
+func removeGlobalNoiseKeys(node any, jsonNoiseKeys map[string]struct{}) any {
+	switch v := node.(type) {
+	case map[string]any:
+		filtered := make(map[string]any, len(v))
+		for k, child := range v {
+			lk := strings.ToLower(strings.TrimSpace(k))
+			if _, ignored := jsonNoiseKeys[lk]; ignored {
+				continue
+			}
+			filtered[k] = removeGlobalNoiseKeys(child, jsonNoiseKeys)
+		}
+		return filtered
+	case []any:
+		arr := make([]any, 0, len(v))
+		for _, child := range v {
+			arr = append(arr, removeGlobalNoiseKeys(child, jsonNoiseKeys))
+		}
+		return arr
+	default:
+		return node
+	}
+}
+
+func compareMultipartStream(expectedBody string, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
 	if strings.TrimSpace(boundary) == "" {
 		return false, "", fmt.Errorf("missing multipart boundary for stream comparison")
 	}
@@ -927,10 +1252,10 @@ func compareMultipartStream(expectedBody string, stream io.Reader, boundary stri
 			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), partErr
 		}
 
-		canonicalPart, canonicalErr := canonicalizeMultipartPart(part)
+		actualPart, partReadErr := readMultipartPart(part)
 		_ = part.Close()
-		if canonicalErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), canonicalErr
+		if partReadErr != nil {
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), partReadErr
 		}
 
 		if nextExpected >= len(expectedQueue) {
@@ -939,13 +1264,15 @@ func compareMultipartStream(expectedBody string, stream io.Reader, boundary stri
 			break
 		}
 
-		actualQueue = append(actualQueue, canonicalPart)
 		expected := expectedQueue[nextExpected]
-		if canonicalPart != expected {
+		actualQueue = append(actualQueue, actualPart.describe())
+		ok, reason := compareMultipartPart(expected, actualPart, jsonNoiseKeys)
+		if !ok {
 			logger.Warn("multipart stream mismatch",
 				zap.Int("part_index", nextExpected),
-				zap.String("expected_part", expected),
-				zap.String("actual_part", canonicalPart))
+				zap.String("reason", reason),
+				zap.String("expected_part", expected.describe()),
+				zap.String("actual_part", actualPart.describe()))
 			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
 		}
 
@@ -967,7 +1294,16 @@ func compareMultipartStream(expectedBody string, stream io.Reader, boundary stri
 	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
 }
 
-func parseMultipartQueue(reader io.Reader, boundary string) ([]string, error) {
+type multipartPartPayload struct {
+	contentType string
+	body        []byte
+}
+
+func (m multipartPartPayload) describe() string {
+	return fmt.Sprintf("content-type:%s size:%d", m.contentType, len(m.body))
+}
+
+func parseMultipartQueue(reader io.Reader, boundary string) ([]multipartPartPayload, error) {
 	if strings.TrimSpace(boundary) == "" {
 		return nil, fmt.Errorf("multipart boundary is empty")
 	}
@@ -994,9 +1330,9 @@ func parseMultipartQueue(reader io.Reader, boundary string) ([]string, error) {
 	return nil, parseErr
 }
 
-func parseMultipartQueueBytes(data []byte, boundary string) ([]string, error) {
+func parseMultipartQueueBytes(data []byte, boundary string) ([]multipartPartPayload, error) {
 	mr := multipart.NewReader(bytes.NewReader(data), boundary)
-	queue := make([]string, 0)
+	queue := make([]multipartPartPayload, 0)
 
 	for {
 		part, err := mr.NextPart()
@@ -1007,62 +1343,70 @@ func parseMultipartQueueBytes(data []byte, boundary string) ([]string, error) {
 			return nil, err
 		}
 
-		canonicalPart, canonicalErr := canonicalizeMultipartPart(part)
+		payload, readErr := readMultipartPart(part)
 		_ = part.Close()
-		if canonicalErr != nil {
-			return nil, canonicalErr
+		if readErr != nil {
+			return nil, readErr
 		}
-		queue = append(queue, canonicalPart)
+		if payload.contentType == "" && len(payload.body) == 0 {
+			continue
+		}
+		queue = append(queue, payload)
 	}
 
 	return queue, nil
 }
 
-func canonicalizeMultipartPart(part *multipart.Part) (string, error) {
-	headers := make([]string, 0, len(part.Header))
-	for key, values := range part.Header {
-		normalizedValues := make([]string, 0, len(values))
-		for _, value := range values {
-			normalizedValues = append(normalizedValues, strings.TrimSpace(value))
-		}
-		headers = append(headers, strings.ToLower(strings.TrimSpace(key))+":"+strings.Join(normalizedValues, ","))
-	}
-	sort.Strings(headers)
-
+func readMultipartPart(part *multipart.Part) (multipartPartPayload, error) {
 	bodyBytes, err := io.ReadAll(part)
 	if err != nil {
-		return "", err
+		return multipartPartPayload{}, err
 	}
 
-	body := canonicalizeMultipartBody(part.Header.Get("Content-Type"), bodyBytes)
-	return strings.Join(headers, "\n") + "\n\n" + body, nil
+	contentType := strings.ToLower(strings.TrimSpace(part.Header.Get("Content-Type")))
+	if parsedType, _, err := mime.ParseMediaType(contentType); err == nil {
+		contentType = strings.ToLower(strings.TrimSpace(parsedType))
+	}
+
+	if isJSONContentType(contentType) {
+		bodyBytes = []byte(strings.TrimSpace(string(bodyBytes)))
+	} else if strings.HasPrefix(contentType, "text/") || contentType == "application/xml" || contentType == "application/x-ndjson" || contentType == "application/ndjson" {
+		normalized := normalizeLineEndings(string(bodyBytes))
+		normalized = strings.TrimSuffix(normalized, "\n")
+		bodyBytes = []byte(normalized)
+	}
+
+	return multipartPartPayload{
+		contentType: contentType,
+		body:        append([]byte(nil), bodyBytes...),
+	}, nil
 }
 
-func canonicalizeMultipartBody(contentType string, body []byte) string {
-	mediaType := strings.ToLower(strings.TrimSpace(contentType))
-	if mediaType != "" {
-		if parsedType, _, err := mime.ParseMediaType(mediaType); err == nil {
-			mediaType = strings.ToLower(strings.TrimSpace(parsedType))
+func compareMultipartPart(expected multipartPartPayload, actual multipartPartPayload, jsonNoiseKeys map[string]struct{}) (bool, string) {
+	if expected.contentType != actual.contentType {
+		return false, "content-type mismatch"
+	}
+
+	if isJSONContentType(expected.contentType) {
+		ok, err := compareJSONTextWithNoise(strings.TrimSpace(string(expected.body)), strings.TrimSpace(string(actual.body)), jsonNoiseKeys)
+		if err != nil {
+			return false, err.Error()
 		}
-	}
-
-	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
-		trimmed := strings.TrimSpace(string(body))
-		var parsed interface{}
-		if json.Unmarshal([]byte(trimmed), &parsed) == nil {
-			if marshaled, err := json.Marshal(parsed); err == nil {
-				return string(marshaled)
-			}
+		if !ok {
+			return false, "json body mismatch"
 		}
-		return trimmed
+		return true, ""
 	}
 
-	if strings.HasPrefix(mediaType, "text/") || mediaType == "application/x-ndjson" || mediaType == "application/ndjson" || mediaType == "application/xml" {
-		normalized := normalizeLineEndings(string(body))
-		return strings.TrimSuffix(normalized, "\n")
+	if len(expected.body) != len(actual.body) {
+		return false, "body-size mismatch"
 	}
+	return true, ""
+}
 
-	return base64.StdEncoding.EncodeToString(body)
+func isJSONContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	return contentType == "application/json" || strings.HasSuffix(contentType, "+json") || contentType == "application/x-ndjson" || contentType == "application/ndjson"
 }
 
 func splitLineQueue(body string, canonicalizer func(string) string, ignoreEmpty bool) []string {
@@ -1133,8 +1477,9 @@ func splitSSEQueue(body string) []string {
 
 	queue := []string{}
 	for scanner.Scan() {
-		frame := canonicalizeSSEFrame(scanner.Text())
-		if frame == "" {
+		frame := normalizeLineEndings(scanner.Text())
+		frame = strings.Trim(frame, "\n")
+		if strings.TrimSpace(frame) == "" {
 			continue
 		}
 		queue = append(queue, frame)
