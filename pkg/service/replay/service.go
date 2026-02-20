@@ -58,9 +58,9 @@ type Service interface {
 	StoreMappings(ctx context.Context, mapping *models.Mapping) error
 
 	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
-	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result)
+	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result)
 	// CompareGRPCResp compares gRPC responses and returns match result with detailed diffs
-	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result)
+	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result)
 }
 
 type TestDB interface {
