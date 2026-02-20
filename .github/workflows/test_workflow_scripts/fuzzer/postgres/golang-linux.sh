@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-
 # This script orchestrates the testing of the Postgres fuzzer with Keploy.
 # It handles setting up a Postgres instance for recording, generating Keploy tests and mocks,
 # and then running tests in a mock environment to validate Keploy's functionality.

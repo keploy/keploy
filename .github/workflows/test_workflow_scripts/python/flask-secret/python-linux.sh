@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Function to cleanup any remaining keploy processes

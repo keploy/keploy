@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # This script tests the go-grpc sample application in two modes:
 # 'incoming': Tests the gRPC server by recording its incoming gRPC calls.
 # 'outgoing': Tests the gRPC client by recording its outgoing gRPC calls.

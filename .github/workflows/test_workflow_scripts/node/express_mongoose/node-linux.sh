@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 # Safe, chatty CI script for Node + Mongo + Keploy (fail-fast, reference-aligned)
 
 set -Eeuo pipefail

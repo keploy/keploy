@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-
 # This script automates the testing of the risk profile identification feature.
 # It records test cases, validates the initial failure report, then tests the
 # two-stage normalization process (safe and forced), and finally confirms

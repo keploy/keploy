@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # Expects:
 #   MODE                -> 'incoming' or 'outgoing'   (argv[1])
 #   RECORD_BIN          -> path to keploy record binary (env)

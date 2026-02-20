@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 # Safe, chatty CI script for Java + Postgres + Keploy with auto API-prefix detection
 
 set -Eeuo pipefail

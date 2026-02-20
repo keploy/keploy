@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout to the specified branch

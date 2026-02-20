@@ -1,4 +1,3 @@
-
 # Add fake installation-id for the workflow.
 sudo mkdir ~/.keploy
 sudo touch ~/.keploy/installation-id.yaml

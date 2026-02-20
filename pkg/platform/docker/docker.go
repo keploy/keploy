@@ -458,7 +458,6 @@ func (idc *Impl) generateKeployVolumes() []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			// "/sys/kernel/tracing:/sys/kernel/tracing",
 		)
 	case "darwin":
 		// macOS volumes
@@ -466,7 +465,6 @@ func (idc *Impl) generateKeployVolumes() []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
-			// "/sys/kernel/tracing:/sys/kernel/tracing",
 		)
 	case "windows":
 		// Windows volumes - check if using default context or colima
@@ -480,7 +478,6 @@ func (idc *Impl) generateKeployVolumes() []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					// "/sys/kernel/tracing:/sys/kernel/tracing",
 				)
 			} else {
 				// Colima context
@@ -488,7 +485,6 @@ func (idc *Impl) generateKeployVolumes() []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
 					"/sys/fs/bpf:/sys/fs/bpf",
-					// "/sys/kernel/tracing:/sys/kernel/tracing",
 				)
 			}
 		}

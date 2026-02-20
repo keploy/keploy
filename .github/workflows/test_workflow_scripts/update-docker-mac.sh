@@ -1,5 +1,4 @@
 #!/bin/bash
-
 set -Eeuo pipefail
 
 DOCKERFILE_PATH="./Dockerfile"

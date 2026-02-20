@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 echo "$RECORD_BIN"
 echo "$REPLAY_BIN"
 

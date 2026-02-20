@@ -1,7 +1,6 @@
 
 #!/usr/bin/env bash
 
-
 # This script orchestrates the testing of the Mongo fuzzer with Keploy.
 # It handles setting up a sharded, multi-cluster Mongo environment for recording,
 # generating Keploy tests and mocks, and then running tests in a mock environment

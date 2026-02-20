@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # Checkout a different branch
 git fetch origin
 git checkout native-linux
