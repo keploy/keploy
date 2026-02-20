@@ -22,6 +22,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -32,10 +33,6 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
-
-// TCP_QUICKACK is the Linux socket option to disable delayed ACKs.
-// This constant is not in the standard syscall package for all platforms.
-const TCP_QUICKACK = 12
 
 // outgoingTLSSessionCache is shared across all outgoing TLS connections.
 // Without this, every proxy→destination dial does a full TLS handshake (~10-30 ms).
@@ -86,28 +83,13 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 }
 
-// setTCPQuickACK enables TCP_QUICKACK to disable delayed ACKs.
-// Delayed ACKs can add up to 40ms latency on Linux when the proxy only reads
-// from one connection and writes to another (piggyback ACK never triggers).
-// Note: TCP_QUICKACK resets after each ACK, but even setting it once helps
-// the first few packets on each connection which are latency-sensitive.
-func setTCPQuickACK(tc *net.TCPConn) {
-	rawConn, err := tc.SyscallConn()
-	if err != nil {
-		return
-	}
-	_ = rawConn.Control(func(fd uintptr) {
-		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, TCP_QUICKACK, 1)
-	})
-}
-
 // tuneTCPConn applies low-latency TCP tuning to a connection:
 // - TCP_NODELAY: disable Nagle's algorithm
 // - TCP_QUICKACK: disable delayed ACKs
 // - Enlarged socket buffers: reduce TCP back-pressure on bursty traffic
 func tuneTCPConn(tc *net.TCPConn) {
 	_ = tc.SetNoDelay(true)
-	setTCPQuickACK(tc)
+	orchestrator.SetTCPQuickACK(tc)
 	_ = tc.SetReadBuffer(2 * 1024 * 1024)  // 2 MB receive buffer
 	_ = tc.SetWriteBuffer(2 * 1024 * 1024) // 2 MB send buffer
 }
