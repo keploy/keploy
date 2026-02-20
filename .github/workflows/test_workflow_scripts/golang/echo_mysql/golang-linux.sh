@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# safer bash, but we’ll locally disable -e around commands we want to inspect
-set -Eeuo pipefail
+# safer bash, but we’ll locally disable -e around commands we want to inspectset -Eeuo pipefail
 
 git fetch origin
 git checkout origin/add-ssl-mysql
