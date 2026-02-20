@@ -279,26 +279,29 @@ func decodeTextResultSetResponse(ctx context.Context, logger *zap.Logger, entry 
 	}
 	_ = hasEOF
 
-	// Decode rows until the final EOF/OK.
+	// Decode rows and the final terminator (EOF or OK with CLIENT_DEPRECATE_EOF).
+	//
+	// The RespPackets are already fully framed by the reassembler.
+	// The last packet is always the terminator (EOF or OK).
+	// Everything between the EOF-after-columns and the last packet is rows.
 	textRes.Rows = make([]*mysql.TextRow, 0)
 	for pktIdx < len(entry.RespPackets) {
 		pkt := entry.RespPackets[pktIdx]
 		pktIdx++
 
-		// Check for final EOF.
-		if len(pkt) >= 5 && pkt[4] == mysql.EOF && payloadLen(pkt) < 9 {
-			textRes.FinalResponse = &mysql.GenericResponse{
-				Data: pkt,
-				Type: mysql.StatusToString(mysql.EOF),
-			}
-			break
-		}
-
-		// Check for final OK (CLIENT_DEPRECATE_EOF).
-		if len(pkt) >= 5 && pkt[4] == mysql.OK && payloadLen(pkt) < 64 {
-			textRes.FinalResponse = &mysql.GenericResponse{
-				Data: pkt,
-				Type: mysql.StatusToString(mysql.OK),
+		// Last packet → terminator (EOF or OK).
+		if pktIdx == len(entry.RespPackets) {
+			if len(pkt) >= 5 && pkt[4] == mysql.EOF && payloadLen(pkt) < 9 {
+				textRes.FinalResponse = &mysql.GenericResponse{
+					Data: pkt,
+					Type: mysql.StatusToString(mysql.EOF),
+				}
+			} else {
+				// CLIENT_DEPRECATE_EOF: OK packet terminates result set.
+				textRes.FinalResponse = &mysql.GenericResponse{
+					Data: pkt,
+					Type: mysql.StatusToString(mysql.OK),
+				}
 			}
 			break
 		}
@@ -354,24 +357,34 @@ func decodeBinaryResultSetResponse(ctx context.Context, logger *zap.Logger, entr
 		}
 	}
 
-	// Decode rows.
+	// Decode rows and the final terminator (EOF or OK with CLIENT_DEPRECATE_EOF).
+	//
+	// IMPORTANT: We CANNOT use `pkt[4] == 0x00` (mysql.OK) to detect the
+	// OK terminator because binary rows ALSO start with 0x00.  The heuristic
+	// `payloadLen < 64` doesn't help either — short rows (e.g. a single
+	// VARCHAR column with value "uss") have payloads well under 64 bytes.
+	//
+	// Since the RespPackets are fully framed by the reassembler, the last
+	// packet is always the terminator.  Everything between EOF-after-columns
+	// and the last packet is rows.
 	binRes.Rows = make([]*mysql.BinaryRow, 0)
 	for pktIdx < len(entry.RespPackets) {
 		pkt := entry.RespPackets[pktIdx]
 		pktIdx++
 
-		if len(pkt) >= 5 && pkt[4] == mysql.EOF && payloadLen(pkt) < 9 {
-			binRes.FinalResponse = &mysql.GenericResponse{
-				Data: pkt,
-				Type: mysql.StatusToString(mysql.EOF),
-			}
-			break
-		}
-
-		if len(pkt) >= 5 && pkt[4] == mysql.OK && payloadLen(pkt) < 64 {
-			binRes.FinalResponse = &mysql.GenericResponse{
-				Data: pkt,
-				Type: mysql.StatusToString(mysql.OK),
+		// Last packet → terminator (EOF or OK).
+		if pktIdx == len(entry.RespPackets) {
+			if len(pkt) >= 5 && pkt[4] == mysql.EOF && payloadLen(pkt) < 9 {
+				binRes.FinalResponse = &mysql.GenericResponse{
+					Data: pkt,
+					Type: mysql.StatusToString(mysql.EOF),
+				}
+			} else {
+				// CLIENT_DEPRECATE_EOF: OK packet terminates result set.
+				binRes.FinalResponse = &mysql.GenericResponse{
+					Data: pkt,
+					Type: mysql.StatusToString(mysql.OK),
+				}
 			}
 			break
 		}
@@ -482,20 +495,28 @@ func safeMarker(pkt []byte) byte {
 }
 
 // decodeHandshakeConfig re-decodes the handshake config packets in the
-// correct interleaved MySQL order (server→client→server→client→…) so the
-// wire decoder's state machine tracks lastOp correctly.
+// correct MySQL protocol order so the wire decoder's state machine
+// tracks lastOp correctly.
 //
 // The handshake exchange stored in a RawMockEntry looks like:
 //
 //	RespPackets[0] = Server Greeting   (HandshakeV10)
-//	ReqPackets[0]  = Client Response   (HandshakeResponse41 / SSLRequest)
+//	ReqPackets[0]  = SSLRequest        (for SSL) or HandshakeResponse41
+//	ReqPackets[1]  = HandshakeResponse41 (for SSL — second consecutive client packet)
 //	RespPackets[1] = Auth result       (OK / AuthSwitchRequest / AuthMoreData)
-//	ReqPackets[1]  = Auth client data  (optional)
+//	ReqPackets[2]  = Auth client data  (optional, e.g. auth switch response)
 //	RespPackets[2] = Next auth result  (optional)
-//	…interleaved until final OK…
+//	…alternating until final OK…
 //
-// We replay this sequence through wire.DecodePayload with a fresh
-// DecodeContext so every packet gets its rich typed representation.
+// IMPORTANT: For SSL connections, there are TWO consecutive client packets
+// (SSLRequest + HandshakeResponse41) before the server responds with auth
+// data.  A naive alternation (resp, req, resp, req) would interleave a
+// server response between them, breaking the decoder state machine.
+//
+// This function replays packets in actual MySQL protocol order:
+//  1. Server Greeting (resp[0])
+//  2. All client handshake packets (req[0], and req[1] if SSL)
+//  3. Remaining auth exchange alternating resp/req
 func decodeHandshakeConfig(
 	ctx context.Context,
 	logger *zap.Logger,
@@ -526,21 +547,62 @@ func decodeHandshakeConfig(
 		return decoded
 	}
 
-	// Interleaved replay: server packet first, then client, alternating.
+	addResp := func(decoded *mysql.PacketBundle) {
+		*responses = append(*responses, mysql.Response{PacketBundle: *decoded})
+		responseOp = decoded.Header.Type
+	}
+	addReq := func(decoded *mysql.PacketBundle) {
+		*requests = append(*requests, mysql.Request{PacketBundle: *decoded})
+		requestOp = decoded.Header.Type
+	}
+
+	// ── Step 1: Server Greeting (always first) ──
+	if ri < len(entry.RespPackets) {
+		decoded := decodePkt(entry.RespPackets[ri])
+		addResp(decoded)
+		ri++
+
+		// Extract server greeting state for the decode context so
+		// subsequent packets (especially AuthMoreData) decode correctly.
+		if sg, ok := decoded.Message.(*mysql.HandshakeV10Packet); ok {
+			decodeCtx.PluginName = sg.AuthPluginName
+			decodeCtx.ServerGreeting = sg
+			decodeCtx.ServerGreetings.Store(connKey, sg)
+		}
+	}
+
+	// ── Step 2: Client handshake packet(s) ──
+	// For SSL: SSLRequest + HandshakeResponse41 (two consecutive)
+	// For non-SSL: HandshakeResponse41 (one)
+	for qi < len(entry.ReqPackets) {
+		decoded := decodePkt(entry.ReqPackets[qi])
+		addReq(decoded)
+		qi++
+
+		if _, isSSL := decoded.Message.(*mysql.SSLRequestPacket); isSSL {
+			// After SSLRequest, the decoder needs lastOp reset to HandshakeV10
+			// so it can decode the next packet as HandshakeResponse41.
+			decodeCtx.LastOp.Store(connKey, mysql.HandshakeV10)
+			if sg := decodeCtx.ServerGreeting; sg != nil {
+				decodeCtx.ServerGreetings.Store(connKey, sg)
+			}
+			continue // read next req (HandshakeResponse41 over TLS)
+		}
+		break // HandshakeResponse41 processed, move to auth exchange
+	}
+
+	// ── Step 3: Remaining auth exchange (alternating resp/req) ──
+	// After the greeting + client handshake, the auth exchange alternates:
+	// server response, client data, server response, ...
 	for ri < len(entry.RespPackets) || qi < len(entry.ReqPackets) {
-		// Server packet (response)
 		if ri < len(entry.RespPackets) {
 			decoded := decodePkt(entry.RespPackets[ri])
-			*responses = append(*responses, mysql.Response{PacketBundle: *decoded})
-			responseOp = decoded.Header.Type
+			addResp(decoded)
 			ri++
 		}
-
-		// Client packet (request)
 		if qi < len(entry.ReqPackets) {
 			decoded := decodePkt(entry.ReqPackets[qi])
-			*requests = append(*requests, mysql.Request{PacketBundle: *decoded})
-			requestOp = decoded.Header.Type
+			addReq(decoded)
 			qi++
 		}
 	}
