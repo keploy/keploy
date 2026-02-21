@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -10,8 +11,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// Register with lowercase to match the command's Use field and be consistent with other commands.
 func init() {
-	Register("Sanitize", Sanitize)
+	Register("sanitize", Sanitize)
 }
 
 func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
@@ -26,19 +28,19 @@ func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var sanitizeService toolsSvc.Service
 			var ok bool
 			if sanitizeService, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return errors.New("service doesn't satisfy tools service interface")
 			}
 
 			err = sanitizeService.Sanitize(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to sanitize test cases")
-				return nil
+				return err
 			}
 
 			return nil

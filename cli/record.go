@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -27,13 +28,13 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var record recordSvc.Service
 			var ok bool
 			if record, ok = svc.(recordSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
-				return nil
+				return errors.New("service doesn't satisfy record service interface")
 			}
 
 			cfg := models.ReRecordCfg{
@@ -45,7 +46,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to record")
-				return nil
+				return err
 			}
 
 			return nil

@@ -192,7 +192,7 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 		err := idc.VolumeRemove(ctx, volumeName, false)
 		if err != nil {
 			idc.logger.Error("failed to remove existing volume", zap.String("volume", volumeName), zap.Error(err))
-			cancel()
+			// No need to call cancel() explicitly here — defer cancel() handles cleanup.
 			return err
 		}
 		idc.logger.Info("removed existing volume", zap.String("volume", volumeName))
@@ -452,15 +452,8 @@ func (idc *Impl) generateKeployVolumes() []string {
 	volumes := []string{}
 
 	switch osName {
-	case "linux":
-		// Standard Linux volumes
-		volumes = append(volumes,
-			"/sys/fs/cgroup:/sys/fs/cgroup",
-			"/sys/kernel/debug:/sys/kernel/debug",
-			"/sys/fs/bpf:/sys/fs/bpf",
-		)
-	case "darwin":
-		// macOS volumes
+	// linux and darwin use identical volume mappings.
+	case "linux", "darwin":
 		volumes = append(volumes,
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
@@ -471,8 +464,17 @@ func (idc *Impl) generateKeployVolumes() []string {
 		cmd := exec.Command("docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err == nil {
-			dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-			if dockerContext != "colima" {
+			// Output format is "Name\tCurrent" per line. Find the line marked as current.
+			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+			var currentContext string
+			for _, line := range lines {
+				parts := strings.SplitN(line, "\t", 2)
+				if len(parts) == 2 && strings.TrimSpace(parts[1]) == "true" {
+					currentContext = strings.TrimSpace(parts[0])
+					break
+				}
+			}
+			if currentContext != "colima" {
 				// Default Docker context on Windows
 				volumes = append(volumes,
 					"/sys/fs/cgroup:/sys/fs/cgroup",

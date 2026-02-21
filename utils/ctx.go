@@ -16,6 +16,7 @@ var cancel context.CancelFunc
 
 func NewCtx() context.Context {
 	// Create a context that can be canceled
+	// Use a distinct local name to avoid shadowing the package-level cancel variable.
 	ctx, c := context.WithCancel(context.Background())
 
 	SetCancel(c)

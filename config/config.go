@@ -206,6 +206,8 @@ func SetByPassPorts(conf *Config, ports []uint) {
 func GetByPassPorts(conf *Config) []uint {
 	var ports []uint
 	for _, rule := range conf.BypassRules {
+		// Skip rules that only specify Host or Path without a port,
+		// as port 0 is not a meaningful value for bypass filtering.
 		if rule.Port == 0 {
 			continue
 		}

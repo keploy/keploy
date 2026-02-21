@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -27,17 +28,17 @@ func Normalize(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return errors.New("service doesn't satisfy tools service interface")
 			}
 			if err := tools.Normalize(ctx); err != nil {
 				utils.LogError(logger, err, "failed to normalize test cases")
-				return nil
+				return err
 			}
 			return nil
 		},
