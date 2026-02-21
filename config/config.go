@@ -206,6 +206,9 @@ func SetByPassPorts(conf *Config, ports []uint) {
 func GetByPassPorts(conf *Config) []uint {
 	var ports []uint
 	for _, rule := range conf.BypassRules {
+		if rule.Port == 0 {
+			continue
+		}
 		ports = append(ports, rule.Port)
 	}
 	return ports

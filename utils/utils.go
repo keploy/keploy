@@ -329,7 +329,7 @@ func RemoveDoubleQuotes(tempMap map[string]interface{}) {
 	}
 }
 
-func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
+func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
@@ -439,7 +439,7 @@ func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
 	sentry.CaptureException(errors.New(fmt.Sprint(r)))
 	// Get the stack trace
 	stackTrace := debug.Stack()
-	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
+	LogError(logger, fmt.Errorf("%v", r), errMsg, zap.String("stack trace", string(stackTrace)))
 }
 
 // Recover recovers from a panic and logs the stack trace to Sentry.
@@ -487,7 +487,7 @@ jobs:
 `
 
 	// Define the file path where the GitHub Actions workflow file will be saved
-	filePath := "/githubactions/keploy.yml"
+	filePath := ".github/workflows/keploy.yml"
 
 	//create the file path
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
@@ -716,7 +716,7 @@ func GetCurrentBinaryPath() (string, error) {
 func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	path := originalPath
 	//if user provides relative path
-	if len(path) > 0 && path[0] != '/' {
+	if len(path) > 0 && !filepath.IsAbs(path) {
 		absPath, err := filepath.Abs(path)
 		if err != nil {
 			LogError(logger, err, "failed to get the absolute path from relative path")
@@ -1154,15 +1154,16 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
 		return false
 	}
-	if err := f.Close(); err != nil {
-		LogError(logger, err, "failed to close file", zap.String("file", filePath))
-	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		}
+	}()
 
 	// Check for section names typical to Go binaries
 	sections := []string{".go.buildinfo", ".gopclntab"}
 	for _, section := range sections {
 		if sect := f.Section(section); sect != nil {
-			fmt.Println(section)
 			return true
 		}
 	}
