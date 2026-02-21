@@ -1,6 +1,5 @@
 <#
   PowerShell test runner for Keploy (Windows) - http-pokeapi sample
-
   - Synchronous (PID-controlled) record phase using Start-Process
   - Cleans keploy dirs/files up-front
   - Generates keploy.yml
