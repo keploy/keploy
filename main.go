@@ -162,8 +162,8 @@ func start(ctx context.Context) {
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
 			fmt.Println("Run 'keploy --help' for usage.")
-			os.Exit(1)
 		}
+		os.Exit(1)
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
