@@ -32,6 +32,22 @@ func getSandboxJWTToken(ctx context.Context, logger *zap.Logger, cfg *config.Con
 		return "", fmt.Errorf("API server URL is not configured")
 	}
 
+	// If KEPLOY_API_KEY is set (e.g., in CI), authenticate via API key
+	// instead of interactive GitHub OAuth.
+	if apiKey := os.Getenv("KEPLOY_API_KEY"); apiKey != "" {
+		logger.Info("KEPLOY_API_KEY detected, authenticating via API key")
+		token, err := platformAuth.AuthenticateWithAPIKey(ctx, cfg.APIServerURL, cfg.InstallationID, apiKey, logger)
+		if err != nil {
+			return "", fmt.Errorf("API key authentication failed: %w", err)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return "", fmt.Errorf("received empty jwt token from API key auth")
+		}
+		return token, nil
+	}
+
+	// Fall back to GitHub OAuth (interactive login).
 	authSvc := platformAuth.New(cfg.APIServerURL, cfg.InstallationID, logger, cfg.GitHubClientID)
 	token, err := authSvc.GetToken(ctx)
 	if err != nil {
