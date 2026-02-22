@@ -117,6 +117,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// ---- Custom field-level matchers (5.4) ----
 	if fieldMatchers != nil && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
 		if err := matcherUtils.CompareWithMatchers([]byte(cleanExp), []byte(cleanAct), fieldMatchers); err != nil {
+			logger.Debug("field matcher comparison failed",
+				zap.Error(err),
+				zap.String("next_step", "check field paths and matcher configuration in replayMatchers.body"),
+			)
 			res.BodyResult[0].Normal = false
 			return false, res
 		}

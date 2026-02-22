@@ -384,6 +384,10 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 			fieldMatchers,
 		)
 		if err != nil {
+			logger.Debug("field matcher comparison failed",
+				zap.Error(err),
+				zap.String("next_step", "check field paths and matcher configuration in replayMatchers.body"),
+			)
 			respCompare.BodyResult.Normal = false
 			return false, respCompare
 		}
