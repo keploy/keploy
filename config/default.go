@@ -64,6 +64,7 @@ test:
   protoDir: ""
   protoInclude: []
   compareAll: false
+  updateMapping: false
 record:
   recordTimer: 0s
   filters: []

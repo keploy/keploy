@@ -1076,6 +1076,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 	}
+	if len(consumedMocks) > 0 {
+		r.logger.Info("Consumed mocks during initial setup", zap.Any("consumedMocks", consumedMocks))
+	}
 	for _, m := range consumedMocks {
 		totalConsumedMocks[m.Name] = m
 	}
@@ -1184,6 +1187,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+			}
+			if len(consumedMocks) > 0 {
+				r.logger.Info("Consumed mocks for test case", zap.String("testcase", testCase.Name), zap.Any("consumedMocks", consumedMocks))
 			}
 			for _, m := range consumedMocks {
 				totalConsumedMocks[m.Name] = m
@@ -1504,7 +1510,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled {
+	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled && r.config.Test.UpdateMapping {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
