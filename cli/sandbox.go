@@ -253,7 +253,7 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 			})
 			if err != nil {
 				utils.LogError(logger, err, "failed to replay mocks")
-				return nil
+				return fmt.Errorf("sandbox replay failed: %w", err)
 			}
 
 			if output := strings.TrimSpace(result.Output); output != "" {
