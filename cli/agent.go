@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"

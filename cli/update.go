@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"errors"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"

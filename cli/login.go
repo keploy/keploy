@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 	toolsSvc "go.keploy.io/server/v3/pkg/service/tools"
