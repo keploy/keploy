@@ -40,7 +40,7 @@ type exactMatcher struct{}
 
 func (e exactMatcher) Match(expected, actual interface{}) error {
 	if !reflect.DeepEqual(expected, actual) {
-		return fmt.Errorf("values not equal")
+		return fmt.Errorf("values not equal: expected %v, got %v", expected, actual)
 	}
 	return nil
 }
@@ -51,7 +51,7 @@ type regexMatcher struct {
 
 func (r regexMatcher) Match(_, actual interface{}) error {
 	if !r.re.MatchString(fmt.Sprint(actual)) {
-		return fmt.Errorf("value does not match regex")
+		return fmt.Errorf("value %v does not match regex pattern %q", actual, r.re.String())
 	}
 	return nil
 }
@@ -69,8 +69,9 @@ func (t toleranceMatcher) Match(expected, actual interface{}) error {
 	if !ok {
 		return fmt.Errorf("actual value is not numeric")
 	}
-	if math.Abs(exp-act) > t.delta {
-		return fmt.Errorf("values differ by more than tolerance")
+	diff := math.Abs(exp - act)
+	if diff > t.delta {
+		return fmt.Errorf("values differ by %v which exceeds tolerance %v (expected: %v, actual: %v)", diff, t.delta, expected, actual)
 	}
 	return nil
 }
@@ -94,7 +95,7 @@ func BuildMatcher(mType, pattern string, delta float64) (Matcher, error) {
 		}
 		return toleranceMatcher{delta: delta}, nil
 	default:
-		return nil, fmt.Errorf("unsupported matcher type: %s", mType)
+		return nil, fmt.Errorf("unsupported matcher type %q (valid types: exact, regex, tolerance)", mType)
 	}
 }
 
@@ -123,11 +124,11 @@ func CompareWithMatchers(expectedBody []byte, actualBody []byte, matchers map[st
 	for path, cfg := range matchers {
 		expVal, ok := GetValueByPath(expMap, path)
 		if !ok {
-			return fmt.Errorf("missing field: %s", path)
+			return fmt.Errorf("missing field %q in expected body; verify the field path and expected payload", path)
 		}
 		actVal, ok := GetValueByPath(actMap, path)
 		if !ok {
-			return fmt.Errorf("missing field: %s", path)
+			return fmt.Errorf("missing field %q in actual body; verify the field path and response payload", path)
 		}
 
 		m, err := BuildMatcher(cfg.Type, cfg.Pattern, cfg.Delta)
@@ -136,7 +137,7 @@ func CompareWithMatchers(expectedBody []byte, actualBody []byte, matchers map[st
 		}
 
 		if err := m.Match(expVal, actVal); err != nil {
-			return err
+			return fmt.Errorf("field matcher failed at path %q (type: %s): %w", path, cfg.Type, err)
 		}
 	}
 	return nil
