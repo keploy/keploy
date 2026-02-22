@@ -13,6 +13,7 @@ import (
 
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -27,7 +28,7 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, fieldMatchers map[string]config.FieldMatcher, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult
@@ -55,7 +56,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		// Clear actual body so body comparison below runs as empty vs empty
 		actualResponse.Body = ""
 	}
-
 	bodyType := models.Plain
 	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
@@ -113,6 +113,18 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
+
+	// ---- Custom field-level matchers (5.4) ----
+	if fieldMatchers != nil && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
+		if err := matcherUtils.CompareWithMatchers([]byte(cleanExp), []byte(cleanAct), fieldMatchers); err != nil {
+			logger.Debug("field matcher comparison failed",
+				zap.Error(err),
+				zap.String("next_step", "check field paths and matcher configuration in replayMatchers.body"),
+			)
+			res.BodyResult[0].Normal = false
+			return false, res
+		}
+	}
 
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
 	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {

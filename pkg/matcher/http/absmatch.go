@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	matcher "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -70,7 +71,7 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	}
 
 	//compare http resp
-	respPass, respCompare := CompareHTTPResp(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
+	respPass, respCompare := CompareHTTPResp(tcs1, tcs2, noiseConfig, ignoreOrdering, nil, logger)
 	if !respPass {
 		logger.Info("test case http resp is not equal", zap.Any("tcs1HttpResp", tcs1.HTTPResp), zap.Any("tcs2HttpResp", tcs2.HTTPResp))
 		pass = false
@@ -238,7 +239,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 }
 
 // CompareHTTPResp compares two http responses and returns a boolean value indicating whether they are equal or not.
-func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, models.RespCompare) {
+func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise, ignoreOrdering bool, fieldMatchers map[string]config.FieldMatcher, logger *zap.Logger) (bool, models.RespCompare) {
 	pass := true
 
 	// If either response body was skipped during recording (>1MB), compute body size comparison
@@ -375,7 +376,24 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPResp.Body, tcs2.HTTPResp.Body
+	// ---- Custom field-level matchers (5.4) ----
+	if fieldMatchers != nil && bodyType1 == models.JSON {
+		err := matcher.CompareWithMatchers(
+			[]byte(cleanExp),
+			[]byte(cleanAct),
+			fieldMatchers,
+		)
+		if err != nil {
+			logger.Debug("field matcher comparison failed",
+				zap.Error(err),
+				zap.String("next_step", "check field paths and matcher configuration in replayMatchers.body"),
+			)
+			respCompare.BodyResult.Normal = false
+			return false, respCompare
+		}
+	}
 	var jsonComparisonResult matcher.JSONComparisonResult
+
 	if !matcher.Contains(matcher.MapToArray(noise), "body") && bodyType1 == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)

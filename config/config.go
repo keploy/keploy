@@ -157,6 +157,7 @@ type Test struct {
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 	CompareAll          bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
 	SchemaMatch         bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
+	ReplayMatchers      ReplayMatchers      `json:"replayMatchers" yaml:"replayMatchers" mapstructure:"replayMatchers"`
 	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
 }
 
@@ -295,4 +296,14 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 
 	conf.Normalize.SelectedTests = selected
 	return nil
+}
+
+type FieldMatcher struct {
+	Type    string  `yaml:"type" json:"type"`
+	Pattern string  `yaml:"pattern,omitempty" json:"pattern,omitempty"`
+	Delta   float64 `yaml:"delta,omitempty" json:"delta,omitempty"`
+}
+
+type ReplayMatchers struct {
+	Body map[string]FieldMatcher `yaml:"body" json:"body"`
 }
