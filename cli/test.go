@@ -27,13 +27,13 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var replay replaySvc.Service
 			var ok bool
 			if replay, ok = svc.(replaySvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
-				return nil
+				return errors.New("service doesn't satisfy replay service interface")
 			}
 			// defering the stop function to stop keploy in case of any error in test or in case of context cancellation
 			defer func() {
@@ -48,6 +48,7 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			if err != nil {
 				if ctx.Err() != context.Canceled {
 					utils.LogError(logger, err, "failed to replay")
+					return err
 				}
 			}
 

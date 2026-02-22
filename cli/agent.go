@@ -28,14 +28,14 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
-				return nil
+				return err
 			}
 
 			var a agent.Service
 			var ok bool
 			if a, ok = svc.(agent.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
-				return nil
+				return errors.New("service doesn't satisfy agent service interface")
 			}
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
@@ -58,7 +58,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			err = a.Setup(ctx, startAgentCh)
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
-				return nil
+				return err
 			}
 
 			return nil

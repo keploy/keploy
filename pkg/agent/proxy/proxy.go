@@ -410,7 +410,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	rule, ok := p.sessions.Get(uint64(0))
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
-		return err
+		return errors.New("failed to fetch the session rule")
 	}
 
 	// Create a local copy of OutgoingOptions to avoid data race when multiple

@@ -24,13 +24,13 @@ func Login(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
-				return nil
+				return errors.New("service doesn't satisfy tools service interface")
 			}
 			tools.Login(ctx)
 			return nil

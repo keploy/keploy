@@ -360,7 +360,7 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 		m.logger.Error("API server returned an error for config push",
 			zap.Int("statusCode", resp.StatusCode),
 			zap.String("response", string(respBody)))
-		return err
+		return fmt.Errorf("API server returned status %d for config push: %s", resp.StatusCode, string(respBody))
 	}
 
 	var respData MockChangeResp

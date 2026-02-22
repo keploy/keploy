@@ -44,13 +44,13 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
-				return nil
+				return errors.New("service doesn't satisfy contract service interface")
 			}
 			// Extract services from the flag
 
@@ -58,7 +58,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
-				return nil
+				return err
 			}
 
 			return nil
@@ -81,18 +81,19 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
-				return nil
+				return errors.New("service doesn't satisfy contract service interface")
 			}
 			err = contract.Download(ctx, true)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to download contract")
+				return err
 			}
 			return nil
 		},
@@ -114,17 +115,18 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var contract contractSvc.Service
 			var ok bool
 			if contract, ok = svc.(contractSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
-				return nil
+				return errors.New("service doesn't satisfy contract service interface")
 			}
 			err = contract.Validate(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to validate contract")
+				return err
 			}
 			return nil
 		},

@@ -284,14 +284,14 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		configData, err = config.Merge(config.InternalConfig, config.GetDefaultConfig())
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to create default config string")
-			return nil
+			return err
 		}
 		data = []byte(configData)
 	}
 
 	if err := yamlLib.Unmarshal(data, &node); err != nil {
 		utils.LogError(t.logger, err, "failed to unmarshal the config")
-		return nil
+		return err
 	}
 
 	if len(node.Content) > 0 { // we don't need agent config in the config file. All the config of the agent will be managed internally
@@ -316,13 +316,13 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to write config file")
-		return nil
+		return err
 	}
 
 	err = os.Chmod(filePath, 0777) // Set permissions to 777
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to set the permission of config file")
-		return nil
+		return err
 	}
 
 	return nil

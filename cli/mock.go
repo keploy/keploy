@@ -43,18 +43,18 @@ func DownloadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Servi
 			svc, err := serviceFactory.GetService(ctx, cmd.Parent().Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Parent().Name()))
-				return nil
+				return err
 			}
 			var replay replaySvc.Service
 			var ok bool
 			if replay, ok = svc.(replaySvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
-				return nil
+				return errors.New("service doesn't satisfy replay service interface")
 			}
 
 			if err := replay.DownloadMocks(ctx); err != nil {
 				utils.LogError(logger, err, "failed to download mocks from keploy registry")
-				return nil
+				return err
 			}
 			return nil
 		},
@@ -75,17 +75,17 @@ func UploadMocks(ctx context.Context, logger *zap.Logger, serviceFactory Service
 			svc, err := serviceFactory.GetService(ctx, cmd.Parent().Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Parent().Name()))
-				return nil
+				return err
 			}
 			var replay replaySvc.Service
 			var ok bool
 			if replay, ok = svc.(replaySvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
-				return nil
+				return errors.New("service doesn't satisfy replay service interface")
 			}
 			if err := replay.UploadMocks(ctx, nil); err != nil {
 				utils.LogError(logger, err, "failed to upload mocks to the keploy registry")
-				return nil
+				return err
 			}
 			return nil
 		},
