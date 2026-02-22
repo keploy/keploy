@@ -207,11 +207,8 @@ IMPORTANT: Before calling this tool, confirm the following with the user:
 - The command to run. Prefer deterministic test commands over app run commands.
 - For Go projects, default to go test commands first (for example 'go test -v -run "TestA|TestB"' or 'go test -v ./...').
 - Never default to 'go run main.go' for recording.
-- Provide a semantic-version tag in the tool argument 'tag' (for example 'v1.0.0').
-- Enforce semantic versioning rules for 'tag' (strict format like v1.0.0 or 1.0.0).
-- The 'tag' value should be AI-generated when the user does not provide one.
-- Read existing tag from keploy.yml when present, then increment the last digit (patch) by one for this record run (for example v1.0.0 -> v1.0.1).
-- Never reuse an existing tag value from keploy.yml for a new record run (avoid duplicate tags).
+- Search keploy.yml for the sandbox ref format (for example: sandbox: ref: anjupathak03/test-server:v1.0.0), extract the tag from ref, and use the next patch version for this record run (for example v1.0.0 -> v1.0.1); never reuse an existing tag value.
+- Provide a semantic-version 'tag' argument (strict format like 'v1.0.0' or '1.0.0'); if the user does not provide one, AI must generate it.
 - Avoid long-running/watch-mode/interactive commands and commands that do not terminate.
 - If command is unknown, send command as empty; the server will resolve it via elicitation.
 - The sandbox location directory (default: .)
@@ -223,7 +220,7 @@ Parameters:
 - command (optional): Command to run (prefer test commands like 'go test -v ./...' or 'npm test'). If empty, server elicits command and uses that value.
 - path (optional): Sandbox location directory (default: .)
 - name (optional): Sandbox file prefix (default: keploy, final file is <name>.sb.yaml)
-- tag (required): Semantic version tag with strict semver enforcement (for example 'v1.0.0'). If keploy.yml already contains a tag, increment the last digit (patch) by one (for example v1.0.0 -> v1.0.1) and use that for this run; otherwise AI should generate the starting tag.`,
+- tag (required): Semantic version tag with strict semver enforcement (for example 'v1.0.0'). Read keploy.yml sandbox ref in the format 'sandbox: ref: <org>/<app>:<tag>', increment the last digit (patch) by one (for example v1.0.0 -> v1.0.1), and use that for this run; otherwise AI should generate the starting tag.`,
 		}, s.handleMockRecord)
 
 	// Register mock replay/test tool
