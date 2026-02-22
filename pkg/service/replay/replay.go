@@ -170,8 +170,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	completeTestReport = make(map[string]TestReportVerdict)
 	totalTests, totalTestPassed, totalTestFailed, totalTestObsolete, totalTestIgnored = 0, 0, 0, 0, 0
 	totalTestTimeTaken = 0
-	completeTestReportMu.Unlock()
 	failedTCsBySetID = make(map[string][]string)
+	completeTestReportMu.Unlock()
 	mockMismatchFailures = NewTestFailureStore()
 
 	testRunID, err := r.GetNextTestRunID(ctx)
@@ -190,7 +190,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		// then set the language to detected language
 		if r.config.Test.Language == "" {
 			if language == models.Unknown {
-				r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+				r.logger.Warn("failed to detect language, skipping coverage calculation. please use --language to manually set the language")
 				r.config.Test.SkipCoverage = true
 			} else {
 				r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
@@ -233,7 +233,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
+			r.logger.Warn("failed to set CLEAN env variable, skipping coverage calculation", zap.Error(err))
 		}
 	}
 
@@ -288,7 +288,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
+				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage calculation", zap.Error(err))
 			}
 		}
 
@@ -309,6 +309,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
+		localMaxFailAttempts := r.config.Test.MaxFailAttempts // use local copy to avoid mutating shared config
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
 
 			// clearing testcase from map is required for 2 reasons:
@@ -377,7 +378,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 				break
 			}
 			failedTcIDs := getFailedTCs(tcResults)
+			completeTestReportMu.Lock()
 			failedTCsBySetID[testSet] = failedTcIDs
+			completeTestReportMu.Unlock()
 
 			// checking for flakiness when --must-pass flag is not set
 			// else if --must-pass is set, delete the failed testcases and rerun
@@ -415,7 +418,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
-			if r.config.Test.MaxFailAttempts == 0 {
+			if localMaxFailAttempts == 0 {
 				utils.LogError(r.logger, nil, "no. of testset failure occurred during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
@@ -439,7 +442,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 			// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
 			// and if it does then delete those failing testcases and rerun it again maxFlakyChecks times
-			r.config.Test.MaxFailAttempts--
+			localMaxFailAttempts--
 			attempt = 0
 		}
 
@@ -456,12 +459,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Warn("failed to set CLEAN env variable, skipping coverage calculation.", zap.Error(err))
 			}
 			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
+				r.logger.Warn("failed to set APPEND env variable, skipping coverage calculation.", zap.Error(err))
 			}
 		}
 	}
