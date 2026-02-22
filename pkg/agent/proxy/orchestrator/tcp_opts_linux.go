@@ -29,33 +29,3 @@ func SetTCPQuickACK(conn net.Conn) {
 		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, tcpQuickACK, 1)
 	})
 }
-
-// extractTCPfd extracts and caches the file descriptor from a TCP connection.
-// Returns -1 if the connection is not TCP. This avoids calling SyscallConn()
-// on every forwarded packet in the hot path.
-// Handles TLS-wrapped connections by unwrapping to the underlying *net.TCPConn.
-func extractTCPfd(conn net.Conn) int {
-	tc := unwrapTCPConn(conn)
-	if tc == nil {
-		return -1
-	}
-	rawConn, err := tc.SyscallConn()
-	if err != nil {
-		return -1
-	}
-	fd := -1
-	_ = rawConn.Control(func(f uintptr) {
-		fd = int(f)
-	})
-	return fd
-}
-
-// quickACKByFD re-enables TCP_QUICKACK using a cached file descriptor.
-// This is the hot-path version — avoids SyscallConn() + Control() overhead
-// (~2-5μs saved per call, significant at thousands of packets/sec).
-func quickACKByFD(fd int) {
-	if fd < 0 {
-		return
-	}
-	_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, tcpQuickACK, 1)
-}
