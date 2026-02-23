@@ -137,9 +137,9 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if !found {
 			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
 
-			// In record mode, only cache real upstream/mocked responses (not synthesized fallbacks).
-			// This prevents "sticky" synthetic answers if upstream DNS was temporarily broken.
-			if !(mode == models.MODE_RECORD && !resp.FromUpstream) {
+			// Only cache real mock responses in test mode.
+			// Never cache synthetic/fallback responses, and never cache in record mode.
+			if mode == models.MODE_TEST && resp.FromUpstream {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
