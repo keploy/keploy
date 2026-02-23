@@ -43,7 +43,7 @@ var Emoji = "\U0001F430" + " Keploy:"
 var SortCounter int64 = -1
 var templateValuesMu sync.RWMutex
 
-const maxSSEFrameSize = 10 * 1024 * 1024
+const maxStreamTokenSize = 10 * 1024 * 1024
 
 type httpStreamMode string
 
@@ -541,7 +541,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 
 		if !streamMatched {
-			logger.Warn("streaming response mismatch detected for testcase", zap.String("testcase", tc.Name), zap.String("mode", string(streamCfg.Mode)))
+			logger.Debug("streaming response mismatch detected for testcase", zap.String("testcase", tc.Name), zap.String("mode", string(streamCfg.Mode)))
 		}
 
 		bodyForMatcher := capturedStreamBody
@@ -825,7 +825,7 @@ func looksLikeSSEPayload(body string) bool {
 
 func looksLikeNDJSONPayload(body string) bool {
 	scanner := bufio.NewScanner(strings.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 
 	nonEmpty := 0
 	for scanner.Scan() {
@@ -849,7 +849,7 @@ func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[s
 	nextExpected := 0
 
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 	scanner.Split(splitSSEFrames)
 
 	for scanner.Scan() {
@@ -860,7 +860,7 @@ func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[s
 		}
 
 		if nextExpected >= len(expectedQueue) {
-			logger.Warn("received additional SSE data after expected stream was fully matched; closing stream capture",
+			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
 		}
@@ -869,7 +869,7 @@ func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[s
 		expectedFrame := expectedQueue[nextExpected]
 		match, reason := compareSSEFrame(expectedFrame, frame, jsonNoiseKeys, logger)
 		if !match {
-			logger.Warn("SSE frame mismatch",
+			logger.Debug("SSE frame mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
 				zap.String("expected_frame", expectedFrame),
@@ -879,7 +879,7 @@ func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[s
 
 		nextExpected++
 		if nextExpected == len(expectedQueue) {
-			logger.Warn("all expected SSE frames matched; closing stream capture early to avoid waiting for extra stream events",
+			logger.Debug("all expected SSE frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
 		}
@@ -890,7 +890,7 @@ func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[s
 	}
 
 	if nextExpected < len(expectedQueue) {
-		logger.Warn("SSE stream ended before all expected frames were received",
+		logger.Debug("SSE stream ended before all expected frames were received",
 			zap.Int("expected_frames", len(expectedQueue)),
 			zap.Int("matched_frames", nextExpected))
 		return false, strings.Join(actualQueue, "\n\n"), nil
@@ -905,7 +905,7 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys ma
 	nextExpected := 0
 
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -914,7 +914,7 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys ma
 		}
 
 		if nextExpected >= len(expectedQueue) {
-			logger.Warn("received additional NDJSON data after expected stream was fully matched; closing stream capture",
+			logger.Debug("received additional NDJSON data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
 		}
@@ -927,7 +927,7 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys ma
 			if cmpErr != nil {
 				reason = cmpErr.Error()
 			}
-			logger.Warn("NDJSON stream mismatch",
+			logger.Debug("NDJSON stream mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
 				zap.String("expected_frame", expected),
@@ -937,7 +937,7 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys ma
 
 		nextExpected++
 		if nextExpected == len(expectedQueue) {
-			logger.Warn("all expected NDJSON frames matched; closing stream capture early to avoid waiting for extra stream events",
+			logger.Debug("all expected NDJSON frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
 		}
@@ -948,7 +948,7 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys ma
 	}
 
 	if nextExpected < len(expectedQueue) {
-		logger.Warn("NDJSON stream ended before all expected frames were received",
+		logger.Debug("NDJSON stream ended before all expected frames were received",
 			zap.Int("expected_frames", len(expectedQueue)),
 			zap.Int("matched_frames", nextExpected))
 		return false, strings.Join(actualQueue, "\n"), nil
@@ -963,13 +963,13 @@ func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.L
 	nextExpected := 0
 
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 
 	for scanner.Scan() {
 		line := canonicalizePlainTextLine(scanner.Text())
 
 		if nextExpected >= len(expectedQueue) {
-			logger.Warn("received additional plain-text stream data after expected stream was fully matched; closing stream capture",
+			logger.Debug("received additional plain-text stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
 		}
@@ -977,7 +977,7 @@ func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.L
 		actualQueue = append(actualQueue, line)
 		expected := expectedQueue[nextExpected]
 		if len(line) != len(expected) {
-			logger.Warn("plain-text stream mismatch",
+			logger.Debug("plain-text stream mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.Int("expected_size", len(expected)),
 				zap.Int("actual_size", len(line)))
@@ -986,7 +986,7 @@ func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.L
 
 		nextExpected++
 		if nextExpected == len(expectedQueue) {
-			logger.Warn("all expected plain-text frames matched; closing stream capture early to avoid waiting for extra stream events",
+			logger.Debug("all expected plain-text frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
 		}
@@ -997,7 +997,7 @@ func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.L
 	}
 
 	if nextExpected < len(expectedQueue) {
-		logger.Warn("plain-text stream ended before all expected frames were received",
+		logger.Debug("plain-text stream ended before all expected frames were received",
 			zap.Int("expected_frames", len(expectedQueue)),
 			zap.Int("matched_frames", nextExpected))
 		return false, strings.Join(actualQueue, "\n"), nil
@@ -1017,7 +1017,7 @@ func compareBinaryStream(expectedBody string, stream io.Reader, logger *zap.Logg
 			actualSize += n
 			if actualSize >= expectedSize {
 				if actualSize > expectedSize {
-					logger.Warn("received additional binary stream data after expected size was matched; closing stream capture",
+					logger.Debug("received additional binary stream data after expected size was matched; closing stream capture",
 						zap.Int("expected_size", expectedSize),
 						zap.Int("actual_size", actualSize))
 				}
@@ -1033,7 +1033,7 @@ func compareBinaryStream(expectedBody string, stream io.Reader, logger *zap.Logg
 	}
 
 	if actualSize != expectedSize {
-		logger.Warn("binary stream size mismatch",
+		logger.Debug("binary stream size mismatch",
 			zap.Int("expected_size", expectedSize),
 			zap.Int("actual_size", actualSize))
 		return false, strconv.Itoa(actualSize), nil
@@ -1259,7 +1259,7 @@ func compareMultipartStream(expectedBody string, stream io.Reader, boundary stri
 		}
 
 		if nextExpected >= len(expectedQueue) {
-			logger.Warn("received additional multipart stream data after expected stream was fully matched; closing stream capture",
+			logger.Debug("received additional multipart stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_parts", len(expectedQueue)))
 			break
 		}
@@ -1268,7 +1268,7 @@ func compareMultipartStream(expectedBody string, stream io.Reader, boundary stri
 		actualQueue = append(actualQueue, actualPart.describe())
 		ok, reason := compareMultipartPart(expected, actualPart, jsonNoiseKeys)
 		if !ok {
-			logger.Warn("multipart stream mismatch",
+			logger.Debug("multipart stream mismatch",
 				zap.Int("part_index", nextExpected),
 				zap.String("reason", reason),
 				zap.String("expected_part", expected.describe()),
@@ -1278,14 +1278,14 @@ func compareMultipartStream(expectedBody string, stream io.Reader, boundary stri
 
 		nextExpected++
 		if nextExpected == len(expectedQueue) {
-			logger.Warn("all expected multipart parts matched; closing stream capture early to avoid waiting for extra stream parts",
+			logger.Debug("all expected multipart parts matched; closing stream capture early to avoid waiting for extra stream parts",
 				zap.Int("matched_parts", nextExpected))
 			break
 		}
 	}
 
 	if nextExpected < len(expectedQueue) {
-		logger.Warn("multipart stream ended before all expected parts were received",
+		logger.Debug("multipart stream ended before all expected parts were received",
 			zap.Int("expected_parts", len(expectedQueue)),
 			zap.Int("matched_parts", nextExpected))
 		return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
@@ -1411,7 +1411,7 @@ func isJSONContentType(contentType string) bool {
 
 func splitLineQueue(body string, canonicalizer func(string) string, ignoreEmpty bool) []string {
 	scanner := bufio.NewScanner(strings.NewReader(normalizeLineEndings(body)))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 
 	queue := []string{}
 	for scanner.Scan() {
@@ -1472,7 +1472,7 @@ func splitSSEFrames(data []byte, atEOF bool) (int, []byte, error) {
 
 func splitSSEQueue(body string) []string {
 	scanner := bufio.NewScanner(strings.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEFrameSize)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 	scanner.Split(splitSSEFrames)
 
 	queue := []string{}
