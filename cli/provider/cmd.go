@@ -364,7 +364,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 			cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 			cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
-			cmd.Flags().Bool("update-mapping", c.cfg.Test.UpdateMapping, "Update the mapping of testcases")
+			cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateMapping, "Update the mapping of testcases")
 		}
 	}
 }
