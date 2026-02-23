@@ -1076,6 +1076,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 	}
+	r.logger.Debug("consumed mocks during initial setup",
+		zap.String("testSetID", testSetID),
+		zap.Int("count", len(consumedMocks)),
+		zap.Any("mocks", consumedMocks))
 	for _, m := range consumedMocks {
 		totalConsumedMocks[m.Name] = m
 	}
@@ -1185,6 +1189,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
+			r.logger.Debug("consumed mocks after test case simulation",
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseID", testCase.Name),
+				zap.Int("count", len(consumedMocks)),
+				zap.Any("mocks", consumedMocks))
 			for _, m := range consumedMocks {
 				totalConsumedMocks[m.Name] = m
 			}
@@ -1293,7 +1302,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// log the consumed mocks during the test run of the test case for test set
-		r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
+		r.logger.Debug("consumed mocks for test case",
+			zap.String("testSetID", testSetID),
+			zap.String("testCaseID", testCase.Name),
+			zap.Strings("mockNames", mockNames),
+			zap.Any("mocks", consumedMocks))
 
 		if mockSetMismatch {
 			if testPass {
@@ -1504,7 +1517,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled {
+	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled && r.config.Test.UpdateTestMapping {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
