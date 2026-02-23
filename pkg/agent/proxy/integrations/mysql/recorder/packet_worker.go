@@ -284,7 +284,11 @@ func decodeTextResultSetResponse(ctx context.Context, logger *zap.Logger, entry 
 	// The RespPackets are already fully framed by the reassembler.
 	// The last packet is always the terminator (EOF or OK).
 	// Everything between the EOF-after-columns and the last packet is rows.
-	textRes.Rows = make([]*mysql.TextRow, 0)
+	estRows := len(entry.RespPackets) - pktIdx - 1 // minus terminator
+	if estRows < 0 {
+		estRows = 0
+	}
+	textRes.Rows = make([]*mysql.TextRow, 0, estRows)
 	for pktIdx < len(entry.RespPackets) {
 		pkt := entry.RespPackets[pktIdx]
 		pktIdx++
@@ -367,7 +371,11 @@ func decodeBinaryResultSetResponse(ctx context.Context, logger *zap.Logger, entr
 	// Since the RespPackets are fully framed by the reassembler, the last
 	// packet is always the terminator.  Everything between EOF-after-columns
 	// and the last packet is rows.
-	binRes.Rows = make([]*mysql.BinaryRow, 0)
+	estRows := len(entry.RespPackets) - pktIdx - 1 // minus terminator
+	if estRows < 0 {
+		estRows = 0
+	}
+	binRes.Rows = make([]*mysql.BinaryRow, 0, estRows)
 	for pktIdx < len(entry.RespPackets) {
 		pkt := entry.RespPackets[pktIdx]
 		pktIdx++

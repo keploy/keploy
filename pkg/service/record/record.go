@@ -52,12 +52,22 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
 
-	// GOGC=400 means the GC triggers at 4× live heap (vs default 100% = 2×),
-	// cutting GC frequency in half.  This reduces write-barrier overhead on
-	// the TeeForwardConn forwarding goroutines' hot path, saving ~1ms P50
-	// and ~4ms P99.  GOGC=-1 (GC off) gives the same P99 as GOGC=400,
-	// confirming the remaining overhead is not GC-related.
-	prevGCPercent := debug.SetGCPercent(400)
+	// Tune GC for the recording session.  A higher GOGC reduces GC frequency
+	// during recording, which lowers write-barrier overhead on the
+	// TeeForwardConn forwarding goroutines' hot path (saves ~2-5ms P99).
+	//
+	// We respect the user's explicit GOGC environment variable if set,
+	// otherwise default to 800 during recording.  The previous value is
+	// restored when recording ends via defer.
+	const defaultRecordGOGC = 800
+	recordGOGC := defaultRecordGOGC
+	if envVal := os.Getenv("GOGC"); envVal != "" {
+		if parsed, err := strconv.Atoi(envVal); err == nil {
+			recordGOGC = parsed
+			r.logger.Debug("Using user-specified GOGC for recording", zap.Int("GOGC", recordGOGC))
+		}
+	}
+	prevGCPercent := debug.SetGCPercent(recordGOGC)
 	defer debug.SetGCPercent(prevGCPercent)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
