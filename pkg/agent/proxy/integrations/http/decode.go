@@ -154,6 +154,32 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
+			// Check if this is an SSE stream mock
+			if stub.Spec.Metadata["type"] == "sse-stream" {
+				h.Logger.Debug("Replaying SSE stream mock", zap.Any("metadata", utils.GetReqMeta(request)))
+
+				// Deserialize SSE frames from the body (loaded from stream file)
+				var frames []models.SSEFrame
+				if stub.Spec.HTTPResp.Body != "" {
+					var err error
+					frames, err = deserializeSSEFrames([]byte(stub.Spec.HTTPResp.Body))
+					if err != nil {
+						utils.LogError(h.Logger, err, "failed to deserialize SSE frames", zap.Any("metadata", utils.GetReqMeta(request)))
+						errCh <- err
+						return
+					}
+				}
+
+				err = h.replaySSE(ctx, clientConn, stub, frames)
+				if err != nil {
+					utils.LogError(h.Logger, err, "failed to replay SSE stream", zap.Any("metadata", utils.GetReqMeta(request)))
+					errCh <- err
+					return
+				}
+				errCh <- nil
+				return
+			}
+
 			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 
 			body := stub.Spec.HTTPResp.Body

@@ -1234,7 +1234,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
 					break
 				}
-				continue
+			continue
 			}
 
 			respCopy := *grpcResp

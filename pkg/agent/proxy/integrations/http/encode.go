@@ -159,6 +159,20 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
+			// Detect SSE or chunked-text streaming response
+			if sType := isStreamingResponse(resp); sType != streamNone {
+				h.Logger.Info("Detected streaming response, switching to SSE encoder",
+					zap.String("type", map[streamType]string{streamSSE: "sse", streamChunkedText: "chunked-text"}[sType]))
+				err = h.encodeSSE(ctx, finalReq, clientConn, destConn, mocks, reqTimestampMock, resp, destPort, opts, sType)
+				if err != nil && err != io.EOF {
+					utils.LogError(h.Logger, err, "failed to encode SSE stream")
+					errCh <- err
+					return nil
+				}
+				errCh <- nil
+				return nil
+			}
+
 			// Capturing the response timestamp
 			resTimestampMock := time.Now()
 

@@ -46,6 +46,15 @@ type FormData struct {
 	FileNames []string `json:"file_names,omitempty" bson:"file_names,omitempty" yaml:"-"`
 }
 
+// SSEFrame represents a single Server-Sent Event frame
+type SSEFrame struct {
+	ID      string `json:"id,omitempty" yaml:"id,omitempty"`
+	Event   string `json:"event,omitempty" yaml:"event,omitempty"`
+	Data    string `json:"data" yaml:"data"`
+	Retry   int    `json:"retry,omitempty" yaml:"retry,omitempty"`        // retry interval in ms
+	DelayMs int64  `json:"delay_ms" yaml:"delay_ms"`                     // ms since previous frame
+}
+
 type HTTPResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`

@@ -119,14 +119,24 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
-	mockYaml, err := EncodeMock(mock, ys.Logger)
-	if err != nil {
-		return err
-	}
 	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
 		mockFileName = "mocks"
+	}
+
+	// If this is an SSE stream mock, split frames into a separate stream file
+	if mock.Spec.Metadata != nil && mock.Spec.Metadata["type"] == "sse-stream" && mock.Spec.HTTPResp != nil && mock.Spec.HTTPResp.Body != "" {
+		err := ys.writeSSEStreamFile(ctx, mockPath, mock)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to write SSE stream file")
+			return err
+		}
+	}
+
+	mockYaml, err := EncodeMock(mock, ys.Logger)
+	if err != nil {
+		return err
 	}
 	data, err := yamlLib.Marshal(&mockYaml)
 	if err != nil {
@@ -148,6 +158,64 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		return err
 	}
 	return nil
+}
+
+// writeSSEStreamFile writes SSE frame data to a separate stream file and
+// updates the mock metadata to reference it. The body is cleared from the mock.
+func (ys *MockYaml) writeSSEStreamFile(ctx context.Context, mockPath string, mock *models.Mock) error {
+	streamsDir := filepath.Join(mockPath, "streams")
+	if err := os.MkdirAll(streamsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create streams directory: %w", err)
+	}
+
+	// Generate stream file name based on mock name
+	streamFileName := fmt.Sprintf("%s-stream", mock.Name)
+
+	// Write the frame data to the stream file
+	frameData := []byte(mock.Spec.HTTPResp.Body)
+	err := yaml.WriteFile(ctx, ys.Logger, streamsDir, streamFileName, frameData, false)
+	if err != nil {
+		return fmt.Errorf("failed to write stream file: %w", err)
+	}
+
+	// Update mock metadata to reference the stream file
+	mock.Spec.Metadata["streamFile"] = filepath.Join("streams", streamFileName+".yaml")
+
+	// Clear the body — frames are in the stream file now
+	mock.Spec.HTTPResp.Body = ""
+
+	ys.Logger.Info("Wrote SSE stream file",
+		zap.String("streamFile", mock.Spec.Metadata["streamFile"]),
+		zap.Int("dataSize", len(frameData)))
+
+	return nil
+}
+
+// loadSSEStreamFrames loads SSE frame data from a stream file into the mock body.
+func (ys *MockYaml) loadSSEStreamFrames(mock *models.Mock, testSetPath string) {
+	if mock.Spec.Metadata == nil || mock.Spec.Metadata["type"] != "sse-stream" {
+		return
+	}
+	streamFile, ok := mock.Spec.Metadata["streamFile"]
+	if !ok || streamFile == "" {
+		return
+	}
+
+	// Read the stream file
+	streamPath := filepath.Join(testSetPath, streamFile)
+	data, err := os.ReadFile(streamPath)
+	if err != nil {
+		ys.Logger.Warn("failed to read SSE stream file",
+			zap.String("path", streamPath),
+			zap.Error(err))
+		return
+	}
+
+	// Load frames back into the body for replay
+	mock.Spec.HTTPResp.Body = string(data)
+	ys.Logger.Debug("Loaded SSE stream frames",
+		zap.String("streamFile", streamFile),
+		zap.Int("dataSize", len(data)))
 }
 
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
@@ -198,6 +266,9 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 				if isMappedToSpecificTest && !isNeededForCurrentRun {
 					continue
 				}
+				// Load SSE stream frames from file if needed
+				ys.loadSSEStreamFrames(mock, path)
+
 				isFilteredMock := true
 				switch mock.Kind {
 				case "Generic":
@@ -281,6 +352,9 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 				if isMappedToSpecificTest && !isNeededForCurrentRun {
 					continue
 				}
+				// Load SSE stream frames from file if needed
+				ys.loadSSEStreamFrames(mock, path)
+
 				isUnFilteredMock := false
 				switch mock.Kind {
 				case "Generic":
@@ -363,6 +437,17 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	if err != nil {
 		utils.LogError(ys.Logger, err, "failed to delete old mocks", zap.String("path", mockPath))
 		return err
+	}
+
+	// Also delete the streams directory if it exists
+	streamsDir := filepath.Join(path, "streams")
+	if _, err := os.Stat(streamsDir); err == nil {
+		if err := os.RemoveAll(streamsDir); err != nil {
+			utils.LogError(ys.Logger, err, "failed to delete SSE streams directory", zap.String("path", streamsDir))
+			// Non-fatal — continue even if streams cleanup fails
+		} else {
+			ys.Logger.Debug("Deleted SSE streams directory", zap.String("path", streamsDir))
+		}
 	}
 
 	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))
