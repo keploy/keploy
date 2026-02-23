@@ -174,6 +174,13 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			if ctx.Err() != nil {
 				return
 			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to read the packet message in proxy. Check if the connection was closed unexpectedly or verify network stability")
 			}
@@ -299,6 +306,16 @@ func ReadBytes(ctx context.Context, _ *zap.Logger, reader io.Reader) ([]byte, er
 		}
 
 		if err != nil {
+			if ctx.Err() != nil {
+				return buffer, ctx.Err()
+			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				select {
+				case <-ctx.Done():
+					return buffer, ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
 			return buffer, err
 		}
 
@@ -318,6 +335,16 @@ func ReadRequiredBytes(ctx context.Context, _ *zap.Logger, reader io.Reader, num
 	buf := make([]byte, numBytes)
 	_, err := io.ReadFull(reader, buf)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if strings.Contains(err.Error(), "use of closed network connection") {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
 		return nil, err
 	}
 	return buf, nil

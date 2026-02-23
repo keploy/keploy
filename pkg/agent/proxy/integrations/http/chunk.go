@@ -143,6 +143,13 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
 
 			utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
 			return err
