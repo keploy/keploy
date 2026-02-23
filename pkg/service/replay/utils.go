@@ -217,9 +217,12 @@ func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (t
 		if diff < 0 {
 			diff = -diff
 		}
-		timeoutSeconds = uint64(math.Ceil((diff + 10*time.Second).Seconds()))
-		if timeoutSeconds < 10 {
-			timeoutSeconds = 10
+		streamTimeoutSeconds := uint64(math.Ceil((diff + 10*time.Second).Seconds()))
+		if streamTimeoutSeconds < 10 {
+			streamTimeoutSeconds = 10
+		}
+		if streamTimeoutSeconds > timeoutSeconds {
+			timeoutSeconds = streamTimeoutSeconds
 		}
 	}
 

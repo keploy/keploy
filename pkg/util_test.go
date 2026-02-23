@@ -544,6 +544,9 @@ func TestComputeStreamingTimeoutSeconds_323(t *testing.T) {
 	timeout := computeStreamingTimeoutSeconds(tc, 2)
 	assert.Equal(t, uint64(12), timeout)
 
+	preferConfigured := computeStreamingTimeoutSeconds(tc, 30)
+	assert.Equal(t, uint64(30), preferConfigured)
+
 	fallback := computeStreamingTimeoutSeconds(&models.TestCase{}, 7)
 	assert.Equal(t, uint64(7), fallback)
 

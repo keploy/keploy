@@ -694,20 +694,19 @@ func compareHTTPStream(expectedBody string, stream io.Reader, cfg httpStreamConf
 }
 
 func computeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
+	baseTimeout := defaultSeconds
+	if baseTimeout == 0 {
+		baseTimeout = 10
+	}
+
 	if tc == nil {
-		if defaultSeconds == 0 {
-			return 10
-		}
-		return defaultSeconds
+		return baseTimeout
 	}
 
 	reqTs := tc.HTTPReq.Timestamp
 	respTs := tc.HTTPResp.Timestamp
 	if reqTs.IsZero() || respTs.IsZero() {
-		if defaultSeconds == 0 {
-			return 10
-		}
-		return defaultSeconds
+		return baseTimeout
 	}
 
 	diff := respTs.Sub(reqTs)
@@ -719,11 +718,14 @@ func computeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) 
 	if timeout < 10*time.Second {
 		timeout = 10 * time.Second
 	}
-	timeoutSeconds := uint64(math.Ceil(timeout.Seconds()))
-	if timeoutSeconds < 10 {
-		return 10
+	streamTimeoutSeconds := uint64(math.Ceil(timeout.Seconds()))
+	if streamTimeoutSeconds < 10 {
+		streamTimeoutSeconds = 10
 	}
-	return timeoutSeconds
+	if baseTimeout > streamTimeoutSeconds {
+		return baseTimeout
+	}
+	return streamTimeoutSeconds
 }
 
 func collectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNoise map[string][]string) map[string]struct{} {

@@ -120,4 +120,8 @@ func TestEffectiveStreamMockWindow_327(t *testing.T) {
 	after, before := effectiveStreamMockWindow(tc, 5)
 	assert.Equal(t, reqTs, after)
 	assert.Equal(t, respTs.Add(11*time.Second), before)
+
+	after, before = effectiveStreamMockWindow(tc, 30)
+	assert.Equal(t, reqTs, after)
+	assert.Equal(t, respTs.Add(30*time.Second), before)
 }
