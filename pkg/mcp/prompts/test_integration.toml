@@ -342,15 +342,12 @@ Package startup:
     - The FIRST executable statement inside that init() MUST be:
       testutil.StartKeploySession("<SCOPE_PATH>", "keploy")
     - If the package already has one or more init() functions in test files within the TARGET SET:
-      - Inspect each existing init() body for outgoing calls (network, database, external I/O).
+      - Inspect each existing init() body for outgoing calls.
       - If ANY existing init() contains outgoing calls:
         - Consolidate ALL existing init() function bodies into the single canonical init() in the setup file.
         - REMOVE the original init() functions from their source files after consolidation (do not leave duplicates).
-        - Preserve execution order: merge in a deterministic order (e.g., alphabetical by source file name).
+        - Preserve execution order: merge in a deterministic order.
         - Ensure the Keploy session call stays as the FIRST statement in the canonical init(), before any consolidated body.
-      - If ALL existing init() functions contain ONLY pure logic (no outgoing calls):
-        - Do NOT consolidate them into a Keploy canonical init().
-        - Do NOT create a canonical init() for Keploy in this package.
     - If no init() exists in targeted test files for that package:
       - Create a new init() in the setup file.
     - Do NOT scatter multiple Keploy init() calls across test files in the same package.
