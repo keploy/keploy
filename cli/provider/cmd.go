@@ -364,7 +364,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 			cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 			cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
-			cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateMapping, "Update the mapping of testcases")
+			cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
 		}
 	}
 }
@@ -433,7 +433,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"disableMapping":        "disable-mapping",
 		"compareAll":            "compare-all",
 		"schemaMatch":           "schema-match",
-		"updateMapping":         "update-mapping",
+		"updateTestMapping":     "update-test-mapping",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
