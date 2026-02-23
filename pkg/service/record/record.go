@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,24 +50,6 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, 
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
-
-	// Tune GC for the recording session.  A higher GOGC reduces GC frequency
-	// during recording, which lowers write-barrier overhead on the
-	// TeeForwardConn forwarding goroutines' hot path (saves ~2-5ms P99).
-	//
-	// We respect the user's explicit GOGC environment variable if set,
-	// otherwise default to 800 during recording.  The previous value is
-	// restored when recording ends via defer.
-	const defaultRecordGOGC = 800
-	recordGOGC := defaultRecordGOGC
-	if envVal := os.Getenv("GOGC"); envVal != "" {
-		if parsed, err := strconv.Atoi(envVal); err == nil {
-			recordGOGC = parsed
-			r.logger.Debug("Using user-specified GOGC for recording", zap.Int("GOGC", recordGOGC))
-		}
-	}
-	prevGCPercent := debug.SetGCPercent(recordGOGC)
-	defer debug.SetGCPercent(prevGCPercent)
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -552,7 +533,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				}
 				select {
 				case <-ctx.Done():
-					outgoingChan <- m
 					goto drain
 				case outgoingChan <- m:
 				}
@@ -571,7 +551,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				if !ok {
 					return ctx.Err()
 				}
-				outgoingChan <- m
+				select {
+				case outgoingChan <- m:
+				case <-time.After(100 * time.Millisecond):
+					// Consumer can't keep up, stop draining
+					return ctx.Err()
+				}
 			case <-time.After(5 * time.Second):
 				// Idle timeout — no more mocks arriving, done draining.
 				return ctx.Err()

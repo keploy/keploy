@@ -144,6 +144,13 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 				return ctx.Err()
 			}
 
+			// During graceful shutdown, connections are closed before in-flight
+			// responses finish reading. This is expected and not a real error.
+			if isConnClosedErr(err) {
+				h.Logger.Debug("failed to read the response message from the destination server", zap.Error(err))
+				return err
+			}
+
 			utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
 			return err
 		}

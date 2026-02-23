@@ -123,7 +123,13 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					}
 					break
 				}
-				utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
+				// During graceful shutdown, connections are closed before in-flight
+				// responses finish reading. This is expected and not a real error.
+				if ctx.Err() != nil || isConnClosedErr(err) {
+					h.Logger.Debug("failed to read the response message from the destination server", zap.Error(err))
+				} else {
+					utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
+				}
 				errCh <- err
 				return nil
 			}
@@ -155,7 +161,13 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- nil
 					return nil
 				}
-				utils.LogError(h.Logger, err, "failed to handle chunk response")
+				// During graceful shutdown, connections are closed before in-flight
+				// chunked responses finish reading. This is expected.
+				if ctx.Err() != nil || isConnClosedErr(err) {
+					h.Logger.Debug("failed to handle chunk response", zap.Error(err))
+				} else {
+					utils.LogError(h.Logger, err, "failed to handle chunk response")
+				}
 				errCh <- err
 				return nil
 			}

@@ -404,7 +404,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA), clientConn, mysql.COM_STMT_SEND_LONG_DATA, decodeCtx)
 	default:
-		logger.Warn("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Uint8("lastOp", lastOp))
+		logger.Debug("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Uint8("lastOp", lastOp))
 		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), clientConn, RESET, decodeCtx)
 	}
 
@@ -607,7 +607,7 @@ func decodePacketFast(ctx context.Context, logger *zap.Logger, packet mysql.Pack
 		SetPacketInfoFast(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_INIT_DB), mysql.COM_INIT_DB, decodeCtx)
 
 	default:
-		logger.Warn("Unknown packet type (fast path)", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Uint8("lastOp", lastOp))
+		logger.Debug("Unknown packet type (fast path)", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Uint8("lastOp", lastOp))
 		SetPacketInfoFast(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), RESET, decodeCtx)
 	}
 

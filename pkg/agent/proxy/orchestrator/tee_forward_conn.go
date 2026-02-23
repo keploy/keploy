@@ -365,6 +365,19 @@ func (t *TeeForwardConn) startForwarding() {
 						return
 					}
 
+					// Re-enable TCP_QUICKACK after every Write.
+					// Linux resets TCP_QUICKACK after each ACK, so without
+					// re-enabling it the kernel falls back to delayed ACKs
+					// (~40ms timer). On the source side, a delayed ACK can
+					// stall the next Read if the peer is waiting for the ACK
+					// before sending more data. Uses cached FDs to avoid
+					// SyscallConn() overhead (~2-5μs per call).
+					//
+					// Only srcFD needs quickACK — it controls our ACKs to the
+					// sender. destFD quickACK is unnecessary since we're writing
+					// to dest, not reading from it.
+					quickACKByFD(t.srcFD)
+
 					// Buffer for parser — write into ring buffer (zero alloc).
 					// All-or-nothing: if the ring can't hold the full chunk,
 					// drop it entirely and close the ring so the pipeline gets
@@ -377,7 +390,7 @@ func (t *TeeForwardConn) startForwarding() {
 							atomic.StoreInt32(&t.disabled, 1)
 							t.ring.Close()
 							if t.logger != nil {
-								t.logger.Warn("TeeForwardConn ring buffer full, disabling recording for this connection",
+								t.logger.Debug("TeeForwardConn ring buffer full, disabling recording for this connection",
 									zap.String("src", t.src.RemoteAddr().String()))
 							}
 						}

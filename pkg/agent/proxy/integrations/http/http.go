@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
@@ -229,4 +230,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 	mocks <- newMock
 	return nil
+}
+
+// isConnClosedErr returns true if the error indicates a closed network
+// connection. These errors are expected during graceful shutdown and
+// should be logged at Debug level rather than Error.
+func isConnClosedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection reset by peer")
 }

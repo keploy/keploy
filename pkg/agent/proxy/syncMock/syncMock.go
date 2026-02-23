@@ -134,8 +134,10 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// Send mocks and mappings outside the lock to prevent blocking the parser.
 	// Channel sends may block if the consumer is slow, so we must not hold
 	// the mutex during these operations.
-	for _, mock := range mocksToSend {
-		outCh <- mock
+	if outCh != nil {
+		for _, mock := range mocksToSend {
+			outCh <- mock
+		}
 	}
 
 	if len(associatedMockIDs) > 0 && mapCh != nil {

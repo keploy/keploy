@@ -155,7 +155,7 @@ func decodeCommandPhase(
 	for _, pkt := range entry.ReqPackets {
 		decoded, err := wire.DecodePayloadFast(ctx, logger, pkt, decodeCtx)
 		if err != nil {
-			logger.Warn("failed to decode command request", zap.Error(err))
+			logger.Debug("failed to decode command request", zap.Error(err))
 			decoded = rawPacketBundle(pkt)
 		}
 		*requests = append(*requests, mysql.Request{PacketBundle: *decoded})
@@ -185,7 +185,7 @@ func decodeCommandPhase(
 			// Simple OK response.
 			decoded, err := wire.DecodePayloadFast(ctx, logger, firstResp, decodeCtx)
 			if err != nil {
-				logger.Warn("failed to decode OK response", zap.Error(err))
+				logger.Debug("failed to decode OK response", zap.Error(err))
 				decoded = rawPacketBundle(firstResp)
 			}
 			*responses = append(*responses, mysql.Response{PacketBundle: *decoded})
@@ -195,7 +195,7 @@ func decodeCommandPhase(
 	case marker == mysql.ERR:
 		decoded, err := wire.DecodePayloadFast(ctx, logger, firstResp, decodeCtx)
 		if err != nil {
-			logger.Warn("failed to decode ERR response", zap.Error(err))
+			logger.Debug("failed to decode ERR response", zap.Error(err))
 			decoded = rawPacketBundle(firstResp)
 		}
 		*responses = append(*responses, mysql.Response{PacketBundle: *decoded})
@@ -243,8 +243,7 @@ func decodeTextResultSetResponse(ctx context.Context, logger *zap.Logger, entry 
 	firstPkt := entry.RespPackets[0]
 	decoded, err := wire.DecodePayloadFast(ctx, logger, firstPkt, decodeCtx)
 	if err != nil {
-		logger.Warn("failed to decode result set metadata", zap.Error(err))
-		decoded = rawPacketBundle(firstPkt)
+		logger.Debug("failed to decode result set metadata", zap.Error(err))
 	}
 
 	textRes, ok := decoded.Message.(*mysql.TextResultSet)
@@ -329,8 +328,7 @@ func decodeBinaryResultSetResponse(ctx context.Context, logger *zap.Logger, entr
 	firstPkt := entry.RespPackets[0]
 	decoded, err := wire.DecodePayloadFast(ctx, logger, firstPkt, decodeCtx)
 	if err != nil {
-		logger.Warn("failed to decode binary result set metadata", zap.Error(err))
-		decoded = rawPacketBundle(firstPkt)
+		logger.Debug("failed to decode binary result set metadata", zap.Error(err))
 	}
 
 	binRes, ok := decoded.Message.(*mysql.BinaryProtocolResultSet)
@@ -416,7 +414,7 @@ func decodeStmtPrepareOkResponse(ctx context.Context, logger *zap.Logger, entry 
 	firstPkt := entry.RespPackets[0]
 	decoded, err := wire.DecodePayloadFast(ctx, logger, firstPkt, decodeCtx)
 	if err != nil {
-		logger.Warn("failed to decode stmt prepare ok", zap.Error(err))
+		logger.Debug("failed to decode stmt prepare ok", zap.Error(err))
 		decoded = rawPacketBundle(firstPkt)
 		*responses = append(*responses, mysql.Response{PacketBundle: *decoded})
 		return decoded.Header.Type

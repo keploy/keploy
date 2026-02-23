@@ -62,12 +62,23 @@ type peekReader interface {
 // ── Record pipeline ─────────────────────────────────────────────────────
 
 // runRecordPipeline reads from the two TeeForwardConn ring buffers,
-// frames MySQL packets using slab allocation, decodes them inline,
-// and sends mocks to the channel.
+// frames MySQL packets using slab allocation, and sends them for async
+// decode.
 //
-// SIMPLE ARCHITECTURE: Single goroutine does read + decode + send.
-// The clientTee forwarding goroutine sends queries to MySQL at wire speed
-// (before the pipeline wakes up), which is critical for P50 latency.
+// ARCHITECTURE: Two goroutines per connection:
+//   - Ring-drain goroutine (this function): reads from ring buffers,
+//     frames MySQL packets using slab allocation, sends RawMockEntry
+//     to a buffered channel. This goroutine is I/O-only — it parks
+//     immediately when no data is available, freeing its Go P for
+//     forwarding goroutines.
+//   - Decode goroutine: receives RawMockEntry, does CPU-intensive
+//     struct allocation and string conversion, sends models.Mock to
+//     the output channel. Runs opportunistically without blocking
+//     ring drains or forwarding.
+//
+// This split reduces Go scheduler contention at P99: the 66 decode
+// goroutines no longer hold P's while doing CPU work inline with
+// ring reads, so the 132 forwarding goroutines get faster scheduling.
 func runRecordPipeline(
 	ctx context.Context,
 	logger *zap.Logger,
@@ -85,7 +96,7 @@ func runRecordPipeline(
 
 	slab := newPktSlab()
 
-	// Per-connection decode context — seeded with handshake state.
+	// Per-connection decode context — owned exclusively by the decode goroutine.
 	decodeCtx := &wire.DecodeContext{
 		Mode:               models.MODE_RECORD,
 		LastOp:             wire.NewLastOpMap(),
@@ -108,6 +119,56 @@ func runRecordPipeline(
 		connID = v.(string)
 	}
 
+	// Buffered channel for async decode.  The ring-drain goroutine sends
+	// RawMockEntry (byte slice references into the slab) and the decode
+	// goroutine consumes them.  Buffer of 32 keeps the ring drainer from
+	// blocking while staying well within one 4MB slab's lifetime.
+	rawCh := make(chan RawMockEntry, 32)
+	decodeDone := make(chan struct{})
+
+	// ── Decode goroutine ──
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("recovered from panic in pipeline decoder", zap.Any("panic", r))
+			}
+			close(decodeDone)
+		}()
+
+		for entry := range rawCh {
+			if ctx.Err() != nil {
+				return
+			}
+
+			mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
+			if err != nil {
+				logger.Debug("failed to decode mock entry", zap.Error(err))
+				continue
+			}
+
+			setConnID(mock, connID)
+
+			// Non-blocking send: if the output channel buffer is full,
+			// dispatch via goroutine so the decode loop is never stalled.
+			select {
+			case mocks <- mock:
+			default:
+				go func(m *models.Mock) {
+					select {
+					case mocks <- m:
+					case <-ctx.Done():
+					}
+				}(mock)
+			}
+		}
+	}()
+
+	// ── Ring-drain loop (I/O only — no struct decode) ──
+	defer func() {
+		close(rawCh)
+		<-decodeDone
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -125,23 +186,19 @@ func runRecordPipeline(
 		reqTimestamp := time.Now()
 
 		if len(cmdPacket) < 5 {
-			logger.Warn("record pipeline: command packet too short", zap.Int("len", len(cmdPacket)))
+			logger.Debug("record pipeline: command packet too short", zap.Int("len", len(cmdPacket)))
 			return
 		}
 		cmdType := cmdPacket[4]
 
 		// ── 2. Handle no-response commands ──
 		if isNoResponseCmd(cmdType) {
-			entry := RawMockEntry{
+			rawCh <- RawMockEntry{
 				ReqPackets:   [][]byte{cmdPacket},
 				CmdType:      cmdType,
 				MockType:     "mocks",
 				ReqTimestamp: reqTimestamp,
 				ResTimestamp: time.Now(),
-			}
-			if mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey); err == nil {
-				setConnID(mock, connID)
-				mocks <- mock
 			}
 			continue
 		}
@@ -155,8 +212,8 @@ func runRecordPipeline(
 			return
 		}
 
-		// ── 4. Decode and send mock ──
-		entry := RawMockEntry{
+		// ── 4. Send to async decoder ──
+		rawCh <- RawMockEntry{
 			ReqPackets:   [][]byte{cmdPacket},
 			RespPackets:  respPackets,
 			CmdType:      cmdType,
@@ -164,14 +221,6 @@ func runRecordPipeline(
 			ReqTimestamp: reqTimestamp,
 			ResTimestamp: time.Now(),
 		}
-		mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
-		if err != nil {
-			logger.Debug("failed to decode mock entry", zap.Error(err))
-			continue
-		}
-
-		setConnID(mock, connID)
-		mocks <- mock
 	}
 }
 

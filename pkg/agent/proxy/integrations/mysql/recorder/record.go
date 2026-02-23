@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"runtime"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -94,13 +93,14 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		// decodes inline, and sends mocks.
 		pipelineDone := make(chan struct{})
 		go func() {
-			// Pin this goroutine to its own OS thread so the Go scheduler
-			// cannot time-slice it against the two TeeForwardConn forwarding
-			// goroutines.  Forwarding goroutines spend most of their time
-			// blocked on network I/O (handled by the netpoller, not an OS
-			// thread), so the extra thread here is low-cost.
-			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
+			// NOTE: We intentionally do NOT use runtime.LockOSThread() here.
+			// With many concurrent MySQL connections (e.g. 66), pinning each
+			// pipeline goroutine to its own OS thread creates thread explosion
+			// that increases kernel context-switch latency and cache misses
+			// for the forwarding goroutines.  The Go scheduler handles
+			// multiplexing correctly — pipeline goroutines mostly sleep
+			// waiting on ring buffer data, while forwarding goroutines are
+			// parked in the netpoller.
 			defer close(pipelineDone)
 			runRecordPipeline(ctx, logger, clientTee, serverTee, mocks, opts, hsResult.State)
 		}()
