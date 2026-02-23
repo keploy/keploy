@@ -18,7 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
+
+var yamlMarshal = yamlLib.Marshal
+var yamlUnmarshal = yamlLib.Unmarshal
 
 // TestSimulateHTTP_NewRequestError_303 ensures that SimulateHTTP returns an error
 // when http.NewRequestWithContext fails. This is triggered by providing an invalid
@@ -552,6 +556,228 @@ func TestComputeStreamingTimeoutSeconds_323(t *testing.T) {
 
 	defaultMin := computeStreamingTimeoutSeconds(&models.TestCase{}, 0)
 	assert.Equal(t, uint64(10), defaultMin)
+}
+
+// TestParseBodyToStreamEntries_SSE parses a raw SSE body into structured StreamBodyEntry entries.
+func TestParseBodyToStreamEntries_SSE(t *testing.T) {
+	rawBody := strings.Join([]string{
+		": heartbeat comment",
+		"",
+		"id:1",
+		"event:message",
+		"data:{\"text\":\"hello world\"}",
+		"",
+		"id:2",
+		"event:tags",
+		"data:[{\"tag\":\"greeting\"}]",
+		"",
+	}, "\n")
+
+	headers := map[string]string{
+		"Content-Type": "text/event-stream; charset=utf-8",
+	}
+	ts := time.Date(2026, 2, 23, 11, 17, 7, 0, time.UTC)
+	entries := ParseBodyToStreamEntries(rawBody, headers, ts)
+
+	require.Len(t, entries, 3)
+	// Comment entry
+	assert.Equal(t, "heartbeat comment", entries[0].Data["comment"])
+	// First message
+	assert.Equal(t, "1", entries[1].Data["id"])
+	assert.Equal(t, "message", entries[1].Data["event"])
+	assert.Equal(t, `{"text":"hello world"}`, entries[1].Data["data"])
+	// Second message
+	assert.Equal(t, "2", entries[2].Data["id"])
+	assert.Equal(t, "tags", entries[2].Data["event"])
+	assert.Equal(t, `[{"tag":"greeting"}]`, entries[2].Data["data"])
+}
+
+// TestParseBodyToStreamEntries_NDJSON parses an NDJSON body into StreamBodyEntry entries.
+func TestParseBodyToStreamEntries_NDJSON(t *testing.T) {
+	rawBody := "{\"id\":1,\"ok\":true}\n{\"id\":2,\"ok\":false}\n"
+	headers := map[string]string{
+		"Content-Type": "application/x-ndjson",
+	}
+	ts := time.Date(2026, 2, 23, 11, 17, 7, 0, time.UTC)
+	entries := ParseBodyToStreamEntries(rawBody, headers, ts)
+
+	require.Len(t, entries, 2)
+	assert.Equal(t, `{"id":1,"ok":true}`, entries[0].Data["raw"])
+	assert.Equal(t, `{"id":2,"ok":false}`, entries[1].Data["raw"])
+}
+
+// TestParseBodyToStreamEntries_NonStreaming returns nil for non-streaming content types.
+func TestParseBodyToStreamEntries_NonStreaming(t *testing.T) {
+	rawBody := `{"key":"value"}`
+	headers := map[string]string{
+		"Content-Type": "application/json",
+	}
+	ts := time.Now()
+	entries := ParseBodyToStreamEntries(rawBody, headers, ts)
+	assert.Nil(t, entries)
+}
+
+// TestReconstructBodyFromStreamEntries_SSE rebuilds an SSE body from structured entries.
+func TestReconstructBodyFromStreamEntries_SSE(t *testing.T) {
+	entries := []models.StreamBodyEntry{
+		{
+			Ts:   "2026-02-23T11:17:07Z",
+			Data: map[string]string{"comment": "heartbeat"},
+		},
+		{
+			Ts: "2026-02-23T11:17:07Z",
+			Data: map[string]string{
+				"id":    "1",
+				"event": "message",
+				"data":  `{"text":"hello"}`,
+			},
+		},
+	}
+
+	headers := map[string]string{"Content-Type": "text/event-stream"}
+	body := models.ReconstructBodyFromStreamEntries(entries, headers)
+
+	// Should be parseable by splitSSEQueue
+	frames := splitSSEQueue(body)
+	require.Len(t, frames, 2)
+	assert.Contains(t, frames[0], ": heartbeat")
+	assert.Contains(t, frames[1], "id:1")
+	assert.Contains(t, frames[1], "event:message")
+	assert.Contains(t, frames[1], `data:{"text":"hello"}`)
+}
+
+// TestReconstructBodyFromStreamEntries_HTTPStream rebuilds HTTP streaming body from entries.
+func TestReconstructBodyFromStreamEntries_HTTPStream(t *testing.T) {
+	entries := []models.StreamBodyEntry{
+		{
+			Ts:   "2026-02-23T11:17:07Z",
+			Data: map[string]string{"raw": `{"chunk_id":1,"status":"processing"}`},
+		},
+		{
+			Ts:   "2026-02-23T11:17:08Z",
+			Data: map[string]string{"raw": `{"chunk_id":2,"status":"done"}`},
+		},
+	}
+
+	headers := map[string]string{"Content-Type": "application/x-ndjson"}
+	body := models.ReconstructBodyFromStreamEntries(entries, headers)
+
+	lines := splitLineQueue(body, strings.TrimSpace, true)
+	require.Len(t, lines, 2)
+	assert.Equal(t, `{"chunk_id":1,"status":"processing"}`, lines[0])
+	assert.Equal(t, `{"chunk_id":2,"status":"done"}`, lines[1])
+}
+
+// TestSSEStreamBody_RoundTrip tests that SSE bodies can be parsed into StreamBody entries
+// and reconstructed back into a body that the comparison functions can process correctly.
+func TestSSEStreamBody_RoundTrip(t *testing.T) {
+	originalBody := strings.Join([]string{
+		": stream init",
+		"",
+		"id:100",
+		"retry:5000",
+		"event:TICKER",
+		"data:[{\"message_id\":\"ticker-1\"}]",
+		"",
+		"id:101",
+		"event:system-alert",
+		"data:Alert for student",
+		"data:Please check your dashboard.",
+		"",
+	}, "\n")
+
+	headers := map[string]string{
+		"Content-Type": "text/event-stream; charset=utf-8",
+	}
+	ts := time.Date(2026, 2, 19, 12, 49, 29, 0, time.UTC)
+
+	// Parse to entries
+	entries := ParseBodyToStreamEntries(originalBody, headers, ts)
+	require.NotNil(t, entries)
+	require.Len(t, entries, 3) // comment, TICKER, system-alert
+
+	// Reconstruct
+	reconstructedBody := models.ReconstructBodyFromStreamEntries(entries, headers)
+
+	// The reconstructed body should be parseable by splitSSEQueue and produce the same frames
+	originalFrames := splitSSEQueue(originalBody)
+	reconstructedFrames := splitSSEQueue(reconstructedBody)
+
+	require.Equal(t, len(originalFrames), len(reconstructedFrames),
+		"reconstructed body should have the same number of SSE frames")
+
+	// Verify each frame is structurally equivalent
+	logger := zap.NewNop()
+	for i := range originalFrames {
+		match, reason := compareSSEFrame(originalFrames[i], reconstructedFrames[i], nil, logger)
+		assert.True(t, match, "frame %d should match: %s", i, reason)
+	}
+}
+
+// TestSSEStreamBody_YAMLRoundTrip tests YAML marshal/unmarshal of HTTPResp with StreamBody.
+func TestSSEStreamBody_YAMLRoundTrip(t *testing.T) {
+	original := models.HTTPResp{
+		StatusCode:    200,
+		Header:        map[string]string{"Content-Type": "text/event-stream"},
+		StatusMessage: "OK",
+		StreamBody: []models.StreamBodyEntry{
+			{Ts: "2026-02-23T11:17:07Z", Data: map[string]string{"comment": "heartbeat"}},
+			{Ts: "2026-02-23T11:17:08Z", Data: map[string]string{
+				"id": "1", "event": "message", "data": `{"text":"hello"}`,
+			}},
+		},
+	}
+
+	// Marshal to YAML
+	yamlData, err := yamlMarshal(original)
+	require.NoError(t, err)
+
+	// The YAML should have body as an array, not a string
+	assert.Contains(t, string(yamlData), "- ts:")
+	assert.Contains(t, string(yamlData), "comment: heartbeat")
+
+	// Unmarshal back
+	var loaded models.HTTPResp
+	err = yamlUnmarshal(yamlData, &loaded)
+	require.NoError(t, err)
+
+	assert.Equal(t, 200, loaded.StatusCode)
+	assert.Equal(t, "OK", loaded.StatusMessage)
+	require.Len(t, loaded.StreamBody, 2)
+	assert.Equal(t, "heartbeat", loaded.StreamBody[0].Data["comment"])
+	assert.Equal(t, "1", loaded.StreamBody[1].Data["id"])
+
+	// Body should be reconstructed
+	assert.NotEmpty(t, loaded.Body)
+	assert.Contains(t, loaded.Body, ": heartbeat")
+	assert.Contains(t, loaded.Body, "id:1")
+}
+
+// TestHTTPResp_YAMLBackwardCompat tests that old-format YAML (body as string) still loads correctly.
+func TestHTTPResp_YAMLBackwardCompat(t *testing.T) {
+	oldFormatYAML := `
+status_code: 200
+header:
+  Content-Type: text/event-stream
+body: |
+  : comment
+  
+  id:1
+  event:test
+  data:hello
+status_message: OK
+proto_major: 1
+proto_minor: 1
+timestamp: 2026-02-23T11:17:07Z
+`
+	var loaded models.HTTPResp
+	err := yamlUnmarshal([]byte(oldFormatYAML), &loaded)
+	require.NoError(t, err)
+
+	assert.Equal(t, 200, loaded.StatusCode)
+	assert.Contains(t, loaded.Body, ": comment")
+	assert.Contains(t, loaded.Body, "id:1")
+	assert.Nil(t, loaded.StreamBody) // StreamBody should be nil for old format
 }
 
 // TestIsTime_VariousFormats_808 covers multiple scenarios for the IsTime function,

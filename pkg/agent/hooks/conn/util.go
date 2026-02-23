@@ -162,6 +162,16 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// Mocks: mocks,
 	}
 
+	// If the response is a streaming content type (SSE, NDJSON, etc.), parse the body into
+	// structured StreamBody entries for better YAML representation.
+	if !respBodySkipped && len(respBody) > 0 {
+		yamlHeaders := pkg.ToYamlHTTPHeader(resp.Header)
+		if streamEntries := pkg.ParseBodyToStreamEntries(string(respBody), yamlHeaders, resTimeTest); len(streamEntries) > 0 {
+			testCase.HTTPResp.StreamBody = streamEntries
+			// Keep Body populated for backward compatibility in comparison logic
+		}
+	}
+
 	if synchronous {
 		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
 		testName := fmt.Sprintf("test-%d", currentID)
