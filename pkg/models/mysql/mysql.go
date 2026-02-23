@@ -28,6 +28,28 @@ type ResponseYaml struct {
 	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
 }
 
+// Write-path types for goccy/go-yaml (can't serialize yaml.v3 Node).
+type SpecWrite struct {
+	Metadata         map[string]string   `json:"metadata" yaml:"metadata"`
+	Requests         []RequestYamlWrite  `json:"requests" yaml:"requests"`
+	Response         []ResponseYamlWrite `json:"responses" yaml:"responses"`
+	CreatedAt        int64               `json:"created" yaml:"created,omitempty"`
+	ReqTimestampMock time.Time           `json:"ReqTimestampMock,omitempty"`
+	ResTimestampMock time.Time           `json:"ResTimestampMock,omitempty"`
+}
+
+type RequestYamlWrite struct {
+	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
+	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
+	Message interface{}       `json:"message,omitempty" yaml:"message"`
+}
+
+type ResponseYamlWrite struct {
+	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
+	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
+	Message interface{}       `json:"message,omitempty" yaml:"message"`
+}
+
 type PacketInfo struct {
 	Header *Header `json:"header" yaml:"header"`
 	Type   string  `json:"packet_type" yaml:"packet_type"`

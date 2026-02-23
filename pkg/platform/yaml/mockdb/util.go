@@ -14,9 +14,9 @@ import (
 	"go.uber.org/zap"
 )
 
-func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
+func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDocWrite, error) {
 
-	yamlDoc := yaml.NetworkTrafficDoc{
+	yamlDoc := yaml.NetworkTrafficDocWrite{
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
@@ -50,7 +50,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			responses = append(responses, resp)
 		}
-		mongoSpec := models.MongoSpec{
+		yamlDoc.Spec = models.MongoSpec{
 			Metadata:         mock.Spec.Metadata,
 			Requests:         requests,
 			Response:         responses,
@@ -59,25 +59,14 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 
-		err := yamlDoc.Spec.Encode(mongoSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the mongo input-output as yaml")
-			return nil, err
-		}
-
 	case models.HTTP:
-		httpSpec := models.HTTPSchema{
+		yamlDoc.Spec = models.HTTPSchema{
 			Metadata:         mock.Spec.Metadata,
 			Request:          *mock.Spec.HTTPReq,
 			Response:         *mock.Spec.HTTPResp,
 			Created:          mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(httpSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
-			return nil, err
 		}
 	case models.DNS:
 		var dnsReq models.DNSReq
@@ -88,43 +77,28 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		if mock.Spec.DNSResp != nil {
 			dnsResp = *mock.Spec.DNSResp
 		}
-		dnsSpec := models.DNSSchema{
+		yamlDoc.Spec = models.DNSSchema{
 			Metadata:         mock.Spec.Metadata,
 			Request:          dnsReq,
 			Response:         dnsResp,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-		err := yamlDoc.Spec.Encode(dnsSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the dns input-output as yaml")
-			return nil, err
-		}
 	case models.GENERIC:
-		genericSpec := models.GenericSchema{
+		yamlDoc.Spec = models.GenericSchema{
 			Metadata:         mock.Spec.Metadata,
 			GenericRequests:  mock.Spec.GenericRequests,
 			GenericResponses: mock.Spec.GenericResponses,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-		err := yamlDoc.Spec.Encode(genericSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
-			return nil, err
-		}
 	case models.REDIS:
-		redisSpec := models.RedisSchema{
+		yamlDoc.Spec = models.RedisSchema{
 			Metadata:         mock.Spec.Metadata,
 			RedisRequests:    mock.Spec.RedisRequests,
 			RedisResponses:   mock.Spec.RedisResponses,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(redisSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
-			return nil, err
 		}
 	case models.PostgresV2:
 		requests := []postgres.RequestYaml{}
@@ -149,7 +123,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			responses = append(responses, resp)
 		}
 
-		sqlSpec := postgres.Spec{
+		yamlDoc.Spec = postgres.Spec{
 			Metadata:         mock.Spec.Metadata,
 			Requests:         requests,
 			Response:         responses,
@@ -157,65 +131,39 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-		err := yamlDoc.Spec.Encode(sqlSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the Postgres input-output as yaml")
-			return nil, err
-		}
 	case models.GRPC_EXPORT:
-		gRPCSpec := models.GrpcSpec{
+		yamlDoc.Spec = models.GrpcSpec{
 			Metadata:         mock.Spec.Metadata,
 			GrpcReq:          *mock.Spec.GRPCReq,
 			GrpcResp:         *mock.Spec.GRPCResp,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-		err := yamlDoc.Spec.Encode(gRPCSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal gRPC of external call into yaml")
-			return nil, err
-		}
 	case models.MySQL:
-		requests := []mysql.RequestYaml{}
+		requests := make([]mysql.RequestYamlWrite, 0, len(mock.Spec.MySQLRequests))
 		for _, v := range mock.Spec.MySQLRequests {
-
-			req := mysql.RequestYaml{
-				Header: v.Header,
-				Meta:   v.Meta,
-			}
-			err := req.Message.Encode(v.Message)
-			if err != nil {
-				utils.LogError(logger, err, "failed to encode mysql request wiremessage into yaml")
-				return nil, err
-			}
-			requests = append(requests, req)
+			requests = append(requests, mysql.RequestYamlWrite{
+				Header:  v.Header,
+				Meta:    v.Meta,
+				Message: v.Message,
+			})
 		}
-		responses := []mysql.ResponseYaml{}
+		responses := make([]mysql.ResponseYamlWrite, 0, len(mock.Spec.MySQLResponses))
 		for _, v := range mock.Spec.MySQLResponses {
-			resp := mysql.ResponseYaml{
-				Header: v.Header,
-				Meta:   v.Meta,
-			}
-			err := resp.Message.Encode(v.Message)
-			if err != nil {
-				utils.LogError(logger, err, "failed to encode mysql response wiremessage into yaml")
-				return nil, err
-			}
-			responses = append(responses, resp)
+			responses = append(responses, mysql.ResponseYamlWrite{
+				Header:  v.Header,
+				Meta:    v.Meta,
+				Message: v.Message,
+			})
 		}
 
-		sqlSpec := mysql.Spec{
+		yamlDoc.Spec = mysql.SpecWrite{
 			Metadata:         mock.Spec.Metadata,
 			Requests:         requests,
 			Response:         responses,
 			CreatedAt:        mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(sqlSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the MySQL input-output as yaml")
-			return nil, err
 		}
 	case models.HTTP2:
 		var http2Req models.HTTP2Req
@@ -226,18 +174,13 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		if mock.Spec.HTTP2Resp != nil {
 			http2Resp = *mock.Spec.HTTP2Resp
 		}
-		http2Spec := models.HTTP2Schema{
+		yamlDoc.Spec = models.HTTP2Schema{
 			Metadata:         mock.Spec.Metadata,
 			Request:          http2Req,
 			Response:         http2Resp,
 			Created:          mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(http2Spec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the HTTP/2 input-output as yaml")
-			return nil, err
 		}
 	default:
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
