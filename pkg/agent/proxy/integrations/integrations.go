@@ -51,4 +51,5 @@ type MockMemDb interface {
 	DeleteFilteredMock(mock models.Mock) bool
 	DeleteUnFilteredMock(mock models.Mock) bool
 	GetMySQLCounts() (total, config, data int)
+	MarkMockAsUsed(mock models.Mock) bool
 }
