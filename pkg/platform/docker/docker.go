@@ -581,9 +581,17 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "container_name"},
 			{Kind: yaml.ScalarNode, Value: opts.KeployContainer},
 
-			// privileged
-			{Kind: yaml.ScalarNode, Value: "privileged"},
-			{Kind: yaml.ScalarNode, Value: "true"},
+			// cap_add — with security explanation comments in the generated YAML
+			{Kind: yaml.ScalarNode, Value: "cap_add", HeadComment: "These capabilities are scoped to the container's own isolated network namespace\n" +
+				"and do NOT grant access to the host's network, interfaces, or firewall.\n" +
+				"The container runs in its own network namespace — no host access is possible."},
+			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "BPF"},
+				{Kind: yaml.ScalarNode, Value: "PERFMON"},
+				{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
+				{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
+				{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
+			}},
 		},
 	}
 
