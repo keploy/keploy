@@ -38,16 +38,70 @@ type SpecWrite struct {
 	ResTimestampMock time.Time           `json:"ResTimestampMock,omitempty"`
 }
 
+// MarshalYAML bypasses reflection for SpecWrite by manually constructing the map
+func (s SpecWrite) MarshalYAML() (interface{}, error) {
+	m := make(map[string]interface{}, 6)
+	if s.Metadata != nil {
+		m["metadata"] = s.Metadata
+	}
+	if len(s.Requests) > 0 {
+		m["requests"] = s.Requests
+	}
+	if len(s.Response) > 0 {
+		m["responses"] = s.Response
+	}
+	if s.CreatedAt != 0 {
+		m["created"] = s.CreatedAt
+	}
+	if !s.ReqTimestampMock.IsZero() {
+		m["reqtimestampmock"] = s.ReqTimestampMock
+	}
+	if !s.ResTimestampMock.IsZero() {
+		m["restimestampmock"] = s.ResTimestampMock
+	}
+	return m, nil
+}
+
 type RequestYamlWrite struct {
 	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 	Message interface{}       `json:"message,omitempty" yaml:"message"`
 }
 
+// MarshalYAML bypasses reflection for RequestYamlWrite
+func (r RequestYamlWrite) MarshalYAML() (interface{}, error) {
+	m := make(map[string]interface{}, 3)
+	if r.Header != nil {
+		m["header"] = r.Header
+	}
+	if len(r.Meta) > 0 {
+		m["meta"] = r.Meta
+	}
+	if r.Message != nil {
+		m["message"] = r.Message
+	}
+	return m, nil
+}
+
 type ResponseYamlWrite struct {
 	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
 	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 	Message interface{}       `json:"message,omitempty" yaml:"message"`
+}
+
+// MarshalYAML bypasses reflection for ResponseYamlWrite
+func (r ResponseYamlWrite) MarshalYAML() (interface{}, error) {
+	m := make(map[string]interface{}, 3)
+	if r.Header != nil {
+		m["header"] = r.Header
+	}
+	if len(r.Meta) > 0 {
+		m["meta"] = r.Meta
+	}
+	if r.Message != nil {
+		m["message"] = r.Message
+	}
+	return m, nil
 }
 
 type PacketInfo struct {
