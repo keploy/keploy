@@ -32,8 +32,11 @@ func shouldCompareStreamingBody(tc *models.TestCase, actualResponse *models.HTTP
 		return true
 	}
 
-	contentType := getHeaderValueCaseInsensitive(actualResponse.Header, "Content-Type")
-	if contentType == "" {
+	var contentType string
+	if actualResponse != nil {
+		contentType = getHeaderValueCaseInsensitive(actualResponse.Header, "Content-Type")
+	}
+	if contentType == "" && tc != nil {
 		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
 	}
 	contentType = strings.ToLower(contentType)
@@ -47,9 +50,12 @@ func shouldCompareStreamingBody(tc *models.TestCase, actualResponse *models.HTTP
 		return true
 	}
 
-	if strings.Contains(contentType, "text/plain") &&
-		(hasChunkedTransferEncoding(tc.HTTPResp.Header) || hasChunkedTransferEncoding(actualResponse.Header)) {
-		return true
+	if strings.Contains(contentType, "text/plain") {
+		hasTcChunked := tc != nil && hasChunkedTransferEncoding(tc.HTTPResp.Header)
+		hasActChunked := actualResponse != nil && hasChunkedTransferEncoding(actualResponse.Header)
+		if hasTcChunked || hasActChunked {
+			return true
+		}
 	}
 
 	return false
