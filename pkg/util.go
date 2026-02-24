@@ -432,11 +432,11 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		req.Host = hostHeader
 	}
 
-	streamTimeoutSeconds := cfg.APITimeout
+	APITimeout := cfg.APITimeout
 	if detectHTTPStreamConfig(tc, nil).Mode != httpStreamModeNone {
-		streamTimeoutSeconds = ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
+		APITimeout = ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
 	}
-	requestTimeout := time.Second * time.Duration(streamTimeoutSeconds)
+	requestTimeout := time.Second * time.Duration(APITimeout)
 
 	// Creating the client and disabling redirects
 	var client *http.Client
