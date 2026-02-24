@@ -319,3 +319,94 @@ func TestMatch_CompareAll_JSONStillCompared(t *testing.T) {
 	assert.True(t, result.StatusCode.Normal)
 	assert.False(t, result.BodyResult[0].Normal)
 }
+
+// TestMatch_StatusCodeClassAssertion verifies the behavior of the status_code_class assertion.
+// It ensures that actualClass is dynamically computed from actualResponse.StatusCode.
+func TestMatch_StatusCodeClassAssertion(t *testing.T) {
+	logger := zap.NewNop()
+
+	testCases := []struct {
+		name           string
+		assertClass    string
+		actualStatus   int
+		expectedPass   bool
+	}{
+		{
+			name:         "Assert 2xx against 200 response -> PASS",
+			assertClass:  "2xx",
+			actualStatus: 200,
+			expectedPass: true,
+		},
+		{
+			name:         "Assert 2xx against 500 response -> FAIL",
+			assertClass:  "2xx",
+			actualStatus: 500,
+			expectedPass: false,
+		},
+		{
+			name:         "Assert 5xx against 500 response -> PASS",
+			assertClass:  "5xx",
+			actualStatus: 500,
+			expectedPass: true,
+		},
+		{
+			name:         "Assert 4xx against 404 response -> PASS",
+			assertClass:  "4xx",
+			actualStatus: 404,
+			expectedPass: true,
+		},
+		{
+			name:         "Assert 3xx against 302 response -> PASS",
+			assertClass:  "3xx",
+			actualStatus: 302,
+			expectedPass: true,
+		},
+		{
+			name:         "Assert 5xx against 200 response -> FAIL",
+			assertClass:  "5xx",
+			actualStatus: 200,
+			expectedPass: false,
+		},
+		{
+			name:         "Assert 200 (without xx) against 200 response -> PASS",
+			assertClass:  "200",
+			actualStatus: 200,
+			expectedPass: true,
+		},
+		{
+			name:         "Assert 404 (without xx) against 400 response -> PASS", // 404 becomes 4xx
+			assertClass:  "404",
+			actualStatus: 400,
+			expectedPass: true,
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+tc := &models.TestCase{
+				Name: tt.name,
+				HTTPResp: models.HTTPResp{
+					StatusCode: 200, // Expected status code recorded
+					Body:       `{"status":"ok"}`,
+				},
+				Assertions: map[models.AssertionType]interface{}{
+					models.StatusCodeClass: tt.assertClass,
+				},
+			}
+
+			actualResponse := &models.HTTPResp{
+				StatusCode: tt.actualStatus,
+				Body:       `{"status":"ok"}`,
+			}
+
+			noiseConfig := map[string]map[string][]string{}
+
+			pass, result := Match(tc, actualResponse, noiseConfig, false, false, logger, false)
+
+			assert.Equal(t, tt.expectedPass, pass, "Expected pass to be %v for %s", tt.expectedPass, tt.name)
+			if tt.expectedPass {
+				assert.True(t, result.StatusCode.Normal, "Expected StatusCode result to be normal on PASS")
+			}
+		})
+	}
+}
