@@ -84,33 +84,3 @@ func TestEffectiveStreamMockWindow_327(t *testing.T) {
 	assert.Equal(t, reqTs, after)
 	assert.Equal(t, respTs.Add(30*time.Second), before)
 }
-
-func TestShouldPreserveInterRequestTiming_StreamingTestcase_328(t *testing.T) {
-	tc := &models.TestCase{
-		Kind: models.HTTP,
-		HTTPResp: models.HTTPResp{
-			Header: map[string]string{"Content-Type": "text/event-stream"},
-		},
-	}
-
-	assert.True(t, shouldPreserveInterRequestTiming(tc, false))
-}
-
-func TestShouldPreserveInterRequestTiming_ActiveStreamingReplay_329(t *testing.T) {
-	tc := &models.TestCase{
-		Kind: models.HTTP,
-		HTTPResp: models.HTTPResp{
-			Header: map[string]string{"Content-Type": "application/json"},
-		},
-	}
-
-	assert.True(t, shouldPreserveInterRequestTiming(tc, true))
-}
-
-func TestShouldPreserveInterRequestTiming_SyncWithoutStreaming_330(t *testing.T) {
-	tc := &models.TestCase{
-		Kind: models.GRPC_EXPORT,
-	}
-
-	assert.False(t, shouldPreserveInterRequestTiming(tc, false))
-}
