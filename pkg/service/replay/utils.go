@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
@@ -428,4 +430,53 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 	}
 
 	table.Render()
+}
+
+func (r *Replayer) enforceInterRequestTiming(
+	ctx context.Context,
+	testCase *models.TestCase,
+	preserve bool,
+	anchorReqTime *time.Time,
+	anchorWallClock *time.Time,
+) error {
+	if !preserve {
+		// Reset anchors when replay is outside streaming-sensitive paths so
+		// synchronous testcase execution doesn't inherit recorded wall-clock gaps.
+		*anchorReqTime = time.Time{}
+		*anchorWallClock = time.Time{}
+		return nil
+	}
+
+	reqTS := testCaseRequestTimestamp(testCase)
+	if reqTS.IsZero() {
+		return nil
+	}
+
+	// Reproduce recorded temporal spacing only while streaming replay is active
+	// so subscriber/publisher ordering remains stable without delaying sync tests.
+	if anchorReqTime.IsZero() {
+		*anchorReqTime = reqTS
+		*anchorWallClock = time.Now()
+		return nil
+	}
+
+	targetStart := anchorWallClock.Add(reqTS.Sub(*anchorReqTime))
+	waitFor := time.Until(targetStart)
+	if waitFor <= 0 {
+		return nil
+	}
+
+	r.logger.Debug("waiting to preserve recorded inter-request timing",
+		zap.String("testcase", testCase.Name),
+		zap.Duration("wait_for", waitFor))
+
+	timer := time.NewTimer(waitFor)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

@@ -1177,36 +1177,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			preserveInterRequestTiming = true
 		}
 
-		if !preserveInterRequestTiming {
-			// Reset anchors when replay is outside streaming-sensitive paths so
-			// synchronous testcase execution doesn't inherit recorded wall-clock gaps.
-			replayAnchorRecordedReqTime = time.Time{}
-			replayAnchorWallClock = time.Time{}
-		} else if reqTS := testCaseRequestTimestamp(testCase); !reqTS.IsZero() {
-			// Reproduce recorded temporal spacing only while streaming replay is active
-			// so subscriber/publisher ordering remains stable without delaying sync tests.
-			if replayAnchorRecordedReqTime.IsZero() {
-				replayAnchorRecordedReqTime = reqTS
-				replayAnchorWallClock = time.Now()
-			} else {
-				targetStart := replayAnchorWallClock.Add(reqTS.Sub(replayAnchorRecordedReqTime))
-				waitFor := time.Until(targetStart)
-				if waitFor > 0 {
-					r.logger.Debug("waiting to preserve recorded inter-request timing",
-						zap.String("testcase", testCase.Name),
-						zap.Duration("wait_for", waitFor))
-					timer := time.NewTimer(waitFor)
-					select {
-					case <-runTestSetCtx.Done():
-						timer.Stop()
-						loopErr = runTestSetCtx.Err()
-						break
-					case <-timer.C:
-					}
-				}
-			}
-		}
-		if loopErr != nil {
+		err = r.enforceInterRequestTiming(runTestSetCtx, testCase, preserveInterRequestTiming, &replayAnchorRecordedReqTime, &replayAnchorWallClock)
+		if err != nil {
+			loopErr = err
 			break
 		}
 
