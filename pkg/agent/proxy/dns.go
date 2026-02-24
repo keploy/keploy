@@ -109,6 +109,40 @@ func mergeRcode(cur, next int) int {
 	return cur
 }
 
+func isUDPResponse(w dns.ResponseWriter) bool {
+	if w == nil || w.RemoteAddr() == nil {
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(w.RemoteAddr().Network()), "udp")
+}
+
+func maxDNSReplySize(r *dns.Msg, w dns.ResponseWriter) int {
+	// RFC-compliant defaults:
+	// - UDP without EDNS0: 512 bytes
+	// - TCP without EDNS0: 65535 bytes
+	if !isUDPResponse(w) {
+		return dns.MaxMsgSize
+	}
+
+	size := dns.MinMsgSize
+	if r != nil {
+		if opt := r.IsEdns0(); opt != nil {
+			if udpSize := int(opt.UDPSize()); udpSize > size {
+				size = udpSize
+			}
+		}
+	}
+
+	// Guard against malformed EDNS0 values.
+	if size < dns.MinMsgSize {
+		return dns.MinMsgSize
+	}
+	if size > dns.MaxMsgSize {
+		return dns.MaxMsgSize
+	}
+	return size
+}
+
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	p.logger.Debug("", zap.String("Source socket info", w.RemoteAddr().String()))
 
@@ -163,6 +197,10 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	p.logger.Debug(fmt.Sprintf("dns msg RCODE sending back:\n%v\n", msg.Rcode))
 	p.logger.Debug("Writing dns info back to the client...")
+
+	// Ensure UDP replies respect the client-advertised payload size. This avoids
+	// oversized packets that can surface as "dns: buffer size too small" on clients.
+	msg.Truncate(maxDNSReplySize(r, w))
 
 	err := w.WriteMsg(msg)
 	if err != nil {
