@@ -150,6 +150,13 @@ func testCaseRequestTimestamp(tc *models.TestCase) time.Time {
 	}
 }
 
+func shouldPreserveInterRequestTiming(tc *models.TestCase, streamingReplayActive bool) bool {
+	if tc != nil && tc.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(tc) {
+		return true
+	}
+	return streamingReplayActive
+}
+
 func reorderForStreamingByRequestTime(testCases []*models.TestCase) ([]*models.TestCase, bool) {
 	if len(testCases) < 2 {
 		return testCases, false
