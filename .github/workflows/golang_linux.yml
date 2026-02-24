@@ -35,9 +35,6 @@ jobs:
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
-          - name: sse-redis
-            path: sse-redis
-            script_dir: sse_redis
         config:
           - job: record_latest_replay_build
             record_src: latest
