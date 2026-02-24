@@ -1209,14 +1209,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// narrowing agent-side mock set and starving in-flight stream dependencies.
 			reqTime = models.BaseTime
 			respTime = time.Now().UTC()
-			if asyncMockFilterPinned {
-				skipMockFilterUpdate = true
-				r.logger.Debug("skipping mock filter update because async stream replay is active and mock window is already pinned",
-					zap.String("testcase", testCase.Name))
-			} else {
-				r.logger.Debug("pinning wide mock filter window because async stream replay is active",
-					zap.String("testcase", testCase.Name))
-			}
+
+			// For non-mapping-based filtering, once an async streaming HTTP test case is encountered, we pin the mock filter parameters to avoid updating them with every subsequent test case, which could interfere with the streaming replay. The filter will be unpinned once the streaming replay is no longer active.
+			skipMockFilterUpdate = asyncMockFilterPinned
 		}
 
 		if !skipMockFilterUpdate {
