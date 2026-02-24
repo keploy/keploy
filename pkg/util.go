@@ -1604,7 +1604,7 @@ func canonicalizeNDJSONLine(line string) string {
 	}
 
 	var parsed interface{}
-	if json.Unmarshal([]byte(line), &parsed) == nil {
+	if err := json.NewDecoder(strings.NewReader(line)).Decode(&parsed); err == nil {
 		if marshaled, err := json.Marshal(parsed); err == nil {
 			return string(marshaled)
 		}
