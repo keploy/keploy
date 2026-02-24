@@ -30,7 +30,7 @@ func ProcessRawMocks(ctx context.Context, logger *zap.Logger, rawMocks <-chan *m
 		}
 
 		if err := processMock(ctx, logger, mock); err != nil {
-			logger.Error("failed to process mock in async worker", zap.Error(err))
+			logger.Error("failed to process mock in async worker. Check if the mock data format is valid or verify MySQL connection stability", zap.Error(err))
 		}
 
 		select {
@@ -80,7 +80,7 @@ func ProcessRawMocksV2(ctx context.Context, logger *zap.Logger, rawMocks <-chan 
 
 		mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
 		if err != nil {
-			logger.Error("failed to decode raw mock entry",
+			logger.Error("failed to decode raw mock entry. Check if the MySQL packet format is valid or verify MySQL connection stability",
 				zap.Error(err), zap.String("mockType", entry.MockType))
 			continue
 		}
