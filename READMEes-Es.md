@@ -188,10 +188,13 @@ keploy test -c "Docker_CMD_to_run_user_container --network <network_name>" --con
 ## 🤔 Preguntas?
 ¡Contáctanos! Estamos aquí para ayudarte.
 
+<!-- Community platforms are defined in community_platforms.json — keep in sync -->
 [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg)
-[![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
+[![GitHub](https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/keploy)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
+[![Substack](https://img.shields.io/badge/Substack-FF6719?style=for-the-badge&logo=substack&logoColor=white)](https://testgpt.substack.com/)
 [![X](https://img.shields.io/badge/X-%231DA1F2.svg?style=for-the-badge&logo=X&logoColor=white)](https://x.com/Keployio)
+[![Blog](https://img.shields.io/badge/Blog-0A0A0A?style=for-the-badge&logo=rss&logoColor=white)](https://keploy.io/blog)
 
 ## 💖 ¡Construyamos Juntos!
 Ya seas un principiante o un mago 🧙‍♀️ en la programación, tu perspectiva es valiosa. Echa un vistazo a nuestras:
