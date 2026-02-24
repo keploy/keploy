@@ -58,7 +58,7 @@ func RunReassembler(
 		reqTimestamp := time.Now()
 
 		if len(cmdPacket) < 5 {
-			logger.Warn("reassembler: command packet too short", zap.Int("len", len(cmdPacket)))
+			logger.Debug("reassembler: command packet too short", zap.Int("len", len(cmdPacket)))
 			return
 		}
 		cmdType := cmdPacket[4] // first payload byte

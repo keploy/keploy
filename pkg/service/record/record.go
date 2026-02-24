@@ -562,7 +562,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 				return ctx.Err()
 			}
 		}
-		return ctx.Err()
 	})
 
 	// MAPPINGS
