@@ -1163,7 +1163,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.Strings("expectedMocks", asyncRes.expectedMocks),
 					zap.Strings("actualMocks", asyncRes.mockNames))
 			} else {
-				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete",
+				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case to update the mock mappings, or verify that the application's external dependencies have not changed.",
 					zap.String("testcase", asyncRes.testCase.Name),
 					zap.String("testset", testSetID),
 					zap.Strings("expectedMocks", asyncRes.expectedMocks),
