@@ -534,7 +534,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 
 		streamNoiseKeys := collectStreamingGlobalNoiseKeys(cfg.StreamingBodyNoise, tc.Noise)
-		streamMatched, capturedStreamBody, streamErr := compareHTTPStream(tc.HTTPResp.Body, streamReader, streamCfg, streamNoiseKeys, logger)
+		streamMatched, capturedStreamBody, streamErr := compareHTTPStream(tc.HTTPResp, streamReader, streamCfg, streamNoiseKeys, logger)
 		if streamErr != nil {
 			utils.LogError(logger, streamErr, "failed to read streaming response body")
 			return nil, streamErr
@@ -676,18 +676,18 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 	return detectHTTPStreamConfig(tc, nil).Mode != httpStreamModeNone
 }
 
-func compareHTTPStream(expectedBody string, stream io.Reader, cfg httpStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+func compareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg httpStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
 	switch cfg.Mode {
 	case httpStreamModeSSE:
-		return compareSSEStream(expectedBody, stream, jsonNoiseKeys, logger)
+		return compareSSEStream(expectedResp, stream, jsonNoiseKeys, logger)
 	case httpStreamModeNDJSON:
-		return compareNDJSONStream(expectedBody, stream, jsonNoiseKeys, logger)
+		return compareNDJSONStream(expectedResp, stream, jsonNoiseKeys, logger)
 	case httpStreamModeMultipart:
-		return compareMultipartStream(expectedBody, stream, cfg.Boundary, jsonNoiseKeys, logger)
+		return compareMultipartStream(expectedResp, stream, cfg.Boundary, jsonNoiseKeys, logger)
 	case httpStreamModePlainText:
-		return comparePlainTextStream(expectedBody, stream, logger)
+		return comparePlainTextStream(expectedResp, stream, logger)
 	case httpStreamModeBinary:
-		return compareBinaryStream(expectedBody, stream, logger)
+		return compareBinaryStream(expectedResp, stream, logger)
 	default:
 		return false, "", fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
@@ -845,8 +845,13 @@ func looksLikeNDJSONPayload(body string) bool {
 	return nonEmpty > 0
 }
 
-func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
-	expectedQueue := splitSSEQueue(expectedBody)
+type expectedSSEFrame struct {
+	fields []sseField
+	raw    string
+}
+
+func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+	expectedQueue := extractExpectedSSEQueue(expectedResp)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
@@ -869,12 +874,12 @@ func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[s
 
 		actualQueue = append(actualQueue, frame)
 		expectedFrame := expectedQueue[nextExpected]
-		match, reason := compareSSEFrame(expectedFrame, frame, jsonNoiseKeys, logger)
+		match, reason := compareSSEFields(expectedFrame.fields, parseSSEFrame(frame), jsonNoiseKeys, logger)
 		if !match {
 			logger.Debug("SSE frame mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
-				zap.String("expected_frame", expectedFrame),
+				zap.String("expected_frame", expectedFrame.raw),
 				zap.String("actual_frame", frame))
 			return false, strings.Join(actualQueue, "\n\n"), nil
 		}
@@ -901,8 +906,8 @@ func compareSSEStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[s
 	return true, strings.Join(actualQueue, "\n\n"), nil
 }
 
-func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
-	expectedQueue := splitLineQueue(expectedBody, strings.TrimSpace, true)
+func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
@@ -910,7 +915,7 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys ma
 	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := canonicalizeNDJSONLine(scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -959,8 +964,8 @@ func compareNDJSONStream(expectedBody string, stream io.Reader, jsonNoiseKeys ma
 	return true, strings.Join(actualQueue, "\n"), nil
 }
 
-func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
-	expectedQueue := splitLineQueue(expectedBody, canonicalizePlainTextLine, false)
+func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
@@ -1008,8 +1013,11 @@ func comparePlainTextStream(expectedBody string, stream io.Reader, logger *zap.L
 	return true, strings.Join(actualQueue, "\n"), nil
 }
 
-func compareBinaryStream(expectedBody string, stream io.Reader, logger *zap.Logger) (bool, string, error) {
-	expectedSize := len([]byte(expectedBody))
+func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+	expectedSize := len([]byte(expectedResp.Body))
+	if structuredSize, ok := expectedStructuredRawSize(expectedResp.StreamBody); ok {
+		expectedSize = structuredSize
+	}
 	actualSize := 0
 	buffer := make([]byte, 32*1024)
 
@@ -1042,6 +1050,114 @@ func compareBinaryStream(expectedBody string, stream io.Reader, logger *zap.Logg
 	}
 
 	return true, strconv.Itoa(actualSize), nil
+}
+
+func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
+	if len(expectedResp.StreamBody) > 0 {
+		queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
+		for _, chunk := range expectedResp.StreamBody {
+			if len(chunk.Data) == 0 {
+				continue
+			}
+			fields := make([]sseField, 0, len(chunk.Data))
+			lines := make([]string, 0, len(chunk.Data))
+			for _, dataField := range chunk.Data {
+				key := strings.TrimSpace(dataField.Key)
+				if key == "" {
+					continue
+				}
+				if strings.EqualFold(key, "comment") {
+					fields = append(fields, sseField{
+						key:      ":",
+						value:    dataField.Value,
+						hasValue: true,
+						comment:  true,
+					})
+					lines = append(lines, ":"+dataField.Value)
+					continue
+				}
+
+				lowerKey := strings.ToLower(key)
+				fields = append(fields, sseField{
+					key:      lowerKey,
+					value:    dataField.Value,
+					hasValue: true,
+				})
+				lines = append(lines, lowerKey+":"+dataField.Value)
+			}
+			if len(fields) == 0 {
+				continue
+			}
+			queue = append(queue, expectedSSEFrame{
+				fields: fields,
+				raw:    strings.Join(lines, "\n"),
+			})
+		}
+		if len(queue) > 0 {
+			return queue
+		}
+	}
+
+	legacyQueue := splitSSEQueue(expectedResp.Body)
+	queue := make([]expectedSSEFrame, 0, len(legacyQueue))
+	for _, frame := range legacyQueue {
+		queue = append(queue, expectedSSEFrame{
+			fields: parseSSEFrame(frame),
+			raw:    frame,
+		})
+	}
+	return queue
+}
+
+func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
+	if len(expectedResp.StreamBody) > 0 {
+		queue := make([]string, 0, len(expectedResp.StreamBody))
+		for _, chunk := range expectedResp.StreamBody {
+			raw, ok := streamChunkFieldValue(chunk, "raw")
+			if !ok {
+				continue
+			}
+			raw = canonicalizer(raw)
+			if ignoreEmpty && raw == "" {
+				continue
+			}
+			queue = append(queue, raw)
+		}
+		if len(queue) > 0 {
+			return queue
+		}
+	}
+
+	return splitLineQueue(expectedResp.Body, canonicalizer, ignoreEmpty)
+}
+
+func expectedStructuredRawSize(chunks []models.HTTPStreamChunk) (int, bool) {
+	if len(chunks) == 0 {
+		return 0, false
+	}
+
+	total := 0
+	found := false
+	for _, chunk := range chunks {
+		raw, ok := streamChunkFieldValue(chunk, "raw")
+		if !ok {
+			continue
+		}
+		total += len([]byte(raw))
+		found = true
+	}
+
+	return total, found
+}
+
+func streamChunkFieldValue(chunk models.HTTPStreamChunk, key string) (string, bool) {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, field := range chunk.Data {
+		if strings.ToLower(strings.TrimSpace(field.Key)) == key {
+			return field.Value, true
+		}
+	}
+	return "", false
 }
 
 type sseField struct {
@@ -1099,9 +1215,10 @@ func parseSSEFrame(frame string) []sseField {
 }
 
 func compareSSEFrame(expectedFrame, actualFrame string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string) {
-	expectedFields := parseSSEFrame(expectedFrame)
-	actualFields := parseSSEFrame(actualFrame)
+	return compareSSEFields(parseSSEFrame(expectedFrame), parseSSEFrame(actualFrame), jsonNoiseKeys, logger)
+}
 
+func compareSSEFields(expectedFields, actualFields []sseField, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string) {
 	if len(expectedFields) != len(actualFields) {
 		return false, "field-count mismatch"
 	}
@@ -1231,11 +1348,12 @@ func removeGlobalNoiseKeys(node any, jsonNoiseKeys map[string]struct{}) any {
 	}
 }
 
-func compareMultipartStream(expectedBody string, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
 	if strings.TrimSpace(boundary) == "" {
 		return false, "", fmt.Errorf("missing multipart boundary for stream comparison")
 	}
 
+	expectedBody := expectedResp.Body
 	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), boundary)
 	if err != nil {
 		return false, "", err

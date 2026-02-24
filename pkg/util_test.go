@@ -339,11 +339,118 @@ func TestSimulateHTTP_SSEStreamMismatch_317(t *testing.T) {
 	assert.Contains(t, resp.Body, "999")
 }
 
+func TestSimulateHTTP_SSEStreamMatch_WithStructuredExpectedBody_317A(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("id:1\nevent:update\ndata:{\"value\":1}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:2\nevent:update\ndata:{\"value\":2}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "sse-structured-expected",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Accept": "text/event-stream",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/event-stream",
+			},
+			// This intentionally does not match the streamed frames. The stream
+			// comparator must use HTTPResp.StreamBody when present.
+			Body: "legacy-body-not-used-for-stream-compare",
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "1"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "2"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":2}`},
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, resp.Body)
+}
+
 func TestCanonicalizeSSEFrame_318(t *testing.T) {
 	input := "id: 100\nevent: system-alert\ndata: {\"active\": true, \"user\" : \"alice\"}\n"
 	got := canonicalizeSSEFrame(input)
 
 	assert.Equal(t, "id:100\nevent:system-alert\ndata:{\"active\":true,\"user\":\"alice\"}", got)
+}
+
+func TestSimulateHTTP_NDJSONStreamMatch_WithStructuredExpectedBody_318A(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("{\"id\":1,\"ok\":true}\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("{\"id\":2,\"ok\":false}\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "ndjson-structured-expected",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "application/x-ndjson",
+			},
+			Body: "legacy-body-not-used-for-stream-compare",
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":1,"ok":true}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":2,"ok":false}`},
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, resp.Body)
 }
 
 func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
