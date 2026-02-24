@@ -43,93 +43,86 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 }
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
-	urlReplacements := h.mergedURLReplacements(testSetID)
-	hostToUse := h.resolveSimulationHost()
+
+	// Extract URL replacements: merge global + per-test-set (test-set level overrides global for same key)
+	var urlReplacements map[string]string
+	rw := h.cfg.Test.ReplaceWith
+	if len(rw.Global.URL) > 0 || len(rw.TestSets) > 0 {
+		urlReplacements = make(map[string]string)
+		// Start with global replacements
+		for k, v := range rw.Global.URL {
+			urlReplacements[k] = v
+		}
+		// Override/add with per-test-set replacements
+		if tsRW, ok := rw.TestSets[testSetID]; ok {
+			for k, v := range tsRW.URL {
+				urlReplacements[k] = v
+			}
+		}
+	}
 
 	switch tc.Kind {
 	case models.HTTP:
-		noiseConfig := CloneGlobalNoise(h.cfg.Test.GlobalNoise.Global)
+		noiseConfig := h.cfg.Test.GlobalNoise.Global
 		if tsNoise, ok := h.cfg.Test.GlobalNoise.Testsets[testSetID]; ok {
-			noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+			noiseConfig = LeftJoinNoise(h.cfg.Test.GlobalNoise.Global, tsNoise)
 		}
 		streamBodyNoise := map[string][]string{}
 		if bodyNoise, ok := noiseConfig["body"]; ok {
 			streamBodyNoise = cloneNoiseMap(bodyNoise)
 		}
 
-		return h.simulateWithHooks(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name, func() (interface{}, error) {
-			h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
-			return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
-				APITimeout:         h.cfg.Test.APITimeout,
-				ConfigPort:         h.cfg.Test.Port,
-				KeployPath:         h.cfg.Path,
-				ConfigHost:         hostToUse,
-				URLReplacements:    urlReplacements,
-				StreamingBodyNoise: streamBodyNoise,
-			})
+		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
+			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		}
+
+		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+
+		hostToUse := h.cfg.Test.Host
+		if hostToUse == "" {
+			hostToUse = "localhost"
+		}
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			APITimeout:         h.cfg.Test.APITimeout,
+			ConfigPort:         h.cfg.Test.Port,
+			KeployPath:         h.cfg.Path,
+			ConfigHost:         hostToUse,
+			URLReplacements:    urlReplacements,
+			StreamingBodyNoise: streamBodyNoise,
 		})
+
+		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
+			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+		}
+
+		return resp, err
 	case models.GRPC_EXPORT:
-		return h.simulateWithHooks(ctx, &tc.GrpcReq.Timestamp, testSetID, tc.Name, func() (interface{}, error) {
-			h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
-			return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
-				ConfigPort:      h.cfg.Test.GRPCPort,
-				ConfigHost:      hostToUse,
-				URLReplacements: urlReplacements,
-			})
+
+		if err := h.instrumentation.BeforeSimulate(ctx, &tc.GrpcReq.Timestamp, testSetID, tc.Name); err != nil {
+			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		}
+
+		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		hostToUse := h.cfg.Test.Host
+		if hostToUse == "" {
+			hostToUse = "localhost"
+		}
+		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			ConfigPort:      h.cfg.Test.GRPCPort,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
 		})
+
+		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
+			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+		}
+
+		return resp, err
 
 	default:
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
-}
-
-func (h *Hooks) mergedURLReplacements(testSetID string) map[string]string {
-	rw := h.cfg.Test.ReplaceWith
-	if len(rw.Global.URL) == 0 && len(rw.TestSets) == 0 {
-		return nil
-	}
-
-	urlReplacements := make(map[string]string, len(rw.Global.URL))
-	for k, v := range rw.Global.URL {
-		urlReplacements[k] = v
-	}
-	if tsRW, ok := rw.TestSets[testSetID]; ok {
-		for k, v := range tsRW.URL {
-			urlReplacements[k] = v
-		}
-	}
-	if len(urlReplacements) == 0 {
-		return nil
-	}
-	return urlReplacements
-}
-
-func (h *Hooks) resolveSimulationHost() string {
-	if h.cfg.Test.Host != "" {
-		return h.cfg.Test.Host
-	}
-	return "localhost"
-}
-
-func (h *Hooks) simulateWithHooks(
-	ctx context.Context,
-	reqTimestamp *time.Time,
-	testSetID string,
-	testCaseName string,
-	simulate func() (interface{}, error),
-) (interface{}, error) {
-	if err := h.instrumentation.BeforeSimulate(ctx, reqTimestamp, testSetID, testCaseName); err != nil {
-		h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
-	}
-
-	resp, simErr := simulate()
-
-	if err := h.instrumentation.AfterSimulate(ctx, testCaseName, testSetID); err != nil {
-		h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
-	}
-
-	return resp, simErr
 }
 
 func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
