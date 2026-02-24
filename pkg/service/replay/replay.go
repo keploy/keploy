@@ -1230,7 +1230,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		insertStart := time.Now()
 		err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 		if time.Since(insertStart) > 50*time.Millisecond {
-			r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+			r.logger.Debug("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
 		}
 		return err
 	}
@@ -1719,7 +1719,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				insertStart := time.Now()
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if time.Since(insertStart) > 50*time.Millisecond {
-					r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+					r.logger.Debug("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
 				}
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
