@@ -2,7 +2,6 @@ package replay
 
 import (
 	"fmt"
-	"math"
 	"net/url"
 	"os"
 	"path"
@@ -164,25 +163,7 @@ func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (t
 
 	reqTs := tc.HTTPReq.Timestamp
 	respTs := tc.HTTPResp.Timestamp
-
-	timeoutSeconds := defaultAPITimeout
-	if timeoutSeconds == 0 {
-		timeoutSeconds = 10
-	}
-
-	if !reqTs.IsZero() && !respTs.IsZero() {
-		diff := respTs.Sub(reqTs)
-		if diff < 0 {
-			diff = -diff
-		}
-		streamTimeoutSeconds := uint64(math.Ceil((diff + 10*time.Second).Seconds()))
-		if streamTimeoutSeconds < 10 {
-			streamTimeoutSeconds = 10
-		}
-		if streamTimeoutSeconds > timeoutSeconds {
-			timeoutSeconds = streamTimeoutSeconds
-		}
-	}
+	timeoutSeconds := pkg.ComputeStreamingTimeoutSeconds(tc, defaultAPITimeout)
 
 	anchor := reqTs
 	if anchor.IsZero() || (!respTs.IsZero() && respTs.After(anchor)) {

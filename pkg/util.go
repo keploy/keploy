@@ -201,10 +201,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			tc.HTTPReq.URL = decoded
 		}
 	}
-	//TODO: adjust this logic in the render function in order to remove the redundant code
-	// convert testcase to string and render the template values.
-	// Render any template values in the test case before simulation.
-	// Render any template values in the test case before simulation.
+	// TODO: adjust this logic in the render function in order to remove the redundant code.
+	// Convert testcase to string and render template values before simulation.
 	templateValuesMu.RLock()
 	hasTemplateOrSecretValues := len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0
 	templateValuesMu.RUnlock()
@@ -436,7 +434,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	streamTimeoutSeconds := cfg.APITimeout
 	if detectHTTPStreamConfig(tc, nil).Mode != httpStreamModeNone {
-		streamTimeoutSeconds = computeStreamingTimeoutSeconds(tc, cfg.APITimeout)
+		streamTimeoutSeconds = ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
 	}
 	requestTimeout := time.Second * time.Duration(streamTimeoutSeconds)
 
@@ -584,6 +582,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Centralized template update: if response body present and templates exist, update them.
 	templateValuesMu.Lock()
+	defer templateValuesMu.Unlock()
+
 	if len(utils.TemplatizedValues) > 0 && len(bodyForTemplateUpdate) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
 
@@ -592,17 +592,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			prev[k] = v
 		}
 
-		// Compare the current response with previous template values and update if needed
-		if len(utils.TemplatizedValues) > 0 && len(bodyForTemplateUpdate) > 0 {
-			respForTemplate := *resp
-			respForTemplate.Body = string(bodyForTemplateUpdate)
-			updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, respForTemplate, utils.TemplatizedValues)
-			if updated {
-				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
-			}
+		respForTemplate := *resp
+		respForTemplate.Body = string(bodyForTemplateUpdate)
+		updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, respForTemplate, utils.TemplatizedValues)
+		if updated {
+			logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
 		}
 	}
-	templateValuesMu.Unlock()
 	return resp, errHTTPReq
 }
 
@@ -702,7 +698,7 @@ func compareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg httpS
 	}
 }
 
-func computeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
+func ComputeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
 	baseTimeout := defaultSeconds
 	if baseTimeout == 0 {
 		baseTimeout = 10
@@ -735,6 +731,10 @@ func computeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) 
 		return baseTimeout
 	}
 	return streamTimeoutSeconds
+}
+
+func computeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
+	return ComputeStreamingTimeoutSeconds(tc, defaultSeconds)
 }
 
 func collectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNoise map[string][]string) map[string]struct{} {

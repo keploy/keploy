@@ -1085,19 +1085,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 	}
 
-	type asyncHTTPResult struct {
-		testCase        *models.TestCase
-		started         time.Time
-		httpResp        *models.HTTPResp
-		testResult      *models.Result
-		testPass        bool
-		simErr          error
-		mockNames       []string
-		expectedMocks   []string
-		mockSetMismatch bool
-		consumedMocks   []models.MockState
-	}
-
 	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
 	var asyncHTTPWG sync.WaitGroup
 	var activeAsyncStreaming int32
@@ -1107,157 +1094,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	hasAsyncStreaming := false
 	sharedProxyErrCancel := func() {}
 	sharedProxyErrMonitorStarted := false
-
-	processAsyncHTTPResult := func(asyncRes asyncHTTPResult) error {
-		if asyncRes.simErr != nil {
-			utils.LogError(r.logger, asyncRes.simErr, "failed to simulate async streaming request. Check network connectivity, verify the server is responding correctly, or increase the API timeout if the stream is slow.")
-			failure++
-			testSetStatus = models.TestSetStatusFailed
-			testCaseResult := r.CreateFailedTestResult(asyncRes.testCase, testSetID, asyncRes.started, asyncRes.simErr.Error())
-			return r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
-		}
-
-		if asyncRes.httpResp == nil {
-			failure++
-			testSetStatus = models.TestSetStatusFailed
-			testCaseResult := r.CreateFailedTestResult(asyncRes.testCase, testSetID, asyncRes.started, "nil async streaming http response")
-			return r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
-		}
-
-		if r.instrument {
-			for _, m := range asyncRes.consumedMocks {
-				totalConsumedMocks[m.Name] = m
-			}
-		}
-
-		if len(asyncRes.mockNames) > 0 {
-			found := false
-			for i, t := range actualTestMockMappings.Tests {
-				if t.ID == asyncRes.testCase.Name {
-					actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(actualTestMockMappings.Tests[i].Mocks.ToSlice(), asyncRes.mockNames...))
-					found = true
-					break
-				}
-			}
-			if !found {
-				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
-					ID:    asyncRes.testCase.Name,
-					Mocks: models.FromSlice(asyncRes.mockNames),
-				})
-			}
-		}
-
-		r.logger.Debug("Consumed Mocks", zap.Any("mocks", asyncRes.consumedMocks))
-
-		if asyncRes.mockSetMismatch {
-			if asyncRes.testPass {
-				r.logger.Debug("mock mapping mismatch ignored because testcase passed",
-					zap.String("testcase", asyncRes.testCase.Name),
-					zap.String("testset", testSetID),
-					zap.Strings("expectedMocks", asyncRes.expectedMocks),
-					zap.Strings("actualMocks", asyncRes.mockNames))
-			} else {
-				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case to update the mock mappings, or verify that the application's external dependencies have not changed.",
-					zap.String("testcase", asyncRes.testCase.Name),
-					zap.String("testset", testSetID),
-					zap.Strings("expectedMocks", asyncRes.expectedMocks),
-					zap.Strings("actualMocks", asyncRes.mockNames))
-				mockMismatchFailures.AddFailure(testSetID, asyncRes.testCase.Name, asyncRes.expectedMocks, asyncRes.mockNames)
-			}
-		}
-
-		if !asyncRes.testPass {
-			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(asyncRes.testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(asyncRes.testPass)))
-		} else {
-			r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(asyncRes.testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(asyncRes.testPass)))
-		}
-
-		var testStatus models.TestStatus
-		if asyncRes.testPass {
-			testStatus = models.TestStatusPassed
-			success++
-		} else if asyncRes.mockSetMismatch {
-			testStatus = models.TestStatusObsolete
-			obsolete++
-		} else {
-			testStatus = models.TestStatusFailed
-			failure++
-			testSetStatus = models.TestSetStatusFailed
-		}
-
-		if asyncRes.testResult == nil {
-			return fmt.Errorf("test result is nil for async testcase: %s", asyncRes.testCase.Name)
-		}
-
-		testCaseResult := &models.TestResult{
-			Kind:       models.HTTP,
-			Name:       testSetID,
-			Status:     testStatus,
-			Started:    asyncRes.started.Unix(),
-			Completed:  time.Now().UTC().Unix(),
-			TestCaseID: asyncRes.testCase.Name,
-			Req: models.HTTPReq{
-				Method:     asyncRes.testCase.HTTPReq.Method,
-				ProtoMajor: asyncRes.testCase.HTTPReq.ProtoMajor,
-				ProtoMinor: asyncRes.testCase.HTTPReq.ProtoMinor,
-				URL:        asyncRes.testCase.HTTPReq.URL,
-				URLParams:  asyncRes.testCase.HTTPReq.URLParams,
-				Header:     asyncRes.testCase.HTTPReq.Header,
-				Body:       asyncRes.testCase.HTTPReq.Body,
-				Binary:     asyncRes.testCase.HTTPReq.Binary,
-				Form:       asyncRes.testCase.HTTPReq.Form,
-				Timestamp:  asyncRes.testCase.HTTPReq.Timestamp,
-			},
-			Res:          *asyncRes.httpResp,
-			TestCasePath: filepath.Join(r.config.Path, testSetID),
-			MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-			Noise:        asyncRes.testCase.Noise,
-			Result:       *asyncRes.testResult,
-			TimeTaken:    time.Since(asyncRes.started).String(),
-		}
-
-		if testStatus == models.TestStatusFailed && asyncRes.testResult.FailureInfo.Risk != models.None {
-			testCaseResult.FailureInfo.Risk = asyncRes.testResult.FailureInfo.Risk
-			testCaseResult.FailureInfo.Category = asyncRes.testResult.FailureInfo.Category
-		}
-
-		insertStart := time.Now()
-		err := r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
-		if time.Since(insertStart) > 50*time.Millisecond {
-			r.logger.Debug("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
-		}
-		return err
+	asyncCounters := asyncResultCounters{
+		success:       &success,
+		failure:       &failure,
+		obsolete:      &obsolete,
+		testSetStatus: &testSetStatus,
 	}
-
-	drainAsyncHTTPResults := func(block bool) error {
-		for {
-			if block {
-				asyncRes, ok := <-asyncHTTPResults
-				if !ok {
-					return nil
-				}
-				if err := processAsyncHTTPResult(asyncRes); err != nil {
-					return err
-				}
-				continue
-			}
-
-			select {
-			case asyncRes, ok := <-asyncHTTPResults:
-				if !ok {
-					return nil
-				}
-				if err := processAsyncHTTPResult(asyncRes); err != nil {
-					return err
-				}
-			default:
-				return nil
-			}
-		}
+	processAsyncResult := func(asyncRes asyncHTTPResult) error {
+		return r.processAsyncHTTPResult(
+			runTestSetCtx,
+			testRunID,
+			testSetID,
+			asyncRes,
+			totalConsumedMocks,
+			actualTestMockMappings,
+			asyncCounters,
+		)
 	}
 
 	for idx, testCase := range testCases {
-		if err := drainAsyncHTTPResults(false); err != nil {
+		if err := drainAsyncHTTPResults(asyncHTTPResults, false, processAsyncResult); err != nil {
 			loopErr = err
 			break
 		}
@@ -1417,53 +1273,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			go func(tc models.TestCase, expectedMocks []string, started time.Time) {
 				defer asyncHTTPWG.Done()
 				defer atomic.AddInt32(&activeAsyncStreaming, -1)
-
-				asyncRes := asyncHTTPResult{
-					testCase:      &tc,
-					started:       started,
-					expectedMocks: expectedMocks,
-				}
-
-				resp, err := HookImpl.SimulateRequest(runTestSetCtx, &tc, testSetID)
-				if err != nil {
-					asyncRes.simErr = err
-					asyncHTTPResults <- asyncRes
-					return
-				}
-
-				httpResp, ok := resp.(*models.HTTPResp)
-				if !ok {
-					asyncRes.simErr = fmt.Errorf("invalid response type for HTTP test case")
-					asyncHTTPResults <- asyncRes
-					return
-				}
-				asyncRes.httpResp = httpResp
-
-				var localConsumedMocks []models.MockState
-				if r.instrument {
-					consumed, err := HookImpl.GetConsumedMocks(runTestSetCtx)
-					if err != nil {
-						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
-					} else {
-						localConsumedMocks = consumed
-					}
-				}
-				asyncRes.consumedMocks = localConsumedMocks
-
-				mockNames := make([]string, 0, len(localConsumedMocks))
-				for _, m := range localConsumedMocks {
-					mockNames = append(mockNames, m.Name)
-				}
-				asyncRes.mockNames = mockNames
-
-				hasExpectedMocks := len(expectedMocks) > 0
-				if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-					asyncRes.mockSetMismatch = !isMockSubset(mockNames, expectedMocks)
-				}
-
-				emitFailureLogs := !asyncRes.mockSetMismatch
-				asyncRes.testPass, asyncRes.testResult = r.CompareHTTPResp(&tc, httpResp, testSetID, emitFailureLogs)
-				asyncHTTPResults <- asyncRes
+				r.runAsyncStreamingRequest(runTestSetCtx, tc, testSetID, started, expectedMocks, useMappingBased, isMappingEnabled, asyncHTTPResults)
 			}(tcCopy, expectedMocks, started)
 
 			continue
@@ -1594,22 +1404,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 		}
 
-		if len(mockNames) > 0 {
-			found := false
-			for i, t := range actualTestMockMappings.Tests {
-				if t.ID == testCase.Name {
-					actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(actualTestMockMappings.Tests[i].Mocks.ToSlice(), mockNames...))
-					found = true
-					break
-				}
-			}
-			if !found {
-				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
-					ID:    testCase.Name,
-					Mocks: models.FromSlice(mockNames),
-				})
-			}
-		}
+		upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, mockNames)
 
 		// log the consumed mocks during the test run of the test case for test set
 		r.logger.Debug("consumed mocks for test case",
@@ -1741,7 +1536,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	asyncHTTPWG.Wait()
 	close(asyncHTTPResults)
-	if err := drainAsyncHTTPResults(true); err != nil && loopErr == nil {
+	if err := drainAsyncHTTPResults(asyncHTTPResults, true, processAsyncResult); err != nil && loopErr == nil {
 		loopErr = err
 	}
 	if sharedProxyErrMonitorStarted {
