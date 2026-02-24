@@ -149,13 +149,6 @@ func testCaseRequestTimestamp(tc *models.TestCase) time.Time {
 	}
 }
 
-func shouldPreserveInterRequestTiming(tc *models.TestCase, streamingReplayActive bool) bool {
-	if tc != nil && tc.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(tc) {
-		return true
-	}
-	return streamingReplayActive
-}
-
 func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
 	if tc == nil {
 		return time.Time{}, time.Time{}

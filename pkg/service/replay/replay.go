@@ -1170,7 +1170,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		streamingReplayActive := atomic.LoadInt32(&activeAsyncStreaming) > 0
-		preserveInterRequestTiming := shouldPreserveInterRequestTiming(testCase, streamingReplayActive)
+
+		// Determine whether to preserve inter-request timing based on streaming replay status and test case characteristics.
+		preserveInterRequestTiming := streamingReplayActive
+		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+			preserveInterRequestTiming = true
+		}
+
 		if !preserveInterRequestTiming {
 			// Reset anchors when replay is outside streaming-sensitive paths so
 			// synchronous testcase execution doesn't inherit recorded wall-clock gaps.
