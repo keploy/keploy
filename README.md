@@ -204,7 +204,7 @@ Prefer a calendar invite? Mention your availability in the email—we’ll send 
 
 ## Documentation & Community
 
-- � [Slack](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg) — Live support, discussions, and quick answers.
+- 💬 [Slack](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg) — Live support, discussions, and quick answers.
 - 🐙 [GitHub](https://github.com/keploy) — Star the repo, report issues, and follow releases.
 - 📺 [YouTube](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg) — Tutorials, demos, and community meetups.
 - 📰 [Substack](https://testgpt.substack.com/) — Ideas worth reading—delivered to your inbox.
