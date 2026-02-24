@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
@@ -73,6 +74,9 @@ type Proxy struct {
 	GlobalPassthrough bool
 	IsDocker          bool
 
+	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
+	dnsCache *expirable.LRU[string, dnsCacheEntry]
+
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
@@ -113,6 +117,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
+		dnsCache:          newDNSCache(),
 	}
 
 	return proxy
@@ -945,7 +950,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
-		clearDNSCache()
+		p.dnsCache.Purge()
 	}
 
 	return nil
