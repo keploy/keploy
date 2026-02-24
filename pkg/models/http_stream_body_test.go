@@ -95,3 +95,24 @@ func TestHTTPResp_MarshalYAML_StreamingSSEBody(t *testing.T) {
 	assert.Contains(t, body, "data: '{\"ok\":true}'")
 	assert.False(t, strings.Contains(body, "body: |"), "streaming body should not be serialized as scalar block")
 }
+
+func TestHTTPResp_MarshalYAML_TextPlainStreamingBodyAsRawChunks(t *testing.T) {
+	resp := HTTPResp{
+		StatusCode: 200,
+		Header: map[string]string{
+			"Content-Type": "text/plain",
+		},
+		Body:      "line-1\nline-2\nline-3\n",
+		Timestamp: time.Date(2026, 2, 24, 5, 53, 37, 0, time.UTC),
+	}
+
+	out, err := yamlLib.Marshal(resp)
+	require.NoError(t, err)
+	body := string(out)
+
+	assert.Contains(t, body, "\nbody:\n")
+	assert.Contains(t, body, "raw: line-1")
+	assert.Contains(t, body, "raw: line-2")
+	assert.Contains(t, body, "raw: line-3")
+	assert.False(t, strings.Contains(body, "body: |"), "text/plain stream body should be serialized as chunk list")
+}

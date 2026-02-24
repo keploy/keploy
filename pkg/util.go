@@ -647,10 +647,19 @@ func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStream
 			return httpStreamConfig{Mode: httpStreamModeMultipart, Boundary: boundary}
 		}
 	case "text/plain":
+		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
+			return httpStreamConfig{Mode: httpStreamModePlainText}
+		}
 		if isLikelyStreamingHTTPResponse(tc, resp) {
 			return httpStreamConfig{Mode: httpStreamModePlainText}
 		}
+		if tc != nil && looksLikeLineDelimitedStreamingPayload(tc.HTTPResp.Body) {
+			return httpStreamConfig{Mode: httpStreamModePlainText}
+		}
 	case "application/octet-stream":
+		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
+			return httpStreamConfig{Mode: httpStreamModeBinary}
+		}
 		if isLikelyStreamingHTTPResponse(tc, resp) {
 			return httpStreamConfig{Mode: httpStreamModeBinary}
 		}
@@ -843,6 +852,15 @@ func looksLikeNDJSONPayload(body string) bool {
 	}
 
 	return nonEmpty > 0
+}
+
+func looksLikeLineDelimitedStreamingPayload(body string) bool {
+	body = normalizeLineEndings(body)
+	body = strings.TrimSuffix(body, "\n")
+	if strings.TrimSpace(body) == "" {
+		return false
+	}
+	return strings.Contains(body, "\n")
 }
 
 type expectedSSEFrame struct {

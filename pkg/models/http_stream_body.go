@@ -95,7 +95,7 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	h.Binary = raw.Binary
 	h.Timestamp = raw.Timestamp
 
-	body, chunks, err := decodeStreamBody(raw.Body, raw.Header)
+	body, chunks, err := decodeStreamBody(raw.Body, raw.Header, raw.Timestamp)
 	if err != nil {
 		return err
 	}
@@ -146,8 +146,10 @@ func shouldStoreStreamingBody(resp HTTPResp) bool {
 	if strings.Contains(contentType, "application/x-ndjson") || strings.Contains(contentType, "application/ndjson") {
 		return true
 	}
-	if strings.Contains(contentType, "text/plain") && strings.Contains(transferEncoding, "chunked") {
-		return true
+	if strings.Contains(contentType, "text/plain") {
+		if strings.Contains(transferEncoding, "chunked") || looksLikeLineDelimitedStreamBody(resp.Body) {
+			return true
+		}
 	}
 	if strings.Contains(contentType, "application/octet-stream") && strings.Contains(transferEncoding, "chunked") {
 		return true
@@ -172,7 +174,7 @@ func detectStreamBodyKind(headers map[string]string, body string) streamBodyKind
 	return streamBodyKindUnknown
 }
 
-func decodeStreamBody(node yamlLib.Node, headers map[string]string) (string, []HTTPStreamChunk, error) {
+func decodeStreamBody(node yamlLib.Node, headers map[string]string, respTimestamp time.Time) (string, []HTTPStreamChunk, error) {
 	if node.Kind == 0 {
 		return "", nil, nil
 	}
@@ -189,7 +191,45 @@ func decodeStreamBody(node yamlLib.Node, headers map[string]string) (string, []H
 	if err := node.Decode(&body); err != nil {
 		return "", nil, err
 	}
+
+	legacyChunks, ok := deriveLegacyStreamChunks(headers, body, respTimestamp)
+	if ok {
+		return body, legacyChunks, nil
+	}
+
 	return body, nil, nil
+}
+
+func deriveLegacyStreamChunks(headers map[string]string, body string, ts time.Time) ([]HTTPStreamChunk, bool) {
+	kind := detectStreamBodyKind(headers, body)
+	switch kind {
+	case streamBodyKindSSE:
+		chunks := parseSSEBodyToChunks(body, ts)
+		if len(chunks) > 0 {
+			return chunks, true
+		}
+	case streamBodyKindRaw:
+		contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(headers, "Content-Type"))
+		isNDJSON := strings.Contains(contentType, "application/x-ndjson") || strings.Contains(contentType, "application/ndjson")
+		if strings.Contains(contentType, "application/octet-stream") {
+			if strings.TrimSpace(body) == "" {
+				return nil, false
+			}
+			return []HTTPStreamChunk{{
+				TS: ts,
+				Data: []HTTPStreamDataField{{
+					Key:   "raw",
+					Value: body,
+				}},
+			}}, true
+		}
+
+		chunks := parseRawBodyToChunks(body, ts, isNDJSON)
+		if len(chunks) > 0 {
+			return chunks, true
+		}
+	}
+	return nil, false
 }
 
 func decodeStreamChunks(seqNode yamlLib.Node) ([]HTTPStreamChunk, error) {
@@ -408,6 +448,15 @@ func splitModelSSEFrames(body string) []string {
 func looksLikeSSEBodyForModel(body string) bool {
 	body = normalizeModelLineEndings(body)
 	return strings.Contains(body, "\n\n") && (strings.Contains(body, "\ndata:") || strings.HasPrefix(body, "data:") || strings.Contains(body, "\nevent:") || strings.HasPrefix(body, "event:"))
+}
+
+func looksLikeLineDelimitedStreamBody(body string) bool {
+	body = normalizeModelLineEndings(body)
+	body = strings.TrimSuffix(body, "\n")
+	if strings.TrimSpace(body) == "" {
+		return false
+	}
+	return strings.Contains(body, "\n")
 }
 
 func normalizeModelLineEndings(value string) string {

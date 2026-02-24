@@ -28,6 +28,10 @@ var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
 func shouldCompareStreamingBody(tc *models.TestCase, actualResponse *models.HTTPResp) bool {
+	if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
+		return true
+	}
+
 	contentType := getHeaderValueCaseInsensitive(actualResponse.Header, "Content-Type")
 	if contentType == "" {
 		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
@@ -38,7 +42,8 @@ func shouldCompareStreamingBody(tc *models.TestCase, actualResponse *models.HTTP
 		strings.Contains(contentType, "application/x-ndjson") ||
 		strings.Contains(contentType, "application/ndjson") ||
 		strings.Contains(contentType, "multipart/x-mixed-replace") ||
-		strings.Contains(contentType, "multipart/mixed") {
+		strings.Contains(contentType, "multipart/mixed") ||
+		strings.Contains(contentType, "application/octet-stream") {
 		return true
 	}
 
