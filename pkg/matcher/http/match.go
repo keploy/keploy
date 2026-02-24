@@ -51,9 +51,9 @@ func shouldCompareStreamingBody(tc *models.TestCase, actualResponse *models.HTTP
 	}
 
 	if strings.Contains(contentType, "text/plain") {
-		hasTcChunked := tc != nil && hasChunkedTransferEncoding(tc.HTTPResp.Header)
-		hasActChunked := actualResponse != nil && hasChunkedTransferEncoding(actualResponse.Header)
-		if hasTcChunked || hasActChunked {
+		tcChunked := tc != nil && hasChunkedTransferEncoding(tc.HTTPResp.Header)
+		actualChunked := actualResponse != nil && hasChunkedTransferEncoding(actualResponse.Header)
+		if tcChunked || actualChunked {
 			return true
 		}
 	}
