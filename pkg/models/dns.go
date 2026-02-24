@@ -11,7 +11,14 @@ type DNSReq struct {
 
 // DNSResp captures the DNS answer section as zone-format strings.
 type DNSResp struct {
-	Answers []string `json:"answers,omitempty" yaml:"answers,omitempty"`
+	Rcode              int  `json:"rcode" yaml:"rcode" bson:"rcode"`
+	Authoritative      bool `json:"authoritative" yaml:"authoritative" bson:"authoritative"`
+	RecursionAvailable bool `json:"recursionAvailable" yaml:"recursionAvailable" bson:"recursionAvailable"`
+	Truncated          bool `json:"truncated" yaml:"truncated" bson:"truncated"`
+
+	Answers []string `json:"answers,omitempty" yaml:"answers,omitempty" bson:"answers,omitempty"`
+	Ns      []string `json:"ns,omitempty" yaml:"ns,omitempty" bson:"ns,omitempty"`
+	Extra   []string `json:"extra,omitempty" yaml:"extra,omitempty" bson:"extra,omitempty"`
 }
 
 // DNSSchema is the YAML/JSON representation for DNS mocks.
