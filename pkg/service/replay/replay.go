@@ -622,7 +622,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	reorderedTestCases, reordered := reorderForStreamingByRequestTime(testCases)
 	if reordered {
 		testCases = reorderedTestCases
-		r.logger.Info("reordered testcase execution by recorded request timestamps for streaming replay",
+		r.logger.Debug("reordered testcase execution by recorded request timestamps for streaming replay",
 			zap.String("test-set", testSetID))
 	}
 
