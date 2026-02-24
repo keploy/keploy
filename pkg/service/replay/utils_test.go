@@ -63,47 +63,6 @@ func TestLeftJoinNoise_DoesNotMutateGlobal_325(t *testing.T) {
 	assert.False(t, hasHeaderOnGlobal)
 }
 
-func TestReorderForStreamingByRequestTime_326(t *testing.T) {
-	base := time.Date(2026, 2, 20, 9, 31, 7, 0, time.UTC)
-	tc1 := &models.TestCase{
-		Name: "test-1",
-		Kind: models.HTTP,
-		HTTPReq: models.HTTPReq{
-			Timestamp: base.Add(500 * time.Millisecond),
-		},
-		HTTPResp: models.HTTPResp{
-			Header: map[string]string{"Content-Type": "application/json"},
-		},
-	}
-	tc2 := &models.TestCase{
-		Name: "test-2",
-		Kind: models.HTTP,
-		HTTPReq: models.HTTPReq{
-			Timestamp: base,
-		},
-		HTTPResp: models.HTTPResp{
-			Header: map[string]string{"Content-Type": "text/event-stream"},
-		},
-	}
-	tc3 := &models.TestCase{
-		Name: "test-3",
-		Kind: models.HTTP,
-		HTTPReq: models.HTTPReq{
-			Timestamp: base.Add(600 * time.Millisecond),
-		},
-		HTTPResp: models.HTTPResp{
-			Header: map[string]string{"Content-Type": "application/json"},
-		},
-	}
-
-	ordered, changed := reorderForStreamingByRequestTime([]*models.TestCase{tc1, tc2, tc3})
-	require.True(t, changed)
-	require.Len(t, ordered, 3)
-	assert.Equal(t, "test-2", ordered[0].Name)
-	assert.Equal(t, "test-1", ordered[1].Name)
-	assert.Equal(t, "test-3", ordered[2].Name)
-}
-
 func TestEffectiveStreamMockWindow_327(t *testing.T) {
 	reqTs := time.Date(2026, 2, 20, 9, 31, 7, 83000000, time.UTC)
 	respTs := reqTs.Add(3255 * time.Microsecond)

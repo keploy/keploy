@@ -157,55 +157,6 @@ func shouldPreserveInterRequestTiming(tc *models.TestCase, streamingReplayActive
 	return streamingReplayActive
 }
 
-func reorderForStreamingByRequestTime(testCases []*models.TestCase) ([]*models.TestCase, bool) {
-	if len(testCases) < 2 {
-		return testCases, false
-	}
-
-	hasStreaming := false
-	for _, tc := range testCases {
-		if tc != nil && tc.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(tc) {
-			hasStreaming = true
-			break
-		}
-	}
-	if !hasStreaming {
-		return testCases, false
-	}
-
-	ordered := append([]*models.TestCase(nil), testCases...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		ti := testCaseRequestTimestamp(ordered[i])
-		tj := testCaseRequestTimestamp(ordered[j])
-
-		if ti.IsZero() || tj.IsZero() {
-			if !ti.IsZero() && tj.IsZero() {
-				return true
-			}
-			if ti.IsZero() && !tj.IsZero() {
-				return false
-			}
-			return false
-		}
-		if ti.Equal(tj) {
-			return false
-		}
-		return ti.Before(tj)
-	})
-
-	changed := false
-	for i := range ordered {
-		if ordered[i] != testCases[i] {
-			changed = true
-			break
-		}
-	}
-	if !changed {
-		return testCases, false
-	}
-	return ordered, true
-}
-
 func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
 	if tc == nil {
 		return time.Time{}, time.Time{}

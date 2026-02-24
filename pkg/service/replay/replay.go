@@ -619,12 +619,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
-	reorderedTestCases, reordered := reorderForStreamingByRequestTime(testCases)
-	if reordered {
-		testCases = reorderedTestCases
-		r.logger.Debug("reordered testcase execution by recorded request timestamps for streaming replay",
-			zap.String("test-set", testSetID))
-	}
 
 	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
 	if r.runDomainSet != nil {
@@ -2011,9 +2005,9 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
-	noiseConfig := CloneGlobalNoise(r.config.Test.GlobalNoise.Global)
+	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
 	if r.config.Test.SchemaMatch {
@@ -2024,9 +2018,9 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
-	noiseConfig := CloneGlobalNoise(r.config.Test.GlobalNoise.Global)
+	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
 	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs)
