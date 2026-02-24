@@ -516,7 +516,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		case "gzip":
 			gzipReader, gzErr := gzip.NewReader(httpResp.Body)
 			if gzErr != nil {
-				utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+				utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response. Verify the response is valid gzip-encoded data, or check if the server is sending uncompressed content despite the Content-Encoding header.")
 				return nil, gzErr
 			}
 			streamReader = gzipReader
@@ -536,7 +536,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		streamNoiseKeys := collectStreamingGlobalNoiseKeys(cfg.StreamingBodyNoise, tc.Noise)
 		streamMatched, capturedStreamBody, streamErr := compareHTTPStream(tc.HTTPResp, streamReader, streamCfg, streamNoiseKeys, logger)
 		if streamErr != nil {
-			utils.LogError(logger, streamErr, "failed to read streaming response body")
+			utils.LogError(logger, streamErr, "failed to read streaming response body. Check network connectivity, verify the server is responding correctly, or increase the API timeout if the stream is slow.")
 			return nil, streamErr
 		}
 
