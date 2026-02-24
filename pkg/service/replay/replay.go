@@ -1116,7 +1116,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	processAsyncHTTPResult := func(asyncRes asyncHTTPResult) error {
 		if asyncRes.simErr != nil {
-			utils.LogError(r.logger, asyncRes.simErr, "failed to simulate async streaming request")
+			utils.LogError(r.logger, asyncRes.simErr, "failed to simulate async streaming request. Check network connectivity, verify the server is responding correctly, or increase the API timeout if the stream is slow.")
 			failure++
 			testSetStatus = models.TestSetStatusFailed
 			testCaseResult := r.CreateFailedTestResult(asyncRes.testCase, testSetID, asyncRes.started, asyncRes.simErr.Error())
