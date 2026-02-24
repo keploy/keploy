@@ -507,7 +507,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			} else {
 				classStr = class
 			}
-			actualClass := fmtSprintf234("%dxx", 200/100)
+			actualClass := fmtSprintf234("%dxx", actualResponse.StatusCode/100)
 			if classStr != actualClass {
 				pass = false
 				logger.Error("status_code_class assertion failed", zap.String("expected", class), zap.String("actual", actualClass))
