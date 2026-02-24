@@ -29,20 +29,26 @@ type LocalInFileRequestPacket struct {
 
 // TextResultSet is used as a response packet for COM_QUERY
 type TextResultSet struct {
-	ColumnCount     uint64                `yaml:"columnCount" json:"columnCount"`
-	Columns         []*ColumnDefinition41 `yaml:"columns" json:"columns"`
-	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
-	Rows            []*TextRow            `yaml:"rows" json:"rows"`
-	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+	ColumnCount        uint64                `yaml:"columnCount" json:"columnCount"`
+	Columns            []*ColumnDefinition41 `yaml:"columns" json:"columns"`
+	EOFAfterColumns    []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
+	Rows               []*TextRow            `yaml:"rows" json:"rows"`
+	FinalResponse      *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+	RawRowData         [][]byte              `yaml:"-" json:"-"` // Used for async decoding, not serialized
+	RawColumnData      [][]byte              `yaml:"-" json:"-"` // Raw column packets for async decoding
+	RawEOFAfterColumns []byte                `yaml:"-" json:"-"` // Raw EOF packet for async decoding
 }
 
 // BinaryProtocolResultSet is used as a response packet for COM_STMT_EXECUTE
 type BinaryProtocolResultSet struct {
-	ColumnCount     uint64                `yaml:"columnCount" json:"columnCount"`
-	Columns         []*ColumnDefinition41 `yaml:"columns" json:"columns"`
-	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
-	Rows            []*BinaryRow          `yaml:"rows" json:"rows"`
-	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+	ColumnCount        uint64                `yaml:"columnCount" json:"columnCount"`
+	Columns            []*ColumnDefinition41 `yaml:"columns" json:"columns"`
+	EOFAfterColumns    []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
+	Rows               []*BinaryRow          `yaml:"rows" json:"rows"`
+	FinalResponse      *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+	RawRowData         [][]byte              `yaml:"-" json:"-"` // Used for async decoding, not serialized
+	RawColumnData      [][]byte              `yaml:"-" json:"-"` // Raw column packets for async decoding
+	RawEOFAfterColumns []byte                `yaml:"-" json:"-"` // Raw EOF packet for async decoding
 }
 
 type GenericResponse struct {
@@ -120,6 +126,12 @@ type StmtPrepareOkPacket struct {
 	EOFAfterParamDefs  []byte                `yaml:"eofAfterParamDefs" json:"eofAfterParamDefs"`
 	ColumnDefs         []*ColumnDefinition41 `yaml:"column_definitions" json:"column_definitions"`
 	EOFAfterColumnDefs []byte                `yaml:"eofAfterColumnDefs" json:"eofAfterColumnDefs"`
+
+	// Raw data for async decoding
+	RawParamData          [][]byte `yaml:"-" json:"-"`
+	RawColumnDefData      [][]byte `yaml:"-" json:"-"`
+	RawEOFAfterParamDefs  []byte   `yaml:"-" json:"-"`
+	RawEOFAfterColumnDefs []byte   `yaml:"-" json:"-"`
 }
 
 // COM_STMT_EXECUTE packet

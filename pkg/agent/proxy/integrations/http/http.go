@@ -9,10 +9,12 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -69,7 +71,20 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, src, dst, mocks, opts)
+
+	// Forward initial request to destination (proxy-level write)
+	if _, err := dst.Write(reqBuf); err != nil {
+		utils.LogError(logger, err, "failed to forward initial request to destination. Check destination server connectivity and verify the address is correct")
+		return err
+	}
+
+	// Create TeeForwardConn wrappers for zero-latency forwarding.
+	// Dedicated goroutines read from src/dst and forward at wire speed,
+	// while the parser reads buffered copies asynchronously.
+	clientTee := orchestrator.NewTeeForwardConn(ctx, logger, src, dst)
+	destTee := orchestrator.NewTeeForwardConn(ctx, logger, dst, src)
+
+	err = h.encodeHTTP(ctx, reqBuf, clientTee, destTee, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -215,4 +230,17 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 	mocks <- newMock
 	return nil
+}
+
+// isConnClosedErr returns true if the error indicates a closed network
+// connection. These errors are expected during graceful shutdown and
+// should be logged at Debug level rather than Error.
+func isConnClosedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection reset by peer")
 }

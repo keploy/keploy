@@ -154,3 +154,4 @@ type contextKey string
 const ErrGroupKey contextKey = "errGroup"
 const ClientConnectionIDKey contextKey = "clientConnectionId"
 const DestConnectionIDKey contextKey = "destConnectionId"
+const OrchestratorKey contextKey = "orchestrator"

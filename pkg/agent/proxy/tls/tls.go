@@ -2,12 +2,13 @@ package tls
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"sync"
 	"time"
 
-	"github.com/cloudflare/cfssl/helpers"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -19,43 +20,62 @@ func IsTLSHandshake(data []byte) bool {
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
+// sharedTicketKey ensures all TLS configs produced by the proxy use the same
+// session ticket encryption key. Without this, every config gets a random key
+// and TLS session resumption NEVER works — every connection does a full
+// handshake (~5-10 ms of pure CPU for key exchange).
+var (
+	sharedTicketKeyOnce sync.Once
+	sharedTicketKey     [32]byte
+)
+
+func getSharedTicketKey() [32]byte {
+	sharedTicketKeyOnce.Do(func() {
+		_, _ = rand.Read(sharedTicketKey[:])
+	})
+	return sharedTicketKey
+}
+
 func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
-	// 1. Load the Proxy's Signing CA (Used to generate server certs)
-	caPrivKey, err := helpers.ParsePrivateKeyPEM(caPKey)
+	// Use cached/parsed-once CA credentials instead of parsing PEM every time.
+	caPrivKey, caCertParsed, err := GetParsedCA()
 	if err != nil {
-		utils.LogError(logger, err, "Failed to parse CA private key")
-		return nil, false, err
-	}
-	caCertParsed, err := helpers.ParseCertificatePEM(caCrt)
-	if err != nil {
-		utils.LogError(logger, err, "Failed to parse CA certificate")
+		utils.LogError(logger, err, "Failed to get parsed CA credentials. Check file permissions on CA credentials or ensure they are properly initialized")
 		return nil, false, err
 	}
 
+	ticketKey := getSharedTicketKey()
+
 	config := &tls.Config{
+		SessionTicketKey: ticketKey,
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			// Check if client supports http/1.1
+			// Check what protocols client supports
 			clientSupportsHTTP1 := false
+			clientSupportsPostgres := false
 			for _, proto := range hello.SupportedProtos {
 				if proto == "http/1.1" {
 					clientSupportsHTTP1 = true
-					break
+				}
+				if proto == "postgresql" {
+					clientSupportsPostgres = true
 				}
 			}
 
 			var nextProtos []string
-			if clientSupportsHTTP1 {
-				// Client supports HTTP/1.1, prefer it (safer for HTTP traffic)
+			if clientSupportsPostgres {
+				nextProtos = []string{"postgresql"}
+				logger.Debug("Client supports postgresql ALPN, using postgresql", zap.Strings("clientProtos", hello.SupportedProtos))
+			} else if clientSupportsHTTP1 {
 				nextProtos = []string{"http/1.1"}
 				logger.Debug("Client supports http/1.1, using http/1.1 only", zap.Strings("clientProtos", hello.SupportedProtos))
 			} else {
-				// Client only supports H2 (likely gRPC), must offer H2
 				nextProtos = []string{"h2", "http/1.1"}
 				logger.Debug("Client requires H2 (likely gRPC), offering H2", zap.Strings("clientProtos", hello.SupportedProtos))
 			}
 
 			return &tls.Config{
-				NextProtos: nextProtos,
+				NextProtos:       nextProtos,
+				SessionTicketKey: ticketKey, // SAME key so session tickets work across connections
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
 				},
@@ -78,8 +98,6 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 		return nil, false, err
 	}
 
-	// 4. (Optional) Check what kind of connection happened
-	// You can log this to verify if the client actually used mTLS or just standard TLS
 	isMTLS := false
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) > 0 {
