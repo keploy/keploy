@@ -9,6 +9,8 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+const maxModelStreamTokenSize = 10 * 1024 * 1024
+
 type HTTPStreamDataField struct {
 	Key   string
 	Value string
@@ -383,8 +385,13 @@ func parseSSEBodyToChunks(body string, ts time.Time) []HTTPStreamChunk {
 			if key == "" {
 				continue
 			}
+			normalizedKey := strings.ToLower(strings.TrimSpace(key))
+			if normalizedKey == "data" && len(fields) > 0 && strings.EqualFold(fields[len(fields)-1].Key, "data") {
+				fields[len(fields)-1].Value = fields[len(fields)-1].Value + "\n" + value
+				continue
+			}
 			fields = append(fields, HTTPStreamDataField{
-				Key:   strings.ToLower(strings.TrimSpace(key)),
+				Key:   normalizedKey,
 				Value: value,
 			})
 		}
@@ -407,12 +414,17 @@ func parseRawBodyToChunks(body string, ts time.Time, ignoreEmpty bool) []HTTPStr
 
 	content := make([]string, 0)
 	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxModelStreamTokenSize)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if ignoreEmpty && strings.TrimSpace(line) == "" {
 			continue
 		}
 		content = append(content, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		content = nil
 	}
 
 	if len(content) == 0 {

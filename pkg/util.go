@@ -1237,6 +1237,9 @@ func compareSSEFrame(expectedFrame, actualFrame string, jsonNoiseKeys map[string
 }
 
 func compareSSEFields(expectedFields, actualFields []sseField, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string) {
+	expectedFields = mergeConsecutiveSSEDataFields(expectedFields)
+	actualFields = mergeConsecutiveSSEDataFields(actualFields)
+
 	if len(expectedFields) != len(actualFields) {
 		return false, "field-count mismatch"
 	}
@@ -1306,6 +1309,37 @@ func compareSSEFields(expectedFields, actualFields []sseField, jsonNoiseKeys map
 	}
 
 	return true, ""
+}
+
+func mergeConsecutiveSSEDataFields(fields []sseField) []sseField {
+	if len(fields) == 0 {
+		return fields
+	}
+
+	merged := make([]sseField, 0, len(fields))
+	for _, field := range fields {
+		if !field.comment && strings.EqualFold(field.key, "data") {
+			current := field
+			if !current.hasValue {
+				current.hasValue = true
+				current.value = ""
+			}
+
+			if len(merged) > 0 {
+				last := &merged[len(merged)-1]
+				if !last.comment && strings.EqualFold(last.key, "data") && last.hasValue {
+					last.value = last.value + "\n" + current.value
+					continue
+				}
+			}
+			merged = append(merged, current)
+			continue
+		}
+
+		merged = append(merged, field)
+	}
+
+	return merged
 }
 
 func detectScalarType(value string) string {

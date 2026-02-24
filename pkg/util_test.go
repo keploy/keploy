@@ -637,6 +637,20 @@ func TestCompareSSEFrame_DataJSONTypeMismatch_322(t *testing.T) {
 	assert.Equal(t, "data-json-type mismatch", reason)
 }
 
+func TestCompareSSEFields_MultilineDataNormalization_322A(t *testing.T) {
+	logger := zap.NewNop()
+
+	expected := []sseField{
+		{key: "id", value: "1", hasValue: true},
+		{key: "data", value: "line-1\nline-2", hasValue: true},
+	}
+	actual := parseSSEFrame("id:1\ndata:line-1\ndata:line-2")
+
+	match, reason := compareSSEFields(expected, actual, nil, logger)
+	assert.True(t, match, "multiline SSE data should compare equal after normalization")
+	assert.Equal(t, "", reason)
+}
+
 func TestComputeStreamingTimeoutSeconds_323(t *testing.T) {
 	now := time.Now().UTC()
 	tc := &models.TestCase{
