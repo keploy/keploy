@@ -1,0 +1,100 @@
+name: Keploy Performance Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: petclinic
+          MYSQL_DATABASE: petclinic
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
+    steps:
+      - name: Checkout Keploy (yaml-optimization branch)
+        uses: actions/checkout@v4
+        with:
+          path: keploy
+
+      - name: Checkout Spring PetClinic
+        uses: actions/checkout@v4
+        with:
+          repository: spring-projects/spring-petclinic
+          path: petclinic
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Build Spring PetClinic
+        working-directory: petclinic
+        run: ./mvnw clean package -DskipTests
+
+      - name: Start Spring PetClinic
+        working-directory: petclinic
+        run: |
+          java -jar target/spring-petclinic-*.jar \
+            --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic \
+            --spring.datasource.username=root \
+            --spring.datasource.password=petclinic &
+          echo $! > app.pid
+
+      - name: Wait for application to be ready
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
+              echo "✅ Application is ready"
+              exit 0
+            fi
+            echo "Waiting for application... ($i/30)"
+            sleep 2
+          done
+          echo "❌ Application failed to start"
+          exit 1
+
+      - name: Build Keploy
+        working-directory: keploy
+        run: |
+          git checkout yaml-optimization
+          go build -o keploy cmd/server/main.go
+
+      - name: Start Keploy in record mode
+        working-directory: keploy
+        run: |
+          ./keploy record --app-port=8080 &
+          echo $! > keploy.pid
+          sleep 5
+
+      - name: Run k6 load test
+        run: |
+          k6 run --out json=results.json keploy/load-test.js
+
+      - name: Validate RPS threshold
+        run: |
+          ACTUAL_RPS=$(jq '.metrics.http_reqs.values.rate' results.json)
+          echo "Actual RPS: $ACTUAL_RPS"
+          
+          if (( $(echo "$ACTUAL_RPS >= 100" | bc -l) )); then
+            echo "✅ PASS: Achieved $ACTUAL_RPS RPS (target: 100)"
+            exit 0
+          else
+            echo "❌ FAIL: Only achieved $ACTUAL_RPS RPS (target: 100)"
+            exit 1
+          fi
