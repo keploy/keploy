@@ -11,6 +11,51 @@ use crate::ebpf::BpfMapHandle;
 use crate::ipc::IpcClient;
 use crate::tls::{self, CertCache};
 
+/// Per-connection capture buffer. Accumulates relay data for batch IPC send.
+/// Keeps the relay hot path free of IPC allocations and channel sends.
+struct CaptureBuffer {
+    /// Pre-serialized chunks: [direction u8][data_len u32_le][data bytes]...
+    chunks: Vec<u8>,
+    total_bytes: usize,
+}
+
+const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024; // 2MB per connection
+
+impl CaptureBuffer {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::with_capacity(32768),
+            total_bytes: 0,
+        }
+    }
+
+    /// Append a data chunk. Silently drops if capture budget exceeded.
+    fn push(&mut self, is_request: bool, data: &[u8]) {
+        if self.total_bytes >= MAX_CAPTURE_BYTES {
+            return;
+        }
+        self.chunks.push(if is_request { 0 } else { 1 });
+        self.chunks.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        self.chunks.extend_from_slice(data);
+        self.total_bytes += data.len();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    /// How many payload bytes are buffered (for flush-threshold checks).
+    fn bytes_buffered(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Take the accumulated chunks, resetting the buffer for reuse.
+    fn take(&mut self) -> Vec<u8> {
+        self.total_bytes = 0;
+        std::mem::replace(&mut self.chunks, Vec::with_capacity(32768))
+    }
+}
+
 /// Apply low-latency TCP tuning to a TcpStream:
 /// - TCP_NODELAY: disable Nagle's algorithm
 /// - TCP_QUICKACK: disable delayed ACKs (biggest P99 win on loopback)
@@ -44,6 +89,27 @@ fn tune_tcp_stream(stream: &TcpStream) {
     // Don't let socket2 close the fd — it's owned by the TcpStream
     std::mem::forget(std_socket);
 }
+
+/// Re-apply TCP_QUICKACK on a raw fd to prevent delayed ACKs.
+/// The kernel resets this one-shot flag after each delayed-ACK decision,
+/// so we re-apply it after every read to keep per-packet latency minimal.
+#[inline]
+fn set_quickack(fd: std::os::unix::io::RawFd) {
+    unsafe {
+        let val: libc::c_int = 1;
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_QUICKACK,
+            &val as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
+/// Flush threshold for per-task capture buffers (bytes).
+/// Chosen to batch enough data per IPC message without holding too much in memory.
+const CAPTURE_FLUSH_THRESHOLD: usize = 8192;
 
 /// Shared state for tracking active ingress listeners 
 type IngressMap = Arc<Mutex<HashMap<u16, tokio::task::JoinHandle<()>>>>;
@@ -337,31 +403,48 @@ async fn handle_connection(
     tune_tcp_stream(&server_socket);
     debug!("Connected to target {}, starting relay", target_addr);
 
-    // 3. Bidirectional forwarding with inline TLS detection.
-    //
-    // We must use a select! loop (not parallel tasks) because TLS ClientHello
-    // can appear mid-protocol for server-speaks-first protocols like MySQL:
-    //   Server greeting → Client SSL Request → Client TLS ClientHello
-    // The select! loop checks every client→server chunk for TLS so we can
-    // intercept the upgrade regardless of when it appears.
+    // Grab raw fds before splitting — needed for TCP_QUICKACK re-application
+    let client_fd = {
+        use std::os::unix::io::AsRawFd;
+        client_socket.as_raw_fd()
+    };
+    let server_fd = {
+        use std::os::unix::io::AsRawFd;
+        server_socket.as_raw_fd()
+    };
 
     let (mut client_read, mut client_write) = client_socket.into_split();
     let (mut server_read, mut server_write) = server_socket.into_split();
 
+    // ── Phase 1: TLS detection window (select! loop, ≤6 packets) ──
+    //
+    // Server-speaks-first protocols (MySQL) do TLS upgrade after the initial
+    // greeting exchange, so we must inspect the first few client→server chunks.
+    // After the window, TLS is ruled out and we switch to fast parallel relay.
+
     let mut client_buf = vec![0u8; 65536];
     let mut server_buf = vec![0u8; 65536];
+    let mut capture = CaptureBuffer::new();
     let mut tls_detected = false;
     let mut pending_client_data: Option<Vec<u8>> = None;
+    let mut phase1_closed = false;
+    let mut total_packets: u32 = 0;
+
+    const TLS_WINDOW_PACKETS: u32 = 6;
 
     loop {
+        if total_packets >= TLS_WINDOW_PACKETS {
+            break; // Window expired → switch to fast relay
+        }
+
         tokio::select! {
             result = client_read.read(&mut client_buf) => {
                 let n = match result {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => { phase1_closed = true; break; }
                     Ok(n) => n,
                 };
+                total_packets += 1;
 
-                // Check for TLS ClientHello if we have a TLS context
                 if tls_ctx.is_some() && tls::is_tls_client_hello(&client_buf[..n]) {
                     info!("TLS ClientHello detected on conn {}", conn_id);
                     tls_detected = true;
@@ -369,53 +452,131 @@ async fn handle_connection(
                     break;
                 }
 
-                // Normal forwarding: write to server + tee to Go
                 if server_write.write_all(&client_buf[..n]).await.is_err() {
+                    phase1_closed = true;
                     break;
                 }
-                ipc.send_data(&conn_id, true, &client_buf[..n]);
+                capture.push(true, &client_buf[..n]);
             }
             result = server_read.read(&mut server_buf) => {
                 let n = match result {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => { phase1_closed = true; break; }
                     Ok(n) => n,
                 };
+                total_packets += 1;
 
-                // Forward to client + tee to Go
                 if client_write.write_all(&server_buf[..n]).await.is_err() {
+                    phase1_closed = true;
                     break;
                 }
-                ipc.send_data(&conn_id, false, &server_buf[..n]);
+                capture.push(false, &server_buf[..n]);
             }
         }
     }
 
+    // Flush Phase 1 capture immediately so Go parser gets early data
+    // (e.g., MySQL greeting, auth) without waiting for the 100ms timer.
+    if !capture.is_empty() {
+        let data = capture.take();
+        ipc.send_batch_data(&conn_id, &data);
+    }
+
+    // Handle TLS upgrade
     if tls_detected {
-        let tls_ctx = tls_ctx.unwrap(); // Safe: we checked is_some() above
+        let tls_ctx = tls_ctx.unwrap();
         let client_hello = pending_client_data.unwrap();
 
-        // Reunite the split halves back into full TcpStreams
         let client_socket = client_read.reunite(client_write).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to reunite client socket: {}", e))
+            std::io::Error::new(std::io::ErrorKind::Other, format!("reunite client: {}", e))
         })?;
         let server_socket = server_read.reunite(server_write).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to reunite server socket: {}", e))
+            std::io::Error::new(std::io::ErrorKind::Other, format!("reunite server: {}", e))
         })?;
 
-        // Perform TLS MITM
         return handle_tls_connection(
-            client_socket,
-            server_socket,
-            &client_hello,
-            source_port,
-            &conn_id,
-            &tls_ctx,
-            &ipc,
+            client_socket, server_socket, &client_hello,
+            source_port, &conn_id, &tls_ctx, &ipc,
         )
         .await;
     }
 
-    // Normal close
+    // Connection closed during detection phase
+    if phase1_closed {
+        ipc.send_close(&conn_id);
+        return Ok(());
+    }
+
+    // ── Phase 2: Fast parallel relay (zero shared state) ──
+    //
+    // Each direction owns its own CaptureBuffer — no shared mutex, no flusher
+    // task, no timer. Capture data is flushed inline when the buffer exceeds
+    // CAPTURE_FLUSH_THRESHOLD. This eliminates the std::sync::Mutex contention
+    // that caused progressive throughput degradation under concurrent load.
+
+    let ipc_c2s = ipc.clone();
+    let conn_c2s = conn_id.clone();
+
+    // Client → Server relay (independent task, owns its capture buffer)
+    let mut c2s = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let mut capture = CaptureBuffer::new();
+        loop {
+            let n = match client_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            set_quickack(client_fd);
+            if server_write.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
+            capture.push(true, &buf[..n]);
+            if capture.bytes_buffered() >= CAPTURE_FLUSH_THRESHOLD {
+                let data = capture.take();
+                ipc_c2s.send_batch_data(&conn_c2s, &data);
+            }
+        }
+        // Flush remaining capture data
+        if !capture.is_empty() {
+            let data = capture.take();
+            ipc_c2s.send_batch_data(&conn_c2s, &data);
+        }
+    });
+
+    let ipc_s2c = ipc.clone();
+    let conn_s2c = conn_id.clone();
+
+    // Server → Client relay (independent task, owns its capture buffer)
+    let mut s2c = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let mut capture = CaptureBuffer::new();
+        loop {
+            let n = match server_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            set_quickack(server_fd);
+            if client_write.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
+            capture.push(false, &buf[..n]);
+            if capture.bytes_buffered() >= CAPTURE_FLUSH_THRESHOLD {
+                let data = capture.take();
+                ipc_s2c.send_batch_data(&conn_s2c, &data);
+            }
+        }
+        // Flush remaining capture data
+        if !capture.is_empty() {
+            let data = capture.take();
+            ipc_s2c.send_batch_data(&conn_s2c, &data);
+        }
+    });
+
+    // Wait for either direction to close, then abort the other
+    tokio::select! {
+        _ = &mut c2s => { s2c.abort(); },
+        _ = &mut s2c => { c2s.abort(); },
+    }
+
     debug!("Connection closed: {}", conn_id);
     ipc.send_close(&conn_id);
 
@@ -471,17 +632,21 @@ async fn handle_tls_connection(
 
     info!("TLS MITM server handshake complete for {}", conn_id);
 
-    // 3. Bidirectional forwarding on decrypted streams, teeing plaintext to Go
+    // 3. Bidirectional forwarding on decrypted streams.
+    //    Each direction owns its own CaptureBuffer — no shared mutex, no
+    //    flusher task. Inline size-based flushing keeps IPC traffic batched
+    //    while eliminating all lock contention.
     let (mut tc_read, mut tc_write) = tokio::io::split(&mut tls_client);
     let (mut ts_read, mut ts_write) = tokio::io::split(&mut tls_server);
 
-    let conn_id_req = conn_id.to_string();
-    let conn_id_res = conn_id.to_string();
     let ipc_req = ipc.clone();
+    let conn_id_req = conn_id.to_string();
     let ipc_res = ipc.clone();
+    let conn_id_res = conn_id.to_string();
 
     let client_to_server = async move {
         let mut buf = vec![0u8; 65536];
+        let mut capture = CaptureBuffer::new();
         loop {
             let n = match tc_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
@@ -491,13 +656,21 @@ async fn handle_tls_connection(
                 error!("TLS: Failed to write to server: {}", e);
                 break;
             }
-            // Tee PLAINTEXT to Go
-            ipc_req.send_data(&conn_id_req, true, &buf[..n]);
+            capture.push(true, &buf[..n]);
+            if capture.bytes_buffered() >= CAPTURE_FLUSH_THRESHOLD {
+                let data = capture.take();
+                ipc_req.send_batch_data(&conn_id_req, &data);
+            }
+        }
+        if !capture.is_empty() {
+            let data = capture.take();
+            ipc_req.send_batch_data(&conn_id_req, &data);
         }
     };
 
     let server_to_client = async move {
         let mut buf = vec![0u8; 65536];
+        let mut capture = CaptureBuffer::new();
         loop {
             let n = match ts_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
@@ -507,8 +680,15 @@ async fn handle_tls_connection(
                 error!("TLS: Failed to write to client: {}", e);
                 break;
             }
-            // Tee PLAINTEXT to Go
-            ipc_res.send_data(&conn_id_res, false, &buf[..n]);
+            capture.push(false, &buf[..n]);
+            if capture.bytes_buffered() >= CAPTURE_FLUSH_THRESHOLD {
+                let data = capture.take();
+                ipc_res.send_batch_data(&conn_id_res, &data);
+            }
+        }
+        if !capture.is_empty() {
+            let data = capture.take();
+            ipc_res.send_batch_data(&conn_id_res, &data);
         }
     };
 

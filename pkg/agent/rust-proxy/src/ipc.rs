@@ -44,7 +44,6 @@ pub struct GetCertRes {
 
 const MSG_TYPE_GET_DEST: u8 = 1;
 const MSG_TYPE_GET_DEST_RES: u8 = 2;
-const MSG_TYPE_DATA: u8 = 3;
 const MSG_TYPE_CLOSE: u8 = 4;
 const MSG_TYPE_START_INGRESS: u8 = 5;
 const MSG_TYPE_INGRESS_DATA: u8 = 6;
@@ -52,6 +51,7 @@ const MSG_TYPE_INGRESS_CLOSE: u8 = 7;
 const MSG_TYPE_GET_CERT: u8 = 8;
 const MSG_TYPE_GET_CERT_RES: u8 = 9;
 const MSG_TYPE_NOTIFY_CONN: u8 = 10;
+const MSG_TYPE_BATCH_DATA: u8 = 11;
 
 struct BackgroundMsg {
     wire: Vec<u8>, // Pre-built wire message: [length_le32][msg_type_u8][payload]
@@ -253,21 +253,6 @@ impl IpcClient {
         Ok(res)
     }
 
-    pub fn send_data(&self, conn_id: &str, is_request: bool, data: &[u8]) {
-        // Build complete wire message in a single allocation:
-        // [length_le32] [MSG_TYPE_DATA] [conn_id_len u8] [conn_id] [direction u8] [data]
-        let payload_len = 1 + conn_id.len() + 1 + data.len();
-        let total_len = (1 + payload_len) as u32;
-        let mut wire = Vec::with_capacity(4 + 1 + payload_len);
-        wire.extend_from_slice(&total_len.to_le_bytes());
-        wire.push(MSG_TYPE_DATA);
-        wire.push(conn_id.len() as u8);
-        wire.extend_from_slice(conn_id.as_bytes());
-        wire.push(if is_request { 0 } else { 1 });
-        wire.extend_from_slice(data);
-        let _ = self.tx.send(BackgroundMsg { wire });
-    }
-
     pub fn send_close(&self, conn_id: &str) {
         let req = CloseReq {
             conn_id: conn_id.to_string(),
@@ -290,6 +275,24 @@ impl IpcClient {
         if let Ok(payload) = serde_json::to_vec(&req) {
             let _ = self.tx.send(BackgroundMsg { wire: build_wire_msg(MSG_TYPE_NOTIFY_CONN, &payload) });
         }
+    }
+
+    /// Send batched capture data for a connection to Go.
+    /// Wire format: [conn_id_len u8][conn_id][capture_chunks...]
+    /// where capture_chunks is pre-serialized [direction u8][data_len u32_le][data bytes]...
+    pub fn send_batch_data(&self, conn_id: &str, capture_data: &[u8]) {
+        if capture_data.is_empty() {
+            return;
+        }
+        let payload_len = 1 + conn_id.len() + capture_data.len();
+        let total_len = (1 + payload_len) as u32;
+        let mut wire = Vec::with_capacity(4 + 1 + payload_len);
+        wire.extend_from_slice(&total_len.to_le_bytes());
+        wire.push(MSG_TYPE_BATCH_DATA);
+        wire.push(conn_id.len() as u8);
+        wire.extend_from_slice(conn_id.as_bytes());
+        wire.extend_from_slice(capture_data);
+        let _ = self.tx.send(BackgroundMsg { wire });
     }
 
     /// Send ingress (incoming) data to Go for test case capture.

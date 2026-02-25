@@ -33,6 +33,7 @@ const (
 	MsgTypeGetCert      = 8
 	MsgTypeGetCertRes   = 9
 	MsgTypeNotifyConn   = 10
+	MsgTypeBatchData    = 11
 )
 
 // Stream type identifiers for the handshake protocol
@@ -273,6 +274,8 @@ func (s *IPCServer) processMessages(ctx context.Context, conn net.Conn, isCtrl b
 			s.handleClose(payload)
 		case MsgTypeNotifyConn:
 			s.handleNotifyConn(ctx, payload)
+		case MsgTypeBatchData:
+			s.handleBatchData(payload)
 		case MsgTypeIngressData:
 			s.handleIngressData(payload)
 		case MsgTypeIngressClose:
@@ -504,6 +507,49 @@ func (s *IPCServer) handleData(payload []byte) {
 		pair.ClientConn.Push(data)
 	} else { // response
 		pair.ServerConn.Push(data)
+	}
+}
+
+// handleBatchData processes batched capture data sent by the Rust proxy.
+// Binary format: [conn_id_len u8][conn_id bytes][chunks...]
+// Each chunk: [direction u8: 0=req, 1=res][data_len u32_le][data bytes]
+func (s *IPCServer) handleBatchData(payload []byte) {
+	if len(payload) < 2 {
+		return
+	}
+	connIDLen := int(payload[0])
+	if len(payload) < 1+connIDLen {
+		return
+	}
+	connID := string(payload[1 : 1+connIDLen])
+	data := payload[1+connIDLen:]
+
+	v, ok := s.connections.Load(connID)
+	if !ok {
+		return
+	}
+	pair := v.(*ConnectionPair)
+
+	// Parse and push each chunk
+	offset := 0
+	for offset < len(data) {
+		if offset+5 > len(data) {
+			break
+		}
+		direction := data[offset]
+		dataLen := int(binary.LittleEndian.Uint32(data[offset+1 : offset+5]))
+		offset += 5
+		if offset+dataLen > len(data) {
+			break
+		}
+		chunk := data[offset : offset+dataLen]
+		offset += dataLen
+
+		if direction == 0 {
+			pair.ClientConn.Push(chunk)
+		} else {
+			pair.ServerConn.Push(chunk)
+		}
 	}
 }
 
