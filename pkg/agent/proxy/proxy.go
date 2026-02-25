@@ -74,6 +74,13 @@ type Proxy struct {
 
 	Listener net.Listener
 
+	// IPC server for Rust proxy communication (exposed for ingress wiring)
+	IPCServer *IPCServer
+
+	// OnIPCServerReady is called after the IPC server is created, allowing
+	// external components (e.g., IngressProxyManager) to register callbacks.
+	OnIPCServerReady func(ipc *IPCServer)
+
 	//to store the nsswitch.conf file data
 	nsSwitchMutex     sync.Mutex
 	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
@@ -213,9 +220,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			p.logger.Info("Using Rust proxy for production capturing")
 			// 1. Start the IPC Server
 			ipcPath := filepath.Join(os.TempDir(), "keploy-rust-proxy.sock")
-			ipcServer := NewIPCServer(p.logger, p)
+			p.IPCServer = NewIPCServer(p.logger, p)
+			// Invoke ready callback so IngressProxyManager can register data handlers
+			if p.OnIPCServerReady != nil {
+				p.OnIPCServerReady(p.IPCServer)
+			}
 			go func() {
-				if err := ipcServer.Start(ctx); err != nil {
+				if err := p.IPCServer.Start(ctx); err != nil {
 					p.logger.Error("IPC Server failed", zap.Error(err))
 				}
 			}()

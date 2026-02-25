@@ -22,10 +22,20 @@ import (
 
 // Message Types
 const (
-	MsgTypeGetDest    = 1
-	MsgTypeGetDestRes = 2
-	MsgTypeData       = 3
-	MsgTypeClose      = 4
+	MsgTypeGetDest      = 1
+	MsgTypeGetDestRes   = 2
+	MsgTypeData         = 3
+	MsgTypeClose        = 4
+	MsgTypeStartIngress = 5
+	MsgTypeIngressData  = 6
+	MsgTypeIngressClose = 7
+)
+
+// Stream type identifiers for the handshake protocol
+const (
+	StreamTypeCtrl = 1 // request/response (GetDest)
+	StreamTypeData = 2 // fire-and-forget (Data/Close/IngressData/IngressClose)
+	StreamTypeCmd  = 3 // Go→Rust commands (StartIngress)
 )
 
 // SimulatedConn represents a mock network connection fed by the Rust proxy via IPC
@@ -124,7 +134,18 @@ type IPCServer struct {
 	logger      *zap.Logger
 	proxy       *Proxy
 	socket      string
-	connections sync.Map // map[string]*ConnectionPair
+	connections sync.Map // map[string]*ConnectionPair  (egress connections)
+
+	// Command stream: Go → Rust (for StartIngress commands)
+	cmdConn net.Conn
+	cmdMu   sync.Mutex
+
+	// Ingress connection tracking
+	ingressConns sync.Map // map[string]*IngressConnection
+
+	// Callback for ingress test case capture
+	ingressDataHandler  func(connID string, direction byte, origPort uint16, data []byte)
+	ingressCloseHandler func(connID string)
 }
 
 // NewIPCServer creates a new IPCServer instance
@@ -168,14 +189,49 @@ func (s *IPCServer) Start(ctx context.Context) error {
 			continue
 		}
 
-		go s.handleConnection(ctx, conn)
+		// Read 1-byte stream type handshake
+		typeBuf := make([]byte, 1)
+		if _, err := io.ReadFull(conn, typeBuf); err != nil {
+			s.logger.Error("Failed to read stream type handshake", zap.Error(err))
+			conn.Close()
+			continue
+		}
+
+		switch typeBuf[0] {
+		case StreamTypeCtrl:
+			s.logger.Info("Accepted ctrl stream from Rust proxy")
+			go s.handleCtrlStream(ctx, conn)
+		case StreamTypeData:
+			s.logger.Info("Accepted data stream from Rust proxy")
+			go s.handleDataStream(ctx, conn)
+		case StreamTypeCmd:
+			s.logger.Info("Accepted cmd stream from Rust proxy (Go→Rust)")
+			s.cmdMu.Lock()
+			s.cmdConn = conn
+			s.cmdMu.Unlock()
+			// No read loop — this is a write-only stream from Go's perspective
+		default:
+			s.logger.Warn("Unknown stream type in handshake", zap.Uint8("type", typeBuf[0]))
+			conn.Close()
+		}
 	}
 }
 
-// handleConnection processes incoming messages from a single Rust proxy connection
-func (s *IPCServer) handleConnection(ctx context.Context, conn net.Conn) {
+// handleCtrlStream processes the request/response ctrl stream (GetDest)
+func (s *IPCServer) handleCtrlStream(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	s.processMessages(ctx, conn, true)
+}
 
+// handleDataStream processes the fire-and-forget data stream (Data/Close/IngressData/IngressClose)
+func (s *IPCServer) handleDataStream(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+	s.processMessages(ctx, conn, false)
+}
+
+// processMessages reads framed messages from a UDS connection and dispatches them.
+// isCtrl distinguishes the ctrl stream (which needs to write responses) from the data stream.
+func (s *IPCServer) processMessages(ctx context.Context, conn net.Conn, isCtrl bool) {
 	for {
 		// Read length prefix (4 bytes)
 		var length uint32
@@ -209,6 +265,10 @@ func (s *IPCServer) handleConnection(ctx context.Context, conn net.Conn) {
 			s.handleData(payload)
 		case MsgTypeClose:
 			s.handleClose(payload)
+		case MsgTypeIngressData:
+			s.handleIngressData(payload)
+		case MsgTypeIngressClose:
+			s.handleIngressClose(payload)
 		default:
 			s.logger.Warn("Unknown message type received", zap.Uint8("type", msgType))
 		}
@@ -298,7 +358,11 @@ func (s *IPCServer) routeToParser(ctx context.Context, connID string, pair *Conn
 		s.logger.Debug("Routing connection to parser", zap.String("integration", string(matchedIntegration)), zap.Uint32("port", destPort))
 		err := integration.RecordOutgoing(parserCtx, pair.ClientConn, pair.ServerConn, rule.MC, rule.OutgoingOptions)
 		if err != nil && err != io.EOF {
-			s.logger.Error("Error during RecordOutgoing", zap.Error(err), zap.String("integration", string(matchedIntegration)))
+			if parserCtx.Err() != nil {
+				s.logger.Debug("RecordOutgoing stopped due to context cancellation", zap.String("integration", string(matchedIntegration)))
+			} else {
+				s.logger.Error("Error during RecordOutgoing", zap.Error(err), zap.String("integration", string(matchedIntegration)))
+			}
 		}
 
 		// Wait for parser goroutines to complete cleanly.
@@ -377,4 +441,103 @@ func (s *IPCServer) handleClose(payload []byte) {
 		pair.ServerConn.Close()
 		s.connections.Delete(req.ConnID)
 	}
+}
+
+// ---------- Ingress (incoming) IPC handling ----------
+
+// IngressConnection tracks a single ingress connection being forwarded by Rust.
+type IngressConnection struct {
+	ClientConn *SimulatedConn // request data from external client
+	ServerConn *SimulatedConn // response data from app
+	OrigPort   uint16
+}
+
+// handleIngressData processes ingress data teed by the Rust proxy.
+// Binary format: [conn_id_len u8] [conn_id bytes] [direction u8] [orig_port u16 LE] [data bytes]
+func (s *IPCServer) handleIngressData(payload []byte) {
+	if len(payload) < 2 {
+		s.logger.Error("INGRESS_DATA payload too short")
+		return
+	}
+	connIDLen := int(payload[0])
+	if len(payload) < 1+connIDLen+1+2 {
+		s.logger.Error("INGRESS_DATA payload invalid length")
+		return
+	}
+	connID := string(payload[1 : 1+connIDLen])
+	direction := payload[1+connIDLen]
+	origPort := binary.LittleEndian.Uint16(payload[1+connIDLen+1 : 1+connIDLen+3])
+	data := payload[1+connIDLen+3:]
+
+	// Forward to registered handler if set
+	if s.ingressDataHandler != nil {
+		s.ingressDataHandler(connID, direction, origPort, data)
+		return
+	}
+
+	s.logger.Warn("Received ingress data but no handler registered", zap.String("conn_id", connID))
+}
+
+// handleIngressClose processes ingress connection close notifications from Rust.
+func (s *IPCServer) handleIngressClose(payload []byte) {
+	var req struct {
+		ConnID string `json:"conn_id"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		s.logger.Error("Failed to unmarshal INGRESS_CLOSE message", zap.Error(err))
+		return
+	}
+
+	s.logger.Debug("Ingress connection closed by Rust Proxy", zap.String("conn_id", req.ConnID))
+
+	if s.ingressCloseHandler != nil {
+		s.ingressCloseHandler(req.ConnID)
+	}
+}
+
+// SendStartIngress sends a StartIngress command to the Rust proxy via the cmd stream.
+func (s *IPCServer) SendStartIngress(origPort, newPort uint16) error {
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
+
+	if s.cmdConn == nil {
+		return fmt.Errorf("cmd stream not connected yet")
+	}
+
+	cmd := struct {
+		OrigPort uint16 `json:"orig_port"`
+		NewPort  uint16 `json:"new_port"`
+	}{
+		OrigPort: origPort,
+		NewPort:  newPort,
+	}
+
+	cmdBytes, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to marshal StartIngress command: %w", err)
+	}
+
+	length := uint32(1 + len(cmdBytes))
+	if err := binary.Write(s.cmdConn, binary.LittleEndian, length); err != nil {
+		return fmt.Errorf("failed to write StartIngress length: %w", err)
+	}
+	if err := binary.Write(s.cmdConn, binary.LittleEndian, uint8(MsgTypeStartIngress)); err != nil {
+		return fmt.Errorf("failed to write StartIngress msg type: %w", err)
+	}
+	if _, err := s.cmdConn.Write(cmdBytes); err != nil {
+		return fmt.Errorf("failed to write StartIngress payload: %w", err)
+	}
+
+	s.logger.Info("Sent StartIngress command to Rust proxy",
+		zap.Uint16("orig_port", origPort), zap.Uint16("new_port", newPort))
+	return nil
+}
+
+// SetIngressHandlers registers callbacks for ingress data/close events from the Rust proxy.
+func (s *IPCServer) SetIngressHandlers(
+	dataHandler func(connID string, direction byte, origPort uint16, data []byte),
+	closeHandler func(connID string),
+) {
+	s.ingressDataHandler = dataHandler
+	s.ingressCloseHandler = closeHandler
 }
