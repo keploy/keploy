@@ -733,10 +733,6 @@ func ComputeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) 
 	return streamTimeoutSeconds
 }
 
-func computeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
-	return ComputeStreamingTimeoutSeconds(tc, defaultSeconds)
-}
-
 func collectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNoise map[string][]string) map[string]struct{} {
 	keys := make(map[string]struct{})
 	add := func(candidate string) {

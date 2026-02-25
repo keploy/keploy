@@ -1089,8 +1089,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var asyncHTTPWG sync.WaitGroup
 	var activeAsyncStreaming int32
 	var asyncMockFilterPinned bool
-	var replayAnchorRecordedReqTime time.Time
-	var replayAnchorWallClock time.Time
+	var firstRecordedTS time.Time // recorded timestamp of the first test in a streaming sequence
+	var firstReplayedAt time.Time // wall-clock time when that first test was actually replayed
 	hasAsyncStreaming := false
 	sharedProxyErrCancel := func() {}
 	sharedProxyErrMonitorStarted := false
@@ -1177,7 +1177,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			preserveInterRequestTiming = true
 		}
 
-		err = r.enforceInterRequestTiming(runTestSetCtx, testCase, preserveInterRequestTiming, &replayAnchorRecordedReqTime, &replayAnchorWallClock)
+		err = r.preserveRecordedRequestTiming(runTestSetCtx, testCase, preserveInterRequestTiming, &firstRecordedTS, &firstReplayedAt)
 		if err != nil {
 			loopErr = err
 			break

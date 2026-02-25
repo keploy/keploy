@@ -432,45 +432,76 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 	table.Render()
 }
 
-func (r *Replayer) enforceInterRequestTiming(
+// preserveRecordedRequestTiming ensures that streaming/SSE test cases are
+// replayed with the same relative timing gaps they had during recording.
+//
+// Problem: In streaming scenarios (e.g. SSE pub/sub), a subscriber must connect
+// before the publisher sends events. If we replay all tests instantly, the
+// ordering breaks. This function preserves the original recorded delays.
+//
+// How it works — time-mapping via two reference points:
+//
+//   - firstRecordedTS: the recorded timestamp of the first test case in a
+//     timing-sensitive sequence (the origin in "recording time").
+//   - firstReplayedAt: the real wall-clock time when that first test case was
+//     actually replayed (the origin in "replay time").
+//
+// For each subsequent test case, we compute how far its recorded timestamp is
+// from the first one, then sleep until the same offset has elapsed in real time.
+//
+// Example:
+//
+//	test-1 recorded at T=10:00:00  →  replayed at T=14:30:00  (anchors set)
+//	test-2 recorded at T=10:00:02  →  should replay at 14:30:00 + 2s = 14:30:02
+//
+// Parameters:
+//   - preserveTiming: if false, resets the anchors so normal (non-streaming)
+//     tests run back-to-back without artificial delays.
+//   - firstRecordedTS: pointer to the recorded timestamp anchor (mutated on first call).
+//   - firstReplayedAt: pointer to the wall-clock anchor (mutated on first call).
+func (r *Replayer) preserveRecordedRequestTiming(
 	ctx context.Context,
 	testCase *models.TestCase,
-	preserve bool,
-	anchorReqTime *time.Time,
-	anchorWallClock *time.Time,
+	preserveTiming bool,
+	firstRecordedTS *time.Time,
+	firstReplayedAt *time.Time,
 ) error {
-	if !preserve {
-		// Reset anchors when replay is outside streaming-sensitive paths so
-		// synchronous testcase execution doesn't inherit recorded wall-clock gaps.
-		*anchorReqTime = time.Time{}
-		*anchorWallClock = time.Time{}
+	if !preserveTiming {
+		// Not in a streaming-sensitive path — reset the anchors so synchronous
+		// tests don't inherit recorded wall-clock gaps from a prior sequence.
+		*firstRecordedTS = time.Time{}
+		*firstReplayedAt = time.Time{}
 		return nil
 	}
 
-	reqTS := testCaseRequestTimestamp(testCase)
-	if reqTS.IsZero() {
+	currentRecordedTS := testCaseRequestTimestamp(testCase)
+	if currentRecordedTS.IsZero() {
 		return nil
 	}
 
-	// Reproduce recorded temporal spacing only while streaming replay is active
-	// so subscriber/publisher ordering remains stable without delaying sync tests.
-	if anchorReqTime.IsZero() {
-		*anchorReqTime = reqTS
-		*anchorWallClock = time.Now()
+	// First streaming test case: establish the time-mapping anchors.
+	if firstRecordedTS.IsZero() {
+		*firstRecordedTS = currentRecordedTS
+		*firstReplayedAt = time.Now()
 		return nil
 	}
 
-	targetStart := anchorWallClock.Add(reqTS.Sub(*anchorReqTime))
-	waitFor := time.Until(targetStart)
-	if waitFor <= 0 {
+	// Compute when this test case should fire in real time:
+	// wall-clock target = firstReplayedAt + (currentRecordedTS - firstRecordedTS)
+	offsetSinceFirst := currentRecordedTS.Sub(*firstRecordedTS)
+	targetReplayTime := firstReplayedAt.Add(offsetSinceFirst)
+	delay := time.Until(targetReplayTime)
+
+	if delay <= 0 {
+		// We're already past the target time — no need to wait.
 		return nil
 	}
 
-	r.logger.Debug("waiting to preserve recorded inter-request timing",
+	r.logger.Debug("delaying test to preserve recorded inter-request timing",
 		zap.String("testcase", testCase.Name),
-		zap.Duration("wait_for", waitFor))
+		zap.Duration("delay", delay))
 
-	timer := time.NewTimer(waitFor)
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
 	select {
