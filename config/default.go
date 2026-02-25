@@ -29,11 +29,6 @@ generateGithubActions: false
 containerName: ""
 networkName: ""
 buildDelay: 30
-agent:
-  useProtocolBasedMySQLDetection: false
-  mysqlPorts:
-    - 3306
-    - 4000
 test:
   selectedTests: {}
   ignoredTests: {}

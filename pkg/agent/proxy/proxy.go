@@ -26,7 +26,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v3/pkg/agent/proxy/mysqldetection"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -77,9 +76,6 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
-
-	// MySQL detection strategy
-	mysqlDetectionStrategy mysqldetection.MySQLDetectionStrategy
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -100,22 +96,7 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	// Determine which MySQL detection strategy to use
-	var mysqlStrategy mysqldetection.MySQLDetectionStrategy
-	if opts.Agent.UseProtocolBasedMySQLDetection {
-		mysqlStrategy = mysqldetection.NewProtocolBasedDetection(logger)
-		logger.Info("Using protocol-based MySQL detection")
-	} else {
-		mysqlPorts := opts.Agent.MySQLPorts
-		if len(mysqlPorts) == 0 {
-			mysqlPorts = []uint32{3306} // Default to 3306 if not configured
-		}
-		mysqlStrategy = mysqldetection.NewPortBasedDetection(logger, mysqlPorts)
-		logger.Debug("Using port-based MySQL detection", zap.Any("ports", mysqlPorts))
-	}
-	
-
-	return &Proxy{
+	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
@@ -132,8 +113,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
-		mysqlDetectionStrategy: mysqlStrategy,
 	}
+	return proxy
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -565,33 +546,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		}
 		return err
-	}
-
-	// Check if MySQL detection strategy should handle this connection
-	if p.mysqlDetectionStrategy.ShouldHandle(ctx, destInfo, testBuffer) {
-		m, ok := p.MockManagers.Load(uint64(0))
-		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
-			return errors.New("failed to fetch mock manager")
-		}
-
-		err := p.mysqlDetectionStrategy.HandleConnection(
-			ctx,
-			parserCtx,
-			srcConn,
-			dstAddr,
-			destInfo,
-			rule,
-			outgoingOpts,
-			p.Integrations[integrations.MYSQL],
-			m,
-			p.logger,
-			p.SendError,
-		)
-		if err != nil {
-			return err
-		}
-		return nil
 	}
 
 	// Continue with normal protocol detection flow

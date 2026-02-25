@@ -58,8 +58,6 @@ type Config struct {
 
 type Agent struct {
 	models.SetupOptions
-	UseProtocolBasedMySQLDetection bool     `json:"useProtocolBasedMySQLDetection" yaml:"useProtocolBasedMySQLDetection" mapstructure:"useProtocolBasedMySQLDetection"`
-	MySQLPorts                      []uint32 `json:"mysqlPorts" yaml:"mysqlPorts" mapstructure:"mysqlPorts"`
 }
 
 type UtGen struct {
