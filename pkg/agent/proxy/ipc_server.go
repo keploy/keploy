@@ -32,6 +32,7 @@ const (
 	MsgTypeIngressClose = 7
 	MsgTypeGetCert      = 8
 	MsgTypeGetCertRes   = 9
+	MsgTypeNotifyConn   = 10
 )
 
 // Stream type identifiers for the handshake protocol
@@ -270,6 +271,8 @@ func (s *IPCServer) processMessages(ctx context.Context, conn net.Conn, isCtrl b
 			s.handleData(payload)
 		case MsgTypeClose:
 			s.handleClose(payload)
+		case MsgTypeNotifyConn:
+			s.handleNotifyConn(ctx, payload)
 		case MsgTypeIngressData:
 			s.handleIngressData(payload)
 		case MsgTypeIngressClose:
@@ -324,6 +327,36 @@ func (s *IPCServer) handleGetDest(ctx context.Context, conn net.Conn, payload []
 	// Checking for specific ports or applying protocol matching logic from Keploy
 	// (simplified integration for mysql, postgres, etc.)
 	go s.routeToParser(ctx, req.ConnID, pair, destInfo.Port)
+}
+
+// handleNotifyConn is the fire-and-forget equivalent of handleGetDest.
+// Used when Rust resolves the destination directly from the pinned eBPF map.
+// No response is sent back — we just set up the SimulatedConn pair and route to the parser.
+func (s *IPCServer) handleNotifyConn(ctx context.Context, payload []byte) {
+	var req struct {
+		ConnID   string `json:"conn_id"`
+		DestIP   string `json:"dest_ip"`
+		DestPort uint16 `json:"dest_port"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		s.logger.Error("Failed to unmarshal NOTIFY_CONN", zap.Error(err))
+		return
+	}
+
+	s.logger.Debug("NOTIFY_CONN from Rust", zap.String("conn_id", req.ConnID),
+		zap.String("dest_ip", req.DestIP), zap.Uint16("dest_port", req.DestPort))
+
+	// Setup connection pair (same as handleGetDest but no IPC response)
+	clientAddr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
+	serverAddr := &net.TCPAddr{IP: net.ParseIP(req.DestIP), Port: int(req.DestPort)}
+
+	pair := &ConnectionPair{
+		ClientConn: NewSimulatedConn(clientAddr, serverAddr),
+		ServerConn: NewSimulatedConn(serverAddr, clientAddr),
+	}
+	s.connections.Store(req.ConnID, pair)
+
+	go s.routeToParser(ctx, req.ConnID, pair, uint32(req.DestPort))
 }
 
 func (s *IPCServer) routeToParser(ctx context.Context, connID string, pair *ConnectionPair, destPort uint32) {

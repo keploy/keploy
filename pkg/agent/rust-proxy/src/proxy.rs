@@ -7,23 +7,40 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use socket2::Socket;
 
+use crate::ebpf::BpfMapHandle;
 use crate::ipc::IpcClient;
 use crate::tls::{self, CertCache};
 
-/// Apply low-latency TCP tuning to a TcpStream, matching Go proxy's tuneTCPConn:
+/// Apply low-latency TCP tuning to a TcpStream:
 /// - TCP_NODELAY: disable Nagle's algorithm
+/// - TCP_QUICKACK: disable delayed ACKs (biggest P99 win on loopback)
 /// - 2 MB socket buffers: reduce TCP back-pressure on bursty traffic
 fn tune_tcp_stream(stream: &TcpStream) {
-    // Use set_nodelay directly on tokio's TcpStream
     let _ = stream.set_nodelay(true);
 
-    // For buffer sizes, we need the raw socket via socket2
+    // For buffer sizes and TCP_QUICKACK, access the raw fd via socket2
     let std_socket = unsafe {
         use std::os::unix::io::{AsRawFd, FromRawFd};
         Socket::from_raw_fd(stream.as_raw_fd())
     };
     let _ = std_socket.set_recv_buffer_size(2 * 1024 * 1024);
     let _ = std_socket.set_send_buffer_size(2 * 1024 * 1024);
+
+    // TCP_QUICKACK: disable delayed ACKs for lower per-packet latency.
+    // This is a one-shot flag that the kernel resets, but setting it at
+    // connection start helps the critical first few packets.
+    unsafe {
+        use std::os::unix::io::AsRawFd;
+        let val: libc::c_int = 1;
+        libc::setsockopt(
+            std_socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_QUICKACK,
+            &val as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+
     // Don't let socket2 close the fd — it's owned by the TcpStream
     std::mem::forget(std_socket);
 }
@@ -31,7 +48,12 @@ fn tune_tcp_stream(stream: &TcpStream) {
 /// Shared state for tracking active ingress listeners 
 type IngressMap = Arc<Mutex<HashMap<u16, tokio::task::JoinHandle<()>>>>;
 
-pub async fn start_proxy(proxy_port: u16, ipc_client: IpcClient, ca_cert_path: Option<&str>) -> std::io::Result<()> {
+pub async fn start_proxy(
+    proxy_port: u16,
+    ipc_client: IpcClient,
+    ca_cert_path: Option<&str>,
+    ebpf_map: Option<Arc<BpfMapHandle>>,
+) -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{}", proxy_port);
     let listener = TcpListener::bind(&addr).await?;
     info!("Rust Proxy listening on {}", addr);
@@ -63,6 +85,21 @@ pub async fn start_proxy(proxy_port: u16, ipc_client: IpcClient, ca_cert_path: O
         None
     };
 
+    // Pre-warm cert cache for common hostnames
+    if let Some(ref ctx) = tls_ctx {
+        let ctx_clone = ctx.clone();
+        let ipc_clone = ipc_client.clone();
+        tokio::spawn(async move {
+            for name in &["localhost", "127.0.0.1"] {
+                info!("Pre-warming TLS cert for {}", name);
+                match ctx_clone.cert_cache.get_or_fetch(name, 0, &ipc_clone).await {
+                    Ok(_) => info!("Pre-warmed TLS cert for {}", name),
+                    Err(e) => warn!("Failed to pre-warm cert for {}: {}", name, e),
+                }
+            }
+        });
+    }
+
     let ingress_map: IngressMap = Arc::new(Mutex::new(HashMap::new()));
 
     // Spawn ingress command listener
@@ -77,9 +114,10 @@ pub async fn start_proxy(proxy_port: u16, ipc_client: IpcClient, ca_cert_path: O
         let (socket, peer_addr) = listener.accept().await?;
         let ipc = ipc_client.clone();
         let tls_ctx_clone = tls_ctx.clone();
+        let ebpf = ebpf_map.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, peer_addr, ipc, tls_ctx_clone).await {
+            if let Err(e) = handle_connection(socket, peer_addr, ipc, tls_ctx_clone, ebpf).await {
                 error!("Connection error: {}", e);
             }
         });
@@ -187,7 +225,7 @@ async fn handle_ingress_connection(
 
     // External Client → App (Request)
     let client_to_upstream = async move {
-        let mut buf = vec![0; 8192];
+        let mut buf = vec![0u8; 65536];
         loop {
             let n = match client_read.read(&mut buf).await {
                 Ok(n) if n > 0 => n,
@@ -207,7 +245,7 @@ async fn handle_ingress_connection(
 
     // App → External Client (Response)
     let upstream_to_client = async move {
-        let mut buf = vec![0; 8192];
+        let mut buf = vec![0u8; 65536];
         loop {
             let n = match upstream_read.read(&mut buf).await {
                 Ok(n) if n > 0 => n,
@@ -248,31 +286,45 @@ async fn handle_connection(
     peer_addr: SocketAddr,
     ipc: IpcClient,
     tls_ctx: Option<Arc<TlsContext>>,
+    ebpf_map: Option<Arc<BpfMapHandle>>,
 ) -> std::io::Result<()> {
     let source_port = peer_addr.port();
     let conn_id = format!("{}:{}", peer_addr.ip(), source_port);
-    
-    info!("New connection from {} (source_port={})", peer_addr, source_port);
 
-    // Apply TCP tuning to client socket
+    debug!("New connection from {} (source_port={})", peer_addr, source_port);
+
     tune_tcp_stream(&client_socket);
 
-    // 1. Get Destination Info from Go Control Plane
-    let dest_res = match ipc.get_dest(source_port, &conn_id).await {
-        Ok(res) => res,
-        Err(e) => {
-            error!("Failed to get destination for port {}: {}", source_port, e);
-            return Ok(());
+    // 1. Resolve destination — direct eBPF map lookup (μs) or IPC fallback (ms)
+    let (dest_ip, dest_port) = if let Some(ref map) = ebpf_map {
+        match map.lookup_and_delete(source_port) {
+            Some(info) => {
+                let (ip, port) = crate::ebpf::format_dest(&info);
+                debug!("eBPF direct lookup for port {}: {}:{}", source_port, ip, port);
+                ipc.send_notify_conn(&conn_id, &ip, port);
+                (ip, port)
+            }
+            None => {
+                warn!("eBPF map lookup failed for port {}. Dropping.", source_port);
+                return Ok(());
+            }
+        }
+    } else {
+        match ipc.get_dest(source_port, &conn_id).await {
+            Ok(res) if res.success => (res.ip, res.port),
+            Ok(_) => {
+                warn!("Go returned failure for port {}. Dropping.", source_port);
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Failed to get destination for port {}: {}", source_port, e);
+                return Ok(());
+            }
         }
     };
 
-    if !dest_res.success {
-        warn!("Go returned failure for port {}. Dropping.", source_port);
-        return Ok(());
-    }
-
-    let target_addr = format!("{}:{}", dest_res.ip, dest_res.port);
-    info!("Resolved dest for port {}: {}", source_port, target_addr);
+    let target_addr = format!("{}:{}", dest_ip, dest_port);
+    debug!("Resolved dest for port {}: {}", source_port, target_addr);
 
     // 2. Dial Target
     let server_socket = match TcpStream::connect(&target_addr).await {
@@ -282,31 +334,25 @@ async fn handle_connection(
             return Ok(());
         }
     };
-
-    // Apply TCP tuning to server socket
     tune_tcp_stream(&server_socket);
-    info!("Connected to target {}, starting bidirectional forwarding", target_addr);
+    debug!("Connected to target {}, starting relay", target_addr);
 
-    // 3. Bidirectional forwarding with inline TLS detection
+    // 3. Bidirectional forwarding with inline TLS detection.
     //
-    // Strategy: We use `into_split()` (owned halves) so we can later `reunite()`
-    // if we need to upgrade to TLS. We forward data in a select! loop, peeking
-    // at each client→server chunk to detect a TLS ClientHello.
-    //
-    // Once TLS is detected:
-    //   a) Reunite both halves back into full TcpStreams
-    //   b) Perform TLS MITM (accept client TLS, connect server TLS)
-    //   c) Continue forwarding on the decrypted streams, teeing plaintext to Go
+    // We must use a select! loop (not parallel tasks) because TLS ClientHello
+    // can appear mid-protocol for server-speaks-first protocols like MySQL:
+    //   Server greeting → Client SSL Request → Client TLS ClientHello
+    // The select! loop checks every client→server chunk for TLS so we can
+    // intercept the upgrade regardless of when it appears.
 
     let (mut client_read, mut client_write) = client_socket.into_split();
     let (mut server_read, mut server_write) = server_socket.into_split();
 
-    let mut client_buf = vec![0u8; 16384];
-    let mut server_buf = vec![0u8; 16384];
+    let mut client_buf = vec![0u8; 65536];
+    let mut server_buf = vec![0u8; 65536];
     let mut tls_detected = false;
     let mut pending_client_data: Option<Vec<u8>> = None;
 
-    // Phase 1: Forward with TLS detection
     loop {
         tokio::select! {
             result = client_read.read(&mut client_buf) => {
@@ -324,8 +370,7 @@ async fn handle_connection(
                 }
 
                 // Normal forwarding: write to server + tee to Go
-                if let Err(e) = server_write.write_all(&client_buf[..n]).await {
-                    error!("Failed to write to server: {}", e);
+                if server_write.write_all(&client_buf[..n]).await.is_err() {
                     break;
                 }
                 ipc.send_data(&conn_id, true, &client_buf[..n]);
@@ -337,8 +382,7 @@ async fn handle_connection(
                 };
 
                 // Forward to client + tee to Go
-                if let Err(e) = client_write.write_all(&server_buf[..n]).await {
-                    error!("Failed to write to client: {}", e);
+                if client_write.write_all(&server_buf[..n]).await.is_err() {
                     break;
                 }
                 ipc.send_data(&conn_id, false, &server_buf[..n]);
@@ -437,7 +481,7 @@ async fn handle_tls_connection(
     let ipc_res = ipc.clone();
 
     let client_to_server = async move {
-        let mut buf = vec![0u8; 16384];
+        let mut buf = vec![0u8; 65536];
         loop {
             let n = match tc_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
@@ -453,7 +497,7 @@ async fn handle_tls_connection(
     };
 
     let server_to_client = async move {
-        let mut buf = vec![0u8; 16384];
+        let mut buf = vec![0u8; 65536];
         loop {
             let n = match ts_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,

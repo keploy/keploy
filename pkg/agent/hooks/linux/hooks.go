@@ -172,6 +172,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
 
+	// Pin redirect_proxy_map to bpffs so Rust can open it directly.
+	const mapPinPath = "/sys/fs/bpf/keploy_redirect_proxy_map"
+	_ = os.Remove(mapPinPath) // clean stale pin
+	if err := objs.RedirectProxyMap.Pin(mapPinPath); err != nil {
+		h.logger.Warn("Failed to pin redirect_proxy_map (Rust direct eBPF lookup will be unavailable)", zap.Error(err))
+	} else {
+		h.logger.Info("Pinned redirect_proxy_map to bpffs", zap.String("path", mapPinPath))
+	}
+
 	// Get the first-mounted cgroupv2 path.
 	cGroupPath, err := agent.DetectCgroupPath(h.logger)
 	if err != nil {
@@ -406,6 +415,9 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	}
 	h.logger.Debug("eBPF resources released successfully...")
+
+	// Clean up pinned eBPF maps
+	_ = os.Remove("/sys/fs/bpf/keploy_redirect_proxy_map")
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {

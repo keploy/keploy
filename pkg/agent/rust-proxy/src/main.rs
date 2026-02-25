@@ -1,3 +1,4 @@
+mod ebpf;
 mod ipc;
 mod proxy;
 mod tls;
@@ -19,6 +20,11 @@ struct Args {
     /// If not provided, TLS interception is disabled and connections are forwarded as-is.
     #[arg(long)]
     ca_cert: Option<String>,
+
+    /// Path to the pinned eBPF redirect_proxy_map (e.g. /sys/fs/bpf/keploy_redirect_proxy_map).
+    /// When provided, Rust reads the eBPF map directly instead of asking Go via IPC.
+    #[arg(long)]
+    ebpf_map_pin: Option<String>,
 }
 
 #[tokio::main]
@@ -27,8 +33,8 @@ async fn main() {
 
     let args = Args::parse();
     info!(
-        "Rust Proxy starting up... port: {}, uds_path: {}, ca_cert: {:?}",
-        args.proxy_port, args.uds_path, args.ca_cert
+        "Rust Proxy starting up... port: {}, uds_path: {}, ca_cert: {:?}, ebpf_map_pin: {:?}",
+        args.proxy_port, args.uds_path, args.ca_cert, args.ebpf_map_pin
     );
 
     // Initialize IPC Client
@@ -42,8 +48,27 @@ async fn main() {
 
     info!("Connected to Go IPC server.");
 
+    // Open pinned eBPF map if provided
+    let ebpf_map = args.ebpf_map_pin.as_deref().and_then(|path| {
+        match ebpf::BpfMapHandle::open_pinned(path) {
+            Ok(handle) => {
+                info!("Opened pinned eBPF map at {}", path);
+                Some(std::sync::Arc::new(handle))
+            }
+            Err(e) => {
+                error!("Failed to open pinned eBPF map at {}: {}. Falling back to IPC.", path, e);
+                None
+            }
+        }
+    });
+
     // Start Proxy
-    if let Err(e) = proxy::start_proxy(args.proxy_port, ipc_client, args.ca_cert.as_deref()).await {
+    if let Err(e) = proxy::start_proxy(
+        args.proxy_port,
+        ipc_client,
+        args.ca_cert.as_deref(),
+        ebpf_map,
+    ).await {
         error!("Proxy exited with error: {}", e);
         exit(1);
     }

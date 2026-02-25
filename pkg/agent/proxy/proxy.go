@@ -243,10 +243,12 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 			// The Rust proxy listens on p.Port + 1 and forwards to UDS handle.
 			rustProxyPort := p.Port + 1
+			ebpfMapPin := "/sys/fs/bpf/keploy_redirect_proxy_map"
 			cmd := exec.CommandContext(ctx, rustProxyBinPath,
 				fmt.Sprintf("--proxy-port=%d", rustProxyPort),
 				fmt.Sprintf("--uds-path=%s", ipcPath),
 				fmt.Sprintf("--ca-cert=%s", caCertPath),
+				fmt.Sprintf("--ebpf-map-pin=%s", ebpfMapPin),
 			)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
@@ -273,10 +275,15 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 				}()
 			}
 
-			// 3. Start the Go proxy on Port (or we can just wait since Rust proxy intercepts Port)
-			// Actually, let's keep Go proxy on its Port so it can still handle raw Go traffic if needed,
-			// or change it to ensure it avoids port conflicts. eBPF handles Port + 1.
-			err = p.start(ctx, readyChan)
+			// Go proxy listener is NOT started when Rust proxy is enabled.
+			// All TCP accept/forward is handled by Rust. IPC server handles parsing.
+			p.logger.Info("Go proxy listener skipped — Rust proxy handles all connections")
+			readyChan <- nil
+
+			// Block until context is cancelled so the goroutine stays alive
+			// for IPC/parsers to keep running.
+			<-ctx.Done()
+			err = nil
 		} else {
 			// Normal flow
 			err = p.start(ctx, readyChan)

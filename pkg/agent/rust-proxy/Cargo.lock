@@ -243,6 +243,7 @@ name = "keploy-rust-proxy"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "rustls",
  "rustls-pemfile",
  "rustls-pki-types",

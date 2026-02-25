@@ -51,10 +51,20 @@ const MSG_TYPE_INGRESS_DATA: u8 = 6;
 const MSG_TYPE_INGRESS_CLOSE: u8 = 7;
 const MSG_TYPE_GET_CERT: u8 = 8;
 const MSG_TYPE_GET_CERT_RES: u8 = 9;
+const MSG_TYPE_NOTIFY_CONN: u8 = 10;
 
 struct BackgroundMsg {
-    msg_type: u8,
-    payload: Vec<u8>,
+    wire: Vec<u8>, // Pre-built wire message: [length_le32][msg_type_u8][payload]
+}
+
+/// Build a complete wire-format message (length prefix + type + payload) in one allocation.
+fn build_wire_msg(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+    let total_len = (1 + payload.len()) as u32;
+    let mut wire = Vec::with_capacity(4 + 1 + payload.len());
+    wire.extend_from_slice(&total_len.to_le_bytes());
+    wire.push(msg_type);
+    wire.extend_from_slice(payload);
+    wire
 }
 
 #[derive(Clone)]
@@ -83,21 +93,25 @@ impl IpcClient {
         let mut cmd_stream = UnixStream::connect(path).await?;
         cmd_stream.write_u8(STREAM_TYPE_CMD).await?;
         
-        // Background task for streaming data/close messages without blocking
+        // Background task for streaming data/close messages without blocking.
+        // Uses BufWriter to batch multiple messages into fewer syscalls.
         let (tx, mut rx) = mpsc::unbounded_channel::<BackgroundMsg>();
         tokio::spawn(async move {
+            let mut writer = tokio::io::BufWriter::with_capacity(65536, data_stream);
             while let Some(msg) = rx.recv().await {
-                let length = (1 + msg.payload.len()) as u32;
-                if let Err(e) = data_stream.write_u32_le(length).await {
-                    error!("IPC Data write length failed: {}", e);
+                if let Err(e) = writer.write_all(&msg.wire).await {
+                    error!("IPC Data write failed: {}", e);
                     break;
                 }
-                if let Err(e) = data_stream.write_u8(msg.msg_type).await {
-                    error!("IPC Data write type failed: {}", e);
-                    break;
+                // Drain all pending messages into the buffer before flushing
+                while let Ok(msg) = rx.try_recv() {
+                    if let Err(e) = writer.write_all(&msg.wire).await {
+                        error!("IPC Data write failed: {}", e);
+                        return;
+                    }
                 }
-                if let Err(e) = data_stream.write_all(&msg.payload).await {
-                    error!("IPC Data write payload failed: {}", e);
+                if let Err(e) = writer.flush().await {
+                    error!("IPC Data flush failed: {}", e);
                     break;
                 }
             }
@@ -240,18 +254,18 @@ impl IpcClient {
     }
 
     pub fn send_data(&self, conn_id: &str, is_request: bool, data: &[u8]) {
-        // Build binary payload directly
-        // [conn_id_len u8] [conn_id bytes] [direction u8: 0=req, 1=res] [data bytes]
-        let mut payload = Vec::with_capacity(1 + conn_id.len() + 1 + data.len());
-        payload.push(conn_id.len() as u8);
-        payload.extend_from_slice(conn_id.as_bytes());
-        payload.push(if is_request { 0 } else { 1 });
-        payload.extend_from_slice(data);
-        
-        let _ = self.tx.send(BackgroundMsg {
-            msg_type: MSG_TYPE_DATA,
-            payload,
-        });
+        // Build complete wire message in a single allocation:
+        // [length_le32] [MSG_TYPE_DATA] [conn_id_len u8] [conn_id] [direction u8] [data]
+        let payload_len = 1 + conn_id.len() + 1 + data.len();
+        let total_len = (1 + payload_len) as u32;
+        let mut wire = Vec::with_capacity(4 + 1 + payload_len);
+        wire.extend_from_slice(&total_len.to_le_bytes());
+        wire.push(MSG_TYPE_DATA);
+        wire.push(conn_id.len() as u8);
+        wire.extend_from_slice(conn_id.as_bytes());
+        wire.push(if is_request { 0 } else { 1 });
+        wire.extend_from_slice(data);
+        let _ = self.tx.send(BackgroundMsg { wire });
     }
 
     pub fn send_close(&self, conn_id: &str) {
@@ -259,27 +273,40 @@ impl IpcClient {
             conn_id: conn_id.to_string(),
         };
         if let Ok(payload) = serde_json::to_vec(&req) {
-            let _ = self.tx.send(BackgroundMsg {
-                msg_type: MSG_TYPE_CLOSE,
-                payload,
-            });
+            let _ = self.tx.send(BackgroundMsg { wire: build_wire_msg(MSG_TYPE_CLOSE, &payload) });
+        }
+    }
+
+    /// Notify Go about a new connection so it can set up parsers.
+    /// Fire-and-forget on the data stream — used when Rust resolves dest via eBPF directly.
+    pub fn send_notify_conn(&self, conn_id: &str, dest_ip: &str, dest_port: u16) {
+        #[derive(serde::Serialize)]
+        struct NotifyConn<'a> {
+            conn_id: &'a str,
+            dest_ip: &'a str,
+            dest_port: u16,
+        }
+        let req = NotifyConn { conn_id, dest_ip, dest_port };
+        if let Ok(payload) = serde_json::to_vec(&req) {
+            let _ = self.tx.send(BackgroundMsg { wire: build_wire_msg(MSG_TYPE_NOTIFY_CONN, &payload) });
         }
     }
 
     /// Send ingress (incoming) data to Go for test case capture.
     /// direction: 0 = request (external client → app), 1 = response (app → external client)
     pub fn send_ingress_data(&self, conn_id: &str, is_request: bool, orig_port: u16, data: &[u8]) {
-        let mut payload = Vec::with_capacity(1 + conn_id.len() + 1 + 2 + data.len());
-        payload.push(conn_id.len() as u8);
-        payload.extend_from_slice(conn_id.as_bytes());
-        payload.push(if is_request { 0 } else { 1 });
-        payload.extend_from_slice(&orig_port.to_le_bytes());
-        payload.extend_from_slice(data);
-
-        let _ = self.tx.send(BackgroundMsg {
-            msg_type: MSG_TYPE_INGRESS_DATA,
-            payload,
-        });
+        // Build complete wire message in one allocation
+        let payload_len = 1 + conn_id.len() + 1 + 2 + data.len();
+        let total_len = (1 + payload_len) as u32;
+        let mut wire = Vec::with_capacity(4 + 1 + payload_len);
+        wire.extend_from_slice(&total_len.to_le_bytes());
+        wire.push(MSG_TYPE_INGRESS_DATA);
+        wire.push(conn_id.len() as u8);
+        wire.extend_from_slice(conn_id.as_bytes());
+        wire.push(if is_request { 0 } else { 1 });
+        wire.extend_from_slice(&orig_port.to_le_bytes());
+        wire.extend_from_slice(data);
+        let _ = self.tx.send(BackgroundMsg { wire });
     }
 
     pub fn send_ingress_close(&self, conn_id: &str) {
@@ -287,10 +314,7 @@ impl IpcClient {
             conn_id: conn_id.to_string(),
         };
         if let Ok(payload) = serde_json::to_vec(&req) {
-            let _ = self.tx.send(BackgroundMsg {
-                msg_type: MSG_TYPE_INGRESS_CLOSE,
-                payload,
-            });
+            let _ = self.tx.send(BackgroundMsg { wire: build_wire_msg(MSG_TYPE_INGRESS_CLOSE, &payload) });
         }
     }
 }
