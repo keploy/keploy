@@ -87,7 +87,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		utils.LogError(a.logger, err, "error during agent setup")
 		return err
 	}
-	a.logger.Info("Context cancelled, stopping the agent")
+	a.logger.Debug("Context cancelled, stopping the agent")
 	return context.Canceled
 
 }
@@ -96,6 +96,13 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	tc := a.IncomingProxy.Start(ctx, opts)
 	a.logger.Debug("Ingress proxy manager started and is listening for bind events.")
 	return tc, nil
+}
+
+// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+// When this flag is set, connection errors will be logged as debug instead of error.
+func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
+	a.logger.Debug("Setting graceful shutdown flag on proxy")
+	return a.Proxy.SetGracefulShutdown(ctx)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -109,8 +116,15 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	return m, nil
 }
 
+func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {
+	mappingCh := make(chan models.TestMockMapping, 100)
+	a.Proxy.Mapping(ctx, mappingCh)
+
+	return mappingCh, nil
+}
+
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
-	a.logger.Debug("Inside MockOutgoing of agent binary !!")
+	a.logger.Debug("MockOutgoing function called", zap.Any("options", opts))
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -219,25 +233,36 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 	a.clientMocks.Store(uint64(0), storage)
 
-	a.logger.Info("Successfully stored mocks for client")
+	a.logger.Debug("Successfully stored mocks for client")
 	return nil
 }
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 
-	// Get stored mocks for the
+	a.logger.Debug("UpdateMockParams called",
+		zap.Time("afterTime", params.AfterTime),
+		zap.Time("beforeTime", params.BeforeTime),
+		zap.Bool("useMappingBased", params.UseMappingBased),
+		zap.Int("mockMappingCount", len(params.MockMapping)))
+
+	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID")
 	}
 	storage := storageInterface.(*ClientMockStorage)
+
 	storage.mu.RLock()
 	originalFiltered := make([]*models.Mock, len(storage.filtered))
 	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
 	copy(originalFiltered, storage.filtered)
 	copy(originalUnfiltered, storage.unfiltered)
 	storage.mu.RUnlock()
+
+	a.logger.Debug("Original mocks before filtering",
+		zap.Int("originalFiltered", len(originalFiltered)),
+		zap.Int("originalUnfiltered", len(originalUnfiltered)))
 
 	var filteredMocks, unfilteredMocks []*models.Mock
 
@@ -250,10 +275,24 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
 	}
 
+	// Count IsFiltered distribution for debugging
+	var filteredCount, unfilteredCount int
+	for _, m := range unfilteredMocks {
+		if m.TestModeInfo.IsFiltered {
+			filteredCount++
+		} else {
+			unfilteredCount++
+		}
+	}
+	a.logger.Debug("After filtering",
+		zap.Int("filteredMocks", len(filteredMocks)),
+		zap.Int("unfilteredMocks", len(unfilteredMocks)),
+		zap.Int("unfilteredWithIsFilteredTrue", filteredCount),
+		zap.Int("unfilteredWithIsFilteredFalse", unfilteredCount))
+
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.TotalConsumedMocks != nil {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
-		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
 	}
 
 	// Set the filtered mocks to the proxy

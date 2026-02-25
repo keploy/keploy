@@ -802,7 +802,6 @@ func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]s
 func (d *DiffsPrinter) PushBodyDiff(exp, act string, noise map[string][]string) {
 	d.bodyExp, d.bodyAct, d.bodyNoise = exp, act, noise
 }
-
 func (d *DiffsPrinter) Render() error {
 	diffs := []string{}
 
@@ -848,7 +847,10 @@ func (d *DiffsPrinter) Render() error {
 	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+
+	if !models.IsAnsiDisabled {
+		table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+	}
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
 
 	for _, e := range diffs {
@@ -858,16 +860,27 @@ func (d *DiffsPrinter) Render() error {
 	}
 
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
 		startPart := " Expected and actual value"
 		var midPartpaint string
+
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			if !models.IsAnsiDisabled {
+				midPartpaint = color.New(color.FgRed).SprintFunc()(d.text)
+			} else {
+				midPartpaint = d.text
+			}
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
-		endPaint := yellowPaint(" are in different order but have the same objects")
+
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
+
+		if !models.IsAnsiDisabled {
+			yellowPaint := color.New(color.FgYellow).SprintFunc()
+			initalPart = yellowPaint(initalPart)
+			endPaint = yellowPaint(endPaint)
+		}
+
 		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
 		table.Append([]string{initalPart + midPartpaint + endPaint})
@@ -876,30 +889,42 @@ func (d *DiffsPrinter) Render() error {
 	table.Render()
 	return nil
 }
-
 func (d *DiffsPrinter) TableWriter(diffs []string) error {
 
 	table := tablewriter.NewWriter(d.out)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+
+	if !models.IsAnsiDisabled {
+		table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+	}
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
 
 	for _, e := range diffs {
 		table.Append([]string{e})
 	}
 	if d.hasarrayIndexMismatch {
-		yellowPaint := color.New(color.FgYellow).SprintFunc()
-		redPaint := color.New(color.FgRed).SprintFunc()
 		startPart := " Expected and actual value"
 		var midPartpaint string
+
 		if len(d.text) > 0 {
-			midPartpaint = redPaint(d.text)
+			if !models.IsAnsiDisabled {
+				midPartpaint = color.New(color.FgRed).SprintFunc()(d.text)
+			} else {
+				midPartpaint = d.text
+			}
 			startPart += " of "
 		}
-		initalPart := yellowPaint(utils.WarningSign + startPart)
 
-		endPaint := yellowPaint(" are in different order but have the same objects")
+		initalPart := utils.WarningSign + startPart
+		endPaint := " are in different order but have the same objects"
+
+		if !models.IsAnsiDisabled {
+			yellowPaint := color.New(color.FgYellow).SprintFunc()
+			initalPart = yellowPaint(initalPart)
+			endPaint = yellowPaint(endPaint)
+		}
+
 		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
 		table.Append([]string{initalPart + midPartpaint + endPaint})
@@ -907,6 +932,7 @@ func (d *DiffsPrinter) TableWriter(diffs []string) error {
 	table.Render()
 	return nil
 }
+
 func (d *DiffsPrinter) RenderAppender() error {
 	//Only show difference for the response body
 	diffs := []string{}
@@ -947,6 +973,78 @@ func (d *DiffsPrinter) RenderAppender() error {
 
 	}
 
+	return nil
+}
+
+// SchemaError represents a single schema mismatch
+type SchemaError struct {
+	Reason   string
+	Expected string
+	Actual   string
+}
+
+// SchemaDiffPrinter for printing schema mismatch errors
+type SchemaDiffPrinter struct {
+	out      io.Writer
+	testCase string
+	errors   []SchemaError
+}
+
+func NewSchemaDiffPrinter(testCase string) SchemaDiffPrinter {
+	return NewSchemaDiffPrinterOut(os.Stdout, testCase)
+}
+
+func NewSchemaDiffPrinterOut(out io.Writer, testCase string) SchemaDiffPrinter {
+	if out == nil {
+		out = os.Stdout
+	}
+	return SchemaDiffPrinter{
+		out:      out,
+		testCase: testCase,
+		errors:   []SchemaError{},
+	}
+}
+
+func (s *SchemaDiffPrinter) PushError(reason, expected, actual string) {
+	s.errors = append(s.errors, SchemaError{
+		Reason:   reason,
+		Expected: expected,
+		Actual:   actual,
+	})
+}
+
+func (s *SchemaDiffPrinter) Render() error {
+	if len(s.errors) == 0 {
+		return nil
+	}
+
+	table := tablewriter.NewWriter(s.out)
+	table.SetAutoWrapText(false)
+	table.SetHeader([]string{"Schema Check Failed", "Expected", "Actual"})
+
+	if !models.IsAnsiDisabled {
+		table.SetHeaderColor(
+			tablewriter.Colors{tablewriter.FgHiRedColor},
+			tablewriter.Colors{tablewriter.FgHiGreenColor},
+			tablewriter.Colors{tablewriter.FgHiRedColor},
+		)
+	}
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+
+	for _, e := range s.errors {
+		exp := e.Expected
+		act := e.Actual
+		reason := e.Reason
+
+		if !models.IsAnsiDisabled {
+			// Colorize reason if needed, or keep plain
+		}
+		table.Append([]string{reason, exp, act})
+	}
+
+	fmt.Fprintf(s.out, "\nTestrun failed for testcase with id: %s\n", s.testCase)
+	table.Render()
+	fmt.Fprintln(s.out) // Add a newline after
 	return nil
 }
 
@@ -1143,7 +1241,6 @@ func truncateStrings(exp, act string) (string, string) {
 
 	return exp, act
 }
-
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
@@ -1154,12 +1251,14 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
 
-	// Apply truncation logic before processing
+	// Apply truncation logic
 	exp, act = truncateStrings(exp, act)
 
-	// jsonDiff.JsonDiff()
-	exp = wrapTextWithAnsi(exp)
-	act = wrapTextWithAnsi(act)
+	if models.IsAnsiDisabled {
+		exp = stripANSI(exp)
+		act = stripANSI(act)
+	}
+
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
@@ -1184,29 +1283,31 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 	// Apply truncation logic before processing
 	exp, act = truncateStrings(exp, act)
 
-	// Apply colors: red for expected, green for actual
-	// Force color output even when piping to files
-	greenPaint := color.New(color.FgGreen)
-	greenPaint.EnableColor()
-	redPaint := color.New(color.FgRed)
-	redPaint.EnableColor()
+	if models.IsAnsiDisabled {
+		exp = stripANSI(exp)
+		act = stripANSI(act)
+	} else {
+		greenPaint := color.New(color.FgGreen)
+		greenPaint.EnableColor()
+		redPaint := color.New(color.FgRed)
+		redPaint.EnableColor()
 
-	coloredExp := redPaint.SprintFunc()(exp)
-	coloredAct := greenPaint.SprintFunc()(act)
+		exp = redPaint.SprintFunc()(exp)
+		act = greenPaint.SprintFunc()(act)
+	}
 
-	coloredExp = wrapTextWithAnsi(coloredExp)
-	coloredAct = wrapTextWithAnsi(coloredAct)
+	exp = wrapTextWithAnsi(exp)
+	act = wrapTextWithAnsi(act)
 
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
 	table.SetColMinWidth(0, maxLineLength)
 	table.SetColMinWidth(1, maxLineLength)
-	table.Append([]string{coloredExp, coloredAct})
+	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
 }
-
 func Contains(elems []string, v string) bool {
 	for _, s := range elems {
 		if v == s {

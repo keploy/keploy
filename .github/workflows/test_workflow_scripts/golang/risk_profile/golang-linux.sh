@@ -305,7 +305,7 @@ endsec
 
 section "Record Test Cases"
 echo "Starting Keploy in record mode..."
-sudo -E env PATH="$PATH" $RECORD_BIN record -c "./my-app" 2>&1 | tee record.log &
+$RECORD_BIN record -c "./my-app" 2>&1 | tee record.log &
 KEPLOY_PID=$!
 wait_for_http 8080
 endsec
@@ -328,28 +328,28 @@ section "Run Keploy Tests"
 echo "Running tests with risk profile analysis..."
 git checkout origin/risk-profile-v2
 go build -o my-app
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee test.log || true
+$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 --compare-all | tee test.log || true
 check_for_errors "test.log"
 check_report_for_risk_profiles
 endsec
 
 section "Attempt Safe Normalization (Expected to Warn)"
 echo "Running normalize without force flag. Expecting warnings for high-risk failures..."
-sudo -E env PATH="$PATH" $REPLAY_BIN normalize 2>&1 | tee normalize_safe.log || true
+$REPLAY_BIN normalize 2>&1 | tee normalize_safe.log || true
 check_for_errors "normalize_safe.log"
 check_normalize_warnings
 endsec
 
 section "Run Forced Normalization (Expected to Succeed)"
 echo "Running normalize with --allow-high-risk flag..."
-sudo -E env PATH="$PATH" $REPLAY_BIN normalize --allow-high-risk 2>&1 | tee normalize_forced.log || true
+$REPLAY_BIN normalize --allow-high-risk 2>&1 | tee normalize_forced.log || true
 check_for_errors "normalize_forced.log"
 echo "Forced normalization complete. Test cases should now be updated."
 endsec
 
 section "Run Final Validation Test"
 echo "Running final test run to confirm all tests now pass..."
-sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 | tee final_test.log || true
+$REPLAY_BIN test -c "./my-app" --skip-coverage=false --disableMockUpload --useLocalMock 2>&1 --compare-all | tee final_test.log || true
 check_for_errors "final_test.log"
 endsec
 

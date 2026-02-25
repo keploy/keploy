@@ -1,8 +1,6 @@
 package replay
 
 import (
-	// "bytes"
-
 	"context"
 	"errors"
 	"fmt"
@@ -15,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-
 	"time"
 
 	"facette.io/natsort"
@@ -31,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/coverage/java"
 	"go.keploy.io/server/v3/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v3/pkg/platform/coverage/python"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -44,6 +42,7 @@ var (
 	totalTests           int
 	totalTestPassed      int
 	totalTestFailed      int
+	totalTestObsolete    int
 	totalTestIgnored     int
 	totalTestTimeTaken   time.Duration
 )
@@ -69,6 +68,7 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
+	runDomainSet    *telemetry.DomainSet // collects host domains across a test run for telemetry
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -105,7 +105,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 
 func (r *Replayer) Start(ctx context.Context) error {
 
-	r.logger.Info("🟢 Starting Keploy replay...")
+	r.logger.Debug("Starting Keploy replay... Please wait.")
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
@@ -127,6 +127,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
+
+		// Notify the agent that we are shutting down gracefully. It covers early exits before RunTestSet runs
+		// and shutdown paths where the per‑test‑set defer doesn’t execute (or never starts)
+		if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+			r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		}
+
 		if hookCancel != nil {
 			hookCancel()
 		}
@@ -161,9 +168,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	completeTestReportMu.Lock()
 	completeTestReport = make(map[string]TestReportVerdict)
-	totalTests, totalTestPassed, totalTestFailed, totalTestIgnored = 0, 0, 0, 0
+	totalTests, totalTestPassed, totalTestFailed, totalTestObsolete, totalTestIgnored = 0, 0, 0, 0, 0
 	totalTestTimeTaken = 0
 	completeTestReportMu.Unlock()
+	failedTCsBySetID = make(map[string][]string)
+	mockMismatchFailures = NewTestFailureStore()
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
@@ -246,6 +255,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	abortTestRun := false
 	var flakyTestSets []string
 	var testSets []string
+	runDomainSet := telemetry.NewDomainSet()
+	r.runDomainSet = runDomainSet
 	for _, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
@@ -291,6 +302,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		initTotal := totalTests
 		initPassed := totalTestPassed
 		initFailed := totalTestFailed
+		initObsolete := totalTestObsolete
 		initIgnored := totalTestIgnored
 		initTimeTaken := totalTestTimeTaken
 		completeTestReportMu.RUnlock()
@@ -313,6 +325,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTests = initTotal
 			totalTestPassed = initPassed
 			totalTestFailed = initFailed
+			totalTestObsolete = initObsolete
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
 			completeTestReportMu.Unlock()
@@ -476,7 +489,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 	passed := totalTestPassed
 	failed := totalTestFailed
 	completeTestReportMu.RUnlock()
-	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus)
+	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
+		"host-domains": runDomainSet.ToSlice(),
+	})
+	// Shutdown is optional: the static Telemetry interface does not require it,
+	// but the concrete implementation exposes it for graceful drain of in-flight events.
+	if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+		s.Shutdown()
+	}
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
@@ -580,6 +600,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
+		// Notify the agent before cancelling the app context so proxy logs shutdown errors as debug.
+		if r.instrument && !serveTest {
+			if err := r.instrumentation.NotifyGracefulShutdown(context.Background()); err != nil {
+				r.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+			}
+		}
 		runTestSetCtxCancel()
 		err := runTestSetErrGrp.Wait()
 		if err != nil {
@@ -591,6 +617,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
+	if r.runDomainSet != nil {
+		for _, tc := range testCases {
+			r.runDomainSet.AddAll(telemetry.ExtractDomainsFromTestCase(tc))
+		}
 	}
 
 	if len(testCases) == 0 {
@@ -635,6 +668,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			total:     testReport.Total,
 			failed:    0,
 			passed:    0,
+			obsolete:  0,
 			ignored:   testReport.Ignored,
 			status:    true,
 			duration:  timeTaken,
@@ -678,6 +712,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var appErr models.AppError
 	var success int
 	var failure int
+	var obsolete int
 	var ignored int
 	var totalConsumedMocks = map[string]models.MockState{}
 
@@ -689,6 +724,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
 	var isMappingEnabled bool
+	isMappingEnabled = !r.config.DisableMapping
+	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
@@ -733,13 +770,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return nil
 		})
 
-		agentCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		agentCtx, cancel := context.WithTimeout(runTestSetCtx, 120*time.Second)
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
 		go pkg.AgentHealthTicker(agentCtx, r.logger, string(r.config.Agent.AgentURI), agentReadyCh, 1*time.Second)
 
 		select {
+		case <-runTestSetCtx.Done():
+			// Parent context cancelled (user pressed Ctrl+C)
+			return models.TestSetStatusUserAbort, runTestSetCtx.Err()
 		case <-agentCtx.Done():
 			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
 		case <-agentReadyCh:
@@ -772,10 +812,46 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		mocksThatHaveMappings := make(map[string]bool)
+
+		mocksWeNeed := make(map[string]bool)
+
+		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
+			// Populate the Registry
+			for _, mocks := range expectedTestMockMappings {
+				for _, m := range mocks {
+					mocksThatHaveMappings[m] = true
+				}
+			}
+
+			if len(selectedTests) > 0 {
+				for testID := range selectedTests {
+					if mocks, ok := expectedTestMockMappings[testID]; ok {
+						for _, m := range mocks {
+							mocksWeNeed[m] = true
+						}
+					}
+				}
+			} else {
+				// If running all tests, we need all mapped mocks
+				mocksWeNeed = mocksThatHaveMappings
+			}
+		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
+		}
+
+		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
+		if r.runDomainSet != nil {
+			for _, m := range filteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+			for _, m := range unfilteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
 		}
 
 		if filteredMocks == nil && unfilteredMocks == nil {
@@ -787,13 +863,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
-			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
-
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
@@ -815,12 +888,47 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if cmdType != utils.DockerCompose {
+
+		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
+		mocksThatHaveMappings := make(map[string]bool)
+
+		mocksWeNeed := make(map[string]bool)
+
+		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
+			// Populate the Registry
+			for _, mocks := range expectedTestMockMappings {
+				for _, m := range mocks {
+					mocksThatHaveMappings[m] = true
+				}
+			}
+
+			if len(selectedTests) > 0 {
+				for testID := range selectedTests {
+					if mocks, ok := expectedTestMockMappings[testID]; ok {
+						for _, m := range mocks {
+							mocksWeNeed[m] = true
+						}
+					}
+				}
+			} else {
+				// If running all tests, we need all mapped mocks
+				mocksWeNeed = mocksThatHaveMappings
+			}
+		}
 		// Get all mocks for mapping-based filtering
-		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
-
+		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
+		if r.runDomainSet != nil {
+			for _, m := range filteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+			for _, m := range unfilteredMocks {
+				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
+			}
+		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
@@ -837,10 +945,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		isMappingEnabled := !r.config.DisableMapping
 
 		if !isMappingEnabled {
-			r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+			r.logger.Debug("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
 		}
-
-		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 
 		pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
@@ -922,7 +1028,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
@@ -961,12 +1066,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var actualTestMockMappings = make(map[string][]models.MockEntry)
+	actualTestMockMappings := &models.Mapping{
+		Version:   string(models.GetVersion()),
+		Kind:      models.MappingKind,
+		TestSetID: testSetID,
+	}
 	var consumedMocks []models.MockState
 	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 	}
+	r.logger.Debug("consumed mocks during initial setup",
+		zap.String("testSetID", testSetID),
+		zap.Int("count", len(consumedMocks)),
+		zap.Any("mocks", consumedMocks))
 	for _, m := range consumedMocks {
 		totalConsumedMocks[m.Name] = m
 	}
@@ -1045,29 +1158,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		// Handle user-provided host replacement
-		if r.config.Test.Host != "" {
-			err = r.replaceHostInTestCase(testCase, r.config.Test.Host, "host provided by the user")
-			if err != nil {
-				break
-			}
-		}
-
-		// Handle user-provided http port replacement
-		if r.config.Test.Port != 0 && testCase.Kind == models.HTTP {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.Port)))
-			if err != nil {
-				break
-			}
-		}
-
-		// Handle user-provided grpc port replacement
-		if r.config.Test.GRPCPort != 0 && testCase.Kind == models.GRPC_EXPORT {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.GRPCPort)))
-			if err != nil {
-				break
-			}
-		}
+		// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
+		// This ensures that replaceWith configuration takes precedence over global host/port overrides.
 
 		started := time.Now().UTC()
 
@@ -1097,12 +1189,30 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
+			r.logger.Debug("consumed mocks after test case simulation",
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseID", testCase.Name),
+				zap.Int("count", len(consumedMocks)),
+				zap.Any("mocks", consumedMocks))
 			for _, m := range consumedMocks {
 				totalConsumedMocks[m.Name] = m
 			}
 		}
 
 		r.logger.Debug("test case kind", zap.String("kind", string(testCase.Kind)), zap.String("testcase", testCase.Name), zap.String("testset", testSetID))
+
+		mockNames := make([]string, 0, len(consumedMocks))
+		for _, m := range consumedMocks {
+			mockNames = append(mockNames, m.Name)
+		}
+
+		expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
+		mockSetMismatch := false
+		if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
+			mockSetMismatch = !isMockSubset(mockNames, expectedMocks)
+		}
+
+		emitFailureLogs := !mockSetMismatch
 
 		switch testCase.Kind {
 		case models.HTTP:
@@ -1119,7 +1229,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID)
+			testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID, emitFailureLogs)
 
 		case models.GRPC_EXPORT:
 			grpcResp, ok := resp.(*models.GrpcResp)
@@ -1138,7 +1248,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			respCopy := *grpcResp
 
-			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 				// get the :path header from the request
 				method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
 				if !ok {
@@ -1171,20 +1281,57 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 		compareResp:
-			testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID)
+			testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 		}
 
 		if len(consumedMocks) > 0 {
+			var mockEntries []models.MockEntry
 			for _, m := range consumedMocks {
-				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], models.MockEntry{
+				mockEntries = append(mockEntries, models.MockEntry{
 					Name: m.Name,
 					Kind: string(m.Kind),
+				})
+			}
+
+			found := false
+			for i, t := range actualTestMockMappings.Tests {
+				if t.ID == testCase.Name {
+					actualTestMockMappings.Tests[i].Mocks = append(actualTestMockMappings.Tests[i].Mocks, mockEntries...)
+					found = true
+					break
+				}
+			}
+			if !found {
+				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+					ID:    testCase.Name,
+					Mocks: mockEntries,
 				})
 			}
 		}
 
 		// log the consumed mocks during the test run of the test case for test set
-		r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
+		r.logger.Debug("consumed mocks for test case",
+			zap.String("testSetID", testSetID),
+			zap.String("testCaseID", testCase.Name),
+			zap.Strings("mockNames", mockNames),
+			zap.Any("mocks", consumedMocks))
+
+		if mockSetMismatch {
+			if testPass {
+				r.logger.Debug("mock mapping mismatch ignored because testcase passed",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", expectedMocks),
+					zap.Strings("actualMocks", mockNames))
+			} else {
+				r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete",
+					zap.String("testcase", testCase.Name),
+					zap.String("testset", testSetID),
+					zap.Strings("expectedMocks", expectedMocks),
+					zap.Strings("actualMocks", mockNames))
+				mockMismatchFailures.AddFailure(testSetID, testCase.Name, expectedMocks, mockNames)
+			}
+		}
 
 		if !testPass {
 			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
@@ -1194,6 +1341,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if testPass {
 			testStatus = models.TestStatusPassed
 			success++
+		} else if mockSetMismatch {
+			testStatus = models.TestStatusObsolete
+			obsolete++
 		} else {
 			testStatus = models.TestStatusFailed
 			failure++
@@ -1258,7 +1408,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
 				}
+				insertStart := time.Now()
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if time.Since(insertStart) > 50*time.Millisecond {
+					r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+				}
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
@@ -1337,6 +1491,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Total:      testCasesCount,
 		Success:    success,
 		Failure:    failure,
+		Obsolete:   obsolete,
 		Ignored:    ignored,
 		Tests:      testCaseResults,
 		TimeTaken:  timeTaken.String(),
@@ -1360,7 +1515,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
-	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
+	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.String("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
 		r.logger.Info("deleting unused mocks from the data store", zap.String("for test-set", testSetID))
@@ -1370,36 +1525,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
-		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
-		if err != nil {
+	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled && r.config.Test.UpdateTestMapping {
+		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings)))
-		}
-	}
-
-	if testSetStatus == models.TestSetStatusFailed && r.instrument && isMappingEnabled {
-
-		for tc, expectedMocks := range expectedTestMockMappings {
-
-			actualMocks, ok := actualTestMockMappings[tc]
-
-			if !ok {
-				continue
-			}
-
-			// Extract names for comparison (expectedMocks is []string from old format)
-			actualMockNames := make([]string, len(actualMocks))
-			for i, m := range actualMocks {
-				actualMockNames[i] = m.Name
-			}
-
-			if len(expectedMocks) != len(actualMockNames) || !compareMockArrays(expectedMocks, actualMockNames) {
-				mockMismatchFailures.AddFailure(testSetID, tc, expectedMocks, actualMockNames)
-			}
+				zap.Int("numTests", len(actualTestMockMappings.Tests)))
 		}
 	}
 
@@ -1408,6 +1540,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		total:     testReport.Total,
 		failed:    testReport.Failure,
 		passed:    testReport.Success,
+		obsolete:  testReport.Obsolete,
 		ignored:   testReport.Ignored,
 		status:    testSetStatus == models.TestSetStatusPassed,
 		duration:  timeTaken,
@@ -1419,6 +1552,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
+	totalTestObsolete += testReport.Obsolete
 	totalTestIgnored += testReport.Ignored
 	totalTestTimeTaken += timeTaken
 	completeTestReportMu.Unlock()
@@ -1426,19 +1560,57 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	timeTakenStr := timeWithUnits(timeTaken)
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
-		if testSetStatus == models.TestSetStatusFailed {
-			pp.SetColorScheme(models.GetFailingColorScheme())
-		} else {
-			pp.SetColorScheme(models.GetPassingColorScheme())
-		}
-		if testReport.Ignored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, timeTakenStr); err != nil {
+
+		if !r.config.DisableANSI {
+			if testSetStatus == models.TestSetStatusFailed {
+				pp.SetColorScheme(models.GetFailingColorScheme())
+			} else {
+				pp.SetColorScheme(models.GetPassingColorScheme())
+			}
+
+			summaryFormat := "\n <=========================================> \n" +
+				"  TESTRUN SUMMARY. For test-set: %s\n" +
+				"\tTotal tests:        %s\n" +
+				"\tTotal test passed:  %s\n" +
+				"\tTotal test failed:  %s\n"
+
+			args := []interface{}{testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure}
+			if testReport.Obsolete > 0 {
+				summaryFormat += "\tTotal test obsolete: %s\n"
+				args = append(args, testReport.Obsolete)
+			}
+
+			if testReport.Ignored > 0 {
+				summaryFormat += "\tTotal test ignored: %s\n"
+				args = append(args, testReport.Ignored)
+			}
+
+			summaryFormat += "\tTime Taken:         %s\n <=========================================> \n\n"
+			args = append(args, timeTakenStr)
+
+			if _, err := pp.Printf(summaryFormat, args...); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
+
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTakenStr); err != nil {
-				utils.LogError(r.logger, err, "failed to print testrun summary")
+			var sb strings.Builder
+			sb.WriteString("\n <=========================================> \n")
+			sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testReport.TestSet))
+			sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
+			sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
+			sb.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", testReport.Failure))
+			if testReport.Obsolete > 0 {
+				sb.WriteString(fmt.Sprintf("\tTotal test obsolete: %d\n", testReport.Obsolete))
 			}
+
+			if testReport.Ignored > 0 {
+				sb.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", testReport.Ignored))
+			}
+
+			sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
+			sb.WriteString(" <=========================================> \n\n")
+
+			fmt.Print(sb.String())
 		}
 	}
 
@@ -1461,13 +1633,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	return testSetStatus, nil
 }
 
-func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) (filtered, unfiltered []*models.Mock, err error) {
-	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime)
+func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, err error) {
+	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
 		return nil, nil, err
 	}
-	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime)
+	unfiltered, err = r.mockDB.GetUnFilteredMocks(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return nil, nil, err
@@ -1517,22 +1689,26 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+
+	if r.config.Test.SchemaMatch {
+		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+	}
+
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
 }
 
-func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
-
+	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, emitFailureLogs)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
@@ -1540,6 +1716,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	totalTestsSnapshot := totalTests
 	totalTestPassedSnapshot := totalTestPassed
 	totalTestFailedSnapshot := totalTestFailed
+	totalTestObsoleteSnapshot := totalTestObsolete
 	totalTestIgnoredSnapshot := totalTestIgnored
 	totalTestTimeTakenSnapshot := totalTestTimeTaken
 	reportSnapshot := make(map[string]TestReportVerdict, len(completeTestReport))
@@ -1569,81 +1746,158 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTakenSnapshot)
 
-		if totalTestIgnoredSnapshot > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestIgnoredSnapshot, totalTestTimeTakenStr); err != nil {
+		if !r.config.DisableANSI {
+			summaryFormat := "\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n" +
+				"\tTotal tests: %s\n" +
+				"\tTotal test passed: %s\n" +
+				"\tTotal test failed: %s\n"
+			summaryArgs := []interface{}{totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot}
+			if totalTestObsoleteSnapshot > 0 {
+				summaryFormat += "\tTotal test obsolete: %s\n"
+				summaryArgs = append(summaryArgs, totalTestObsoleteSnapshot)
+			}
+			if totalTestIgnoredSnapshot > 0 {
+				summaryFormat += "\tTotal test ignored: %s\n"
+				summaryArgs = append(summaryArgs, totalTestIgnoredSnapshot)
+			}
+			summaryFormat += "\tTotal time taken: %s\n"
+			summaryArgs = append(summaryArgs, totalTestTimeTakenStr)
+
+			if _, err := pp.Printf(summaryFormat, summaryArgs...); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
-		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot, totalTestTimeTakenStr); err != nil {
-				utils.LogError(r.logger, err, "failed to print test run summary")
+
+			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			if totalTestObsoleteSnapshot > 0 {
+				header += "\t\tObsolete"
+			}
+			if totalTestIgnoredSnapshot > 0 {
+				header += "\t\tIgnored"
+			}
+			header += "\t\tTime Taken"
+			if totalTestFailedSnapshot > 0 {
+				header += "\tFailed Testcases"
+			}
+			header += "\t\n"
+
+			_, err := pp.Printf(header)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to print test suite summary header")
 				return
 			}
-		}
 
-		header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
-		if totalTestIgnoredSnapshot > 0 {
-			header += "\t\tIgnored"
-		}
-		header += "\t\tTime Taken"
-		if totalTestFailedSnapshot > 0 {
-			header += "\tFailed Testcases"
-		}
-		header += "\t\n"
-
-		_, err := pp.Printf(header)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to print test suite summary header")
-			return
-		}
-
-		for _, testSuiteName := range testSuiteNames {
-			report := reportSnapshot[testSuiteName]
-			if report.status {
-				pp.SetColorScheme(models.GetPassingColorScheme())
-			} else {
-				pp.SetColorScheme(models.GetFailingColorScheme())
-			}
-
-			testSetTimeTakenStr := timeWithUnits(report.duration)
-
-			var format strings.Builder
-			args := []interface{}{}
-
-			// Using a more dynamic way to build format string and arguments
-			// to ensure correct tabbing and conditional column
-			format.WriteString("\n\t%s\t\t%s\t\t%s\t\t%s")
-			args = append(args, testSuiteName, report.total, report.passed, report.failed)
-
-			if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
-				format.WriteString("\t\t%s")
-				args = append(args, report.ignored)
-			}
-
-			format.WriteString("\t\t%s") // Time Taken
-			args = append(args, testSetTimeTakenStr)
-
-			if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
-				failedCasesStr := "-"
-				if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
-					failedCasesStr = strings.Join(failedCases, ", ")
+			for _, testSuiteName := range testSuiteNames {
+				report := reportSnapshot[testSuiteName]
+				if report.status {
+					pp.SetColorScheme(models.GetPassingColorScheme())
+				} else {
+					pp.SetColorScheme(models.GetFailingColorScheme())
 				}
-				format.WriteString("\t%s")
-				args = append(args, failedCasesStr)
-			}
 
-			if _, err := pp.Printf(format.String(), args...); err != nil {
-				utils.LogError(r.logger, err, "failed to print test suite details")
+				testSetTimeTakenStr := timeWithUnits(report.duration)
+
+				var format strings.Builder
+				args := []interface{}{}
+
+				format.WriteString("\n\t%s\t\t%s\t\t%s\t\t%s")
+				args = append(args, testSuiteName, report.total, report.passed, report.failed)
+
+				if totalTestObsoleteSnapshot > 0 {
+					format.WriteString("\t\t%s")
+					args = append(args, report.obsolete)
+				}
+
+				if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
+					format.WriteString("\t\t%s")
+					args = append(args, report.ignored)
+				}
+
+				format.WriteString("\t\t%s") // Time Taken
+				args = append(args, testSetTimeTakenStr)
+
+				if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
+					failedCasesStr := "-"
+					if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+						failedCasesStr = strings.Join(failedCases, ", ")
+					}
+					format.WriteString("\t%s")
+					args = append(args, failedCasesStr)
+				}
+
+				if _, err := pp.Printf(format.String(), args...); err != nil {
+					utils.LogError(r.logger, err, "failed to print test suite details")
+					return
+				}
+			}
+			if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
+				utils.LogError(r.logger, err, "failed to print separator")
 				return
 			}
-		}
-		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
-			utils.LogError(r.logger, err, "failed to print separator")
-			return
+
+		} else {
+			fmt.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %d\n"+"\tTotal test passed: %d\n"+"\tTotal test failed: %d\n", totalTestsSnapshot, totalTestPassedSnapshot, totalTestFailedSnapshot)
+			if totalTestObsoleteSnapshot > 0 {
+				fmt.Printf("\tTotal test obsolete: %d\n", totalTestObsoleteSnapshot)
+			}
+			if totalTestIgnoredSnapshot > 0 {
+				fmt.Printf("\tTotal test ignored: %d\n", totalTestIgnoredSnapshot)
+			}
+			fmt.Printf("\tTotal time taken: %s\n", totalTestTimeTakenStr)
+
+			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			if totalTestObsoleteSnapshot > 0 {
+				header += "\t\tObsolete"
+			}
+			if totalTestIgnoredSnapshot > 0 {
+				header += "\t\tIgnored"
+			}
+			header += "\t\tTime Taken"
+			if totalTestFailedSnapshot > 0 {
+				header += "\tFailed Testcases"
+			}
+			header += "\t\n"
+
+			fmt.Print(header)
+
+			for _, testSuiteName := range testSuiteNames {
+				report := reportSnapshot[testSuiteName]
+				testSetTimeTakenStr := timeWithUnits(report.duration)
+
+				var format strings.Builder
+				args := []interface{}{}
+
+				format.WriteString("\n\t%s\t\t%d\t\t%d\t\t%d")
+				args = append(args, testSuiteName, report.total, report.passed, report.failed)
+
+				if totalTestObsoleteSnapshot > 0 {
+					format.WriteString("\t\t%d")
+					args = append(args, report.obsolete)
+				}
+
+				if totalTestIgnoredSnapshot > 0 && !r.config.Test.MustPass {
+					format.WriteString("\t\t%d")
+					args = append(args, report.ignored)
+				}
+
+				format.WriteString("\t\t%s") // Time Taken
+				args = append(args, testSetTimeTakenStr)
+
+				if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
+					failedCasesStr := "-"
+					if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+						failedCasesStr = strings.Join(failedCases, ", ")
+					}
+					format.WriteString("\t\t%s")
+					args = append(args, failedCasesStr)
+				}
+				fmt.Printf(format.String(), args...)
+			}
+
+			fmt.Print("\n<=========================================> \n\n")
 		}
 	}
 }
-
 func (r *Replayer) RunApplication(ctx context.Context, opts models.RunOptions) models.AppError {
 	return r.instrumentation.Run(ctx, opts)
 }
@@ -1767,7 +2021,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Body:       errorMessage,
 		}
 
-		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID)
+		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID, true)
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
@@ -1800,7 +2054,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 		respCopy := *actualResponse
 
-		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" || len(r.config.Test.ProtoInclude) > 0 {
 			// get the :path header from the request
 			method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
 			if !ok {
@@ -1833,7 +2087,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		}
 
 	compareResp:
-		_, result = r.CompareGRPCResp(testCase, &respCopy, testSetID)
+		_, result = r.CompareGRPCResp(testCase, &respCopy, testSetID, true)
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse
@@ -2012,9 +2266,9 @@ func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
 	return nil
 }
 
-func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]models.MockEntry) error {
+func (r *Replayer) StoreMappings(ctx context.Context, mapping *models.Mapping) error {
 	// Save test-mock mappings to YAML file
-	err := r.mappingDB.Insert(ctx, testSetID, mappings)
+	err := r.mappingDB.Insert(ctx, mapping)
 	return err
 }
 
@@ -2169,14 +2423,14 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 
 	if hasMeaningfulMappings {
 		// Meaningful mappings were found, so use the mapping-based strategy.
-		r.logger.Info("Using mapping-based mock filtering strategy",
+		r.logger.Debug("Using mapping-based mock filtering strategy",
 			zap.String("testSetID", testSetID),
 			zap.Int("totalMappings", len(expectedTestMockMappings)))
 		return true, expectedTestMockMappings
 	}
 
 	// No meaningful mappings were found, so fall back to the timestamp-based strategy.
-	r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+	r.logger.Debug("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
 		zap.String("testSetID", testSetID))
 	return false, defaultMappings
 }

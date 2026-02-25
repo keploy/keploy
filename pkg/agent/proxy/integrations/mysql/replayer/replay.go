@@ -43,7 +43,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 		}
 	}
 
-	logger.Info("MySQL replay session starting",
+	logger.Debug("MySQL replay session starting",
 		zap.Int("total_unfiltered_mocks", len(unfiltered)),
 		zap.Int("total_mysql_mocks", totalMySQLMocks),
 		zap.Int("config_mocks", len(configMocks)),

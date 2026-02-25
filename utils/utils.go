@@ -47,6 +47,25 @@ var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
+// IsShutdownError checks if the error is related to shutdown (EOF, connection closed, etc.)
+// This is useful for gracefully handling errors during application shutdown.
+func IsShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for EOF errors
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Check error message for common shutdown-related patterns
+	errStr := err.Error()
+	return strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "use of closed network connection")
+}
+
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
@@ -1240,6 +1259,14 @@ func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
 
+// PermissionError holds information about files/directories with permission issues
+type PermissionError struct {
+	Path     string
+	OwnerUID uint32
+	IsRead   bool // true if it's a read permission issue, false if write
+}
+
+// AddToGitIgnore adds an entry to the .gitignore file if it doesn't already exist.
 func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"
 
@@ -1250,7 +1277,7 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 
 	defer func() {
 		if err := file.Close(); err != nil {
-			logger.Error("error closing .gitignore file: %v", zap.Error(err))
+			logger.Error("error closing .gitignore file", zap.Error(err))
 		}
 	}()
 
@@ -1267,7 +1294,6 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 		if _, err := file.WriteString("\n" + ignoreString + "\n"); err != nil {
 			return fmt.Errorf("error writing to .gitignore file: %v", err)
 		}
-		return nil
 	}
 
 	return nil

@@ -128,3 +128,6 @@ jobs:
   run_grpc_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/grpc_linux.yml
+  run_schema_match_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/schema_match_linux.yml

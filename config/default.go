@@ -35,8 +35,11 @@ test:
   globalNoise:
     global: {}
     test-sets: {}
+  replaceWith:
+    global: {}
+    test-sets: {}
   delay: 5
-  host: ""
+  host: "localhost"
   port: 0
   grpcPort: 0
   apiTimeout: 5
@@ -60,12 +63,15 @@ test:
   protoFile: ""
   protoDir: ""
   protoInclude: []
+  compareAll: false
+  updateTestMapping: false
 record:
   recordTimer: 0s
   filters: []
   sync: false
 configPath: ""
 bypassRules: []
+disableMapping: true
 contract:
   driven: "consumer"
   mappings:

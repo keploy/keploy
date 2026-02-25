@@ -6,8 +6,12 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -34,6 +38,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/health", a.Health)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
+		r.Post("/mappings", a.HandleMappings)
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/storemocks", a.StoreMocks)
 		r.Post("/updatemockparams", a.UpdateMockParams)
@@ -41,6 +46,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// r.Post("/testbench", a.SendKtInfo)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Post("/agent/ready", a.MakeAgentReady)
+		r.Post("/graceful-shutdown", a.HandleGracefulShutdown)
 		r.Post("/hooks/before-simulate", a.HandleBeforeSimulate)
 		r.Post("/hooks/after-simulate", a.HandleAfterSimulate)
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
@@ -160,12 +166,7 @@ func (a *Agent) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
-
-	a.logger.Info("🟢 Received request to handle incoming test cases")
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("Cache-Control", "no-cache")
+	a.logger.Debug("Received request to handle incoming test cases")
 
 	// Flush headers to ensure the client gets the response immediately
 	flusher, ok := w.(http.Flusher)
@@ -173,6 +174,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
 		return
 	}
+
+	// Set up Multipart Writer
+	mw := multipart.NewWriter(w)
+	defer func() {
+		if err := mw.Close(); err != nil {
+			a.logger.Error("failed to close multipart writer", zap.Error(err))
+		}
+		// Flush the final boundary so the client sees a clean EOF
+		// instead of "unexpected EOF" when the connection tears down.
+		flusher.Flush()
+	}()
+	w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+	w.Header().Set("Cache-Control", "no-cache")
 
 	// Create a context with the request's context to manage cancellation
 	errGrp, _ := errgroup.WithContext(r.Context())
@@ -194,9 +208,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		return // Important: return after handling the error
 	}
 
-	a.logger.Info("🟢 Streaming incoming test cases to client")
+	a.logger.Debug("Streaming incoming test cases to client")
 
-	// TODO: make a uniform implementation for both test and mock streaming channels
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	a.logger.Debug("Incoming stream connection established and headers flushed")
+
 	// Keep the connection alive and stream data
 	for t := range tc {
 		select {
@@ -207,7 +224,75 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		default:
 			// Stream each test case as JSON
 			a.logger.Debug("Sending test case", zap.Any("test_case", t))
-			render.JSON(w, r, t)
+			// 1. Write metadata (JSON)
+			header := textproto.MIMEHeader{}
+			header.Set("Content-Disposition", `form-data; name="metadata"`)
+			header.Set("Content-Type", "application/json")
+			part, err := mw.CreatePart(header)
+			if err != nil {
+				a.logger.Error("failed to create metadata part", zap.Error(err))
+				return
+			}
+			if err := json.NewEncoder(part).Encode(t); err != nil {
+				a.logger.Error("failed to encode metadata", zap.Error(err))
+				return
+			}
+
+			// 2. Write file part if exists
+			if t.HasBinaryFile {
+				a.logger.Debug("Starting binary file streaming for test case", zap.String("name", t.Name))
+				for _, form := range t.HTTPReq.Form {
+					for i, path := range form.Paths {
+						if path == "" {
+							continue
+						}
+
+						// Get filename from FileNames if available, or base of path
+						fileName := "binary_file"
+						if i < len(form.FileNames) {
+							fileName = form.FileNames[i]
+						} else {
+							fileName = filepath.Base(path)
+						}
+
+						fileHeader := textproto.MIMEHeader{}
+						fileHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
+						filePart, err := mw.CreatePart(fileHeader)
+						if err != nil {
+							a.logger.Error("failed to create file part", zap.Error(err))
+							return
+						}
+
+						f, err := os.Open(path)
+						if err != nil {
+							a.logger.Error("failed to open file for streaming", zap.String("path", path), zap.Error(err))
+							return
+						}
+						if _, err := io.Copy(filePart, f); err != nil {
+							f.Close()
+							a.logger.Error("failed to copy file to stream", zap.Error(err))
+							return
+						}
+						f.Close()
+						a.logger.Debug("Successfully streamed file part", zap.String("file", fileName))
+
+						// Cleanup temp file
+						os.Remove(path)
+					}
+				}
+			}
+
+			// 3. Write delimiter part to force closure of previous part (file)
+			// This is critical: The client reads the file part until it sees the *next* boundary.
+			// Without this delimiter, the client blocks waiting for the *next testcase* to create a boundary,
+			// causing a deadlock if testcases are infrequent.
+			delimiterHeader := textproto.MIMEHeader{}
+			delimiterHeader.Set("Content-Disposition", `form-data; name="delimiter"`)
+			if _, err := mw.CreatePart(delimiterHeader); err != nil {
+				a.logger.Error("failed to create delimiter part", zap.Error(err))
+				return
+			}
+
 			flusher.Flush() // Immediately send data to the client
 		}
 	}
@@ -215,7 +300,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 
-	a.logger.Info("🟢 Received request to handle outgoing mocks...")
+	a.logger.Debug("Received request to handle outgoing mocks")
 
 	// Headers for a binary gob stream
 	w.Header().Set("Content-Type", "application/x-gob")
@@ -244,7 +329,10 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.logger.Info("🟢 Streaming outgoing mocks to client...")
+	a.logger.Debug("Streaming outgoing mocks to client")
+
+	// Flush the headers to establish the connection immediately
+	flusher.Flush()
 
 	enc := gob.NewEncoder(w)
 
@@ -258,6 +346,40 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := enc.Encode(m); err != nil {
 				a.logger.Error("gob encode failed", zap.Error(err))
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (a *Agent) HandleMappings(w http.ResponseWriter, r *http.Request) {
+	a.logger.Debug("Received request to handle mappings stream")
+	w.Header().Set("Content-Type", "application/json")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Connect to the service to get the channel
+	mappingChan, err := a.svc.GetMapping(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	enc := json.NewEncoder(w)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case mapping, ok := <-mappingChan:
+			if !ok {
+				return
+			}
+			if err := enc.Encode(mapping); err != nil {
 				return
 			}
 			flusher.Flush()
@@ -283,7 +405,23 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.logger.Info("Agent marked as ready", zap.String("file", readyFile))
+	a.logger.Debug("Agent marked as ready", zap.String("file", readyFile))
 	w.WriteHeader(http.StatusOK)
+	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
+}
+
+// HandleGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+// When this flag is set, connection errors will be logged as debug instead of error.
+func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
+	a.logger.Debug("Received graceful shutdown notification")
+
+	if err := a.svc.SetGracefulShutdown(r.Context()); err != nil {
+		a.logger.Error("failed to set graceful shutdown flag", zap.Error(err))
+		http.Error(w, "failed to set graceful shutdown", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("Graceful shutdown flag set\n"))
 }

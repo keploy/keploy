@@ -16,6 +16,7 @@ type IntegrationType string
 // constants for different types of integrations
 const (
 	HTTP        IntegrationType = "http"
+	HTTP2       IntegrationType = "http2"
 	GRPC        IntegrationType = "grpc"
 	GENERIC     IntegrationType = "generic"
 	MYSQL       IntegrationType = "mysql"
@@ -50,4 +51,5 @@ type MockMemDb interface {
 	DeleteFilteredMock(mock models.Mock) bool
 	DeleteUnFilteredMock(mock models.Mock) bool
 	GetMySQLCounts() (total, config, data int)
+	MarkMockAsUsed(mock models.Mock) bool
 }

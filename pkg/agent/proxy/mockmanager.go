@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -183,9 +184,13 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
 	touched := map[models.Kind]struct{}{}
 
+	var maxSortOrder int64
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
+		if mock.TestModeInfo.SortOrder > maxSortOrder {
+			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
@@ -198,6 +203,10 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
+	}
+
+	if maxSortOrder > 0 {
+		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 
 	// atomically swap the per-kind map
@@ -219,9 +228,13 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
 	touched := map[models.Kind]struct{}{}
 
+	var maxSortOrder int64
 	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
+		if mock.TestModeInfo.SortOrder > maxSortOrder {
+			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
@@ -234,6 +247,10 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
+	}
+
+	if maxSortOrder > 0 {
+		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 
 	// atomically swap the per-kind map
@@ -389,8 +406,28 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	return deletedGlobal
 }
 
-// ---------- bookkeeping ----------
+// MarkMockAsUsed marks the given mock as used (consumed) without modifying
+// its sort order or removing it from any tree. This is intended for parsers
+// (e.g. mongo v2) that need to record mock usage without changing mock ordering.
+func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
+	if mock.Name == "" {
+		return false
+	}
+	if err := m.flagMockAsUsed(models.MockState{
+		Name:       mock.Name,
+		Usage:      models.Updated,
+		IsFiltered: mock.TestModeInfo.IsFiltered,
+		SortOrder:  mock.TestModeInfo.SortOrder,
+	}); err != nil {
+		if m.logger != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+		return false
+	}
+	return true
+}
 
+// ---------- bookkeeping ----------
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")

@@ -77,7 +77,7 @@ send_request(){
 for i in {1..2}; do
     app_name="nodeApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH $RECORD_BIN record -c 'node app.js'    &> "${app_name}.txt"
+    $RECORD_BIN record -c 'node app.js'    &> "${app_name}.txt"
     cat "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
@@ -95,7 +95,7 @@ for i in {1..2}; do
 done
 
 # Test modes and result checking
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'node app.js' --delay 10    &> test_logs1.txt
+$REPLAY_BIN test -c 'node app.js' --delay 10    &> test_logs1.txt
 cat test_logs1.txt
 if grep "ERROR" "test_logs1.txt"; then
     echo "Error found in pipeline..."
@@ -108,7 +108,7 @@ if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'node app.js' --delay 10 --testsets test-set-0    &> test_logs2.txt
+$REPLAY_BIN test -c 'node app.js' --delay 10 --testsets test-set-0    &> test_logs2.txt
 cat test_logs2.txt
 if grep "ERROR" "test_logs2.txt"; then
     echo "Error found in pipeline..."
@@ -121,7 +121,7 @@ if grep "WARNING: DATA RACE" "test_logs2.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'node app.js' --apiTimeout 30 --delay 10    &> test_logs3.txt
+$REPLAY_BIN test -c 'node app.js' --apiTimeout 30 --delay 10    &> test_logs3.txt
 cat test_logs3.txt
 if grep "ERROR" "test_logs3.txt"; then
     echo "Error found in pipeline..."

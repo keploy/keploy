@@ -37,7 +37,6 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
 				return nil
 			}
-
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
@@ -48,6 +47,10 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 					logger.Info("context cancelled before agent http server could start")
 					return
 				case p := <-startAgentCh:
+					if err := agent.SetupAgentHook.AfterSetup(ctx); err != nil {
+						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
+						return
+					}
 					routes.StartAgentServer(logger, p, router)
 				}
 			}()
