@@ -139,8 +139,40 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if !compareAll && bodyType != models.JSON {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
-		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
-			pass = false
+		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") {
+			// Sub-classify the non-JSON body to enable type-specific semantic comparison.
+			subType := pkg.GuessContentType([]byte(actualResponse.Body))
+			switch subType {
+			case models.HTML:
+				// Fix 3: validate that expected body is also HTML before canonicalizing.
+				// Prevents false positives where plain text canonicalizes
+				// to the same html.Parse wrapper as an actual HTML response.
+				expSubType := pkg.GuessContentType([]byte(tc.HTTPResp.Body))
+				if expSubType != models.HTML {
+					logger.Debug("HTML subtype mismatch: expected body is not HTML",
+						zap.String("expected_type", string(expSubType)),
+						zap.String("actual_type", string(subType)))
+					if tc.HTTPResp.Body != actualResponse.Body {
+						pass = false
+					}
+				} else {
+					htmlCfg := buildHTMLConfig(bodyNoise)
+					canExp, errExp := matcherUtils.CanonicalizeHTML(tc.HTTPResp.Body, htmlCfg)
+					canAct, errAct := matcherUtils.CanonicalizeHTML(actualResponse.Body, htmlCfg)
+					if errExp != nil || errAct != nil {
+						logger.Warn("HTML canonicalization failed", zap.NamedError("exp_err", errExp), zap.NamedError("act_err", errAct))
+						if tc.HTTPResp.Body != actualResponse.Body {
+							pass = false
+						}
+					} else if canExp != canAct {
+						pass = false
+					}
+				}
+			default:
+				if tc.HTTPResp.Body != actualResponse.Body {
+					pass = false
+				}
+			}
 		}
 	}
 
@@ -339,6 +371,19 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
 					}
 					logDiffs.PushBodyDiff(fmtSprint234(op.OldValue), fmtSprint234(op.Value), bodyNoise)
+				}
+			case models.HTML:
+				htmlCfg := buildHTMLConfig(bodyNoise)
+				canExp, errExp := matcherUtils.CanonicalizeHTML(tc.HTTPResp.Body, htmlCfg)
+				canAct, errAct := matcherUtils.CanonicalizeHTML(actualResponse.Body, htmlCfg)
+				if errExp != nil || errAct != nil {
+					logger.Warn("HTML canonicalization failed during diff", zap.NamedError("exp_err", errExp), zap.NamedError("act_err", errAct))
+					logDiffs.PushBodyDiff(fmtSprint234(tc.HTTPResp.Body), fmtSprint234(actualResponse.Body), bodyNoise)
+				} else {
+					if canExp != canAct {
+						isBodyMismatch = true
+					}
+					logDiffs.PushBodyDiff(fmtSprint234(canExp), fmtSprint234(canAct), bodyNoise)
 				}
 			default: // right now for every other type we would do a simple comparison, till we don't have dedicated logic for other types.
 				if tc.HTTPResp.Body != actualResponse.Body {
@@ -674,4 +719,27 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 		return m, err
 	}
 	return m, nil
+}
+
+// buildHTMLConfig translates body noise keys into HTMLCompareConfig attribute-strip patterns.
+// Noise keys such as "id", "data-session", "data-*" become regexp patterns used to strip
+// matching attribute names during HTML canonicalization.
+func buildHTMLConfig(bodyNoise map[string][]string) matcherUtils.HTMLCompareConfig {
+	cfg := matcherUtils.HTMLCompareConfig{
+		StripTags: map[string]bool{
+			"script": true,
+			"style":  true,
+		},
+	}
+	for key := range bodyNoise {
+		// Fix 4: QuoteMeta first so metacharacters in key names are treated as literals,
+		// then replace the escaped glob wildcards with their regex equivalents.
+		escaped := regexp.QuoteMeta(strings.ToLower(key))
+		// QuoteMeta turns * into \* and ? into \? — replace those escaped forms.
+		pattern := "^" + strings.NewReplacer(`\*`, `.*`, `\?`, `.`).Replace(escaped) + "$"
+		if re, err := regexp.Compile(pattern); err == nil {
+			cfg.StripAttrRegex = append(cfg.StripAttrRegex, re)
+		}
+	}
+	return cfg
 }
