@@ -52,7 +52,7 @@ type Service interface {
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context, testSets []string) error
 
-	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]models.MockEntry) error
 
 	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
 	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result)
@@ -117,6 +117,6 @@ type InstrumentState struct {
 }
 
 type MappingDB interface {
-	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	Insert(ctx context.Context, testSetID string, testMockMappings map[string][]models.MockEntry) error
 	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
 }

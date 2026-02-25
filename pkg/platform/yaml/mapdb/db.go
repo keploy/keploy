@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -24,9 +25,9 @@ func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
 }
 
 // Insert saves test-mock mappings to a YAML file
-func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error {
+func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockEntrys map[string][]models.MockEntry) error {
 	// Create mapping structure from the test-mock mappings
-	mapping := CreateMappingStructure(testSetID, testMockMappings, db.logger)
+	mapping := CreateMappingStructure(testSetID, testMockEntrys, db.logger)
 
 	// Encode mapping to YAML
 	yamlData, err := EncodeMapping(mapping, db.logger)
@@ -69,7 +70,7 @@ func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappi
 	db.logger.Info("Successfully saved test-mock mappings",
 		zap.String("testSetID", testSetID),
 		zap.String("filePath", filepath.Join(mappingPath, fileName+".yaml")),
-		zap.Int("numTests", len(testMockMappings)))
+		zap.Int("numTests", len(testMockEntrys)))
 
 	return nil
 }

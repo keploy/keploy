@@ -102,6 +102,7 @@ type Payload struct {
 
 type MockState struct {
 	Name       string    `json:"name"`
+	Kind       Kind      `json:"kind"`
 	Usage      MockUsage `json:"usage"`
 	IsFiltered bool      `json:"isFiltered"`
 	SortOrder  int64     `json:"sortOrder"`

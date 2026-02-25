@@ -961,7 +961,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var actualTestMockMappings = make(map[string][]string)
+	var actualTestMockMappings = make(map[string][]models.MockEntry)
 	var consumedMocks []models.MockState
 	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
@@ -1176,7 +1176,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if len(consumedMocks) > 0 {
 			for _, m := range consumedMocks {
-				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], models.MockEntry{
+					Name: m.Name,
+					Kind: string(m.Kind),
+				})
 			}
 		}
 
@@ -1388,8 +1391,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 
-			if len(expectedMocks) != len(actualMocks) || !compareMockArrays(expectedMocks, actualMocks) {
-				mockMismatchFailures.AddFailure(testSetID, tc, expectedMocks, actualMocks)
+			// Extract names for comparison (expectedMocks is []string from old format)
+			actualMockNames := make([]string, len(actualMocks))
+			for i, m := range actualMocks {
+				actualMockNames[i] = m.Name
+			}
+
+			if len(expectedMocks) != len(actualMockNames) || !compareMockArrays(expectedMocks, actualMockNames) {
+				mockMismatchFailures.AddFailure(testSetID, tc, expectedMocks, actualMockNames)
 			}
 		}
 	}
@@ -2003,7 +2012,7 @@ func (r *Replayer) UploadMocks(ctx context.Context, testSets []string) error {
 	return nil
 }
 
-func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]string) error {
+func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]models.MockEntry) error {
 	// Save test-mock mappings to YAML file
 	err := r.mappingDB.Insert(ctx, testSetID, mappings)
 	return err
