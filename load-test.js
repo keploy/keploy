@@ -8,9 +8,13 @@ export const options = {
       rate: 100,
       timeUnit: '1s',
       duration: '60s',
-      preAllocatedVUs: 10,
-      maxVUs: 50,
+      preAllocatedVUs: 20,
+      maxVUs: 100,
     },
+  },
+  thresholds: {
+    http_reqs: ['rate>=100'],
+    http_req_failed: ['rate<0.01'],
   },
 };
 
