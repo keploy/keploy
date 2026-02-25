@@ -81,13 +81,13 @@ jobs:
       - name: Start Keploy in record mode
         working-directory: keploy
         run: |
-          ./keploy record --app-port=8080 &
+          ./keploy record -c "" --proxy-port=16789 &
           echo $! > keploy.pid
           sleep 5
 
       - name: Run k6 load test
         run: |
-          k6 run --out json=results.json keploy/load-test.js
+          k6 run --out json=results.json load-test.js
 
       - name: Validate RPS threshold
         run: |
