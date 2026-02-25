@@ -1,5 +1,6 @@
 mod ipc;
 mod proxy;
+mod tls;
 
 use clap::Parser;
 use std::process::exit;
@@ -13,6 +14,11 @@ struct Args {
 
     #[arg(long)]
     uds_path: String,
+
+    /// Path to the CA certificate PEM file for TLS MITM.
+    /// If not provided, TLS interception is disabled and connections are forwarded as-is.
+    #[arg(long)]
+    ca_cert: Option<String>,
 }
 
 #[tokio::main]
@@ -21,8 +27,8 @@ async fn main() {
 
     let args = Args::parse();
     info!(
-        "Rust Proxy starting up... port: {}, uds_path: {}",
-        args.proxy_port, args.uds_path
+        "Rust Proxy starting up... port: {}, uds_path: {}, ca_cert: {:?}",
+        args.proxy_port, args.uds_path, args.ca_cert
     );
 
     // Initialize IPC Client
@@ -37,7 +43,7 @@ async fn main() {
     info!("Connected to Go IPC server.");
 
     // Start Proxy
-    if let Err(e) = proxy::start_proxy(args.proxy_port, ipc_client).await {
+    if let Err(e) = proxy::start_proxy(args.proxy_port, ipc_client, args.ca_cert.as_deref()).await {
         error!("Proxy exited with error: {}", e);
         exit(1);
     }

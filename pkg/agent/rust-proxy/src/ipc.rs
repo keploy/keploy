@@ -29,6 +29,19 @@ struct CloseReq {
     conn_id: String,
 }
 
+#[derive(Debug, Serialize)]
+struct GetCertReq {
+    server_name: String,
+    source_port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetCertRes {
+    pub success: bool,
+    pub cert_pem: String,
+    pub key_pem: String,
+}
+
 const MSG_TYPE_GET_DEST: u8 = 1;
 const MSG_TYPE_GET_DEST_RES: u8 = 2;
 const MSG_TYPE_DATA: u8 = 3;
@@ -36,6 +49,8 @@ const MSG_TYPE_CLOSE: u8 = 4;
 const MSG_TYPE_START_INGRESS: u8 = 5;
 const MSG_TYPE_INGRESS_DATA: u8 = 6;
 const MSG_TYPE_INGRESS_CLOSE: u8 = 7;
+const MSG_TYPE_GET_CERT: u8 = 8;
+const MSG_TYPE_GET_CERT_RES: u8 = 9;
 
 struct BackgroundMsg {
     msg_type: u8,
@@ -183,6 +198,44 @@ impl IpcClient {
         }
         
         let res: GetDestRes = serde_json::from_slice(&res_payload)?;
+        Ok(res)
+    }
+
+    /// Request a TLS certificate from Go for the given server name.
+    /// This is a request/response on the ctrl stream (same as get_dest).
+    pub async fn get_cert(&self, server_name: &str, source_port: u16) -> std::io::Result<GetCertRes> {
+        let req = GetCertReq {
+            server_name: server_name.to_string(),
+            source_port,
+        };
+        let payload = serde_json::to_vec(&req)?;
+
+        // Lock ctrl stream for request-response cycle
+        let mut stream = self.ctrl_stream.lock().await;
+
+        let length = (1 + payload.len()) as u32;
+        stream.write_u32_le(length).await?;
+        stream.write_u8(MSG_TYPE_GET_CERT).await?;
+        stream.write_all(&payload).await?;
+        stream.flush().await?;
+
+        // Wait for response
+        let res_len = stream.read_u32_le().await?;
+        let msg_type = stream.read_u8().await?;
+        if msg_type != MSG_TYPE_GET_CERT_RES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Expected GET_CERT_RES (9), got {}", msg_type),
+            ));
+        }
+
+        let payload_len = res_len as usize - 1;
+        let mut res_payload = vec![0u8; payload_len];
+        if payload_len > 0 {
+            stream.read_exact(&mut res_payload).await?;
+        }
+
+        let res: GetCertRes = serde_json::from_slice(&res_payload)?;
         Ok(res)
     }
 

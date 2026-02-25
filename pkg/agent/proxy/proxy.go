@@ -235,11 +235,18 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 			// Extract it from embedded filesystem if possible
 			rustProxyBinPath, _ := ExtractRustProxy(p.logger)
 
+			// Write CA cert to temp file so Rust can load it for TLS MITM
+			caCertPath := filepath.Join(os.TempDir(), "keploy-ca.crt")
+			if err := os.WriteFile(caCertPath, pTls.GetCACertPEM(), 0644); err != nil {
+				p.logger.Error("Failed to write CA cert for Rust proxy", zap.Error(err))
+			}
+
 			// The Rust proxy listens on p.Port + 1 and forwards to UDS handle.
 			rustProxyPort := p.Port + 1
 			cmd := exec.CommandContext(ctx, rustProxyBinPath,
 				fmt.Sprintf("--proxy-port=%d", rustProxyPort),
 				fmt.Sprintf("--uds-path=%s", ipcPath),
+				fmt.Sprintf("--ca-cert=%s", caCertPath),
 			)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr

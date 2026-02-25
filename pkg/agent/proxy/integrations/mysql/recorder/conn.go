@@ -166,6 +166,11 @@ func handleHandshake(ctx context.Context, logger *zap.Logger, clientConn, destCo
 			destConn = upgradedDest
 			result.ClientConn = clientConn
 			result.DestConn = destConn
+		} else {
+			// Not a TLS handshake — likely Rust proxy already decrypted.
+			// Use wrappedClient so peeked bytes aren't lost.
+			clientConn = wrappedClient
+			result.ClientConn = clientConn
 		}
 
 		// Reset state for the upgraded connection.

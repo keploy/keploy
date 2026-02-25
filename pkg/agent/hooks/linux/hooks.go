@@ -452,9 +452,16 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 		if err != nil {
 			return structs.ProxyInfo{}, err
 		}
+		// Use IPv4-mapped IPv6 address (::ffff:127.0.0.1) so that IPv6 connections
+		// (e.g. from Java JVM which prefers IPv6) get routed through the IPv4 stack
+		// to the proxy listening on 0.0.0.0.
+		proxyIPv6, err := ToIPv4MappedIPv6("127.0.0.1")
+		if err != nil {
+			return structs.ProxyInfo{}, err
+		}
 		proxyInfo := structs.ProxyInfo{
 			IP4:  proxyIP,
-			IP6:  [4]uint32{0, 0, 0, 0},
+			IP6:  proxyIPv6,
 			Port: port,
 		}
 

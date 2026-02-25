@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -29,6 +30,8 @@ const (
 	MsgTypeStartIngress = 5
 	MsgTypeIngressData  = 6
 	MsgTypeIngressClose = 7
+	MsgTypeGetCert      = 8
+	MsgTypeGetCertRes   = 9
 )
 
 // Stream type identifiers for the handshake protocol
@@ -261,6 +264,8 @@ func (s *IPCServer) processMessages(ctx context.Context, conn net.Conn, isCtrl b
 		switch msgType {
 		case MsgTypeGetDest:
 			s.handleGetDest(ctx, conn, payload)
+		case MsgTypeGetCert:
+			s.handleGetCert(ctx, conn, payload)
 		case MsgTypeData:
 			s.handleData(payload)
 		case MsgTypeClose:
@@ -390,6 +395,51 @@ func (s *IPCServer) sendGetDestRes(conn net.Conn, success bool, ip string, port 
 
 	binary.Write(conn, binary.LittleEndian, length)
 	binary.Write(conn, binary.LittleEndian, uint8(MsgTypeGetDestRes))
+	conn.Write(resBytes)
+}
+
+// handleGetCert handles certificate generation requests from the Rust proxy.
+// The Rust proxy sends this when it detects a TLS ClientHello and needs a
+// per-host certificate signed by the embedded CA for MITM.
+func (s *IPCServer) handleGetCert(ctx context.Context, conn net.Conn, payload []byte) {
+	var req struct {
+		ServerName string `json:"server_name"`
+		SourcePort uint16 `json:"source_port"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		s.logger.Error("Failed to unmarshal GET_CERT request", zap.Error(err))
+		s.sendGetCertRes(conn, false, nil, nil)
+		return
+	}
+
+	s.logger.Debug("GET_CERT request", zap.String("server_name", req.ServerName), zap.Uint16("source_port", req.SourcePort))
+
+	certPEM, keyPEM, err := pTls.CertForHost(s.logger, req.ServerName, time.Now())
+	if err != nil {
+		s.logger.Error("Failed to generate cert for host", zap.String("host", req.ServerName), zap.Error(err))
+		s.sendGetCertRes(conn, false, nil, nil)
+		return
+	}
+
+	s.sendGetCertRes(conn, true, certPEM, keyPEM)
+}
+
+func (s *IPCServer) sendGetCertRes(conn net.Conn, success bool, certPEM, keyPEM []byte) {
+	res := struct {
+		Success bool   `json:"success"`
+		CertPEM string `json:"cert_pem"`
+		KeyPEM  string `json:"key_pem"`
+	}{
+		Success: success,
+		CertPEM: string(certPEM),
+		KeyPEM:  string(keyPEM),
+	}
+
+	resBytes, _ := json.Marshal(res)
+	length := uint32(1 + len(resBytes))
+
+	binary.Write(conn, binary.LittleEndian, length)
+	binary.Write(conn, binary.LittleEndian, uint8(MsgTypeGetCertRes))
 	conn.Write(resBytes)
 }
 

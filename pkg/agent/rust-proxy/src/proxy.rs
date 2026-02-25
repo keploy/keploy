@@ -8,6 +8,7 @@ use tracing::{debug, error, info, warn};
 use socket2::Socket;
 
 use crate::ipc::IpcClient;
+use crate::tls::{self, CertCache};
 
 /// Apply low-latency TCP tuning to a TcpStream, matching Go proxy's tuneTCPConn:
 /// - TCP_NODELAY: disable Nagle's algorithm
@@ -30,10 +31,37 @@ fn tune_tcp_stream(stream: &TcpStream) {
 /// Shared state for tracking active ingress listeners 
 type IngressMap = Arc<Mutex<HashMap<u16, tokio::task::JoinHandle<()>>>>;
 
-pub async fn start_proxy(proxy_port: u16, ipc_client: IpcClient) -> std::io::Result<()> {
+pub async fn start_proxy(proxy_port: u16, ipc_client: IpcClient, ca_cert_path: Option<&str>) -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{}", proxy_port);
     let listener = TcpListener::bind(&addr).await?;
     info!("Rust Proxy listening on {}", addr);
+
+    // Install the ring crypto provider for rustls before any TLS usage.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls ring CryptoProvider");
+
+    // Load TLS infrastructure if CA cert is provided
+    let tls_ctx: Option<Arc<TlsContext>> = if let Some(path) = ca_cert_path {
+        match tls::load_ca_cert(path) {
+            Ok(ca_cert) => {
+                info!("Loaded CA certificate from {}", path);
+                let cert_cache = CertCache::new(ca_cert);
+                let client_config = tls::build_insecure_client_config();
+                Some(Arc::new(TlsContext {
+                    cert_cache,
+                    client_config,
+                }))
+            }
+            Err(e) => {
+                error!("Failed to load CA certificate from {}: {}. TLS MITM disabled.", path, e);
+                None
+            }
+        }
+    } else {
+        info!("No CA cert provided, TLS MITM disabled");
+        None
+    };
 
     let ingress_map: IngressMap = Arc::new(Mutex::new(HashMap::new()));
 
@@ -48,9 +76,10 @@ pub async fn start_proxy(proxy_port: u16, ipc_client: IpcClient) -> std::io::Res
     loop {
         let (socket, peer_addr) = listener.accept().await?;
         let ipc = ipc_client.clone();
+        let tls_ctx_clone = tls_ctx.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, peer_addr, ipc).await {
+            if let Err(e) = handle_connection(socket, peer_addr, ipc, tls_ctx_clone).await {
                 error!("Connection error: {}", e);
             }
         });
@@ -208,10 +237,17 @@ async fn handle_ingress_connection(
     Ok(())
 }
 
+/// Shared TLS MITM context
+struct TlsContext {
+    cert_cache: CertCache,
+    client_config: Arc<rustls::ClientConfig>,
+}
+
 async fn handle_connection(
-    mut client_socket: TcpStream,
+    client_socket: TcpStream,
     peer_addr: SocketAddr,
     ipc: IpcClient,
+    tls_ctx: Option<Arc<TlsContext>>,
 ) -> std::io::Result<()> {
     let source_port = peer_addr.port();
     let conn_id = format!("{}:{}", peer_addr.ip(), source_port);
@@ -239,7 +275,7 @@ async fn handle_connection(
     info!("Resolved dest for port {}: {}", source_port, target_addr);
 
     // 2. Dial Target
-    let mut server_socket = match TcpStream::connect(&target_addr).await {
+    let server_socket = match TcpStream::connect(&target_addr).await {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to connect to target {}: {}", target_addr, e);
@@ -251,64 +287,194 @@ async fn handle_connection(
     tune_tcp_stream(&server_socket);
     info!("Connected to target {}, starting bidirectional forwarding", target_addr);
 
-    // 3. Setup bidirectional forwarding with teeing
-    let (mut client_read, mut client_write) = client_socket.split();
-    let (mut server_read, mut server_write) = server_socket.split();
+    // 3. Bidirectional forwarding with inline TLS detection
+    //
+    // Strategy: We use `into_split()` (owned halves) so we can later `reunite()`
+    // if we need to upgrade to TLS. We forward data in a select! loop, peeking
+    // at each client→server chunk to detect a TLS ClientHello.
+    //
+    // Once TLS is detected:
+    //   a) Reunite both halves back into full TcpStreams
+    //   b) Perform TLS MITM (accept client TLS, connect server TLS)
+    //   c) Continue forwarding on the decrypted streams, teeing plaintext to Go
 
-    let conn_id_req = conn_id.clone();
-    let conn_id_res = conn_id.clone();
+    let (mut client_read, mut client_write) = client_socket.into_split();
+    let (mut server_read, mut server_write) = server_socket.into_split();
+
+    let mut client_buf = vec![0u8; 16384];
+    let mut server_buf = vec![0u8; 16384];
+    let mut tls_detected = false;
+    let mut pending_client_data: Option<Vec<u8>> = None;
+
+    // Phase 1: Forward with TLS detection
+    loop {
+        tokio::select! {
+            result = client_read.read(&mut client_buf) => {
+                let n = match result {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+
+                // Check for TLS ClientHello if we have a TLS context
+                if tls_ctx.is_some() && tls::is_tls_client_hello(&client_buf[..n]) {
+                    info!("TLS ClientHello detected on conn {}", conn_id);
+                    tls_detected = true;
+                    pending_client_data = Some(client_buf[..n].to_vec());
+                    break;
+                }
+
+                // Normal forwarding: write to server + tee to Go
+                if let Err(e) = server_write.write_all(&client_buf[..n]).await {
+                    error!("Failed to write to server: {}", e);
+                    break;
+                }
+                ipc.send_data(&conn_id, true, &client_buf[..n]);
+            }
+            result = server_read.read(&mut server_buf) => {
+                let n = match result {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+
+                // Forward to client + tee to Go
+                if let Err(e) = client_write.write_all(&server_buf[..n]).await {
+                    error!("Failed to write to client: {}", e);
+                    break;
+                }
+                ipc.send_data(&conn_id, false, &server_buf[..n]);
+            }
+        }
+    }
+
+    if tls_detected {
+        let tls_ctx = tls_ctx.unwrap(); // Safe: we checked is_some() above
+        let client_hello = pending_client_data.unwrap();
+
+        // Reunite the split halves back into full TcpStreams
+        let client_socket = client_read.reunite(client_write).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to reunite client socket: {}", e))
+        })?;
+        let server_socket = server_read.reunite(server_write).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to reunite server socket: {}", e))
+        })?;
+
+        // Perform TLS MITM
+        return handle_tls_connection(
+            client_socket,
+            server_socket,
+            &client_hello,
+            source_port,
+            &conn_id,
+            &tls_ctx,
+            &ipc,
+        )
+        .await;
+    }
+
+    // Normal close
+    debug!("Connection closed: {}", conn_id);
+    ipc.send_close(&conn_id);
+
+    Ok(())
+}
+
+/// Handle a connection that has been identified as TLS.
+/// Performs MITM: accept TLS from client, connect TLS to server, forward plaintext.
+async fn handle_tls_connection(
+    client_socket: TcpStream,
+    server_socket: TcpStream,
+    client_hello: &[u8],
+    source_port: u16,
+    conn_id: &str,
+    tls_ctx: &TlsContext,
+    ipc: &IpcClient,
+) -> std::io::Result<()> {
+    // 1. Accept TLS from client (act as TLS server)
+    let (mut tls_client, server_name) = match tls::accept_tls_client(
+        client_socket,
+        client_hello,
+        source_port,
+        &tls_ctx.cert_cache,
+        ipc,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            error!("TLS client handshake failed for {}: {}", conn_id, e);
+            ipc.send_close(conn_id);
+            return Ok(());
+        }
+    };
+
+    info!("TLS MITM client handshake complete for {} (SNI={})", conn_id, server_name);
+
+    // 2. Connect TLS to server (act as TLS client)
+    let mut tls_server = match tls::connect_tls_server(
+        server_socket,
+        &server_name,
+        tls_ctx.client_config.clone(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            error!("TLS server handshake failed for {}: {}", conn_id, e);
+            ipc.send_close(conn_id);
+            return Ok(());
+        }
+    };
+
+    info!("TLS MITM server handshake complete for {}", conn_id);
+
+    // 3. Bidirectional forwarding on decrypted streams, teeing plaintext to Go
+    let (mut tc_read, mut tc_write) = tokio::io::split(&mut tls_client);
+    let (mut ts_read, mut ts_write) = tokio::io::split(&mut tls_server);
+
+    let conn_id_req = conn_id.to_string();
+    let conn_id_res = conn_id.to_string();
     let ipc_req = ipc.clone();
     let ipc_res = ipc.clone();
 
-    // Client -> Server (Request)
     let client_to_server = async move {
-        let mut buf = vec![0; 8192];
+        let mut buf = vec![0u8; 16384];
         loop {
-            let n = match client_read.read(&mut buf).await {
-                Ok(n) if n > 0 => n,
-                _ => break,
+            let n = match tc_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
             };
-
-            // Write to Server
-            if let Err(e) = server_write.write_all(&buf[..n]).await {
-                error!("Failed to write to server: {}", e);
+            if let Err(e) = ts_write.write_all(&buf[..n]).await {
+                error!("TLS: Failed to write to server: {}", e);
                 break;
             }
-
-            // Tee to Go IPC
+            // Tee PLAINTEXT to Go
             ipc_req.send_data(&conn_id_req, true, &buf[..n]);
         }
     };
 
-    // Server -> Client (Response)
     let server_to_client = async move {
-        let mut buf = vec![0; 8192];
+        let mut buf = vec![0u8; 16384];
         loop {
-            let n = match server_read.read(&mut buf).await {
-                Ok(n) if n > 0 => n,
-                _ => break,
+            let n = match ts_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
             };
-
-            // Write to Client
-            if let Err(e) = client_write.write_all(&buf[..n]).await {
-                error!("Failed to write to client: {}", e);
+            if let Err(e) = tc_write.write_all(&buf[..n]).await {
+                error!("TLS: Failed to write to client: {}", e);
                 break;
             }
-
-            // Tee to Go IPC
+            // Tee PLAINTEXT to Go
             ipc_res.send_data(&conn_id_res, false, &buf[..n]);
         }
     };
 
-    // Run both forwarding loops concurrently
     tokio::select! {
-        _ = client_to_server => debug!("Client -> Server finished"),
-        _ = server_to_client => debug!("Server -> Client finished"),
+        _ = client_to_server => debug!("TLS Client -> Server finished for {}", conn_id),
+        _ = server_to_client => debug!("TLS Server -> Client finished for {}", conn_id),
     }
 
-    // 4. Notify Go that connection is closed
-    debug!("Connection closed: {}", conn_id);
-    ipc.send_close(&conn_id);
+    debug!("TLS connection closed: {}", conn_id);
+    ipc.send_close(conn_id);
 
     Ok(())
 }
