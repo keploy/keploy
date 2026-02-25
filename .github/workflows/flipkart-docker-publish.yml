@@ -1,0 +1,98 @@
+name: Docker (Flipkart)
+
+# This workflow builds and pushes Docker images for the flipkart branch
+# Images are tagged with fk-<commit-hash>
+
+on:
+  push:
+    branches: [ flipkart ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23"
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          integration-ref: flipkart
+
+      # Install the cosign tool
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.4.0
+
+      # Setup Docker buildx
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@79abd3f86f79a9d68a23c75a09a9a85889262adf
+
+      # Login to GHCR
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set version and image tag
+        shell: bash
+        run: |
+          COMMIT_HASH=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "VERSION=fk-${COMMIT_HASH}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=fk-${COMMIT_HASH}" >> $GITHUB_ENV
+
+      - name: Prepare Dockerfile for Release Build
+        run: |
+          # Add the SSH host key to trust github.com and configure git to use SSH
+          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' ./Dockerfile
+          
+          # Ensure the go mod download command uses the SSH agent mount
+          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile
+
+      # Build and push Docker image with fk-<commit-hash> tag
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+        with:
+          context: .
+          ssh: default
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref.name=flipkart
+          build-args: |
+            SENTRY_DSN_DOCKER=${{secrets.SENTRY_DSN_DOCKER}}
+            VERSION=${{ env.VERSION }}
+            SERVER_URL=https://api.keploy.io
+            GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+
+      # Sign the Docker image
+      - name: Sign the published Docker image
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-and-push.outputs.digest }}
+
+      - name: Output image info
+        run: |
+          echo "🐳 Docker image pushed successfully!"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo "Digest: ${{ steps.build-and-push.outputs.digest }}"

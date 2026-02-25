@@ -1,9 +1,9 @@
 name: Prepare Binary and Run Workflows (macOS)
 on:
   pull_request:
-    branches: [main]
+    branches: [main, flipkart]
   push:
-    branches: [main]
+    branches: [main, flipkart]
   # push:
   #   branches: [ main ]
 
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   build-and-upload:
     runs-on: [self-hosted, macOS, native]
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart')) }}
     steps:
       - name: Clean up git config
         if: always()
@@ -68,7 +68,7 @@ jobs:
 
   # Build docker image on Ubuntu and push to registry
   build-docker-image:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart')) }}
     runs-on: ubuntu-24.04-arm
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
@@ -105,7 +105,7 @@ jobs:
           git config --global --unset url."git@github.com:".insteadOf
 
   pull-docker-image:
-    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart')) }}
     runs-on: [self-hosted, macOS, native]
     needs: [build-docker-image]
     
@@ -138,7 +138,7 @@ jobs:
       MAC_RUNNER_USER_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
   
   clean_up_docker_macos:
-    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/flipkart'))) }}
     runs-on: [self-hosted, macOS, native]
     needs: [run_python_docker_macos, run_golang_docker_macos]
     steps:
