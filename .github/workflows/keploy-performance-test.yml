@@ -108,26 +108,27 @@ jobs:
             });
           }
           EOF
-          # Start Keploy wrapping k6 to intercept its traffic
-          sudo -E env PATH=$PATH ./keploy record -c "k6 run --summary-export=summary.json load-test.js" --path=./keploy-tests --config-path=/tmp/keploy-no-config || true
+          # Start Keploy wrapping k6 to intercept its traffic, capture output
+          sudo -E env PATH=$PATH ./keploy record -c "k6 run load-test.js" --path=./keploy-tests --config-path=/tmp/keploy-no-config 2>&1 | tee k6-output.log || true
 
       - name: Validate RPS threshold
         working-directory: keploy
         run: |
-          # Extract actual RPS from k6 summary
-          if [ -f summary.json ]; then
-            ACTUAL_RPS=$(jq -r '.metrics.http_reqs.values.rate // 0' summary.json)
-            echo "Actual RPS: $ACTUAL_RPS"
-            
-            # Validate RPS >= 100
-            if (( $(echo "$ACTUAL_RPS >= 100" | bc -l) )); then
-              echo "✅ PASS: Achieved $ACTUAL_RPS RPS (target: 100)"
-              exit 0
-            else
-              echo "❌ FAIL: Only achieved $ACTUAL_RPS RPS (target: 100)"
-              exit 1
-            fi
+          # Extract actual RPS from k6 console output
+          ACTUAL_RPS=$(grep -oP 'http_reqs.*?:\s+\d+\s+\K[\d.]+(?=/s)' k6-output.log | tail -1)
+          
+          if [ -z "$ACTUAL_RPS" ]; then
+            echo "❌ FAIL: Could not extract RPS from k6 output"
+            exit 1
+          fi
+          
+          echo "Actual RPS: $ACTUAL_RPS"
+          
+          # Validate RPS >= 100
+          if (( $(echo "$ACTUAL_RPS >= 100" | bc -l) )); then
+            echo "✅ PASS: Achieved $ACTUAL_RPS RPS (target: 100)"
+            exit 0
           else
-            echo "❌ FAIL: summary.json not found"
+            echo "❌ FAIL: Only achieved $ACTUAL_RPS RPS (target: 100)"
             exit 1
           fi
