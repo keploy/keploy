@@ -1,4 +1,3 @@
-
 <#
   PowerShell test runner for Keploy (Windows) - go-dedup sample
 

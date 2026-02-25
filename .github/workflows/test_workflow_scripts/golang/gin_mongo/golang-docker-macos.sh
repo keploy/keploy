@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # macOS variant for gin-mongo (docker). Uses BSD sed.
-
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
 # Start mongo before starting keploy.
