@@ -2,6 +2,8 @@ name: Keploy Performance Test
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [ main ]
 
 jobs:
   performance-test:
@@ -73,7 +75,7 @@ jobs:
         working-directory: keploy
         run: |
           git checkout yaml-optimization
-          go build -o keploy cmd/server/main.go
+          go build -o keploy main.go
 
       - name: Start Keploy in record mode
         working-directory: keploy
