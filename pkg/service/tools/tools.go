@@ -67,11 +67,11 @@ func (t *Tools) Update(ctx context.Context) error {
 	currentVersion := "v" + utils.Version
 	isKeployInDocker := len(os.Getenv("KEPLOY_INDOCKER")) > 0
 	if isKeployInDocker {
-		fmt.Println("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
+		t.logger.Info("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
 		return nil
 	}
 	if strings.HasSuffix(currentVersion, "-dev") {
-		fmt.Println("you are using a development version of Keploy. Skipping update")
+		t.logger.Info("You are using a development version of Keploy. Skipping update.")
 		return nil
 	}
 
@@ -87,7 +87,7 @@ func (t *Tools) Update(ctx context.Context) error {
 	changelog := releaseInfo.Body
 
 	if currentVersion == latestVersion {
-		fmt.Println("✅You are already on the latest version of Keploy: " + latestVersion)
+		t.logger.Info("✅ You are already on the latest version of Keploy", zap.String("version", latestVersion))
 		return nil
 	}
 
@@ -129,7 +129,7 @@ func (t *Tools) Update(ctx context.Context) error {
 		utils.LogError(t.logger, err, "failed to render release notes")
 		return err
 	}
-	fmt.Println(changelog)
+	t.logger.Info("Release Notes:\n" + changelog)
 	return nil
 }
 

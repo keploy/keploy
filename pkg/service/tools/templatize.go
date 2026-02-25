@@ -141,7 +141,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	t.logAPIChains(chains, tcs)
 
 	if fuzzerYamlPath := os.Getenv("ASSERT_CHAINS_WITH"); fuzzerYamlPath != "" {
-		fmt.Println("Asserting chains with fuzzer YAML:", fuzzerYamlPath)
+		t.logger.Info("Asserting chains with fuzzer YAML", zap.String("fuzzerYamlPath", fuzzerYamlPath))
 		t.AssertChains(chains, tcs, fuzzerYamlPath)
 	}
 	return nil
@@ -151,27 +151,30 @@ func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCa
 	if len(chains) == 0 {
 		return
 	}
-	fmt.Println("\n✨ API Chain Analysis ✨")
-	fmt.Println("========================")
+	
+	var sb strings.Builder
+	sb.WriteString("\n✨ API Chain Analysis ✨\n")
+	sb.WriteString("========================\n")
 	for i, chain := range chains {
 		if i > 0 {
-			fmt.Println("--------------------")
+			sb.WriteString("--------------------\n")
 		}
 		truncatedValue := chain.Value
 		if len(truncatedValue) > 50 {
 			truncatedValue = truncatedValue[:47] + "..."
 		}
-		fmt.Printf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue)
-		fmt.Printf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases))
+		sb.WriteString(fmt.Sprintf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue))
+		sb.WriteString(fmt.Sprintf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases)))
 		for j, consumer := range chain.Consumers {
 			branch := "├─>"
 			if j == len(chain.Consumers)-1 {
 				branch = "    └─>"
 			}
-			fmt.Printf("    %s [CONSUMER] %s\n", branch, formatLocation(consumer, testCases))
+			sb.WriteString(fmt.Sprintf("    %s [CONSUMER] %s\n", branch, formatLocation(consumer, testCases)))
 		}
 	}
-	fmt.Println("========================")
+	sb.WriteString("========================")
+	t.logger.Info(sb.String())
 }
 
 func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
@@ -529,48 +532,48 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 var jsonMarshal987 = json.Marshal
 
 func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.TestCase, fuzzerYamlPath string) {
-	fmt.Println("\n🔎 Chain Assertion against Fuzzer Output")
-	fmt.Println("==========================================")
+	t.logger.Info("\n🔎 Chain Assertion against Fuzzer Output")
+	t.logger.Info("==========================================")
 
 	// 1. Load fuzzer's baseline chains from the YAML file.
 	yamlFile, err := os.ReadFile(fuzzerYamlPath)
 	if err != nil {
-		fmt.Printf("🔴 ERROR: Could not read fuzzer's chain file at %s: %v\n", fuzzerYamlPath, err)
+		t.logger.Error("Could not read fuzzer's chain file", zap.String("path", fuzzerYamlPath), zap.Error(err))
 		return
 	}
 
 	// Use a generic map to bypass struct tag parsing issues.
 	var genericFuzzerData map[string]interface{}
 	if err := yaml.Unmarshal(yamlFile, &genericFuzzerData); err != nil {
-		fmt.Printf("🔴 ERROR: Could not parse fuzzer's YAML file into a generic map: %v\n", err)
+		t.logger.Error("Could not parse fuzzer's YAML file into a generic map", zap.Error(err))
 		return
 	}
 
 	// Manually build the canonical chains from the generic map. This is the FIX.
 	fuzzerChains, err := buildCanonicalChainsFromMap(genericFuzzerData)
 	if err != nil {
-		fmt.Printf("🔴 ERROR: Could not process the parsed fuzzer data: %v\n", err)
+		t.logger.Error("Could not process the parsed fuzzer data", zap.Error(err))
 		return
 	}
-	fmt.Printf("✅ Loaded %d chains from fuzzer baseline file.\n", len(fuzzerChains))
+	t.logger.Info(fmt.Sprintf("✅ Loaded %d chains from fuzzer baseline file.", len(fuzzerChains)))
 
 	// 2. Convert and Normalize Keploy's detected chains.
 	canonicalKeployChains := t.convertToCanonical(keployChains, testCases)
 	normalizeCanonicalChains(canonicalKeployChains)
-	fmt.Printf("✅ Converted and Normalized %d detected Keploy chains for comparison.\n", len(canonicalKeployChains))
+	t.logger.Info(fmt.Sprintf("✅ Converted and Normalized %d detected Keploy chains for comparison.", len(canonicalKeployChains)))
 
 	// 3. Perform the comparison.
 	passed, report := t.compareChainSets(fuzzerChains, canonicalKeployChains)
 
 	// 4. Print the result.
-	fmt.Println("\n--- Comparison Report ---")
-	fmt.Print(report)
+	t.logger.Info("\n--- Comparison Report ---")
+	t.logger.Info(report)
 	if passed {
-		fmt.Println("\n✅ PASSED: Keploy's detected chains match the fuzzer's baseline.")
+		t.logger.Info("\n✅ PASSED: Keploy's detected chains match the fuzzer's baseline.")
 	} else {
-		fmt.Println("\n❌ FAILED: Keploy's detected chains DO NOT match the fuzzer's baseline.")
+		t.logger.Info("\n❌ FAILED: Keploy's detected chains DO NOT match the fuzzer's baseline.")
 	}
-	fmt.Println("==========================================")
+	t.logger.Info("==========================================")
 }
 
 // buildCanonicalChainsFromMap manually constructs the chain structs from a generic map,
