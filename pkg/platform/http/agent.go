@@ -786,7 +786,6 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	a.agentCancel = cancel
 	if a.conf.Record.Synchronous {
 		opts.Synchronous = true
-		a.conf.Agent.Synchronous = true
 	}
 	opts.ExtraArgs = agent.StartupAgentHook.GetArgs(ctx)
 	if isDockerCmd {
