@@ -49,28 +49,6 @@ jobs:
         working-directory: petclinic
         run: ./mvnw clean package -DskipTests
 
-      - name: Start Spring PetClinic
-        working-directory: petclinic
-        run: |
-          java -jar target/spring-petclinic-*.jar \
-            --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic \
-            --spring.datasource.username=root \
-            --spring.datasource.password=petclinic &
-          echo $! > app.pid
-
-      - name: Wait for application to be ready
-        run: |
-          for i in {1..30}; do
-            if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
-              echo "✅ Application is ready"
-              exit 0
-            fi
-            echo "Waiting for application... ($i/30)"
-            sleep 2
-          done
-          echo "❌ Application failed to start"
-          exit 1
-
       - name: Build Keploy
         working-directory: keploy
         run: |
@@ -78,12 +56,31 @@ jobs:
           git checkout yaml-optimization
           go build -o keploy main.go
 
-      - name: Start Keploy in record mode
+      - name: Start PetClinic with Keploy recording
         working-directory: keploy
         run: |
           # Create test directory
           mkdir -p keploy-tests
-          # Create load test script inline
+          # Get the PetClinic JAR path
+          PETCLINIC_JAR=$(ls ../petclinic/target/spring-petclinic-*.jar | head -1)
+          # Start Keploy wrapping PetClinic application
+          sudo -E env PATH=$PATH ./keploy record -c "java -jar $PETCLINIC_JAR --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic --spring.datasource.username=root --spring.datasource.password=petclinic" --path=./keploy-tests --config-path=/tmp/keploy-no-config &
+          echo $! > keploy.pid
+          
+          # Wait for PetClinic to be ready
+          for i in {1..30}; do
+            if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
+              echo "✅ PetClinic with Keploy is ready"
+              break
+            fi
+            echo "Waiting for PetClinic with Keploy... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run k6 load test
+        working-directory: keploy
+        run: |
+          # Create load test script
           cat > load-test.js << 'EOF'
           import http from 'k6/http';
           import { check } from 'k6';
@@ -108,8 +105,17 @@ jobs:
             });
           }
           EOF
-          # Start Keploy wrapping k6 to intercept its traffic, capture output
-          sudo -E env PATH=$PATH ./keploy record -c "k6 run load-test.js" --path=./keploy-tests --config-path=/tmp/keploy-no-config 2>&1 | tee k6-output.log || true
+          # Run k6 and capture output
+          k6 run load-test.js 2>&1 | tee k6-output.log
+
+      - name: Stop Keploy
+        if: always()
+        working-directory: keploy
+        run: |
+          if [ -f keploy.pid ]; then
+            sudo kill $(cat keploy.pid) || true
+            sleep 2
+          fi
 
       - name: Validate RPS threshold
         working-directory: keploy
