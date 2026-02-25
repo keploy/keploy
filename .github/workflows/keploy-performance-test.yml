@@ -83,7 +83,7 @@ jobs:
           # Create load test script
           cat > load-test.js << 'EOF'
           import http from 'k6/http';
-          import { check } from 'k6';
+          import { check, sleep } from 'k6';
 
           export const options = {
             scenarios: {
@@ -96,12 +96,32 @@ jobs:
                 maxVUs: 100,
               },
             },
+            // Track specific percentiles
+            summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(80)', 'p(95)', 'p(99)', 'p(99.9)'],
+            // Set thresholds for percentiles
+            thresholds: {
+              'http_req_duration': ['p(80)<100', 'p(99)<500'],
+              'http_req_failed': ['rate<0.01'],
+            },
           };
 
+          // Array of PetClinic endpoints to hit
+          const endpoints = [
+            '/',
+            '/actuator/health',
+            '/owners',
+            '/vets',
+            '/api/owners',
+            '/api/vets',
+          ];
+
           export default function () {
-            const res = http.get('http://localhost:8080/');
+            // Randomly select an endpoint to create diverse test cases
+            const endpoint = endpoints[Math.floor(Math.random() * endpoints.length)];
+            const res = http.get(`http://localhost:8080${endpoint}`);
+            
             check(res, {
-              'status is 200': (r) => r.status === 200,
+              'status is 2xx or 3xx': (r) => r.status >= 200 && r.status < 400,
             });
           }
           EOF
@@ -130,11 +150,27 @@ jobs:
           
           echo "Actual RPS: $ACTUAL_RPS"
           
+          # Extract and display percentile metrics
+          echo ""
+          echo "📊 Performance Metrics:"
+          grep -E "http_req_duration|http_req_waiting" k6-output.log | head -2
+          
           # Validate RPS >= 100
           if (( $(echo "$ACTUAL_RPS >= 100" | bc -l) )); then
+            echo ""
             echo "✅ PASS: Achieved $ACTUAL_RPS RPS (target: 100)"
             exit 0
           else
+            echo ""
             echo "❌ FAIL: Only achieved $ACTUAL_RPS RPS (target: 100)"
             exit 1
           fi
+
+      - name: Display Keploy test cases
+        if: always()
+        working-directory: keploy
+        run: |
+          echo "📝 Keploy recorded test cases:"
+          find keploy-tests -name "*.yaml" -type f | wc -l
+          echo "test cases found"
+          ls -la keploy-tests/keploy/test-set-0/tests/ || echo "No tests directory found"
