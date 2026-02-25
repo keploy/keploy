@@ -862,6 +862,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	if opts.EnableRustProxy {
+		args = append(args, "--rust-proxy")
+	}
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}

@@ -1,0 +1,380 @@
+package proxy
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/models"
+)
+
+// Message Types
+const (
+	MsgTypeGetDest    = 1
+	MsgTypeGetDestRes = 2
+	MsgTypeData       = 3
+	MsgTypeClose      = 4
+)
+
+// SimulatedConn represents a mock network connection fed by the Rust proxy via IPC
+type SimulatedConn struct {
+	readCh     chan []byte
+	currentBuf []byte
+	closed     bool
+	mu         sync.Mutex
+	localAddr  net.Addr
+	remoteAddr net.Addr
+}
+
+func NewSimulatedConn(local, remote net.Addr) *SimulatedConn {
+	return &SimulatedConn{
+		readCh:     make(chan []byte, 1000), // generous buffer
+		localAddr:  local,
+		remoteAddr: remote,
+	}
+}
+
+func (c *SimulatedConn) Push(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	buf := make([]byte, len(b))
+	copy(buf, b)
+	c.readCh <- buf
+}
+
+func (c *SimulatedConn) Read(b []byte) (n int, err error) {
+	c.mu.Lock()
+	if len(c.currentBuf) > 0 {
+		n = copy(b, c.currentBuf)
+		c.currentBuf = c.currentBuf[n:]
+		c.mu.Unlock()
+		return n, nil
+	}
+	c.mu.Unlock()
+
+	buf, ok := <-c.readCh
+	if !ok {
+		return 0, io.EOF
+	}
+
+	n = copy(b, buf)
+	c.mu.Lock()
+	if n < len(buf) {
+		c.currentBuf = buf[n:]
+	}
+	c.mu.Unlock()
+	return n, nil
+}
+
+func (c *SimulatedConn) Write(b []byte) (n int, err error) {
+	// discard writes because the real server connection handles it
+	return len(b), nil
+}
+
+func (c *SimulatedConn) Close() error {
+	c.mu.Lock()
+	if !c.closed {
+		c.closed = true
+		close(c.readCh)
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *SimulatedConn) LocalAddr() net.Addr {
+	return c.localAddr
+}
+
+func (c *SimulatedConn) RemoteAddr() net.Addr {
+	return c.remoteAddr
+}
+
+func (c *SimulatedConn) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *SimulatedConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *SimulatedConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+type ConnectionPair struct {
+	ClientConn *SimulatedConn
+	ServerConn *SimulatedConn
+}
+
+// IPCServer handles Unix Domain Socket communication with the Rust forwarder
+type IPCServer struct {
+	logger      *zap.Logger
+	proxy       *Proxy
+	socket      string
+	connections sync.Map // map[string]*ConnectionPair
+}
+
+// NewIPCServer creates a new IPCServer instance
+func NewIPCServer(logger *zap.Logger, proxy *Proxy) *IPCServer {
+	socketPath := filepath.Join(os.TempDir(), "keploy-rust-proxy.sock")
+	return &IPCServer{
+		logger: logger.With(zap.String("component", "ipc-server")),
+		proxy:  proxy,
+		socket: socketPath,
+	}
+}
+
+// Start listens for incoming IPC connections from the Rust proxy
+func (s *IPCServer) Start(ctx context.Context) error {
+	s.logger.Info("Starting IPC Server for Rust Proxy", zap.String("socket", s.socket))
+
+	// Clean up existing socket if it exists
+	if err := os.RemoveAll(s.socket); err != nil {
+		s.logger.Error("Failed to remove existing socket", zap.Error(err))
+	}
+
+	listener, err := net.Listen("unix", s.socket)
+	if err != nil {
+		s.logger.Error("Failed to listen on UDS", zap.Error(err))
+		return err
+	}
+
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+		os.RemoveAll(s.socket)
+	}()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			s.logger.Error("Failed to accept IPC connection", zap.Error(err))
+			continue
+		}
+
+		go s.handleConnection(ctx, conn)
+	}
+}
+
+// handleConnection processes incoming messages from a single Rust proxy connection
+func (s *IPCServer) handleConnection(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+
+	for {
+		// Read length prefix (4 bytes)
+		var length uint32
+		if err := binary.Read(conn, binary.LittleEndian, &length); err != nil {
+			if err != io.EOF {
+				s.logger.Error("Failed to read message length", zap.Error(err))
+			}
+			return
+		}
+
+		// Read message type (1 byte)
+		var msgType uint8
+		if err := binary.Read(conn, binary.LittleEndian, &msgType); err != nil {
+			s.logger.Error("Failed to read message type", zap.Error(err))
+			return
+		}
+
+		// Read payload
+		payload := make([]byte, length-1) // Length includes the msgType byte
+		if _, err := io.ReadFull(conn, payload); err != nil {
+			if err != io.EOF {
+				s.logger.Error("Failed to read message payload", zap.Error(err))
+			}
+			return
+		}
+
+		switch msgType {
+		case MsgTypeGetDest:
+			s.handleGetDest(ctx, conn, payload)
+		case MsgTypeData:
+			s.handleData(payload)
+		case MsgTypeClose:
+			s.handleClose(payload)
+		default:
+			s.logger.Warn("Unknown message type received", zap.Uint8("type", msgType))
+		}
+	}
+}
+
+// handleGetDest handles requests to resolve original destination using eBPF maps
+func (s *IPCServer) handleGetDest(ctx context.Context, conn net.Conn, payload []byte) {
+	var req struct {
+		SourcePort uint16 `json:"source_port"`
+		ConnID     string `json:"conn_id"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		s.logger.Error("Failed to unmarshal GET_DEST request", zap.Error(err))
+		return
+	}
+
+	destInfo, err := s.proxy.DestInfo.Get(ctx, req.SourcePort)
+	if err != nil {
+		s.logger.Warn("Untracked connection", zap.Uint16("source_port", req.SourcePort), zap.Error(err))
+		s.sendGetDestRes(conn, false, "", 0)
+		return
+	}
+
+	_ = s.proxy.DestInfo.Delete(ctx, req.SourcePort)
+
+	// Format destination address
+	var destIP string
+	if destInfo.Version == 4 {
+		destIP = fmt.Sprintf("%d.%d.%d.%d", byte(destInfo.IPv4Addr>>24), byte(destInfo.IPv4Addr>>16), byte(destInfo.IPv4Addr>>8), byte(destInfo.IPv4Addr))
+	} else {
+		destIP = "::1" // IPv6 simplified for now
+	}
+
+	s.sendGetDestRes(conn, true, destIP, uint16(destInfo.Port))
+
+	// Setup connection pair
+	clientAddr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: int(req.SourcePort)}
+	serverAddr := &net.TCPAddr{IP: net.ParseIP(destIP), Port: int(destInfo.Port)}
+
+	pair := &ConnectionPair{
+		ClientConn: NewSimulatedConn(clientAddr, serverAddr),
+		ServerConn: NewSimulatedConn(serverAddr, clientAddr),
+	}
+	s.connections.Store(req.ConnID, pair)
+
+	// Identify protocol and route to parser
+	// Checking for specific ports or applying protocol matching logic from Keploy
+	// (simplified integration for mysql, postgres, etc.)
+	go s.routeToParser(ctx, req.ConnID, pair, destInfo.Port)
+}
+
+func (s *IPCServer) routeToParser(ctx context.Context, connID string, pair *ConnectionPair, destPort uint32) {
+	rule, ok := s.proxy.sessions.Get(0)
+	if !ok {
+		s.logger.Error("Failed to fetch session rule")
+		return
+	}
+
+	mgr := syncMock.Get()
+	mgr.SetOutputChannel(rule.MC)
+
+	var matchedIntegration integrations.IntegrationType
+	switch destPort {
+	case 3306:
+		matchedIntegration = integrations.MYSQL
+	case 5432:
+		matchedIntegration = integrations.POSTGRES_V2
+	case 27017:
+		matchedIntegration = integrations.MONGO_V2
+	default:
+		// Try generic/http
+		matchedIntegration = integrations.GENERIC
+	}
+
+	if integration, exists := s.proxy.Integrations[matchedIntegration]; exists {
+		parserCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		// RecordOutgoing requires an errgroup in the context to spawn its
+		// internal goroutines (handshake, TeeForwardConn pipeline, etc.).
+		g, parserCtx := errgroup.WithContext(parserCtx)
+		parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, g)
+		parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, connID)
+		parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, connID)
+
+		s.logger.Debug("Routing connection to parser", zap.String("integration", string(matchedIntegration)), zap.Uint32("port", destPort))
+		err := integration.RecordOutgoing(parserCtx, pair.ClientConn, pair.ServerConn, rule.MC, rule.OutgoingOptions)
+		if err != nil && err != io.EOF {
+			s.logger.Error("Error during RecordOutgoing", zap.Error(err), zap.String("integration", string(matchedIntegration)))
+		}
+
+		// Wait for parser goroutines to complete cleanly.
+		if err := g.Wait(); err != nil {
+			s.logger.Debug("Parser errgroup finished", zap.Error(err))
+		}
+	} else {
+		s.logger.Warn("No parser found for destination port", zap.Uint32("port", destPort))
+	}
+}
+
+func (s *IPCServer) sendGetDestRes(conn net.Conn, success bool, ip string, port uint16) {
+	res := struct {
+		Success bool   `json:"success"`
+		IP      string `json:"ip"`
+		Port    uint16 `json:"port"`
+	}{
+		Success: success,
+		IP:      ip,
+		Port:    port,
+	}
+
+	resBytes, _ := json.Marshal(res)
+	length := uint32(1 + len(resBytes))
+
+	binary.Write(conn, binary.LittleEndian, length)
+	binary.Write(conn, binary.LittleEndian, uint8(MsgTypeGetDestRes))
+	conn.Write(resBytes)
+}
+
+// handleData processes raw network data forwarded by the Rust proxy
+func (s *IPCServer) handleData(payload []byte) {
+	// Custom binary format:
+	// [conn_id_len u8] [conn_id bytes] [direction u8: 0=req, 1=res] [data bytes]
+	if len(payload) < 2 {
+		s.logger.Error("DATA payload too short")
+		return
+	}
+	connIDLen := int(payload[0])
+	if len(payload) < 1+connIDLen+1 {
+		s.logger.Error("DATA payload invalid length")
+		return
+	}
+	connID := string(payload[1 : 1+connIDLen])
+	direction := payload[1+connIDLen] // 0 or 1
+	data := payload[1+connIDLen+1:]
+
+	v, ok := s.connections.Load(connID)
+	if !ok {
+		// Log softly, it might be an unhandled bypassed connection or close race condition
+		return
+	}
+	pair := v.(*ConnectionPair)
+
+	if direction == 0 { // request
+		pair.ClientConn.Push(data)
+	} else { // response
+		pair.ServerConn.Push(data)
+	}
+}
+
+func (s *IPCServer) handleClose(payload []byte) {
+	var req struct {
+		ConnID string `json:"conn_id"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		s.logger.Error("Failed to unmarshal CLOSE message", zap.Error(err))
+		return
+	}
+
+	s.logger.Debug("Connection closed by Rust Proxy", zap.String("conn_id", req.ConnID))
+
+	if v, ok := s.connections.Load(req.ConnID); ok {
+		pair := v.(*ConnectionPair)
+		pair.ClientConn.Close()
+		pair.ServerConn.Close()
+		s.connections.Delete(req.ConnID)
+	}
+}

@@ -13,14 +13,18 @@ type Hooks interface {
 	DestInfo
 	Load(ctx context.Context, cfg HookCfg, setupOpts config.Agent) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
+	// RegisterProxyPID stores the given PID in the eBPF agent-kernel-pid map (key=1)
+	// so that the Rust proxy process is excluded from traffic interception.
+	RegisterProxyPID(pid uint32) error
 }
 
 type HookCfg struct {
-	Pid      uint32
-	IsDocker bool
-	Mode     models.Mode
-	Rules    []models.BypassRule
-	Port     uint32
+	Pid             uint32
+	IsDocker        bool
+	Mode            models.Mode
+	Rules           []models.BypassRule
+	Port            uint32
+	EnableRustProxy bool
 }
 
 // Proxy listens on all available interfaces and forwards traffic to the destination

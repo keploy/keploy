@@ -29,7 +29,7 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	}
 
 	h := hooks.New(logger, cfg)
-	p := proxy.New(logger, h, cfg)
+	p := proxy.New(logger, h, cfg, h.RegisterProxyPID)
 	ip := incoming.New(logger, h, cfg)
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)

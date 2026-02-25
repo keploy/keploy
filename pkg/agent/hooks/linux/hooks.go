@@ -58,6 +58,7 @@ type Hooks struct {
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
+	agentKernelPidMap     *ebpf.Map
 	redirectProxyMap      *ebpf.Map
 
 	// eBPF C shared objectsobjects
@@ -154,8 +155,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1770972393001
-	h.agentRegistartionMap = objs.M_1770972393002
+	h.clientRegistrationMap = objs.KeployClientRegistrationMap
+	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	h.agentKernelPidMap = objs.KeployAgentKernelPidMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -304,7 +306,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
 	}
-	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts)
+	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts, opts)
 	if err != nil {
 		return err
 	}
@@ -435,7 +437,16 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 	return h.SendClientInfo(clientInfo)
 }
 
-func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent) (structs.ProxyInfo, error) {
+func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {
+	port := opts.ProxyPort
+	// TODO: currently we are just checking if it is enabled in the config. We might need to add it to the Agent setup options
+	// However, we can use the environment variable as a fallback if not passed directly.
+	if cfg.EnableRustProxy || (h.conf != nil && h.conf.Agent.EnableRustProxy) {
+		// If rust proxy is enabled, we need to intercept traffic and send it to the rust proxy port instead
+		// The rust proxy will listen on proxyPort + 1
+		port = opts.ProxyPort + 1
+	}
+
 	if !opts.IsDocker {
 		proxyIP, err := IPv4ToUint32("127.0.0.1")
 		if err != nil {
@@ -444,7 +455,7 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent) (structs.Pr
 		proxyInfo := structs.ProxyInfo{
 			IP4:  proxyIP,
 			IP6:  [4]uint32{0, 0, 0, 0},
-			Port: opts.ProxyPort,
+			Port: port,
 		}
 
 		return proxyInfo, nil

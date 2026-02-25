@@ -551,6 +551,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
 	}
+	if opts.EnableRustProxy {
+		command = append(command, "--rust-proxy")
+	}
 
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))

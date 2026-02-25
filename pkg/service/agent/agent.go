@@ -65,10 +65,11 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	}
 
 	err := a.Hook(ctx, models.HookOptions{
-		Mode:          a.config.Agent.Mode,
-		IsDocker:      a.config.Agent.IsDocker,
-		EnableTesting: a.config.Agent.EnableTesting,
-		Rules:         rules,
+		Mode:            a.config.Agent.Mode,
+		IsDocker:        a.config.Agent.IsDocker,
+		EnableTesting:   a.config.Agent.EnableTesting,
+		Rules:           rules,
+		EnableRustProxy: a.config.Agent.EnableRustProxy,
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -176,10 +177,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, agent.HookCfg{
-		Pid:      0,
-		IsDocker: opts.IsDocker,
-		Mode:     opts.Mode,
-		Rules:    opts.Rules,
+		Pid:             0,
+		IsDocker:        opts.IsDocker,
+		Mode:            opts.Mode,
+		Rules:           opts.Rules,
+		EnableRustProxy: opts.EnableRustProxy,
 	}, a.config.Agent)
 
 	if err != nil {

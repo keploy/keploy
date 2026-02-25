@@ -12,6 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -85,6 +88,13 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+
+	// EnableRustProxy dictates whether the rust proxy forwarder should be used
+	EnableRustProxy bool
+
+	// RegisterProxyPID is a callback to register the Rust proxy's PID with eBPF
+	// so that its outgoing connections are excluded from interception.
+	RegisterProxyPID func(pid uint32) error
 }
 
 // tuneTCPConn applies low-latency TCP tuning to a connection:
@@ -115,7 +125,7 @@ func isNetworkClosedErr(err error) bool {
 		strings.Contains(errStr, "forcibly closed by the remote host")
 }
 
-func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
+func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config, registerPID ...func(uint32) error) *Proxy {
 	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
@@ -134,6 +144,11 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
+		EnableRustProxy:   opts.Agent.EnableRustProxy,
+	}
+
+	if len(registerPID) > 0 && registerPID[0] != nil {
+		proxy.RegisterProxyPID = registerPID[0]
 	}
 
 	return proxy
@@ -193,7 +208,62 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// start the proxy server
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
-		err := p.start(ctx, readyChan)
+		var err error
+		if p.EnableRustProxy {
+			p.logger.Info("Using Rust proxy for production capturing")
+			// 1. Start the IPC Server
+			ipcPath := filepath.Join(os.TempDir(), "keploy-rust-proxy.sock")
+			ipcServer := NewIPCServer(p.logger, p)
+			go func() {
+				if err := ipcServer.Start(ctx); err != nil {
+					p.logger.Error("IPC Server failed", zap.Error(err))
+				}
+			}()
+
+			// 2. Spawn the Rust Proxy Binary
+			// Extract it from embedded filesystem if possible
+			rustProxyBinPath, _ := ExtractRustProxy(p.logger)
+
+			// The Rust proxy listens on p.Port + 1 and forwards to UDS handle.
+			rustProxyPort := p.Port + 1
+			cmd := exec.CommandContext(ctx, rustProxyBinPath,
+				fmt.Sprintf("--proxy-port=%d", rustProxyPort),
+				fmt.Sprintf("--uds-path=%s", ipcPath),
+			)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Env = append(os.Environ(), "RUST_LOG=info")
+
+			p.logger.Info("Starting Rust Forwarder process", zap.Uint32("port", rustProxyPort))
+			if err := cmd.Start(); err != nil {
+				p.logger.Error("Failed to start Rust Proxy process", zap.Error(err))
+			} else {
+				// Register the Rust proxy's PID in eBPF so its outgoing
+				// connections (e.g. to MySQL) are NOT intercepted.
+				if p.RegisterProxyPID != nil && cmd.Process != nil {
+					rustPID := uint32(cmd.Process.Pid)
+					if regErr := p.RegisterProxyPID(rustPID); regErr != nil {
+						p.logger.Error("Failed to register Rust proxy PID in eBPF", zap.Uint32("pid", rustPID), zap.Error(regErr))
+					}
+				}
+				go func() {
+					if err := cmd.Wait(); err != nil {
+						if ctx.Err() == nil {
+							p.logger.Error("Rust Proxy process exited with error", zap.Error(err))
+						}
+					}
+				}()
+			}
+
+			// 3. Start the Go proxy on Port (or we can just wait since Rust proxy intercepts Port)
+			// Actually, let's keep Go proxy on its Port so it can still handle raw Go traffic if needed,
+			// or change it to ensure it avoids port conflicts. eBPF handles Port + 1.
+			err = p.start(ctx, readyChan)
+		} else {
+			// Normal flow
+			err = p.start(ctx, readyChan)
+		}
+
 		readyChan <- err
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
