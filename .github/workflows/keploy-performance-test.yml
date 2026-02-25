@@ -83,12 +83,10 @@ jobs:
         run: |
           # Create test directory
           mkdir -p keploy-tests
-          # Start Keploy with minimal command (true does nothing and exits immediately)
-          # But Keploy proxy stays running to intercept traffic
-          ./keploy record -c "true" --proxy-port=16789 --path=./keploy-tests --config-path=/tmp/keploy-no-config &
+          # Start Keploy with sleep command to keep it running during the test
+          ./keploy record -c "sleep 3600" --proxy-port=16789 --path=./keploy-tests --config-path=/tmp/keploy-no-config &
           echo $! > keploy.pid
           sleep 5
 
       - name: Run k6 load test
-        working-directory: keploy
-        run: k6 run ../load-test.js
+        run: k6 run keploy/load-test.js
