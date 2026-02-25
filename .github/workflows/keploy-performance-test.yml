@@ -52,20 +52,20 @@ jobs:
       - name: Build Keploy
         working-directory: keploy
         run: |
-          # Build from current branch (which has yaml-optimization changes)
+          # Build from current branch
           go build -o keploy main.go
 
       - name: Make scripts executable
         working-directory: keploy
-        run: chmod +x scripts/performance-test/*.sh
+        run: chmod +x .github/workflows/test_workflow_scripts/*.sh
 
       - name: Start PetClinic with Keploy recording
         working-directory: keploy
-        run: ./scripts/performance-test/start-petclinic-with-keploy.sh
+        run: ./.github/workflows/test_workflow_scripts/start-petclinic-with-keploy.sh
 
       - name: Create k6 load test script
         working-directory: keploy
-        run: ./scripts/performance-test/create-k6-script.sh
+        run: ./.github/workflows/test_workflow_scripts/create-k6-script.sh
 
       - name: Run k6 load test
         working-directory: keploy
@@ -74,13 +74,13 @@ jobs:
       - name: Stop Keploy
         if: always()
         working-directory: keploy
-        run: ./scripts/performance-test/stop-keploy.sh
+        run: ./.github/workflows/test_workflow_scripts/stop-keploy.sh
 
       - name: Validate RPS threshold
         working-directory: keploy
-        run: ./scripts/performance-test/validate-rps.sh
+        run: ./.github/workflows/test_workflow_scripts/validate-rps.sh
 
       - name: Display Keploy test cases
         if: always()
         working-directory: keploy
-        run: ./scripts/performance-test/display-test-cases.sh
+        run: ./.github/workflows/test_workflow_scripts/display-test-cases.sh
