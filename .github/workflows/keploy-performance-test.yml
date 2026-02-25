@@ -84,6 +84,6 @@ jobs:
           # Create test directory
           mkdir -p keploy-tests
           # Copy load test script to keploy directory
-          cp ../.github/workflows/load-test.js ./load-test.js
+          cp .github/workflows/load-test.js ./load-test.js
           # Start Keploy wrapping k6 to intercept its traffic
           sudo -E env PATH=$PATH ./keploy record -c "k6 run --quiet load-test.js" --path=./keploy-tests --config-path=/tmp/keploy-no-config
