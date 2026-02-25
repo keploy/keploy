@@ -20,7 +20,7 @@ jobs:
         options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
 
     steps:
-      - name: Checkout Keploy (yaml-optimization branch)
+      - name: Checkout Keploy (current branch with scripts)
         uses: actions/checkout@v4
         with:
           path: keploy
@@ -52,125 +52,35 @@ jobs:
       - name: Build Keploy
         working-directory: keploy
         run: |
-          git fetch origin main
-          git checkout main
+          # Build from current branch (which has yaml-optimization changes)
           go build -o keploy main.go
+
+      - name: Make scripts executable
+        working-directory: keploy
+        run: chmod +x scripts/performance-test/*.sh
 
       - name: Start PetClinic with Keploy recording
         working-directory: keploy
-        run: |
-          # Create test directory
-          mkdir -p keploy-tests
-          # Get the PetClinic JAR path
-          PETCLINIC_JAR=$(ls ../petclinic/target/spring-petclinic-*.jar | head -1)
-          # Start Keploy wrapping PetClinic application
-          sudo -E env PATH=$PATH ./keploy record -c "java -jar $PETCLINIC_JAR --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic --spring.datasource.username=root --spring.datasource.password=petclinic" --path=./keploy-tests --config-path=/tmp/keploy-no-config &
-          echo $! > keploy.pid
-          
-          # Wait for PetClinic to be ready
-          for i in {1..30}; do
-            if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
-              echo "✅ PetClinic with Keploy is ready"
-              break
-            fi
-            echo "Waiting for PetClinic with Keploy... ($i/30)"
-            sleep 2
-          done
+        run: ./scripts/performance-test/start-petclinic-with-keploy.sh
+
+      - name: Create k6 load test script
+        working-directory: keploy
+        run: ./scripts/performance-test/create-k6-script.sh
 
       - name: Run k6 load test
         working-directory: keploy
-        run: |
-          # Create load test script
-          cat > load-test.js << 'EOF'
-          import http from 'k6/http';
-          import { check, sleep } from 'k6';
-
-          export const options = {
-            scenarios: {
-              constant_load: {
-                executor: 'constant-arrival-rate',
-                rate: 100,
-                timeUnit: '1s',
-                duration: '60s',
-                preAllocatedVUs: 20,
-                maxVUs: 100,
-              },
-            },
-            // Track specific percentiles
-            summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(80)', 'p(95)', 'p(99)', 'p(99.9)'],
-            // Set thresholds for percentiles
-            thresholds: {
-              'http_req_duration': ['p(80)<100', 'p(99)<500'],
-              'http_req_failed': ['rate<0.01'],
-            },
-          };
-
-          // Array of PetClinic endpoints to hit
-          const endpoints = [
-            '/',
-            '/actuator/health',
-            '/owners',
-            '/vets',
-            '/api/owners',
-            '/api/vets',
-          ];
-
-          export default function () {
-            // Randomly select an endpoint to create diverse test cases
-            const endpoint = endpoints[Math.floor(Math.random() * endpoints.length)];
-            const res = http.get(`http://localhost:8080${endpoint}`);
-            
-            check(res, {
-              'status is 2xx or 3xx': (r) => r.status >= 200 && r.status < 400,
-            });
-          }
-          EOF
-          # Run k6 and capture output
-          k6 run load-test.js 2>&1 | tee k6-output.log
+        run: k6 run load-test.js 2>&1 | tee k6-output.log
 
       - name: Stop Keploy
         if: always()
         working-directory: keploy
-        run: |
-          if [ -f keploy.pid ]; then
-            sudo kill $(cat keploy.pid) || true
-            sleep 2
-          fi
+        run: ./scripts/performance-test/stop-keploy.sh
 
       - name: Validate RPS threshold
         working-directory: keploy
-        run: |
-          # Extract actual RPS from k6 console output
-          ACTUAL_RPS=$(grep -oP 'http_reqs.*?:\s+\d+\s+\K[\d.]+(?=/s)' k6-output.log | tail -1)
-          
-          if [ -z "$ACTUAL_RPS" ]; then
-            echo "❌ FAIL: Could not extract RPS from k6 output"
-            exit 1
-          fi
-          
-          echo "Actual RPS: $ACTUAL_RPS"
-          
-          # Extract and display percentile metrics
-          echo ""
-          echo "📊 Performance Metrics:"
-          grep -E "http_req_duration|http_req_waiting" k6-output.log | head -2
-          
-          # Validate RPS >= 100
-          if (( $(echo "$ACTUAL_RPS >= 100" | bc -l) )); then
-            echo ""
-            echo "✅ PASS: Achieved $ACTUAL_RPS RPS (target: 100)"
-            exit 0
-          else
-            echo ""
-            echo "❌ FAIL: Only achieved $ACTUAL_RPS RPS (target: 100)"
-            exit 1
-          fi
+        run: ./scripts/performance-test/validate-rps.sh
 
       - name: Display Keploy test cases
         if: always()
         working-directory: keploy
-        run: |
-          echo "📝 Keploy recorded test cases:"
-          find keploy-tests -name "*.yaml" -type f | wc -l
-          echo "test cases found"
-          ls -la keploy-tests/keploy/test-set-0/tests/ || echo "No tests directory found"
+        run: ./scripts/performance-test/display-test-cases.sh
