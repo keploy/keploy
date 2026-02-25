@@ -83,7 +83,34 @@ jobs:
         run: |
           # Create test directory
           mkdir -p keploy-tests
-          # Copy load test script to keploy directory
-          cp .github/workflows/load-test.js ./load-test.js
+          # Create load test script inline
+          cat > load-test.js << 'EOF'
+          import http from 'k6/http';
+          import { check } from 'k6';
+
+          export const options = {
+            scenarios: {
+              constant_load: {
+                executor: 'constant-arrival-rate',
+                rate: 100,
+                timeUnit: '1s',
+                duration: '60s',
+                preAllocatedVUs: 20,
+                maxVUs: 100,
+              },
+            },
+            thresholds: {
+              http_reqs: ['rate>=100'],
+              http_req_failed: ['rate<0.01'],
+            },
+          };
+
+          export default function () {
+            const res = http.get('http://localhost:8080/');
+            check(res, {
+              'status is 200': (r) => r.status === 200,
+            });
+          }
+          EOF
           # Start Keploy wrapping k6 to intercept its traffic
           sudo -E env PATH=$PATH ./keploy record -c "k6 run --quiet load-test.js" --path=./keploy-tests --config-path=/tmp/keploy-no-config
