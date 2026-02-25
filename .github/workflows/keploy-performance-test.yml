@@ -83,10 +83,11 @@ jobs:
         run: |
           # Create test directory
           mkdir -p keploy-tests
-          # Start Keploy with sleep command to keep it running during the test
-          ./keploy record -c "sleep 3600" --proxy-port=16789 --path=./keploy-tests --config-path=/tmp/keploy-no-config &
+          # Start Keploy in proxy mode to intercept traffic to PetClinic
+          sudo -E env PATH=$PATH ./keploy record --proxy-port=16789 --path=./keploy-tests --config-path=/tmp/keploy-no-config &
           echo $! > keploy.pid
           sleep 5
 
       - name: Run k6 load test
-        run: k6 run keploy/load-test.js
+        working-directory: keploy
+        run: k6 run ../.github/workflows/load-test.js
