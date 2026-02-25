@@ -52,6 +52,7 @@ jobs:
       - name: Build Keploy
         working-directory: keploy
         run: |
+          git fetch origin main
           git checkout main
           go build -o keploy main.go
 
