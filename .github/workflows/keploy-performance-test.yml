@@ -81,12 +81,14 @@ jobs:
       - name: Start Keploy in record mode
         working-directory: keploy
         run: |
-          # Create minimal config to avoid YAML parsing errors
+          # Create test directory
           mkdir -p keploy-tests
-          # Start Keploy without config file, just with CLI flags
-          ./keploy record -c "" --proxy-port=16789 --path=./keploy-tests &
+          # Start Keploy with --config-path pointing to non-existent dir to skip config file
+          ./keploy record -c "" --proxy-port=16789 --path=./keploy-tests --config-path=/tmp/keploy-no-config &
           echo $! > keploy.pid
           sleep 5
 
       - name: Run k6 load test
-        run: k6 run load-test.js
+        run: |
+          # Route k6 traffic through Keploy's proxy
+          HTTP_PROXY=http://localhost:16789 k6 run keploy/load-test.js
