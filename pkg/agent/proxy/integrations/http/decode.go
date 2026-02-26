@@ -159,12 +159,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			var responseString string
-			
+
 			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 
 			if stub.Spec.HTTPResp.StreamRef != nil {
 				// Streaming replay
 				header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+				// The raw stream data in the ndjson file contains HTTP chunked
+				// transfer-encoding framing (size\r\ndata\r\n). During recording,
+				// http.ReadResponse strips the Transfer-Encoding header, so we
+				// must add it back for the client's HTTP parser to dechunk correctly.
+				header.Set("Transfer-Encoding", "chunked")
 				var headers string
 				for key, values := range header {
 					for _, value := range values {
