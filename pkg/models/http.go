@@ -27,6 +27,14 @@ type HTTPReq struct {
 	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
 }
 
+// StreamRef stores a reference to a request/response stream that has been offloaded
+// to a file. When StreamRef is set, Body/StreamBody will be empty.
+type StreamRef struct {
+	Path      string    `json:"path" yaml:"path"`           // relative path to the stream file
+	Created   time.Time `json:"created" yaml:"created"`     // creation time of the stream file
+	ChunkCount int       `json:"chunk_count" yaml:"chunk_count"` // number of chunks in the stream
+}
+
 type HTTPSchema struct {
 	Metadata         map[string]string             `json:"metadata" yaml:"metadata"`
 	Request          HTTPReq                       `json:"req" yaml:"req"`
@@ -51,6 +59,7 @@ type HTTPResp struct {
 	Header        map[string]string `json:"header" yaml:"header"`
 	Body          string            `json:"body" yaml:"body"`
 	StreamBody    []HTTPStreamChunk `json:"-" yaml:"-"`
+	StreamRef     *StreamRef        `json:"stream_ref,omitempty" yaml:"stream_ref,omitempty"` // set when stream is offloaded to file
 	BodySkipped   bool              `json:"body_skipped,omitempty" yaml:"body_skipped,omitempty"` // true when body was >1MB and not saved
 	BodySize      int64             `json:"body_size,omitempty" yaml:"body_size,omitempty"`       // original body size in bytes when BodySkipped is true
 	StatusMessage string            `json:"status_message" yaml:"status_message"`

@@ -63,6 +63,7 @@ type OutgoingOptions struct {
 	DstCfg         *ConditionalDstCfg
 	Backdate       time.Time                      // used to set backdate in cacert request
 	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	ConfigPath     string                         // path to the config file (used to resolve relative paths for assets/streams)
 }
 
 type ConditionalDstCfg struct {

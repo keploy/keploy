@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -350,6 +351,45 @@ func EnsureKeployFolderPermissions(ctx context.Context, logger *zap.Logger, kepl
 	// Fix permissions on the entire keploy folder
 	// sudo -v will cache credentials, which will be used by subsequent sudo -n commands
 	return FixKeployFolderPermissions(ctx, logger, keployPath, permErrors)
+}
+
+// RestoreFileOwnership changes ownership of a file or directory to the original user
+// when running under sudo. This prevents the agent process (which runs as root via sudo)
+// from creating files that the CLI process (running as the normal user) cannot access.
+// Returns nil if not running under sudo or if ownership was successfully restored.
+func RestoreFileOwnership(logger *zap.Logger, paths ...string) {
+	// Only restore if running under sudo (SUDO_USER will be set)
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser == "" {
+		return
+	}
+
+	usr, err := user.Lookup(sudoUser)
+	if err != nil {
+		logger.Debug("Failed to lookup SUDO_USER for ownership restore", zap.String("user", sudoUser), zap.Error(err))
+		return
+	}
+
+	uid, err := strconv.Atoi(usr.Uid)
+	if err != nil {
+		logger.Debug("Failed to parse UID", zap.String("uid", usr.Uid), zap.Error(err))
+		return
+	}
+
+	gid, err := strconv.Atoi(usr.Gid)
+	if err != nil {
+		logger.Debug("Failed to parse GID", zap.String("gid", usr.Gid), zap.Error(err))
+		return
+	}
+
+	for _, p := range paths {
+		if chownErr := os.Chown(p, uid, gid); chownErr != nil {
+			logger.Debug("Failed to restore ownership",
+				zap.String("path", p),
+				zap.String("user", sudoUser),
+				zap.Error(chownErr))
+		}
+	}
 }
 
 // RestoreKeployFolderOwnership restores ownership of the keploy folder to the original user

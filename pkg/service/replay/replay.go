@@ -823,6 +823,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:    headerNoiseConfig,
+			ConfigPath:     filepath.Join(r.config.Path, testSetID),
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -980,6 +981,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:    headerNoiseConfig,
+			ConfigPath:     filepath.Join(r.config.Path, testSetID),
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
