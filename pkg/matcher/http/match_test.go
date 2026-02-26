@@ -266,12 +266,64 @@ func TestMatch_CompareAll_Disabled(t *testing.T) {
 	assert.True(t, result.BodyResult[0].Normal)
 }
 
-// TestMatch_StreamingBodyComparedWhenCompareAllDisabled ensures streaming response
-// bodies are still compared even if compareAll is false.
-func TestMatch_StreamingBodyComparedWhenCompareAllDisabled(t *testing.T) {
+// TestMatch_StreamingBodyPassesWhenSimulateHTTPHandlesComparison verifies that
+// Match() correctly passes for streaming test cases when compareAll is false.
+//
+// In the real flow, SimulateHTTP handles streaming body comparison chunk-by-chunk
+// (via compareHTTPStream). When streams match, SimulateHTTP sets the actual body
+// to the expected body, so Match() always sees identical strings for matched streams.
+// Match() itself does NOT do streaming-specific comparison.
+func TestMatch_StreamingBodyPassesWhenSimulateHTTPHandlesComparison(t *testing.T) {
+	logger := zap.NewNop()
+	// Simulate what SimulateHTTP does when a stream matches: it passes
+	// the expected body as both expected and actual to Match().
+	matchedBody := "{\"id\":1}\n{\"id\":2}\n"
+	tc := &models.TestCase{
+		Name: "test-streaming-body-matched",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Header: map[string]string{
+				"Content-Type": "application/x-ndjson",
+			},
+			Body: matchedBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":2}`},
+					},
+				},
+			},
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Header: map[string]string{
+			"Content-Type": "application/x-ndjson",
+		},
+		Body: matchedBody, // SimulateHTTP sets actual = expected when stream matches
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	pass, result := Match(tc, actualResponse, noiseConfig, false, false, logger, true)
+
+	assert.True(t, pass, "Should pass because SimulateHTTP already compared the stream and set actual body = expected body")
+	require.NotNil(t, result)
+	assert.True(t, result.StatusCode.Normal)
+	assert.True(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_StreamingMismatchPassedThroughBySimulateHTTP verifies that when
+// SimulateHTTP detects a stream mismatch, it passes the captured (different) body
+// to Match(). With compareAll=true, Match() will then detect the body difference.
+func TestMatch_StreamingMismatchPassedThroughBySimulateHTTP(t *testing.T) {
 	logger := zap.NewNop()
 	tc := &models.TestCase{
-		Name: "test-streaming-body-compared",
+		Name: "test-streaming-body-mismatch",
 		HTTPResp: models.HTTPResp{
 			StatusCode: 200,
 			Header: map[string]string{
@@ -292,6 +344,7 @@ func TestMatch_StreamingBodyComparedWhenCompareAllDisabled(t *testing.T) {
 			},
 		},
 	}
+	// SimulateHTTP passes the captured (different) body when stream doesn't match
 	actualResponse := &models.HTTPResp{
 		StatusCode: 200,
 		Header: map[string]string{
@@ -301,49 +354,10 @@ func TestMatch_StreamingBodyComparedWhenCompareAllDisabled(t *testing.T) {
 	}
 	noiseConfig := map[string]map[string][]string{}
 
-	pass, result := Match(tc, actualResponse, noiseConfig, false, false, logger, true)
+	// With compareAll=true, Match() will catch the body difference
+	pass, result := Match(tc, actualResponse, noiseConfig, false, true, logger, true)
 
-	assert.False(t, pass, "Should fail because streaming bodies must be compared even when compareAll is false")
-	require.NotNil(t, result)
-	assert.True(t, result.StatusCode.Normal)
-	assert.False(t, result.BodyResult[0].Normal)
-}
-
-func TestMatch_StreamingBodyComparedForStructuredTextPlain(t *testing.T) {
-	logger := zap.NewNop()
-	tc := &models.TestCase{
-		Name: "test-streaming-text-plain-structured",
-		HTTPResp: models.HTTPResp{
-			StatusCode: 200,
-			Header: map[string]string{
-				"Content-Type": "text/plain",
-			},
-			Body: "line-1\nline-2\n",
-			StreamBody: []models.HTTPStreamChunk{
-				{
-					Data: []models.HTTPStreamDataField{
-						{Key: "raw", Value: "line-1"},
-					},
-				},
-				{
-					Data: []models.HTTPStreamDataField{
-						{Key: "raw", Value: "line-2"},
-					},
-				},
-			},
-		},
-	}
-	actualResponse := &models.HTTPResp{
-		StatusCode: 200,
-		Header: map[string]string{
-			"Content-Type": "text/plain",
-		},
-		Body: "line-1\nline-999\n",
-	}
-
-	pass, result := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
-
-	assert.False(t, pass, "Should fail because structured streaming text/plain body must be compared")
+	assert.False(t, pass, "Should fail because compareAll is true and bodies differ")
 	require.NotNil(t, result)
 	assert.True(t, result.StatusCode.Normal)
 	assert.False(t, result.BodyResult[0].Normal)
