@@ -628,9 +628,6 @@ func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStream
 		if isSSETestCase(tc, resp) {
 			return httpStreamConfig{Mode: httpStreamModeSSE}
 		}
-		if tc != nil && looksLikeSSEPayload(tc.HTTPResp.Body) {
-			return httpStreamConfig{Mode: httpStreamModeSSE}
-		}
 		return httpStreamConfig{Mode: httpStreamModePlainText}
 	case "application/x-ndjson", "application/ndjson":
 		return httpStreamConfig{Mode: httpStreamModeNDJSON}
@@ -649,9 +646,6 @@ func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStream
 		if isLikelyStreamingHTTPResponse(tc, resp) {
 			return httpStreamConfig{Mode: httpStreamModePlainText}
 		}
-		if tc != nil && looksLikeLineDelimitedStreamingPayload(tc.HTTPResp.Body) {
-			return httpStreamConfig{Mode: httpStreamModePlainText}
-		}
 	case "application/octet-stream":
 		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
 			return httpStreamConfig{Mode: httpStreamModeBinary}
@@ -659,14 +653,6 @@ func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStream
 		if isLikelyStreamingHTTPResponse(tc, resp) {
 			return httpStreamConfig{Mode: httpStreamModeBinary}
 		}
-	}
-
-	if isSSETestCase(tc, resp) {
-		return httpStreamConfig{Mode: httpStreamModeSSE}
-	}
-
-	if tc != nil && isLikelyStreamingHTTPResponse(tc, resp) && looksLikeNDJSONPayload(tc.HTTPResp.Body) {
-		return httpStreamConfig{Mode: httpStreamModeNDJSON}
 	}
 
 	return httpStreamConfig{Mode: httpStreamModeNone}
@@ -823,40 +809,6 @@ func isLikelyStreamingHTTPResponse(tc *models.TestCase, resp *http.Response) boo
 	}
 
 	return false
-}
-
-func looksLikeSSEPayload(body string) bool {
-	body = normalizeLineEndings(body)
-	return strings.Contains(body, "\n\n") && (strings.Contains(body, "\ndata:") || strings.HasPrefix(body, "data:") || strings.Contains(body, "\nevent:") || strings.HasPrefix(body, "event:"))
-}
-
-func looksLikeNDJSONPayload(body string) bool {
-	scanner := bufio.NewScanner(strings.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-
-	nonEmpty := 0
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		nonEmpty++
-		var js interface{}
-		if json.Unmarshal([]byte(line), &js) != nil {
-			return false
-		}
-	}
-
-	return nonEmpty > 0
-}
-
-func looksLikeLineDelimitedStreamingPayload(body string) bool {
-	body = normalizeLineEndings(body)
-	body = strings.TrimSuffix(body, "\n")
-	if strings.TrimSpace(body) == "" {
-		return false
-	}
-	return strings.Contains(body, "\n")
 }
 
 type expectedSSEFrame struct {
@@ -1067,82 +1019,68 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 }
 
 func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
-	if len(expectedResp.StreamBody) > 0 {
-		queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
-		for _, chunk := range expectedResp.StreamBody {
-			if len(chunk.Data) == 0 {
+	if len(expectedResp.StreamBody) == 0 {
+		return nil
+	}
+	queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
+	for _, chunk := range expectedResp.StreamBody {
+		if len(chunk.Data) == 0 {
+			continue
+		}
+		fields := make([]sseField, 0, len(chunk.Data))
+		lines := make([]string, 0, len(chunk.Data))
+		for _, dataField := range chunk.Data {
+			key := strings.TrimSpace(dataField.Key)
+			if key == "" {
 				continue
 			}
-			fields := make([]sseField, 0, len(chunk.Data))
-			lines := make([]string, 0, len(chunk.Data))
-			for _, dataField := range chunk.Data {
-				key := strings.TrimSpace(dataField.Key)
-				if key == "" {
-					continue
-				}
-				if strings.EqualFold(key, "comment") {
-					fields = append(fields, sseField{
-						key:      ":",
-						value:    dataField.Value,
-						hasValue: true,
-						comment:  true,
-					})
-					lines = append(lines, ":"+dataField.Value)
-					continue
-				}
-
-				lowerKey := strings.ToLower(key)
+			if strings.EqualFold(key, "comment") {
 				fields = append(fields, sseField{
-					key:      lowerKey,
+					key:      ":",
 					value:    dataField.Value,
 					hasValue: true,
+					comment:  true,
 				})
-				lines = append(lines, lowerKey+":"+dataField.Value)
-			}
-			if len(fields) == 0 {
+				lines = append(lines, ":"+dataField.Value)
 				continue
 			}
-			queue = append(queue, expectedSSEFrame{
-				fields: fields,
-				raw:    strings.Join(lines, "\n"),
-			})
-		}
-		if len(queue) > 0 {
-			return queue
-		}
-	}
 
-	legacyQueue := splitSSEQueue(expectedResp.Body)
-	queue := make([]expectedSSEFrame, 0, len(legacyQueue))
-	for _, frame := range legacyQueue {
+			lowerKey := strings.ToLower(key)
+			fields = append(fields, sseField{
+				key:      lowerKey,
+				value:    dataField.Value,
+				hasValue: true,
+			})
+			lines = append(lines, lowerKey+":"+dataField.Value)
+		}
+		if len(fields) == 0 {
+			continue
+		}
 		queue = append(queue, expectedSSEFrame{
-			fields: parseSSEFrame(frame),
-			raw:    frame,
+			fields: fields,
+			raw:    strings.Join(lines, "\n"),
 		})
 	}
 	return queue
 }
 
 func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
-	if len(expectedResp.StreamBody) > 0 {
-		queue := make([]string, 0, len(expectedResp.StreamBody))
-		for _, chunk := range expectedResp.StreamBody {
-			raw, ok := streamChunkFieldValue(chunk, "raw")
-			if !ok {
-				continue
-			}
-			raw = canonicalizer(raw)
-			if ignoreEmpty && raw == "" {
-				continue
-			}
-			queue = append(queue, raw)
-		}
-		if len(queue) > 0 {
-			return queue
-		}
+	if len(expectedResp.StreamBody) == 0 {
+		return nil
 	}
-
-	return splitLineQueue(expectedResp.Body, canonicalizer, ignoreEmpty)
+	queue := make([]string, 0, len(expectedResp.StreamBody))
+	for _, chunk := range expectedResp.StreamBody {
+		raw, ok := streamChunkFieldValue(chunk, "raw")
+		if !ok {
+			continue
+		}
+		raw = canonicalizer(raw)
+		if ignoreEmpty && raw == "" {
+			continue
+		}
+		queue = append(queue, raw)
+	}
+	return queue
 }
 
 func expectedStructuredRawSize(chunks []models.HTTPStreamChunk) (int, bool) {
@@ -1577,22 +1515,6 @@ func isJSONContentType(contentType string) bool {
 	return contentType == "application/json" || strings.HasSuffix(contentType, "+json") || contentType == "application/x-ndjson" || contentType == "application/ndjson"
 }
 
-func splitLineQueue(body string, canonicalizer func(string) string, ignoreEmpty bool) []string {
-	scanner := bufio.NewScanner(strings.NewReader(normalizeLineEndings(body)))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-
-	queue := []string{}
-	for scanner.Scan() {
-		line := canonicalizer(scanner.Text())
-		if ignoreEmpty && line == "" {
-			continue
-		}
-		queue = append(queue, line)
-	}
-
-	return queue
-}
-
 func canonicalizeNDJSONLine(line string) string {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -1636,24 +1558,6 @@ func splitSSEFrames(data []byte, atEOF bool) (int, []byte, error) {
 	default:
 		return doubleCRLFIdx + len("\r\n\r\n"), data[:doubleCRLFIdx], nil
 	}
-}
-
-func splitSSEQueue(body string) []string {
-	scanner := bufio.NewScanner(strings.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-	scanner.Split(splitSSEFrames)
-
-	queue := []string{}
-	for scanner.Scan() {
-		frame := normalizeLineEndings(scanner.Text())
-		frame = strings.Trim(frame, "\n")
-		if strings.TrimSpace(frame) == "" {
-			continue
-		}
-		queue = append(queue, frame)
-	}
-
-	return queue
 }
 
 func canonicalizeSSEFrame(frame string) string {

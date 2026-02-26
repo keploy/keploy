@@ -273,6 +273,22 @@ func TestSimulateHTTP_SSEStreamMatchAndEarlyClose_316(t *testing.T) {
 				"Content-Type": "text/event-stream; charset=utf-8",
 			},
 			Body: expectedSSEBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "100"},
+						{Key: "event", Value: "ticker"},
+						{Key: "data", Value: `{"value":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "101"},
+						{Key: "event", Value: "ticker"},
+						{Key: "data", Value: `{"value":2}`},
+					},
+				},
+			},
 		},
 	}
 
@@ -328,6 +344,22 @@ func TestSimulateHTTP_SSEStreamMismatch_317(t *testing.T) {
 				"data:{\"value\":2}",
 				"",
 			}, "\n"),
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "1"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "2"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":2}`},
+					},
+				},
+			},
 		},
 	}
 
@@ -488,6 +520,18 @@ func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
 				"Content-Type": "application/x-ndjson",
 			},
 			Body: expectedBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":1,"ok":true}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":2,"ok":false}`},
+					},
+				},
+			},
 		},
 	}
 
@@ -557,6 +601,13 @@ func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
 				"Content-Type": "multipart/x-mixed-replace; boundary=" + boundary,
 			},
 			Body: expectedBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: expectedBody},
+					},
+				},
+			},
 		},
 	}
 
@@ -608,6 +659,18 @@ func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
 				"Content-Type": "text/plain",
 			},
 			Body: expectedBody,
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: "[INFO] booting"},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: "[INFO] ready"},
+					},
+				},
+			},
 		},
 	}
 

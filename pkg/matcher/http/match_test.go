@@ -278,6 +278,18 @@ func TestMatch_StreamingBodyComparedWhenCompareAllDisabled(t *testing.T) {
 				"Content-Type": "application/x-ndjson",
 			},
 			Body: "{\"id\":1}\n{\"id\":2}\n",
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":2}`},
+					},
+				},
+			},
 		},
 	}
 	actualResponse := &models.HTTPResp{

@@ -119,47 +119,10 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 	if len(resp.StreamBody) > 0 {
 		return cloneStreamChunks(resp.StreamBody), true
 	}
-	if !shouldStoreStreamingBody(resp) {
-		return nil, false
-	}
-
-	kind := detectStreamBodyKind(resp.Header, resp.Body)
-	if kind == streamBodyKindUnknown {
-		return nil, false
-	}
-
-	switch kind {
-	case streamBodyKindSSE:
-		return parseSSEBodyToChunks(resp.Body, resp.Timestamp), true
-	case streamBodyKindRaw:
-		return parseRawBodyToChunks(resp.Body, resp.Timestamp, strings.Contains(strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type")), "application/x-ndjson") || strings.Contains(strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type")), "application/ndjson")), true
-	default:
-		return nil, false
-	}
+	return nil, false
 }
 
-func shouldStoreStreamingBody(resp HTTPResp) bool {
-	contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
-	transferEncoding := strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Transfer-Encoding"))
-
-	if strings.Contains(contentType, "text/event-stream") {
-		return true
-	}
-	if strings.Contains(contentType, "application/x-ndjson") || strings.Contains(contentType, "application/ndjson") {
-		return true
-	}
-	if strings.Contains(contentType, "text/plain") {
-		if strings.Contains(transferEncoding, "chunked") || looksLikeLineDelimitedStreamBody(resp.Body) {
-			return true
-		}
-	}
-	if strings.Contains(contentType, "application/octet-stream") && strings.Contains(transferEncoding, "chunked") {
-		return true
-	}
-	return false
-}
-
-func detectStreamBodyKind(headers map[string]string, body string) streamBodyKind {
+func detectStreamBodyKind(headers map[string]string) streamBodyKind {
 	contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(headers, "Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") {
 		return streamBodyKindSSE
@@ -169,9 +132,6 @@ func detectStreamBodyKind(headers map[string]string, body string) streamBodyKind
 		strings.Contains(contentType, "text/plain") ||
 		strings.Contains(contentType, "application/octet-stream") {
 		return streamBodyKindRaw
-	}
-	if looksLikeSSEBodyForModel(body) {
-		return streamBodyKindSSE
 	}
 	return streamBodyKindUnknown
 }
@@ -186,7 +146,7 @@ func decodeStreamBody(node yamlLib.Node, headers map[string]string, respTimestam
 		if err != nil {
 			return "", nil, err
 		}
-		return streamChunksToLegacyBody(chunks, detectStreamBodyKind(headers, "")), chunks, nil
+		return streamChunksToLegacyBody(chunks, detectStreamBodyKind(headers)), chunks, nil
 	}
 
 	var body string
@@ -194,44 +154,7 @@ func decodeStreamBody(node yamlLib.Node, headers map[string]string, respTimestam
 		return "", nil, err
 	}
 
-	legacyChunks, ok := deriveLegacyStreamChunks(headers, body, respTimestamp)
-	if ok {
-		return body, legacyChunks, nil
-	}
-
 	return body, nil, nil
-}
-
-func deriveLegacyStreamChunks(headers map[string]string, body string, ts time.Time) ([]HTTPStreamChunk, bool) {
-	kind := detectStreamBodyKind(headers, body)
-	switch kind {
-	case streamBodyKindSSE:
-		chunks := parseSSEBodyToChunks(body, ts)
-		if len(chunks) > 0 {
-			return chunks, true
-		}
-	case streamBodyKindRaw:
-		contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(headers, "Content-Type"))
-		isNDJSON := strings.Contains(contentType, "application/x-ndjson") || strings.Contains(contentType, "application/ndjson")
-		if strings.Contains(contentType, "application/octet-stream") {
-			if strings.TrimSpace(body) == "" {
-				return nil, false
-			}
-			return []HTTPStreamChunk{{
-				TS: ts,
-				Data: []HTTPStreamDataField{{
-					Key:   "raw",
-					Value: body,
-				}},
-			}}, true
-		}
-
-		chunks := parseRawBodyToChunks(body, ts, isNDJSON)
-		if len(chunks) > 0 {
-			return chunks, true
-		}
-	}
-	return nil, false
 }
 
 func decodeStreamChunks(seqNode yamlLib.Node) ([]HTTPStreamChunk, error) {
@@ -455,20 +378,6 @@ func splitModelSSEFrames(body string) []string {
 		frames = append(frames, part)
 	}
 	return frames
-}
-
-func looksLikeSSEBodyForModel(body string) bool {
-	body = normalizeModelLineEndings(body)
-	return strings.Contains(body, "\n\n") && (strings.Contains(body, "\ndata:") || strings.HasPrefix(body, "data:") || strings.Contains(body, "\nevent:") || strings.HasPrefix(body, "event:"))
-}
-
-func looksLikeLineDelimitedStreamBody(body string) bool {
-	body = normalizeModelLineEndings(body)
-	body = strings.TrimSuffix(body, "\n")
-	if strings.TrimSpace(body) == "" {
-		return false
-	}
-	return strings.Contains(body, "\n")
 }
 
 func normalizeModelLineEndings(value string) string {

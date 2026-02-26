@@ -72,7 +72,7 @@ timestamp: 2026-02-23T11:17:08.5708415Z
 	assert.Equal(t, `{"chunk_id":1}`+"\n"+`{"chunk_id":2}`, got.Body)
 }
 
-func TestHTTPResp_UnmarshalYAML_LegacyTextPlainAutoDerivesRawChunks(t *testing.T) {
+func TestHTTPResp_UnmarshalYAML_ScalarTextPlainDoesNotDeriveStreamBody(t *testing.T) {
 	input := `
 status_code: 200
 header:
@@ -89,10 +89,8 @@ timestamp: 2026-02-23T11:17:08.5708415Z
 	var got HTTPResp
 	require.NoError(t, yamlLib.Unmarshal([]byte(input), &got))
 
-	require.Len(t, got.StreamBody, 2)
-	assert.Equal(t, "raw", got.StreamBody[0].Data[0].Key)
-	assert.Equal(t, "line-1", got.StreamBody[0].Data[0].Value)
-	assert.Equal(t, "line-2", got.StreamBody[1].Data[0].Value)
+	// After removing backward compat, scalar body should NOT derive StreamBody.
+	assert.Len(t, got.StreamBody, 0, "scalar text/plain body should not derive StreamBody after backward compat removal")
 	assert.Contains(t, got.Body, "line-1")
 	assert.Contains(t, got.Body, "line-2")
 }
@@ -106,6 +104,16 @@ func TestHTTPResp_MarshalYAML_StreamingSSEBody(t *testing.T) {
 		},
 		Body:      "id:1\nevent:message\ndata:{\"ok\":true}\n\n",
 		Timestamp: ts,
+		StreamBody: []HTTPStreamChunk{
+			{
+				TS: ts,
+				Data: []HTTPStreamDataField{
+					{Key: "id", Value: "1"},
+					{Key: "event", Value: "message"},
+					{Key: "data", Value: `{"ok":true}`},
+				},
+			},
+		},
 	}
 
 	out, err := yamlLib.Marshal(resp)
@@ -122,13 +130,19 @@ func TestHTTPResp_MarshalYAML_StreamingSSEBody(t *testing.T) {
 }
 
 func TestHTTPResp_MarshalYAML_TextPlainStreamingBodyAsRawChunks(t *testing.T) {
+	ts := time.Date(2026, 2, 24, 5, 53, 37, 0, time.UTC)
 	resp := HTTPResp{
 		StatusCode: 200,
 		Header: map[string]string{
 			"Content-Type": "text/plain",
 		},
 		Body:      "line-1\nline-2\nline-3\n",
-		Timestamp: time.Date(2026, 2, 24, 5, 53, 37, 0, time.UTC),
+		Timestamp: ts,
+		StreamBody: []HTTPStreamChunk{
+			{TS: ts, Data: []HTTPStreamDataField{{Key: "raw", Value: "line-1"}}},
+			{TS: ts, Data: []HTTPStreamDataField{{Key: "raw", Value: "line-2"}}},
+			{TS: ts, Data: []HTTPStreamDataField{{Key: "raw", Value: "line-3"}}},
+		},
 	}
 
 	out, err := yamlLib.Marshal(resp)
@@ -143,6 +157,7 @@ func TestHTTPResp_MarshalYAML_TextPlainStreamingBodyAsRawChunks(t *testing.T) {
 }
 
 func TestHTTPResp_MarshalYAML_SSEMultilineDataUsesSingleDataField(t *testing.T) {
+	ts := time.Date(2026, 2, 24, 5, 53, 37, 0, time.UTC)
 	resp := HTTPResp{
 		StatusCode: 200,
 		Header: map[string]string{
@@ -155,7 +170,17 @@ func TestHTTPResp_MarshalYAML_SSEMultilineDataUsesSingleDataField(t *testing.T) 
 			"data:line-2",
 			"",
 		}, "\n"),
-		Timestamp: time.Date(2026, 2, 24, 5, 53, 37, 0, time.UTC),
+		Timestamp: ts,
+		StreamBody: []HTTPStreamChunk{
+			{
+				TS: ts,
+				Data: []HTTPStreamDataField{
+					{Key: "id", Value: "1"},
+					{Key: "event", Value: "message"},
+					{Key: "data", Value: "line-1\nline-2"},
+				},
+			},
+		},
 	}
 
 	out, err := yamlLib.Marshal(resp)
