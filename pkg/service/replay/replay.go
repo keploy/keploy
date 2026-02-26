@@ -1091,8 +1091,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var asyncHTTPWG sync.WaitGroup
 	// Atomic counter checked mid-loop to know if any stream is still in-flight (drives mock filter decisions).
 	var activeAsyncStreaming int32
-	// tracks if the mock filter is pinned for async streaming requests
-	var asyncMockFilterPinned bool
+	// set to true after the first wide mock window is sent while a stream is active;
+	// prevents redundant updates until the stream finishes.
+	var asyncMockFilterWidened bool
 	// recordedStreamStartTime acts as the "zero point" in recording time.
 	// It is the recorded timestamp of the very first request in a streaming sequence (e.g., SSE subscribe).
 	var recordedStreamStartTime time.Time
@@ -1214,7 +1215,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if !streamingReplayActive {
-			asyncMockFilterPinned = false
+			asyncMockFilterWidened = false
 		}
 
 		isAsyncStreamingHTTP := isCurrentTestStreaming
@@ -1246,9 +1247,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			reqTime = models.BaseTime
 			respTime = time.Now().UTC()
 
-			// If a wide window was already sent, pin it — skip resending the same value.
-			// Unpinned when activeAsyncStreaming drops to zero.
-			skipMockFilterUpdate = asyncMockFilterPinned
+			// If the wide window was already sent once, skip resending — it hasn't changed.
+			// Reset when activeAsyncStreaming drops to zero.
+			skipMockFilterUpdate = asyncMockFilterWidened
 		}
 
 		if !skipMockFilterUpdate {
@@ -1258,7 +1259,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 			if !useMappingBased && streamingReplayActive && !isAsyncStreamingHTTP {
-				asyncMockFilterPinned = true
+				asyncMockFilterWidened = true
 			}
 		}
 
