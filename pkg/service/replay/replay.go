@@ -1087,9 +1087,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
 
-	// tracks how many async http requests are currently running
+	// WaitGroup used post-loop to block until all streaming goroutines have finished before closing the channel.
 	var asyncHTTPWG sync.WaitGroup
-	// tracks how many async streaming requests are currently running
+	// Atomic counter checked mid-loop to know if any stream is still in-flight (drives mock filter decisions).
 	var activeAsyncStreaming int32
 	// tracks if the mock filter is pinned for async streaming requests
 	var asyncMockFilterPinned bool
