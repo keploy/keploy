@@ -1086,8 +1086,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
+
+	// tracks how many async http requests are currently running
 	var asyncHTTPWG sync.WaitGroup
+	// tracks how many async streaming requests are currently running
 	var activeAsyncStreaming int32
+	// tracks if the mock filter is pinned for async streaming requests
 	var asyncMockFilterPinned bool
 	// recordedStreamStartTime acts as the "zero point" in recording time.
 	// It is the recorded timestamp of the very first request in a streaming sequence (e.g., SSE subscribe).
@@ -1129,7 +1133,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	for idx, testCase := range testCases {
-		if err := drainAsyncHTTPResults(asyncHTTPResults, false, processAsyncResult); err != nil {
+		err := drainAsyncHTTPResults(asyncHTTPResults, false, processAsyncResult)
+		if err != nil {
 			loopErr = err
 			break
 		}
@@ -1220,16 +1225,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			reqTime = testCase.GrpcReq.Timestamp
 			respTime = testCase.GrpcResp.Timestamp
 		}
+		// The agent uses a time window [reqTime, respTime] to decide which mocks to serve.
+		// Streaming tests run as goroutines — narrowing the window while they're in-flight
+		// starves them of their mocks. So we widen or pin the window while a stream is active.
 		skipMockFilterUpdate := false
 		if isAsyncStreamingHTTP {
+			// For the streaming test itself: use a window wide enough to cover its full duration.
 			reqTime, respTime = effectiveStreamMockWindow(testCase, r.config.Test.APITimeout)
 		} else if !useMappingBased && streamingReplayActive {
-			// During active async stream replay, keep a wide timestamp window to avoid
-			// narrowing agent-side mock set and starving in-flight stream dependencies.
+			// A stream is still running in the background. Open the window to [BaseTime, now]
+			// so any mock the stream still needs remains reachable. Intentionally wide because
+			// we don't know when the last stream event will arrive.
+			// (Mapping-based mode is unaffected — it matches mocks by ID, not timestamp.)
 			reqTime = models.BaseTime
 			respTime = time.Now().UTC()
 
-			// For non-mapping-based filtering, once an async streaming HTTP test case is encountered, we pin the mock filter parameters to avoid updating them with every subsequent test case, which could interfere with the streaming replay. The filter will be unpinned once the streaming replay is no longer active.
+			// If a wide window was already sent, pin it — skip resending the same value.
+			// Unpinned when activeAsyncStreaming drops to zero.
 			skipMockFilterUpdate = asyncMockFilterPinned
 		}
 
@@ -1251,6 +1263,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if isAsyncStreamingHTTP {
 			hasAsyncStreaming = true
+
+			// Start a single shared proxy error monitor for all async streams in this test set.
+			// Per-test monitors are not used for streaming — one shared monitor covers them all.
 			if !sharedProxyErrMonitorStarted {
 				sharedProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
 				sharedProxyErrCancel = cancel
@@ -1258,8 +1273,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				go r.monitorProxyErrors(sharedProxyErrCtx, testSetID, "")
 			}
 
+			// Deep copy testCase and expectedMocks before launching the goroutine.
+			// The loop variable is overwritten on the next iteration, so the goroutine
+			// must own its own copies to avoid a data race.
 			tcCopy := *testCase
-			expectedMocks := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
+			expectedMocksForTC := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
 
 			asyncHTTPWG.Add(1)
 			atomic.AddInt32(&activeAsyncStreaming, 1)
@@ -1267,12 +1285,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				defer asyncHTTPWG.Done()
 				defer atomic.AddInt32(&activeAsyncStreaming, -1)
 				r.runAsyncStreamingRequest(runTestSetCtx, tc, testSetID, started, expectedMocks, useMappingBased, isMappingEnabled, asyncHTTPResults)
-			}(tcCopy, expectedMocks, started)
+			}(tcCopy, expectedMocksForTC, started)
 
 			previousTestWasStreaming = true
-			continue
+			continue // don't block — move to the next test case immediately
 		}
 
+		// For sync test cases: start a per-test proxy error monitor.
+		// Once any async streaming has started, the shared monitor above covers
+		// proxy errors for the whole test set, so per-test monitors are skipped.
 		testCaseProxyErrCancel := func() {}
 		if !hasAsyncStreaming {
 			testCaseProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
@@ -1531,9 +1552,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		runTestSetCtxCancel()
 	}
 
+	// Wait for all async streaming test cases to complete
 	asyncHTTPWG.Wait()
+	// 	Close the channel to signal that no more results will be sent
 	close(asyncHTTPResults)
-	if err := drainAsyncHTTPResults(asyncHTTPResults, true, processAsyncResult); err != nil && loopErr == nil {
+	// Drain the channel to process any remaining results
+	err = drainAsyncHTTPResults(asyncHTTPResults, true, processAsyncResult)
+	if err != nil && loopErr == nil {
 		loopErr = err
 	}
 	if sharedProxyErrMonitorStarted {

@@ -151,6 +151,9 @@ func testCaseRequestTimestamp(tc *models.TestCase) time.Time {
 	}
 }
 
+// effectiveStreamMockWindow calculates the effective time window for streaming mocks.
+// It returns the start time (request timestamp) and end time (request timestamp + timeout).
+// The timeout is calculated using pkg.ComputeStreamingTimeoutSeconds which considers the test case's timeout configuration.
 func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
 	if tc == nil {
 		return time.Time{}, time.Time{}

@@ -48,12 +48,15 @@ func (r *Replayer) runAsyncStreamingRequest(
 	isMappingEnabled bool,
 	results chan<- asyncHTTPResult,
 ) {
+	// Pre-populate the result with what we already know before the request fires.
 	asyncRes := asyncHTTPResult{
 		testCase:      &tc,
 		started:       started,
 		expectedMocks: expectedMocks,
 	}
 
+	// Fire the HTTP request. For streaming test cases this blocks until the entire
+	// stream is consumed or the context is cancelled.
 	resp, err := HookImpl.SimulateRequest(ctx, &tc, testSetID)
 	if err != nil {
 		asyncRes.simErr = err
@@ -69,6 +72,7 @@ func (r *Replayer) runAsyncStreamingRequest(
 	}
 	asyncRes.httpResp = httpResp
 
+	// If instrumentation is enabled, collect which mocks the agent served during this test.
 	if r.instrument {
 		consumed, err := HookImpl.GetConsumedMocks(ctx)
 		if err != nil {
@@ -78,19 +82,26 @@ func (r *Replayer) runAsyncStreamingRequest(
 		}
 	}
 
+	// Extract just the mock names for easier comparison against expectedMocks.
 	mockNames := make([]string, 0, len(asyncRes.consumedMocks))
 	for _, m := range asyncRes.consumedMocks {
 		mockNames = append(mockNames, m.Name)
 	}
 	asyncRes.mockNames = mockNames
 
+	// Check if the consumed mocks match the expected mocks (mapping-based mode only).
+	// Mock mismatch means the app hit different dependencies than during recording.
 	hasExpectedMocks := len(expectedMocks) > 0
 	if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 		asyncRes.mockSetMismatch = !isMockSubset(mockNames, expectedMocks)
 	}
 
+	// If mock set is mismatched, suppress failure logs — the test will be marked obsolete,
+	// not failed, and the mismatch itself is already logged by processAsyncHTTPResult.
 	emitFailureLogs := !asyncRes.mockSetMismatch
 	asyncRes.testPass, asyncRes.testResult = r.CompareHTTPResp(&tc, httpResp, testSetID, emitFailureLogs)
+
+	// Push the completed result to the channel. The main loop picks it up via drainAsyncHTTPResults.
 	results <- asyncRes
 }
 
@@ -109,6 +120,7 @@ func (r *Replayer) processAsyncHTTPResult(
 		return fmt.Errorf("async streaming testcase is nil")
 	}
 
+	// Simulation failed (e.g. network error, timeout) — mark as failed and persist.
 	if asyncRes.simErr != nil {
 		utils.LogError(r.logger, asyncRes.simErr, "failed to simulate async streaming request. Check network connectivity, verify the server is responding correctly, or increase the API timeout if the stream is slow.")
 		incrementCounter(counters.failure)
@@ -117,6 +129,7 @@ func (r *Replayer) processAsyncHTTPResult(
 		return r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, testCaseResult)
 	}
 
+	// No response returned despite no error — treat as failure.
 	if asyncRes.httpResp == nil {
 		incrementCounter(counters.failure)
 		setTestSetStatus(counters.testSetStatus, models.TestSetStatusFailed)
@@ -124,16 +137,21 @@ func (r *Replayer) processAsyncHTTPResult(
 		return r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, testCaseResult)
 	}
 
+	// Merge the mocks consumed by this streaming test into the global consumed mocks map.
 	if r.instrument {
 		for _, m := range asyncRes.consumedMocks {
 			totalConsumedMocks[m.Name] = m
 		}
 	}
 
+	// Record which mocks this test case actually consumed for the final mock mapping report.
 	upsertActualTestMockMapping(actualTestMockMappings, asyncRes.testCase.Name, asyncRes.mockNames)
 
 	r.logger.Debug("Consumed Mocks", zap.Any("mocks", asyncRes.consumedMocks))
 
+	// Handle mock set mismatch:
+	// - If the test still passed despite the mismatch, log and ignore (the app behaved correctly).
+	// - If it failed, mark the test as obsolete — the recorded mocks are out of date.
 	if asyncRes.mockSetMismatch {
 		if asyncRes.testPass {
 			r.logger.Debug("mock mapping mismatch ignored because testcase passed",
@@ -157,6 +175,7 @@ func (r *Replayer) processAsyncHTTPResult(
 		r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(asyncRes.testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(asyncRes.testPass)))
 	}
 
+	// Determine final status: Passed, Obsolete (mock mismatch + failed), or Failed.
 	var testStatus models.TestStatus
 	if asyncRes.testPass {
 		testStatus = models.TestStatusPassed
@@ -201,6 +220,7 @@ func (r *Replayer) processAsyncHTTPResult(
 		TimeTaken:    time.Since(asyncRes.started).String(),
 	}
 
+	// Propagate failure risk info if the test failed with a known risk category.
 	if testStatus == models.TestStatusFailed && asyncRes.testResult.FailureInfo.Risk != models.None {
 		testCaseResult.FailureInfo.Risk = asyncRes.testResult.FailureInfo.Risk
 		testCaseResult.FailureInfo.Category = asyncRes.testResult.FailureInfo.Category
@@ -215,14 +235,15 @@ func (r *Replayer) processAsyncHTTPResult(
 }
 
 // drainAsyncHTTPResults reads and processes results from the async HTTP results channel.
-// If block is true, it waits until the channel is closed.
-// If block is false, it uses a non-blocking select to process any immediately available results.
+// If block is true, it waits until the channel is closed (used after the test loop ends).
+// If block is false, it only picks up results that are already available (used inside the loop).
 func drainAsyncHTTPResults(asyncHTTPResults <-chan asyncHTTPResult, block bool, handler func(asyncHTTPResult) error) error {
 	for {
 		if block {
+			// Blocking receive — waits for the next result or returns when channel is closed.
 			asyncRes, ok := <-asyncHTTPResults
 			if !ok {
-				return nil
+				return nil // channel closed and fully drained
 			}
 			if err := handler(asyncRes); err != nil {
 				return err
@@ -230,16 +251,17 @@ func drainAsyncHTTPResults(asyncHTTPResults <-chan asyncHTTPResult, block bool, 
 			continue
 		}
 
+		// Non-blocking receive — grab a result if available, return immediately otherwise.
 		select {
 		case asyncRes, ok := <-asyncHTTPResults:
 			if !ok {
-				return nil
+				return nil // channel closed
 			}
 			if err := handler(asyncRes); err != nil {
 				return err
 			}
 		default:
-			return nil
+			return nil // nothing ready right now
 		}
 	}
 }
@@ -251,6 +273,7 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 		return
 	}
 
+	// If the test case already has an entry, append the new mock names to it.
 	for i := range actualTestMockMappings.Tests {
 		if actualTestMockMappings.Tests[i].ID == testCaseID {
 			existing := actualTestMockMappings.Tests[i].Mocks.ToSlice()
@@ -259,6 +282,7 @@ func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCas
 		}
 	}
 
+	// No existing entry — create a new one.
 	actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
 		ID:    testCaseID,
 		Mocks: models.FromSlice(mockNames),
