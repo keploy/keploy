@@ -332,15 +332,16 @@ func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientCon
 		configPath := opts.ConfigPath
 		if configPath == "" {
 			configPath = "."
-		} else if !pUtil.IsDirectoryExist(configPath) {
-			configPath = filepath.Dir(configPath)
 		}
 
 		streamsDir := filepath.Join(configPath, "streams")
-		if err := os.MkdirAll(streamsDir, 0755); err != nil {
+		if err := os.MkdirAll(streamsDir, 0777); err != nil {
 			utils.LogError(h.Logger, err, "failed to create streams directory")
 			return err
 		}
+		// Restore ownership of dirs created by the agent (root) so the CLI process
+		// (running as the normal user) can write mocks/tests into the same test-set dir.
+		utils.RestoreFileOwnership(h.Logger, configPath, streamsDir)
 
 		streamPath = filepath.Join("streams", fmt.Sprintf("stream_%d_%d.ndjson", time.Now().UnixNano(), pUtil.GetNextID()))
 		fullPath := filepath.Join(configPath, streamPath)
@@ -353,6 +354,7 @@ func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientCon
 		defer f.Close()
 		file = f
 		encoder = json.NewEncoder(file)
+		utils.RestoreFileOwnership(h.Logger, fullPath)
 		h.Logger.Debug("Created stream file", zap.String("path", fullPath))
 	}
 
