@@ -12,9 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +45,8 @@ type ParserPriority struct {
 	ParserType integrations.IntegrationType
 }
 
+// AuxiliaryProxyHook is now defined in pkg/agent to avoid circular dependency
+
 type Proxy struct {
 	logger *zap.Logger
 
@@ -74,13 +73,6 @@ type Proxy struct {
 
 	Listener net.Listener
 
-	// IPC server for Rust proxy communication (exposed for ingress wiring)
-	IPCServer *IPCServer
-
-	// OnIPCServerReady is called after the IPC server is created, allowing
-	// external components (e.g., IngressProxyManager) to register callbacks.
-	OnIPCServerReady func(ipc *IPCServer)
-
 	//to store the nsswitch.conf file data
 	nsSwitchMutex     sync.Mutex
 	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
@@ -96,12 +88,7 @@ type Proxy struct {
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
 
-	// EnableRustProxy dictates whether the rust proxy forwarder should be used
-	EnableRustProxy bool
-
-	// RegisterProxyPID is a callback to register the Rust proxy's PID with eBPF
-	// so that its outgoing connections are excluded from interception.
-	RegisterProxyPID func(pid uint32) error
+	auxiliaryHook agent.AuxiliaryProxyHook
 }
 
 // tuneTCPConn applies low-latency TCP tuning to a connection:
@@ -151,14 +138,21 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config, registerP
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
-		EnableRustProxy:   opts.Agent.EnableRustProxy,
-	}
-
-	if len(registerPID) > 0 && registerPID[0] != nil {
-		proxy.RegisterProxyPID = registerPID[0]
 	}
 
 	return proxy
+}
+
+func (p *Proxy) GetSessions() *agent.Sessions {
+	return p.sessions
+}
+
+func (p *Proxy) GetDestInfo() agent.DestInfo {
+	return p.DestInfo
+}
+
+func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.Integrations {
+	return p.Integrations
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -172,6 +166,10 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
 func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
+}
+
+func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
+	p.auxiliaryHook = h
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -215,79 +213,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// start the proxy server
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
-		var err error
-		if p.EnableRustProxy {
-			p.logger.Info("Using Rust proxy for production capturing")
-			// 1. Start the IPC Server
-			ipcPath := filepath.Join(os.TempDir(), "keploy-rust-proxy.sock")
-			p.IPCServer = NewIPCServer(p.logger, p)
-			// Invoke ready callback so IngressProxyManager can register data handlers
-			if p.OnIPCServerReady != nil {
-				p.OnIPCServerReady(p.IPCServer)
-			}
-			go func() {
-				if err := p.IPCServer.Start(ctx); err != nil {
-					p.logger.Error("IPC Server failed", zap.Error(err))
-				}
-			}()
-
-			// 2. Spawn the Rust Proxy Binary
-			// Extract it from embedded filesystem if possible
-			rustProxyBinPath, _ := ExtractRustProxy(p.logger)
-
-			// Write CA cert to temp file so Rust can load it for TLS MITM
-			caCertPath := filepath.Join(os.TempDir(), "keploy-ca.crt")
-			if err := os.WriteFile(caCertPath, pTls.GetCACertPEM(), 0644); err != nil {
-				p.logger.Error("Failed to write CA cert for Rust proxy", zap.Error(err))
-			}
-
-			// The Rust proxy listens on p.Port + 1 and forwards to UDS handle.
-			rustProxyPort := p.Port + 1
-			ebpfMapPin := "/sys/fs/bpf/keploy_redirect_proxy_map"
-			cmd := exec.CommandContext(ctx, rustProxyBinPath,
-				fmt.Sprintf("--proxy-port=%d", rustProxyPort),
-				fmt.Sprintf("--uds-path=%s", ipcPath),
-				fmt.Sprintf("--ca-cert=%s", caCertPath),
-				fmt.Sprintf("--ebpf-map-pin=%s", ebpfMapPin),
-			)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Env = append(os.Environ(), "RUST_LOG=info")
-
-			p.logger.Info("Starting Rust Forwarder process", zap.Uint32("port", rustProxyPort))
-			if err := cmd.Start(); err != nil {
-				p.logger.Error("Failed to start Rust Proxy process", zap.Error(err))
-			} else {
-				// Register the Rust proxy's PID in eBPF so its outgoing
-				// connections (e.g. to MySQL) are NOT intercepted.
-				if p.RegisterProxyPID != nil && cmd.Process != nil {
-					rustPID := uint32(cmd.Process.Pid)
-					if regErr := p.RegisterProxyPID(rustPID); regErr != nil {
-						p.logger.Error("Failed to register Rust proxy PID in eBPF", zap.Uint32("pid", rustPID), zap.Error(regErr))
-					}
-				}
-				go func() {
-					if err := cmd.Wait(); err != nil {
-						if ctx.Err() == nil {
-							p.logger.Error("Rust Proxy process exited with error", zap.Error(err))
-						}
-					}
-				}()
-			}
-
-			// Go proxy listener is NOT started when Rust proxy is enabled.
-			// All TCP accept/forward is handled by Rust. IPC server handles parsing.
-			p.logger.Info("Go proxy listener skipped — Rust proxy handles all connections")
-			readyChan <- nil
-
-			// Block until context is cancelled so the goroutine stays alive
-			// for IPC/parsers to keep running.
-			<-ctx.Done()
-			err = nil
-		} else {
-			// Normal flow
-			err = p.start(ctx, readyChan)
-		}
+		err := p.start(ctx, readyChan)
 
 		readyChan <- err
 		if err != nil {
@@ -296,6 +222,14 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		}
 		return nil
 	})
+
+	if p.auxiliaryHook != nil {
+		err := p.auxiliaryHook.AfterStart(ctx, p)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to execute auxiliary proxy hook")
+			return err
+		}
+	}
 
 	//change the ip4 and ip6 if provided in the opts in case of docker environment
 	if len(opts.DNSIPv4Addr) != 0 {

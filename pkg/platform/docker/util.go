@@ -133,9 +133,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
-		if opts.EnableRustProxy {
-			alias += " --rust-proxy"
-		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 		}
@@ -200,9 +197,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
-			if opts.EnableRustProxy {
-				alias += " --rust-proxy"
-			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
@@ -250,9 +244,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
-		}
-		if opts.EnableRustProxy {
-			alias += " --rust-proxy"
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
@@ -317,9 +308,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
-			if opts.EnableRustProxy {
-				alias += " --rust-proxy"
-			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
 			}
@@ -368,9 +356,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
-		}
-		if opts.EnableRustProxy {
-			alias += " --rust-proxy"
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)

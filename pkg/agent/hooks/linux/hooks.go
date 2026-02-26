@@ -451,12 +451,8 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 
 func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {
 	port := opts.ProxyPort
-	// TODO: currently we are just checking if it is enabled in the config. We might need to add it to the Agent setup options
-	// However, we can use the environment variable as a fallback if not passed directly.
-	if cfg.EnableRustProxy || (h.conf != nil && h.conf.Agent.EnableRustProxy) {
-		// If rust proxy is enabled, we need to intercept traffic and send it to the rust proxy port instead
-		// The rust proxy will listen on proxyPort + 1
-		port = opts.ProxyPort + 1
+	if cfg.Port != 0 {
+		port = cfg.Port
 	}
 
 	if !opts.IsDocker {

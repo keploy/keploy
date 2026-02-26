@@ -38,14 +38,18 @@ type Agent struct {
 }
 
 func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker.Client, ip agent.IncomingProxy, config *config.Config) *Agent {
-	return &Agent{
+	instrumentation := &Agent{
 		logger:        logger,
 		Hooks:         hook,
 		Proxy:         proxy,
 		IncomingProxy: ip,
-		dockerClient:  client,
 		config:        config,
 	}
+	if ProxyHook != nil && proxy != nil {
+		proxy.SetAuxiliaryHook(ProxyHook)
+	}
+	RegisterIncomingProxy(ip)
+	return instrumentation
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
@@ -65,11 +69,10 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 	}
 
 	err := a.Hook(ctx, models.HookOptions{
-		Mode:            a.config.Agent.Mode,
-		IsDocker:        a.config.Agent.IsDocker,
-		EnableTesting:   a.config.Agent.EnableTesting,
-		Rules:           rules,
-		EnableRustProxy: a.config.Agent.EnableRustProxy,
+		Mode:          a.config.Agent.Mode,
+		IsDocker:      a.config.Agent.IsDocker,
+		EnableTesting: a.config.Agent.EnableTesting,
+		Rules:         rules,
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -176,13 +179,19 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	})
 
 	// load hooks if the mode changes ..
-	err := a.Hooks.Load(hookCtx, agent.HookCfg{
-		Pid:             0,
-		IsDocker:        opts.IsDocker,
-		Mode:            opts.Mode,
-		Rules:           opts.Rules,
-		EnableRustProxy: opts.EnableRustProxy,
-	}, a.config.Agent)
+	hookCfg := agent.HookCfg{
+		Pid:      0,
+		IsDocker: opts.IsDocker,
+		Mode:     opts.Mode,
+		Rules:    opts.Rules,
+	}
+	// When the Rust proxy is enabled, the Go proxy port is set to 0 (random).
+	// Override the eBPF proxy port so that outgoing connections are redirected
+	// to the Rust proxy (which handles egress) instead of port 0.
+	if EbpfProxyPortOverride != 0 {
+		hookCfg.Port = EbpfProxyPortOverride
+	}
+	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
@@ -212,6 +221,10 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to start proxy")
 		return hookErr
+	}
+
+	if ProxyHook != nil {
+		a.Proxy.SetAuxiliaryHook(ProxyHook)
 	}
 
 	a.proxyStarted = true

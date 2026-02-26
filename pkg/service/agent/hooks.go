@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -70,4 +71,21 @@ var SetupAgentHook SetupHooks = &SetupHook{}
 
 func RegisterSetupHook(h SetupHooks) {
 	SetupAgentHook = h
+}
+
+var ProxyHook agent.AuxiliaryProxyHook
+
+func RegisterProxyHook(h agent.AuxiliaryProxyHook) {
+	ProxyHook = h
+}
+
+// EbpfProxyPortOverride is set by the enterprise Rust proxy startup to tell
+// eBPF to redirect outgoing connections to the Rust proxy port instead of the
+// Go proxy port. When zero (default), the normal config ProxyPort is used.
+var EbpfProxyPortOverride uint32
+
+var ActiveIncomingProxy agent.IncomingProxy
+
+func RegisterIncomingProxy(ip agent.IncomingProxy) {
+	ActiveIncomingProxy = ip
 }

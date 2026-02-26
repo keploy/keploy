@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/hooks"
@@ -32,21 +31,6 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	h := hooks.New(logger, cfg)
 	p := proxy.New(logger, h, cfg, h.RegisterProxyPID)
 	ip := incoming.New(logger, h, cfg)
-
-	// Wire ingress proxy to Rust proxy IPC (lazy — IPC server starts later in Record())
-	if cfg.Agent.EnableRustProxy {
-		ip.SetSendIngressCmd(func(origPort, newPort uint16) error {
-			if p.IPCServer == nil {
-				return fmt.Errorf("IPC server not started yet")
-			}
-			return p.IPCServer.SendStartIngress(origPort, newPort)
-		})
-
-		// Register ingress data/close handlers so the IPC server can forward teed data
-		p.OnIPCServerReady = func(ipc *proxy.IPCServer) {
-			ipc.SetIngressHandlers(ip.HandleIngressData, ip.HandleIngressClose)
-		}
-	}
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
 

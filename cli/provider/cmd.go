@@ -250,7 +250,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 		cmd.Flags().Bool("sync", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
-		cmd.Flags().Bool("rust-proxy", c.cfg.Agent.EnableRustProxy, "Enable the Rust proxy forwarder for recording")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint16("incoming-proxy-port", c.cfg.IncomingProxyPort, "Port used by the Keploy proxy server to intercept the incoming dependency calls")
@@ -311,7 +310,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
 
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
-		cmd.Flags().Bool("rust-proxy", c.cfg.Agent.EnableRustProxy, "Enable the Rust proxy forwarder")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
 
@@ -428,7 +426,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
-		"enableRustProxy":       "rust-proxy",
 		"protoFile":             "proto-file",
 		"protoDir":              "proto-dir",
 		"protoInclude":          "proto-include",
@@ -1186,14 +1183,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
-		rustProxy, err := cmd.Flags().GetBool("rust-proxy")
-		if err != nil {
-			errMsg := "failed to read the rust-proxy flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Agent.EnableRustProxy = rustProxy
-
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
@@ -1254,13 +1243,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.EnableTesting = enableTesting
-
-		rustProxy, err := cmd.Flags().GetBool("rust-proxy")
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to get rust-proxy flag")
-			return nil
-		}
-		c.cfg.Agent.EnableRustProxy = rustProxy
 
 		port, err := cmd.Flags().GetUint32("port")
 		if err != nil {
