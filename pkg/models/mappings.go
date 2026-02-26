@@ -12,8 +12,9 @@ const MappingKind = "TestMocksMapping"
 
 // MockEntry represents a single mock entry with its name and kind.
 type MockEntry struct {
-	Name string `json:"name" yaml:"name"`
-	Kind string `json:"kind" yaml:"kind"`
+	Name      string `json:"name" yaml:"name"`
+	Kind      string `json:"kind" yaml:"kind"`
+	Timestamp int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty"`
 }
 
 // Mapping represents the top-level structure of a mappings.yaml file.

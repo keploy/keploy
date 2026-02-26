@@ -311,7 +311,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				insertMockErrChan <- err
 			} else {
 				if tempID != "" && mock.Name != "" {
-					correlationMap.Store(tempID, models.MockEntry{Name: mock.Name, Kind: string(mock.GetKind())})
+					correlationMap.Store(tempID, models.MockEntry{Name: mock.Name, Kind: string(mock.GetKind()), Timestamp: mock.Spec.ReqTimestampMock.Unix()})
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())

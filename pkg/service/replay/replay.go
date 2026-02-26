@@ -1288,8 +1288,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			var mockEntries []models.MockEntry
 			for _, m := range consumedMocks {
 				mockEntries = append(mockEntries, models.MockEntry{
-					Name: m.Name,
-					Kind: string(m.Kind),
+					Name:      m.Name,
+					Kind:      string(m.Kind),
+					Timestamp: m.SortOrder,
 				})
 			}
 
