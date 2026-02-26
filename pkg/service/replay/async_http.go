@@ -245,7 +245,8 @@ func drainAsyncHTTPResults(asyncHTTPResults <-chan asyncHTTPResult, block bool, 
 			if !ok {
 				return nil // channel closed and fully drained
 			}
-			if err := handler(asyncRes); err != nil {
+			err := handler(asyncRes)
+			if err != nil {
 				return err
 			}
 			continue
@@ -257,7 +258,8 @@ func drainAsyncHTTPResults(asyncHTTPResults <-chan asyncHTTPResult, block bool, 
 			if !ok {
 				return nil // channel closed
 			}
-			if err := handler(asyncRes); err != nil {
+			err := handler(asyncRes)
+			if err != nil {
 				return err
 			}
 		default:
