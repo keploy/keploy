@@ -113,7 +113,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
-	forceBodyCompareForStream := tc != nil && len(tc.HTTPResp.StreamBody) > 0
 
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
 	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
@@ -137,7 +136,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
 		// Skip body comparison for non-JSON responses unless compareAll is enabled
-		if !compareAll && bodyType != models.JSON && !forceBodyCompareForStream {
+		if !compareAll && bodyType != models.JSON {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
 		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
