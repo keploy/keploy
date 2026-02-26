@@ -82,10 +82,13 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				return a
 			}(),
 		}
+		httpSchema.Metadata = make(map[string]string)
 		if tc.Description != "" {
-			httpSchema.Metadata = map[string]string{
-				"description": tc.Description,
-			}
+			httpSchema.Metadata["description"] = tc.Description
+		}
+		// Merge client metadata (FQDN, IP, etc.) into the schema metadata
+		for k, v := range tc.Metadata {
+			httpSchema.Metadata[k] = v
 		}
 		err = doc.Spec.Encode(httpSchema)
 		if err != nil {
@@ -99,6 +102,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 		// Create a YAML node for the gRPC schema
 		grpcSpec := models.GrpcSpec{
+			Metadata: tc.Metadata,
 			GrpcReq:  tc.GrpcReq,
 			GrpcResp: tc.GrpcResp,
 			Created:  tc.Created,
