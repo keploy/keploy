@@ -1114,12 +1114,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// it's only started once and can be cancelled when the loop finishes.
 	sharedProxyErrCancel := func() {}
 	sharedProxyErrMonitorStarted := false
+	// asyncCounters bundles pointers to the test loop's shared counters so that
+	// processAsyncHTTPResult can update them without needing to return new values.
 	asyncCounters := asyncResultCounters{
 		success:       &success,
 		failure:       &failure,
 		obsolete:      &obsolete,
 		testSetStatus: &testSetStatus,
 	}
+
+	// processAsyncResult is a pre-bound closure around processAsyncHTTPResult.
+	// It captures all the loop-level context (ctx, IDs, mocks, counters) so that
+	// drainAsyncHTTPResults only needs to pass the result itself, keeping call sites clean.
 	processAsyncResult := func(asyncRes asyncHTTPResult) error {
 		return r.processAsyncHTTPResult(
 			runTestSetCtx,
