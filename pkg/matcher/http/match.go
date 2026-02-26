@@ -135,10 +135,12 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
-		// Skip body comparison for non-JSON responses unless compareAll is enabled
-		if !compareAll && bodyType != models.JSON {
+		// Skip body comparison for non-JSON responses unless compareAll is enabled,
+		// OR unless it's a streaming test case (streaming bodies must always be compared).
+		isStreaming := pkg.IsHTTPStreamingTestCase(tc)
+		if !compareAll && bodyType != models.JSON && !isStreaming {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
-			// Mark body as passing when compareAll is false and body is not JSON
+			// Mark body as passing when compareAll is false, body is not JSON, and it's not a stream
 		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
 		}

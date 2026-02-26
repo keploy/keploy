@@ -441,9 +441,9 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 //
 // How it works — time-mapping via two reference points:
 //
-//   - firstRecordedTS: the recorded timestamp of the first test case in a
+//   - recordedStreamStartTime: the recorded timestamp of the first test case in a
 //     timing-sensitive sequence (the origin in "recording time").
-//   - firstReplayedAt: the real wall-clock time when that first test case was
+//   - replayedStreamStartTime: the real wall-clock time when that first test case was
 //     actually replayed (the origin in "replay time").
 //
 // For each subsequent test case, we compute how far its recorded timestamp is
@@ -455,22 +455,22 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 //	test-2 recorded at T=10:00:02  →  should replay at 14:30:00 + 2s = 14:30:02
 //
 // Parameters:
-//   - preserveTiming: if false, resets the anchors so normal (non-streaming)
+//   - preserveTiming: if false, resets the reference points so normal (non-streaming)
 //     tests run back-to-back without artificial delays.
-//   - firstRecordedTS: pointer to the recorded timestamp anchor (mutated on first call).
-//   - firstReplayedAt: pointer to the wall-clock anchor (mutated on first call).
+//   - recordedStreamStartTime: pointer to the recorded timestamp reference (mutated on first call).
+//   - replayedStreamStartTime: pointer to the wall-clock reference (mutated on first call).
 func (r *Replayer) preserveRecordedRequestTiming(
 	ctx context.Context,
 	testCase *models.TestCase,
 	preserveTiming bool,
-	firstRecordedTS *time.Time,
-	firstReplayedAt *time.Time,
+	recordedStreamStartTime *time.Time,
+	replayedStreamStartTime *time.Time,
 ) error {
 	if !preserveTiming {
-		// Not in a streaming-sensitive path — reset the anchors so synchronous
+		// Not in a streaming-sensitive path — reset the reference points so synchronous
 		// tests don't inherit recorded wall-clock gaps from a prior sequence.
-		*firstRecordedTS = time.Time{}
-		*firstReplayedAt = time.Time{}
+		*recordedStreamStartTime = time.Time{}
+		*replayedStreamStartTime = time.Time{}
 		return nil
 	}
 
@@ -479,17 +479,17 @@ func (r *Replayer) preserveRecordedRequestTiming(
 		return nil
 	}
 
-	// First streaming test case: establish the time-mapping anchors.
-	if firstRecordedTS.IsZero() {
-		*firstRecordedTS = currentRecordedTS
-		*firstReplayedAt = time.Now()
+	// First streaming test case: establish the time-mapping reference points.
+	if recordedStreamStartTime.IsZero() {
+		*recordedStreamStartTime = currentRecordedTS
+		*replayedStreamStartTime = time.Now()
 		return nil
 	}
 
 	// Compute when this test case should fire in real time:
-	// wall-clock target = firstReplayedAt + (currentRecordedTS - firstRecordedTS)
-	offsetSinceFirst := currentRecordedTS.Sub(*firstRecordedTS)
-	targetReplayTime := firstReplayedAt.Add(offsetSinceFirst)
+	// wall-clock target = replayedStreamStartTime + (currentRecordedTS - recordedStreamStartTime)
+	offsetSinceFirst := currentRecordedTS.Sub(*recordedStreamStartTime)
+	targetReplayTime := replayedStreamStartTime.Add(offsetSinceFirst)
 	delay := time.Until(targetReplayTime)
 
 	if delay <= 0 {

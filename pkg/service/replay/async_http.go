@@ -11,26 +11,33 @@ import (
 	"go.uber.org/zap"
 )
 
+// asyncHTTPResult holds the outcome of an asynchronous HTTP streaming test replay.
+// Since streaming tests (like SSE) run non-blocking in the background, their
+// results are captured in this struct and processed later via a channel.
 type asyncHTTPResult struct {
-	testCase        *models.TestCase
-	started         time.Time
-	httpResp        *models.HTTPResp
-	testResult      *models.Result
-	testPass        bool
-	simErr          error
-	mockNames       []string
-	expectedMocks   []string
-	mockSetMismatch bool
-	consumedMocks   []models.MockState
+	testCase        *models.TestCase   // The test case that was simulated
+	started         time.Time          // The wall-clock time the simulation started
+	httpResp        *models.HTTPResp   // The actual recorded response from the application
+	testResult      *models.Result     // The result of comparing the expected vs actual response
+	testPass        bool               // True if the actual response matched the expected response
+	simErr          error              // Any error that occurred during the request simulation
+	mockNames       []string           // The names of the mocks that were consumed during the test
+	expectedMocks   []string           // The mocks that were expected to be consumed
+	mockSetMismatch bool               // True if the consumed mocks did not match the expected mocks
+	consumedMocks   []models.MockState // Detailed state of the consumed mocks
 }
 
+// asyncResultCounters holds pointers to the overall test loop's state counters
+// so that the async result processor can update the global success/failure totals.
 type asyncResultCounters struct {
-	success       *int
-	failure       *int
-	obsolete      *int
-	testSetStatus *models.TestSetStatus
+	success       *int                  // Pointer to the global test success counter
+	failure       *int                  // Pointer to the global test failure counter
+	obsolete      *int                  // Pointer to the global obsolete test counter
+	testSetStatus *models.TestSetStatus // Pointer to the overall test set status
 }
 
+// runAsyncStreamingRequest executes an asynchronous streaming HTTP request (e.g. Server-Sent Events).
+// It simulates the request non-blocking and pushes the final result to the results channel.
 func (r *Replayer) runAsyncStreamingRequest(
 	ctx context.Context,
 	tc models.TestCase,
@@ -87,6 +94,8 @@ func (r *Replayer) runAsyncStreamingRequest(
 	results <- asyncRes
 }
 
+// processAsyncHTTPResult evaluates the outcome of a completed asynchronous request,
+// updates global counters, and persists the test result to the database.
 func (r *Replayer) processAsyncHTTPResult(
 	ctx context.Context,
 	testRunID string,
@@ -205,6 +214,9 @@ func (r *Replayer) processAsyncHTTPResult(
 	return err
 }
 
+// drainAsyncHTTPResults reads and processes results from the async HTTP results channel.
+// If block is true, it waits until the channel is closed.
+// If block is false, it uses a non-blocking select to process any immediately available results.
 func drainAsyncHTTPResults(asyncHTTPResults <-chan asyncHTTPResult, block bool, handler func(asyncHTTPResult) error) error {
 	for {
 		if block {
@@ -232,6 +244,8 @@ func drainAsyncHTTPResults(asyncHTTPResults <-chan asyncHTTPResult, block bool, 
 	}
 }
 
+// upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
+// consumed during the replay of a specific test case.
 func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, mockNames []string) {
 	if actualTestMockMappings == nil || testCaseID == "" || len(mockNames) == 0 {
 		return

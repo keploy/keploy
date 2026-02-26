@@ -1089,8 +1089,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var asyncHTTPWG sync.WaitGroup
 	var activeAsyncStreaming int32
 	var asyncMockFilterPinned bool
-	var firstRecordedTS time.Time // recorded timestamp of the first test in a streaming sequence
-	var firstReplayedAt time.Time // wall-clock time when that first test was actually replayed
+	// recordedStreamStartTime acts as the "zero point" in recording time.
+	// It is the recorded timestamp of the very first request in a streaming sequence (e.g., SSE subscribe).
+	var recordedStreamStartTime time.Time
+
+	// replayedStreamStartTime acts as the "zero point" in real replay time.
+	// It is the actual wall-clock time when that first streaming request was fired during replay.
+	// The delay for subsequent streaming-related requests is calculated relative to these two reference points.
+	var replayedStreamStartTime time.Time
 	hasAsyncStreaming := false
 
 	// Tracks whether the previous test case in the loop was an async streaming
@@ -1098,6 +1104,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// that triggers SSE events) needs to preserve recorded timing so the
 	// subscriber has time to connect before the publisher fires.
 	previousTestWasStreaming := false
+	// sharedProxyErrCancel and sharedProxyErrMonitorStarted coordinate the proxy
+	// error monitoring for asynchronous streaming requests. A single monitor goroutine
+	// is started for all async streams in a test set, and these variables ensure
+	// it's only started once and can be cancelled when the loop finishes.
 	sharedProxyErrCancel := func() {}
 	sharedProxyErrMonitorStarted := false
 	asyncCounters := asyncResultCounters{
@@ -1186,7 +1196,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// a streaming request is still in-flight in the background.
 		needsTimingPreservation := isCurrentTestStreaming || previousTestWasStreaming
 
-		err = r.preserveRecordedRequestTiming(runTestSetCtx, testCase, needsTimingPreservation, &firstRecordedTS, &firstReplayedAt)
+		err = r.preserveRecordedRequestTiming(runTestSetCtx, testCase, needsTimingPreservation, &recordedStreamStartTime, &replayedStreamStartTime)
 		if err != nil {
 			loopErr = err
 			break
