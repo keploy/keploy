@@ -12,8 +12,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,6 +191,13 @@ func setupNative(ctx context.Context, logger *zap.Logger) error {
 		return err
 	}
 
+	// Install CA in NSS database for Chromium/Firefox browsers
+	if finalCAPath != "" {
+		if err := installNSSCA(ctx, logger, finalCAPath); err != nil {
+			logger.Warn("Failed to install CA in NSS database (Chromium/Firefox may not trust it)", zap.Error(err))
+		}
+	}
+
 	// Set Env Vars pointing to the installed cert
 	if finalCAPath != "" {
 		return SetEnvForPath(logger, finalCAPath)
@@ -348,6 +357,162 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		logger.Debug("Java is not installed on the system")
 	}
 	return nil
+}
+
+// installNSSCA installs the CA certificate into NSS databases used by Chromium/Firefox on Linux.
+// Chromium on Linux does NOT use the system CA store (/usr/local/share/ca-certificates/ etc.).
+// Instead, it uses the NSS (Network Security Services) database at ~/.pki/nssdb/.
+// This function ensures Keploy's CA is trusted by Chromium-based browsers (e.g., Playwright, Puppeteer).
+func installNSSCA(ctx context.Context, logger *zap.Logger, certPath string) error {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return nil
+	}
+
+	// Check if certutil (NSS tool) is available; auto-install if missing
+	if !commandExists("certutil") {
+		logger.Info("certutil not found, attempting to install libnss3-tools automatically...")
+		if err := installNSSTools(ctx, logger); err != nil {
+			logger.Warn("Failed to auto-install libnss3-tools. Chromium/Firefox may not trust Keploy's CA.",
+				zap.Error(err))
+			return nil
+		}
+		// Verify certutil is now available after installation
+		if !commandExists("certutil") {
+			logger.Warn("certutil still not found after installing libnss3-tools. " +
+				"Chromium/Firefox may not trust Keploy's CA.")
+			return nil
+		}
+		logger.Info("Successfully installed libnss3-tools (certutil)")
+	}
+
+	// When running with sudo, we need the original user's home directory, not root's.
+	// The agent process runs with sudo, so $HOME is /root, but Chromium runs as the original user.
+	homeDir := os.Getenv("HOME")
+	sudoUser := os.Getenv("SUDO_USER")
+
+	if sudoUser != "" {
+		u, err := user.Lookup(sudoUser)
+		if err == nil {
+			homeDir = u.HomeDir
+		} else {
+			logger.Debug("Could not look up SUDO_USER home, falling back to HOME", zap.String("SUDO_USER", sudoUser), zap.Error(err))
+		}
+	}
+
+	if homeDir == "" {
+		logger.Debug("HOME directory not found, skipping NSS CA installation")
+		return nil
+	}
+
+	// Chromium uses ~/.pki/nssdb/ ; some Firefox profiles use their own NSS DBs
+	nssDBDirs := []string{filepath.Join(homeDir, ".pki", "nssdb")}
+
+	// Also search for Firefox NSS databases in ~/.mozilla/firefox/
+	mozDir := filepath.Join(homeDir, ".mozilla", "firefox")
+	if util.IsDirectoryExist(mozDir) {
+		entries, err := os.ReadDir(mozDir)
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() && strings.HasSuffix(e.Name(), ".default") || strings.Contains(e.Name(), ".default-") {
+					nssDBDirs = append(nssDBDirs, filepath.Join(mozDir, e.Name()))
+				}
+			}
+		}
+	}
+
+	const alias = "Keploy CA"
+
+	for _, dbDir := range nssDBDirs {
+		dbPath := "sql:" + dbDir
+
+		// Create the NSS database directory if it doesn't exist
+		if !util.IsDirectoryExist(dbDir) {
+			if err := os.MkdirAll(dbDir, 0755); err != nil {
+				logger.Debug("Failed to create NSS db directory, skipping", zap.String("path", dbDir), zap.Error(err))
+				continue
+			}
+			// Initialize a new NSS database
+			cmd := exec.CommandContext(ctx, "certutil", "-d", dbPath, "-N", "--empty-password")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				logger.Debug("Failed to initialize NSS db, skipping", zap.String("path", dbDir), zap.String("output", string(output)), zap.Error(err))
+				continue
+			}
+		}
+
+		// Check if the cert is already installed
+		cmd := exec.CommandContext(ctx, "certutil", "-d", dbPath, "-L", "-n", alias)
+		if err := cmd.Run(); err == nil {
+			logger.Debug("Keploy CA already installed in NSS database", zap.String("nssdb", dbDir))
+			continue
+		}
+
+		// Install the certificate as a trusted CA
+		cmd = exec.CommandContext(ctx, "certutil", "-d", dbPath, "-A", "-t", "C,,", "-n", alias, "-i", certPath)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			logger.Warn("Failed to install Keploy CA in NSS database", zap.String("nssdb", dbDir), zap.String("output", string(output)), zap.Error(err))
+			continue
+		}
+
+		logger.Debug("Successfully installed Keploy CA in NSS database", zap.String("nssdb", dbDir))
+	}
+
+	// Fix ownership if running as sudo so the original user can access the NSS DB
+	if sudoUser != "" {
+		pki := filepath.Join(homeDir, ".pki")
+		if util.IsDirectoryExist(pki) {
+			cmd := exec.CommandContext(ctx, "chown", "-R", sudoUser, pki)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				logger.Debug("Failed to fix NSS db ownership", zap.String("output", string(output)), zap.Error(err))
+			}
+		}
+	}
+
+	return nil
+}
+
+// installNSSTools attempts to install the libnss3-tools (or nss-tools) package
+// which provides the certutil command needed for NSS database management.
+// Since Keploy runs with sudo (for eBPF), we have the permissions to install packages.
+func installNSSTools(ctx context.Context, logger *zap.Logger) error {
+	// Try apt-get first (Debian/Ubuntu)
+	if commandExists("apt-get") {
+		logger.Debug("Detected apt-get, installing libnss3-tools...")
+		cmd := exec.CommandContext(ctx, "apt-get", "install", "-y", "libnss3-tools")
+		cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			logger.Debug("apt-get install libnss3-tools failed", zap.String("output", string(output)), zap.Error(err))
+			return fmt.Errorf("apt-get install libnss3-tools failed: %w", err)
+		}
+		return nil
+	}
+
+	// Try yum (RHEL/CentOS/Fedora)
+	if commandExists("yum") {
+		logger.Debug("Detected yum, installing nss-tools...")
+		cmd := exec.CommandContext(ctx, "yum", "install", "-y", "nss-tools")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			logger.Debug("yum install nss-tools failed", zap.String("output", string(output)), zap.Error(err))
+			return fmt.Errorf("yum install nss-tools failed: %w", err)
+		}
+		return nil
+	}
+
+	// Try dnf (modern Fedora)
+	if commandExists("dnf") {
+		logger.Debug("Detected dnf, installing nss-tools...")
+		cmd := exec.CommandContext(ctx, "dnf", "install", "-y", "nss-tools")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			logger.Debug("dnf install nss-tools failed", zap.String("output", string(output)), zap.Error(err))
+			return fmt.Errorf("dnf install nss-tools failed: %w", err)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("no supported package manager found (apt-get, yum, or dnf)")
 }
 
 // installWindowsCA installs the CA certificate in Windows certificate store using certutil
