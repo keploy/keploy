@@ -27,10 +27,6 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
-func shouldCompareStreamingBody(tc *models.TestCase, actualResponse *models.HTTPResp) bool {
-	return tc != nil && len(tc.HTTPResp.StreamBody) > 0
-}
-
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
@@ -117,7 +113,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
-	forceBodyCompareForStream := shouldCompareStreamingBody(tc, actualResponse)
+	forceBodyCompareForStream := tc != nil && len(tc.HTTPResp.StreamBody) > 0
 
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
 	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
