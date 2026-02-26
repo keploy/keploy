@@ -1092,6 +1092,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var firstRecordedTS time.Time // recorded timestamp of the first test in a streaming sequence
 	var firstReplayedAt time.Time // wall-clock time when that first test was actually replayed
 	hasAsyncStreaming := false
+
+	// Tracks whether the previous test case in the loop was an async streaming
+	// test (e.g. SSE subscribe). When true, the *next* test case (e.g. a publish
+	// that triggers SSE events) needs to preserve recorded timing so the
+	// subscriber has time to connect before the publisher fires.
+	previousTestWasStreaming := false
 	sharedProxyErrCancel := func() {}
 	sharedProxyErrMonitorStarted := false
 	asyncCounters := asyncResultCounters{
@@ -1170,14 +1176,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		streamingReplayActive := atomic.LoadInt32(&activeAsyncStreaming) > 0
+		isCurrentTestStreaming := testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
 
-		// Determine whether to preserve inter-request timing based on streaming replay status and test case characteristics.
-		preserveInterRequestTiming := streamingReplayActive
-		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
-			preserveInterRequestTiming = true
-		}
+		// Only preserve inter-request timing for:
+		//   1. The streaming test case itself (e.g. SSE subscribe).
+		//   2. The test case immediately after a streaming test (e.g. the publish
+		//      that triggers events — the subscriber needs time to connect first).
+		// All other sync tests run back-to-back without artificial delays, even if
+		// a streaming request is still in-flight in the background.
+		needsTimingPreservation := isCurrentTestStreaming || previousTestWasStreaming
 
-		err = r.preserveRecordedRequestTiming(runTestSetCtx, testCase, preserveInterRequestTiming, &firstRecordedTS, &firstReplayedAt)
+		err = r.preserveRecordedRequestTiming(runTestSetCtx, testCase, needsTimingPreservation, &firstRecordedTS, &firstReplayedAt)
 		if err != nil {
 			loopErr = err
 			break
@@ -1187,7 +1196,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			asyncMockFilterPinned = false
 		}
 
-		isAsyncStreamingHTTP := testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
+		isAsyncStreamingHTTP := isCurrentTestStreaming
 		var testStatus models.TestStatus
 		var testResult *models.Result
 		var testPass bool
@@ -1250,6 +1259,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				r.runAsyncStreamingRequest(runTestSetCtx, tc, testSetID, started, expectedMocks, useMappingBased, isMappingEnabled, asyncHTTPResults)
 			}(tcCopy, expectedMocks, started)
 
+			previousTestWasStreaming = true
 			continue
 		}
 
@@ -1496,6 +1506,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, nil, "test result is nil")
 			break
 		}
+
+		// This test case was not a streaming test, so clear the flag.
+		previousTestWasStreaming = false
 
 		// We need to sleep for a second to avoid mismatching of mocks during keploy testing via test-bench
 		if r.config.EnableTesting {
