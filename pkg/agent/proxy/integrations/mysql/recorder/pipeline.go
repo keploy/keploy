@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -59,44 +60,149 @@ type peekReader interface {
 	Peek(n int) ([]byte, error)
 }
 
-// ── Record pipeline ─────────────────────────────────────────────────────
+// ── Decode concurrency gate ─────────────────────────────────────────────
+//
+// Global semaphore (cap=1): at most ONE goroutine system-wide does decode
+// work at any instant.  The goroutine holds the sem during the 15ms sleep,
+// so all other decode goroutines are fully parked.  This keeps Go's CPU
+// usage at ~6% of one core (1ms decode + 15ms sleep = 16ms per cycle),
+// preventing OS-level cache/scheduler contention with Rust's tokio workers.
+//
+// Throughput: 1000ms / 16ms ≈ 62 decodes/sec.
+// Test load:  ~27 decodes/sec.  Headroom: ~2.3x.
+var decodeSem = make(chan struct{}, 1)
 
-// runRecordPipeline reads from the two TeeForwardConn ring buffers,
-// frames MySQL packets using slab allocation, and sends them for async
-// decode.
+const decodeThrottleDelay = 7 * time.Millisecond
+
+// MocksProduced is an atomic counter tracking how many mocks have been
+// successfully sent to the mocks channel across all connections.
+var MocksProduced atomic.Int64
+
+// RawsCaptured is an atomic counter tracking how many raw request/response
+// pairs have been captured (before decoding) across all connections.
+var RawsCaptured atomic.Int64
+
+// safeSendMock sends a mock to the channel, recovering from panics
+// caused by sending on a closed channel during shutdown.
+// Returns true if the send succeeded.
+func safeSendMock(ch chan<- *models.Mock, m *models.Mock) (sent bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			sent = false
+		}
+	}()
+	ch <- m
+	return true
+}
+
+// ── Record pipeline ─────────────────────────────────────────────────────
 //
-// ARCHITECTURE: Two goroutines per connection:
-//   - Ring-drain goroutine (this function): reads from ring buffers,
-//     frames MySQL packets using slab allocation, sends RawMockEntry
-//     to a buffered channel. This goroutine is I/O-only — it parks
-//     immediately when no data is available, freeing its Go P for
-//     forwarding goroutines.
-//   - Decode goroutine: receives RawMockEntry, does CPU-intensive
-//     struct allocation and string conversion, sends models.Mock to
-//     the output channel. Runs opportunistically without blocking
-//     ring drains or forwarding.
+// Two-stage design:
+//   Stage 1 (capture): reads packets at full speed, builds RawMockEntry,
+//           pushes into a buffered channel. Never throttled.
+//   Stage 2 (decode):  drains the buffered channel, acquires the global
+//           decodeSem, decodes, throttles, sends to mocks channel.
 //
-// This split reduces Go scheduler contention at P99: the 66 decode
-// goroutines no longer hold P's while doing CPU work inline with
-// ring reads, so the 132 forwarding goroutines get faster scheduling.
+// This ensures all raw data is captured even when decode is throttled.
+
+const rawEntryChanCap = 10000 // buffered channel between capture and decode
+
 func runRecordPipeline(
 	ctx context.Context,
 	logger *zap.Logger,
-	clientSrc peekReader, // *TeeForwardConn — client queries
-	serverSrc peekReader, // *TeeForwardConn — server responses
+	clientSrc peekReader,
+	serverSrc peekReader,
 	mocks chan<- *models.Mock,
 	opts models.OutgoingOptions,
 	hs handshakeState,
 ) {
+	var mocksWritten int64
+	var rawsCapturedLocal int64
+
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("recovered from panic in runRecordPipeline", zap.Any("panic", r))
 		}
+		logger.Info("record pipeline exiting",
+			zap.Int64("raws_captured", rawsCapturedLocal),
+			zap.Int64("mocks_written", mocksWritten),
+			zap.Int64("mocks_pending_decode", rawsCapturedLocal-mocksWritten),
+			zap.Int64("total_raws_captured_globally", RawsCaptured.Load()),
+			zap.Int64("total_mocks_produced_globally", MocksProduced.Load()))
 	}()
 
-	slab := newPktSlab()
+	connID := ""
+	if v := ctx.Value(models.ClientConnectionIDKey); v != nil {
+		connID = v.(string)
+	}
 
-	// Per-connection decode context — owned exclusively by the decode goroutine.
+	// Buffered channel between capture and decode stages.
+	rawCh := make(chan RawMockEntry, rawEntryChanCap)
+
+	// ── Stage 1: Capture goroutine (runs at full speed) ──
+	go func() {
+		defer close(rawCh)
+
+		slab := newPktSlab()
+
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+
+			cmdPacket, err := readMySQLPacketSlab(clientSrc, slab)
+			if err != nil {
+				if err != io.EOF && ctx.Err() == nil {
+					logger.Debug("record pipeline: client read error", zap.Error(err))
+				}
+				return
+			}
+
+			reqTimestamp := time.Now()
+
+			if len(cmdPacket) < 5 {
+				logger.Debug("record pipeline: command packet too short", zap.Int("len", len(cmdPacket)))
+				return
+			}
+			cmdType := cmdPacket[4]
+
+			var entry RawMockEntry
+			if isNoResponseCmd(cmdType) {
+				entry = RawMockEntry{
+					ReqPackets:   [][]byte{cmdPacket},
+					CmdType:      cmdType,
+					MockType:     "mocks",
+					ReqTimestamp: reqTimestamp,
+					ResTimestamp: time.Now(),
+				}
+			} else {
+				respPackets, err := readFullResponseSlab(ctx, logger, serverSrc, cmdType, hs, slab)
+				if err != nil {
+					if err != io.EOF && ctx.Err() == nil {
+						logger.Debug("record pipeline: server response error", zap.Error(err))
+					}
+					return
+				}
+				entry = RawMockEntry{
+					ReqPackets:   [][]byte{cmdPacket},
+					RespPackets:  respPackets,
+					CmdType:      cmdType,
+					MockType:     "mocks",
+					ReqTimestamp: reqTimestamp,
+					ResTimestamp: time.Now(),
+				}
+			}
+
+			RawsCaptured.Add(1)
+			select {
+			case rawCh <- entry:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// ── Stage 2: Decode loop (throttled) ──
 	decodeCtx := &wire.DecodeContext{
 		Mode:               models.MODE_RECORD,
 		LastOp:             wire.NewLastOpMap(),
@@ -114,113 +220,45 @@ func runRecordPipeline(
 		decodeCtx.ServerGreetings.Store(connKey, hs.ServerGreeting)
 	}
 
-	connID := ""
-	if v := ctx.Value(models.ClientConnectionIDKey); v != nil {
-		connID = v.(string)
-	}
+	for entry := range rawCh {
+		rawsCapturedLocal++
 
-	// Buffered channel for async decode.  The ring-drain goroutine sends
-	// RawMockEntry (byte slice references into the slab) and the decode
-	// goroutine consumes them.  Buffer of 32 keeps the ring drainer from
-	// blocking while staying well within one 4MB slab's lifetime.
-	rawCh := make(chan RawMockEntry, 32)
-	decodeDone := make(chan struct{})
+		// Acquire sem → decode → throttle → release sem
+		decodeSem <- struct{}{}
 
-	// ── Decode goroutine ──
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Error("recovered from panic in pipeline decoder", zap.Any("panic", r))
-			}
-			close(decodeDone)
-		}()
+		mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
 
-		for entry := range rawCh {
-			if ctx.Err() != nil {
-				return
-			}
-
-			mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
-			if err != nil {
-				logger.Debug("failed to decode mock entry", zap.Error(err))
-				continue
-			}
-
-			setConnID(mock, connID)
-
-			// Non-blocking send: if the output channel buffer is full,
-			// dispatch via goroutine so the decode loop is never stalled.
-			select {
-			case mocks <- mock:
-			default:
-				go func(m *models.Mock) {
-					select {
-					case mocks <- m:
-					case <-ctx.Done():
-					}
-				}(mock)
-			}
+		// Sleep while HOLDING sem — parks all other decode goroutines.
+		// Skip after shutdown to drain remaining entries fast.
+		if ctx.Err() == nil {
+			time.Sleep(decodeThrottleDelay)
 		}
-	}()
+		<-decodeSem
 
-	// ── Ring-drain loop (I/O only — no struct decode) ──
-	defer func() {
-		close(rawCh)
-		<-decodeDone
-	}()
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		// ── 1. Read one command packet from the client ──
-		cmdPacket, err := readMySQLPacketSlab(clientSrc, slab)
 		if err != nil {
-			if err != io.EOF && ctx.Err() == nil {
-				logger.Debug("record pipeline: client read error", zap.Error(err))
-			}
-			return
-		}
-
-		reqTimestamp := time.Now()
-
-		if len(cmdPacket) < 5 {
-			logger.Debug("record pipeline: command packet too short", zap.Int("len", len(cmdPacket)))
-			return
-		}
-		cmdType := cmdPacket[4]
-
-		// ── 2. Handle no-response commands ──
-		if isNoResponseCmd(cmdType) {
-			rawCh <- RawMockEntry{
-				ReqPackets:   [][]byte{cmdPacket},
-				CmdType:      cmdType,
-				MockType:     "mocks",
-				ReqTimestamp: reqTimestamp,
-				ResTimestamp: time.Now(),
-			}
+			logger.Debug("failed to decode mock entry", zap.Error(err))
 			continue
 		}
 
-		// ── 3. Read the full response from the server ──
-		respPackets, err := readFullResponseSlab(ctx, logger, serverSrc, cmdType, hs, slab)
-		if err != nil {
-			if err != io.EOF && ctx.Err() == nil {
-				logger.Debug("record pipeline: server response error", zap.Error(err))
-			}
+		setConnID(mock, connID)
+
+		// Use safeSendMock to avoid panic on closed channel during shutdown.
+		if safeSendMock(mocks, mock) {
+			mocksWritten++
+			MocksProduced.Add(1)
+		} else {
+			logger.Warn("mocks channel closed, dropping mock",
+				zap.String("conn_id", connID),
+				zap.Int64("mocks_written_so_far", mocksWritten))
 			return
 		}
+	}
 
-		// ── 4. Send to async decoder ──
-		rawCh <- RawMockEntry{
-			ReqPackets:   [][]byte{cmdPacket},
-			RespPackets:  respPackets,
-			CmdType:      cmdType,
-			MockType:     "mocks",
-			ReqTimestamp: reqTimestamp,
-			ResTimestamp: time.Now(),
-		}
+	// rawCh closed — capture stage is done. Log remaining pending count.
+	pending := rawsCapturedLocal - mocksWritten
+	if pending > 0 {
+		logger.Info("capture complete, finishing remaining decodes",
+			zap.Int64("pending", pending), zap.String("conn_id", connID))
 	}
 }
 
