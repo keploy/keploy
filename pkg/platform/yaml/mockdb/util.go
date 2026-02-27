@@ -126,6 +126,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
 			return nil, err
 		}
+	case models.KAFKA:
+		kafkaSpec := models.KafkaSchema{
+			Metadata:         mock.Spec.Metadata,
+			KafkaRequests:    mock.Spec.KafkaRequests,
+			KafkaResponses:   mock.Spec.KafkaResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(kafkaSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the kafka input-output as yaml")
+			return nil, err
+		}
 	case models.PostgresV2:
 		requests := []postgres.RequestYaml{}
 		for _, v := range mock.Spec.PostgresRequestsV2 {
@@ -352,7 +365,20 @@ func DecodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock: redisSpec.ReqTimestampMock,
 				ResTimestampMock: redisSpec.ResTimestampMock,
 			}
-
+		case models.KAFKA:
+			kafkaSpec := models.KafkaSchema{}
+			err := m.Spec.Decode(&kafkaSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into kafka mock", zap.String("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         kafkaSpec.Metadata,
+				KafkaRequests:    kafkaSpec.KafkaRequests,
+				KafkaResponses:   kafkaSpec.KafkaResponses,
+				ReqTimestampMock: kafkaSpec.ReqTimestampMock,
+				ResTimestampMock: kafkaSpec.ResTimestampMock,
+			}
 		case models.PostgresV2:
 
 			PostSpec := postgres.Spec{}
