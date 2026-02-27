@@ -164,12 +164,16 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		case *mysql.HandshakeResponse41Packet:
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+			// Also keep ClientCaps in sync so DeprecateEOF() works in record mode
+			decodeCtx.ClientCaps = pkt.CapabilityFlags
 
 			pktType = mysql.HandshakeResponse41
 			lastOp = payloadType
 		case *mysql.SSLRequestPacket:
 			// Store the client capabilities to use it later
 			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+			// Also keep ClientCaps in sync so DeprecateEOF() works in record mode
+			decodeCtx.ClientCaps = pkt.CapabilityFlags
 
 			pktType = mysql.SSLRequest
 			decodeCtx.UseSSL = true
@@ -296,6 +300,8 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		}
 		// Store the server greetings to use it later
 		decodeCtx.ServerGreetings.Store(clientConn, pkt)
+		// Also store the server capability flags so DeprecateEOF() works in record mode
+		decodeCtx.ServerCaps = pkt.CapabilityFlags
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.HandshakeV10), clientConn, mysql.HandshakeV10, decodeCtx)
 
 		logger.Debug("HandshakeV10 decoded", zap.Any("parsed packet", parsedPacket))
