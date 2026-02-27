@@ -12,23 +12,23 @@ const MappingKind = "TestMocksMapping"
 
 // MockEntry represents a single mock entry with its name and kind.
 type MockEntry struct {
-	Name      string `json:"name" yaml:"name"`
-	Kind      string `json:"kind" yaml:"kind"`
-	Timestamp int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty"`
+	Name      string `json:"name" yaml:"name" bson:"name"`
+	Kind      string `json:"kind" yaml:"kind" bson:"kind"`
+	Timestamp int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty" bson:"timestamp,omitempty"`
 }
 
 // Mapping represents the top-level structure of a mappings.yaml file.
 type Mapping struct {
-	Version   string `json:"version" yaml:"version"`
-	Kind      string `json:"kind" yaml:"kind"`
-	TestSetID string `json:"testSetId" yaml:"test_set_id"`
-	Tests     []Test `json:"tests" yaml:"tests"`
+	Version   string `json:"version" yaml:"version" bson:"version"`
+	Kind      string `json:"kind" yaml:"kind" bson:"kind"`
+	TestSetID string `json:"testSetId" yaml:"test_set_id" bson:"test_set_id"`
+	Tests     []Test `json:"tests" yaml:"tests" bson:"tests"`
 }
 
 // Test represents a single test case and its associated mocks.
 type Test struct {
-	ID    string      `json:"id" yaml:"id"`
-	Mocks []MockEntry `json:"mocks" yaml:"mocks"`
+	ID    string      `json:"id" yaml:"id" bson:"id"`
+	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 }
 
 // UnmarshalYAML provides backward compatibility for the old comma-separated
