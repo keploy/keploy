@@ -160,7 +160,14 @@ const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
-	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
+
+	// Extract connection ID for logging purposes
+	connID := ""
+	if clientConn.RemoteAddr() != nil {
+		connID = clientConn.RemoteAddr().String()
+	}
+
+	logger.Debug("Accepted ingress connection", zap.String("client", connID))
 
 	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
@@ -197,10 +204,10 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 			return
 		}
 
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, connID)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
-		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
+		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort, connID)
 	}
 }
 

@@ -23,17 +23,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16) error {
-	return recordIncomingTestCase(ctx, logger, clientConn, destConn, t, appPort)
+func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, connID string) error {
+	return recordIncomingTestCase(ctx, logger, clientConn, destConn, t, appPort, connID)
 }
 
-func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16) error {
+func recordIncomingTestCase(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, connID string) error {
 	proxy := &grpcTestCaseProxy{
 		logger:    logger,
 		destConn:  destConn,
 		testCases: t,
 		ctx:       ctx,
 		appPort:   appPort,
+		connID:    connID,
 	}
 
 	// Defer connection closures with nil checks
@@ -100,6 +101,7 @@ type grpcTestCaseProxy struct {
 	ccMu      sync.Mutex
 	cc        *grpc.ClientConn
 	appPort   uint16
+	connID    string
 }
 
 func (p *grpcTestCaseProxy) getClientConn(ctx context.Context) (*grpc.ClientConn, error) {
@@ -264,7 +266,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 		GRPCResp: grpcResp,
 	}
 
-	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, p.appPort)
+	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, p.appPort, p.connID)
 
 	if s, ok := status.FromError(respErr); ok && respErr != nil {
 		return s.Err()
