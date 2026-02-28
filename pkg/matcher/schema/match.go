@@ -174,10 +174,24 @@ func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger
 				}
 			}
 			var statusCode string
+			foundMatch := false
 			for status := range mockOperation.Responses {
-				statusCode = status
-				break
-
+				if _, ok := testOperation.Responses[status]; ok {
+					statusCode = status
+					foundMatch = true
+					break
+				}
+			}
+			if !foundMatch {
+				// Fallback to the first one just to proceed with failure logic,
+				// or let compareResponseBodies handle the mismatch.
+				// compareResponseBodies checks: `if _, ok := testOperation.Responses[status]; ok`
+				// So if we pick one that doesn't exist, it will correctly return false.
+				// So picking the first one is fine as a fallback if NO match is found.
+				for status := range mockOperation.Responses {
+					statusCode = status
+					break
+				}
 			}
 
 			if candidateScore, pass, _, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
