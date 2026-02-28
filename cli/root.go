@@ -2,13 +2,14 @@ package cli
 
 import (
 	"context"
-	"os"
-
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/clilog"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"log/slog"
+	"os"
 )
 
 func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
@@ -37,6 +38,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 	rootCmd.PersistentFlags().Bool("verbose", false, "Enable verbose debug logging")
+
 	rootCmd.SetHelpTemplate(provider.RootCustomHelpTemplate)
 
 	rootCmd.SetVersionTemplate(provider.VersionTemplate)
@@ -49,7 +51,38 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 
 	for _, cmd := range Registered {
 		c := cmd(ctx, logger, conf, svcFactory, cmdConfigurator)
+		wrapCommandContext(c)
 		rootCmd.AddCommand(c)
 	}
 	return rootCmd
+}
+
+// fix2
+func wrapCommandContext(c *cobra.Command) {
+	originalPreRunE := c.PreRunE
+	originalRunE := c.RunE
+
+	c.PreRunE = func(cmd *cobra.Command, args []string) error {
+		base := clilog.FromContext(cmd.Context())
+
+		l := clilog.CommandLogger(
+			base,
+			cmd.Name(),
+			utils.Version,
+		)
+
+		ctxWith := clilog.WithContext(cmd.Context(), l)
+		cmd.SetContext(ctxWith)
+
+		if originalPreRunE != nil {
+			return originalPreRunE(cmd, args)
+		}
+		return nil
+	}
+
+	if originalRunE != nil {
+		c.RunE = func(cmd *cobra.Command, args []string) error {
+			return originalRunE(cmd, args)
+		}
+	}
 }
