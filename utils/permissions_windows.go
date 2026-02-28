@@ -50,6 +50,12 @@ func EnsureKeployFolderPermissions(_ context.Context, _ *zap.Logger, _ string) e
 	return nil
 }
 
+// RestoreFileOwnership is a no-op on Windows.
+// Ownership restoration using chown is not applicable on Windows.
+func RestoreFileOwnership(_ *zap.Logger, _ ...string) {
+	// No-op on Windows
+}
+
 // RestoreKeployFolderOwnership is a no-op on Windows.
 // Ownership restoration using chown is not applicable on Windows.
 func RestoreKeployFolderOwnership(_ *zap.Logger, _ string) {

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -82,7 +83,8 @@ func TestChunkedResponseExitsOnEOF(t *testing.T) {
 	// This should complete quickly, not timeout
 	done := make(chan error, 1)
 	go func() {
-		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn)
+		var streamRef *models.StreamRef
+		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn, false, &streamRef, models.OutgoingOptions{})
 	}()
 
 	select {
@@ -114,7 +116,8 @@ func TestChunkedResponseEmptyBody(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn)
+		var streamRef *models.StreamRef
+		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn, false, &streamRef, models.OutgoingOptions{})
 	}()
 
 	select {

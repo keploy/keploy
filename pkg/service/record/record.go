@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -234,7 +235,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	var correlationMap sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(reqCtx)
+	frames, err := r.GetTestAndMockChans(reqCtx, newTestSetID)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -425,7 +426,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
+func (r *Recorder) GetTestAndMockChans(ctx context.Context, testSetID string) (FrameChan, error) {
 
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
@@ -493,6 +494,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 		MongoPassword:  r.config.Test.MongoPassword,
 		TLSPrivateKey:  tlsPrivateKey,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		ConfigPath:     filepath.Join(r.config.Path, testSetID),
 	})
 	if err != nil {
 

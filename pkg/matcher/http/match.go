@@ -27,6 +27,55 @@ var ppNew234 = pp.New
 var jsonMarshal234 = json.Marshal
 var jsonUnmarshal234 = json.Unmarshal
 
+func shouldCompareStreamingBody(tc *models.TestCase, actualResponse *models.HTTPResp) bool {
+	if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
+		return true
+	}
+
+	var contentType string
+	if actualResponse != nil {
+		contentType = getHeaderValueCaseInsensitive(actualResponse.Header, "Content-Type")
+	}
+	if contentType == "" && tc != nil {
+		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
+	}
+	contentType = strings.ToLower(contentType)
+
+	if strings.Contains(contentType, "text/event-stream") ||
+		strings.Contains(contentType, "application/x-ndjson") ||
+		strings.Contains(contentType, "application/ndjson") ||
+		strings.Contains(contentType, "multipart/x-mixed-replace") ||
+		strings.Contains(contentType, "multipart/mixed") ||
+		strings.Contains(contentType, "application/octet-stream") {
+		return true
+	}
+
+	if strings.Contains(contentType, "text/plain") {
+		tcChunked := tc != nil && hasChunkedTransferEncoding(tc.HTTPResp.Header)
+		actualChunked := actualResponse != nil && hasChunkedTransferEncoding(actualResponse.Header)
+		if tcChunked || actualChunked {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasChunkedTransferEncoding(headers map[string]string) bool {
+	te := strings.ToLower(getHeaderValueCaseInsensitive(headers, "Transfer-Encoding"))
+	return strings.Contains(te, "chunked")
+}
+
+func getHeaderValueCaseInsensitive(headers map[string]string, key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for k, v := range headers {
+		if strings.ToLower(strings.TrimSpace(k)) == key {
+			return v
+		}
+	}
+	return ""
+}
+
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, compareAll bool, logger *zap.Logger, emitFailureLogs bool) (bool, *models.Result) {
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
@@ -113,6 +162,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
+	forceBodyCompareForStream := shouldCompareStreamingBody(tc, actualResponse)
 
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
 	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
@@ -136,7 +186,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
 		// Skip body comparison for non-JSON responses unless compareAll is enabled
-		if !compareAll && bodyType != models.JSON {
+		if !compareAll && bodyType != models.JSON && !forceBodyCompareForStream {
 			logger.Debug("Skipping body comparison for non-JSON response", zap.String("bodyType", string(bodyType)))
 			// Mark body as passing when compareAll is false and body is not JSON
 		} else if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {

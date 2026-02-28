@@ -63,6 +63,14 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 	switch tc.Kind {
 	case models.HTTP:
+		noiseConfig := h.cfg.Test.GlobalNoise.Global
+		if tsNoise, ok := h.cfg.Test.GlobalNoise.Testsets[testSetID]; ok {
+			noiseConfig = LeftJoinNoise(h.cfg.Test.GlobalNoise.Global, tsNoise)
+		}
+		streamBodyNoise := map[string][]string{}
+		if bodyNoise, ok := noiseConfig["body"]; ok {
+			streamBodyNoise = cloneNoiseMap(bodyNoise)
+		}
 
 		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
 			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
@@ -75,11 +83,12 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			hostToUse = "localhost"
 		}
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
-			APITimeout:      h.cfg.Test.APITimeout,
-			ConfigPort:      h.cfg.Test.Port,
-			KeployPath:      h.cfg.Path,
-			ConfigHost:      hostToUse,
-			URLReplacements: urlReplacements,
+			APITimeout:         h.cfg.Test.APITimeout,
+			ConfigPort:         h.cfg.Test.Port,
+			KeployPath:         h.cfg.Path,
+			ConfigHost:         hostToUse,
+			URLReplacements:    urlReplacements,
+			StreamingBodyNoise: streamBodyNoise,
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
@@ -311,6 +320,16 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 type getPlanRes struct {
 	Plan  models.Plan `json:"plan"`
 	Error string      `json:"error"`
+}
+
+func cloneNoiseMap(input map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(input))
+	for k, v := range input {
+		copied := make([]string, len(v))
+		copy(copied, v)
+		out[k] = copied
+	}
+	return out
 }
 
 func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {

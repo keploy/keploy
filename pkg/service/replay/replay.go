@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -812,6 +813,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:    headerNoiseConfig,
+			ConfigPath:     filepath.Join(r.config.Path, testSetID),
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -969,6 +971,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Mocking:        r.config.Test.Mocking,
 			Backdate:       testCases[0].HTTPReq.Timestamp,
 			NoiseConfig:    headerNoiseConfig,
+			ConfigPath:     filepath.Join(r.config.Path, testSetID),
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1092,7 +1095,38 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 	}
 
+	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
+	var asyncHTTPWG sync.WaitGroup
+	var activeAsyncStreaming int32
+	var asyncMockFilterPinned bool
+	var firstRecordedTS time.Time // recorded timestamp of the first test in a streaming sequence
+	var firstReplayedAt time.Time // wall-clock time when that first test was actually replayed
+	hasAsyncStreaming := false
+	sharedProxyErrCancel := func() {}
+	sharedProxyErrMonitorStarted := false
+	asyncCounters := asyncResultCounters{
+		success:       &success,
+		failure:       &failure,
+		obsolete:      &obsolete,
+		testSetStatus: &testSetStatus,
+	}
+	processAsyncResult := func(asyncRes asyncHTTPResult) error {
+		return r.processAsyncHTTPResult(
+			runTestSetCtx,
+			testRunID,
+			testSetID,
+			asyncRes,
+			totalConsumedMocks,
+			actualTestMockMappings,
+			asyncCounters,
+		)
+	}
+
 	for idx, testCase := range testCases {
+		if err := drainAsyncHTTPResults(asyncHTTPResults, false, processAsyncResult); err != nil {
+			loopErr = err
+			break
+		}
 
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
@@ -1145,10 +1179,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
+		streamingReplayActive := atomic.LoadInt32(&activeAsyncStreaming) > 0
+
+		// Determine whether to preserve inter-request timing based on streaming replay status and test case characteristics.
+		preserveInterRequestTiming := streamingReplayActive
+		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
+			preserveInterRequestTiming = true
+		}
+
+		err = r.preserveRecordedRequestTiming(runTestSetCtx, testCase, preserveInterRequestTiming, &firstRecordedTS, &firstReplayedAt)
+		if err != nil {
+			loopErr = err
+			break
+		}
+
+		if !streamingReplayActive {
+			asyncMockFilterPinned = false
+		}
+
+		isAsyncStreamingHTTP := testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
 		var testStatus models.TestStatus
 		var testResult *models.Result
 		var testPass bool
-		var loopErr error
 
 		var reqTime, respTime time.Time
 		switch testCase.Kind {
@@ -1159,11 +1211,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			reqTime = testCase.GrpcReq.Timestamp
 			respTime = testCase.GrpcResp.Timestamp
 		}
+		skipMockFilterUpdate := false
+		if isAsyncStreamingHTTP {
+			reqTime, respTime = effectiveStreamMockWindow(testCase, r.config.Test.APITimeout)
+		} else if !useMappingBased && streamingReplayActive {
+			// During active async stream replay, keep a wide timestamp window to avoid
+			// narrowing agent-side mock set and starving in-flight stream dependencies.
+			reqTime = models.BaseTime
+			respTime = time.Now().UTC()
 
-		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
-			break
+			// For non-mapping-based filtering, once an async streaming HTTP test case is encountered, we pin the mock filter parameters to avoid updating them with every subsequent test case, which could interfere with the streaming replay. The filter will be unpinned once the streaming replay is no longer active.
+			skipMockFilterUpdate = asyncMockFilterPinned
+		}
+
+		if !skipMockFilterUpdate {
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+				break
+			}
+			if !useMappingBased && streamingReplayActive && !isAsyncStreamingHTTP {
+				asyncMockFilterPinned = true
+			}
 		}
 
 		// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
@@ -1171,8 +1240,35 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
-		go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
+		if isAsyncStreamingHTTP {
+			hasAsyncStreaming = true
+			if !sharedProxyErrMonitorStarted {
+				sharedProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
+				sharedProxyErrCancel = cancel
+				sharedProxyErrMonitorStarted = true
+				go r.monitorProxyErrors(sharedProxyErrCtx, testSetID, "")
+			}
+
+			tcCopy := *testCase
+			expectedMocks := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
+
+			asyncHTTPWG.Add(1)
+			atomic.AddInt32(&activeAsyncStreaming, 1)
+			go func(tc models.TestCase, expectedMocks []string, started time.Time) {
+				defer asyncHTTPWG.Done()
+				defer atomic.AddInt32(&activeAsyncStreaming, -1)
+				r.runAsyncStreamingRequest(runTestSetCtx, tc, testSetID, started, expectedMocks, useMappingBased, isMappingEnabled, asyncHTTPResults)
+			}(tcCopy, expectedMocks, started)
+
+			continue
+		}
+
+		testCaseProxyErrCancel := func() {}
+		if !hasAsyncStreaming {
+			testCaseProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
+			testCaseProxyErrCancel = cancel
+			go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
+		}
 
 		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
 
@@ -1292,22 +1388,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 		}
 
-		if len(mockNames) > 0 {
-			found := false
-			for i, t := range actualTestMockMappings.Tests {
-				if t.ID == testCase.Name {
-					actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(actualTestMockMappings.Tests[i].Mocks.ToSlice(), mockNames...))
-					found = true
-					break
-				}
-			}
-			if !found {
-				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
-					ID:    testCase.Name,
-					Mocks: models.FromSlice(mockNames),
-				})
-			}
-		}
+		upsertActualTestMockMapping(actualTestMockMappings, testCase.Name, mockNames)
 
 		// log the consumed mocks during the test run of the test case for test set
 		r.logger.Debug("consumed mocks for test case",
@@ -1411,7 +1492,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				insertStart := time.Now()
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if time.Since(insertStart) > 50*time.Millisecond {
-					r.logger.Warn("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
+					r.logger.Debug("Slow InsertTestCaseResult", zap.Duration("duration", time.Since(insertStart)))
 				}
 				if loopErr != nil {
 					utils.LogError(r.logger, loopErr, "failed to insert test case result")
@@ -1431,6 +1512,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
 			time.Sleep(time.Second)
 		}
+	}
+
+	if loopErr != nil {
+		runTestSetCtxCancel()
+	}
+
+	asyncHTTPWG.Wait()
+	close(asyncHTTPResults)
+	if err := drainAsyncHTTPResults(asyncHTTPResults, true, processAsyncResult); err != nil && loopErr == nil {
+		loopErr = err
+	}
+	if sharedProxyErrMonitorStarted {
+		sharedProxyErrCancel()
 	}
 
 	timeTaken := time.Since(startTime)

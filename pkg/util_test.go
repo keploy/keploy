@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,6 +224,455 @@ func TestSimulateHTTP_MultipartRebuildWithFileNames_315(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestSimulateHTTP_SSEStreamMatchAndEarlyClose_316(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("id:100\nevent:ticker\ndata:{\"value\":1}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:101\nevent:ticker\ndata:{\"value\":2}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:102\nevent:ticker\ndata:{\"value\":3}\n\n"))
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedSSEBody := strings.Join([]string{
+		"id:100",
+		"event:ticker",
+		"data:{\"value\":1}",
+		"",
+		"id:101",
+		"event:ticker",
+		"data:{\"value\":2}",
+		"",
+	}, "\n")
+
+	tc := &models.TestCase{
+		Name: "sse-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Accept": "text/event-stream",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/event-stream; charset=utf-8",
+			},
+			Body: expectedSSEBody,
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, expectedSSEBody, resp.Body)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected server stream to be closed by client after matching SSE queue")
+	}
+}
+
+func TestSimulateHTTP_SSEStreamMismatch_317(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("id:1\nevent:update\ndata:{\"value\":1}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:2\nevent:update\ndata:{\"value\":999}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "sse-mismatch",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Accept": "text/event-stream",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/event-stream",
+			},
+			Body: strings.Join([]string{
+				"id:1",
+				"event:update",
+				"data:{\"value\":1}",
+				"",
+				"id:2",
+				"event:update",
+				"data:{\"value\":2}",
+				"",
+			}, "\n"),
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.NotEqual(t, tc.HTTPResp.Body, resp.Body)
+	assert.Contains(t, resp.Body, "999")
+}
+
+func TestSimulateHTTP_SSEStreamMatch_WithStructuredExpectedBody_317A(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("id:1\nevent:update\ndata:{\"value\":1}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("id:2\nevent:update\ndata:{\"value\":2}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "sse-structured-expected",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+			Header: map[string]string{
+				"Accept": "text/event-stream",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/event-stream",
+			},
+			// This intentionally does not match the streamed frames. The stream
+			// comparator must use HTTPResp.StreamBody when present.
+			Body: "legacy-body-not-used-for-stream-compare",
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "1"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":1}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "id", Value: "2"},
+						{Key: "event", Value: "update"},
+						{Key: "data", Value: `{"value":2}`},
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, resp.Body)
+}
+
+func TestCanonicalizeSSEFrame_318(t *testing.T) {
+	input := "id: 100\nevent: system-alert\ndata: {\"active\": true, \"user\" : \"alice\"}\n"
+	got := canonicalizeSSEFrame(input)
+
+	assert.Equal(t, "id:100\nevent:system-alert\ndata:{\"active\":true,\"user\":\"alice\"}", got)
+}
+
+func TestSimulateHTTP_NDJSONStreamMatch_WithStructuredExpectedBody_318A(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("{\"id\":1,\"ok\":true}\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("{\"id\":2,\"ok\":false}\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	tc := &models.TestCase{
+		Name: "ndjson-structured-expected",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "application/x-ndjson",
+			},
+			Body: "legacy-body-not-used-for-stream-compare",
+			StreamBody: []models.HTTPStreamChunk{
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":1,"ok":true}`},
+					},
+				},
+				{
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: `{"id":2,"ok":false}`},
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, resp.Body)
+}
+
+func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("{\"id\":1,\"ok\":true}\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("{\"id\":2,\"ok\":false}\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("{\"id\":3,\"ok\":true}\n"))
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedBody := "{\"id\":1,\"ok\":true}\n{\"id\":2,\"ok\":false}\n"
+
+	tc := &models.TestCase{
+		Name: "ndjson-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "application/x-ndjson",
+			},
+			Body: expectedBody,
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, expectedBody, resp.Body)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected NDJSON stream to be closed by client after matching queue")
+	}
+}
+
+func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+	const boundary = "myCustomBoundary"
+
+	writePart := func(w http.ResponseWriter, contentType string, body string) {
+		_, _ = w.Write([]byte("--" + boundary + "\r\n"))
+		_, _ = w.Write([]byte("Content-Type: " + contentType + "\r\n\r\n"))
+		_, _ = w.Write([]byte(body))
+		_, _ = w.Write([]byte("\r\n"))
+	}
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary="+boundary)
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		writePart(w, "application/json", `{"frame":1}`)
+		flusher.Flush()
+		writePart(w, "text/plain", "frame-2")
+		flusher.Flush()
+		writePart(w, "text/plain", "frame-3")
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedBody := strings.Join([]string{
+		"--" + boundary,
+		"Content-Type: application/json",
+		"",
+		`{"frame":1}`,
+		"--" + boundary,
+		"Content-Type: text/plain",
+		"",
+		"frame-2",
+		"",
+	}, "\r\n")
+
+	tc := &models.TestCase{
+		Name: "multipart-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "multipart/x-mixed-replace; boundary=" + boundary,
+			},
+			Body: expectedBody,
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, expectedBody, resp.Body)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected multipart stream to be closed by client after matching queue")
+	}
+}
+
+func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	serverClosed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "server response writer must support flushing")
+
+		_, _ = w.Write([]byte("[INFO] booting\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("[INFO] ready\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("[INFO] keep-running\n"))
+		flusher.Flush()
+
+		<-r.Context().Done()
+		close(serverClosed)
+	}))
+	defer server.Close()
+
+	expectedBody := "[INFO] booting\n[INFO] ready\n"
+
+	tc := &models.TestCase{
+		Name: "plain-stream-match-and-close",
+		HTTPReq: models.HTTPReq{
+			Method: "GET",
+			URL:    server.URL,
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "text/plain",
+			},
+			Body: expectedBody,
+		},
+	}
+
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, expectedBody, resp.Body)
+
+	select {
+	case <-serverClosed:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected plain text stream to be closed by client after matching queue")
+	}
+}
+
+func TestCompareSSEFrame_DataJSONTypeMismatch_322(t *testing.T) {
+	logger := zap.NewNop()
+	match, reason := compareSSEFrame(
+		"data:{\"value\":1}",
+		"data:not-json",
+		nil,
+		logger,
+	)
+
+	assert.False(t, match)
+	assert.Equal(t, "data-json-type mismatch", reason)
+}
+
+func TestCompareSSEFields_MultilineDataNormalization_322A(t *testing.T) {
+	logger := zap.NewNop()
+
+	expected := []sseField{
+		{key: "id", value: "1", hasValue: true},
+		{key: "data", value: "line-1\nline-2", hasValue: true},
+	}
+	actual := parseSSEFrame("id:1\ndata:line-1\ndata:line-2")
+
+	match, reason := compareSSEFields(expected, actual, nil, logger)
+	assert.True(t, match, "multiline SSE data should compare equal after normalization")
+	assert.Equal(t, "", reason)
+}
+
+func TestComputeStreamingTimeoutSeconds_323(t *testing.T) {
+	now := time.Now().UTC()
+	tc := &models.TestCase{
+		HTTPReq: models.HTTPReq{
+			Timestamp: now,
+		},
+		HTTPResp: models.HTTPResp{
+			Timestamp: now.Add(1500 * time.Millisecond),
+		},
+	}
+
+	timeout := ComputeStreamingTimeoutSeconds(tc, 2)
+	assert.Equal(t, uint64(12), timeout)
+
+	preferConfigured := ComputeStreamingTimeoutSeconds(tc, 30)
+	assert.Equal(t, uint64(30), preferConfigured)
+
+	fallback := ComputeStreamingTimeoutSeconds(&models.TestCase{}, 7)
+	assert.Equal(t, uint64(7), fallback)
+
+	defaultMin := ComputeStreamingTimeoutSeconds(&models.TestCase{}, 0)
+	assert.Equal(t, uint64(10), defaultMin)
 }
 
 // TestIsTime_VariousFormats_808 covers multiple scenarios for the IsTime function,
