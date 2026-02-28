@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,7 +27,14 @@ import (
 
 var GlobalTestCounter int64
 
-type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16)
+// CaptureConfig holds the configuration for capturing a test case.
+type CaptureConfig struct {
+	Synchronous bool
+	AppPort     uint16
+	ClientAddr  string // host:port of the incoming client connection
+}
+
+type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, cfg CaptureConfig)
 
 var CaptureHook CaptureFunc = Capture
 
@@ -37,7 +45,7 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, cfg CaptureConfig) {
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -131,6 +139,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}
 
+	// Resolve client FQDN from the client address
+	clientMeta := ResolveClientMetadata(logger, cfg.ClientAddr)
+
 	testCase := &models.TestCase{
 		Version:       models.GetVersion(),
 		Name:          pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
@@ -157,12 +168,13 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
-		Noise:   map[string][]string{},
-		AppPort: appPort,
+		Noise:    map[string][]string{},
+		AppPort:  cfg.AppPort,
+		Metadata: clientMeta,
 		// Mocks: mocks,
 	}
 
-	if synchronous {
+	if cfg.Synchronous {
 		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
 		testName := fmt.Sprintf("test-%d", currentID)
 		testCase.Name = testName
@@ -361,8 +373,36 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 	return formData
 }
 
+// ResolveClientMetadata performs a reverse DNS lookup on the client address
+// and returns metadata containing the client IP and FQDN (if resolvable).
+func ResolveClientMetadata(logger *zap.Logger, clientAddr string) map[string]string {
+	meta := make(map[string]string)
+	if clientAddr == "" {
+		return meta
+	}
+
+	host, _, err := net.SplitHostPort(clientAddr)
+	if err != nil {
+		// clientAddr might be just an IP without port
+		host = clientAddr
+	}
+	meta["client_ip"] = host
+
+	names, err := net.LookupAddr(host)
+	if err != nil {
+		logger.Debug("reverse DNS lookup failed for client",
+			zap.String("client_ip", host), zap.Error(err))
+		return meta
+	}
+	if len(names) > 0 {
+		// LookupAddr returns FQDNs with a trailing dot; trim it.
+		meta["client_fqdn"] = strings.TrimSuffix(names[0], ".")
+	}
+	return meta
+}
+
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16) {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, cfg CaptureConfig) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -373,6 +413,9 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
+	// Resolve client FQDN from the client address
+	clientMeta := ResolveClientMetadata(logger, cfg.ClientAddr)
+
 	// Create test case from stream data
 	testCase := &models.TestCase{
 		Version:  models.GetVersion(),
@@ -382,7 +425,8 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		GrpcReq:  *http2Stream.GRPCReq,
 		GrpcResp: *http2Stream.GRPCResp,
 		Noise:    map[string][]string{},
-		AppPort:  appPort,
+		AppPort:  cfg.AppPort,
+		Metadata: clientMeta,
 	}
 
 	select {
