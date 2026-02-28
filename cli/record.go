@@ -44,7 +44,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			err = record.Start(ctx, cfg)
 
 			if err != nil {
-				utils.LogError(logger, err, "failed to record")
+				utils.LogError(logger, err, "failed to record\n"+models.HighlightOrangeBoldString("💡 Possible Reason:")+models.HighlightBoldString(" Is your application running without Keploy? Keploy record needs all the setup/envs which you need to run your application smoothly"))
 				return nil
 			}
 

@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"strings"
 
 	"go.keploy.io/server/v3/utils"
 )
@@ -44,20 +43,12 @@ func PrintLogo(wr io.Writer, disableANSI bool) {
 }
 
 func printKeployLogo(wr io.Writer, disableANSI bool, logo string) {
-	const reset = "\033[0m"
-	lines := strings.Split(logo, "\n")
-
 	if !disableANSI {
-		for i, line := range lines {
-			for j, ch := range line {
-				color := getLogoColor(i, j)
-				// wrapper now uses fmt.Fprint, so this will correctly print color + char + reset
-				FprintWrapper(false, wr, color, string(ch), reset)
-			}
-			FprintWrapper(true, wr) // newline after each line
-		}
+		const orange = "\033[38;5;208m"
+		const reset = "\033[0m"
+		FprintWrapper(false, wr, orange, logo, reset)
+		FprintWrapper(true, wr)
 	} else {
-		// plain logo (no per-char coloring)
 		FprintWrapper(false, wr, logo)
 		FprintWrapper(true, wr)
 	}
@@ -78,24 +69,3 @@ func FprintWrapper(newLine bool, wr io.Writer, a ...interface{}) {
 }
 
 // Get the color for the logo at position (i, j)
-func getLogoColor(i, j int) string {
-	gradientColors := []string{
-		"\033[38;5;202m", // Dark Orange
-		"\033[38;5;208m",
-		"\033[38;5;214m", // Light Orange
-		"\033[38;5;226m", // Light Yellow
-	}
-
-	switch {
-	case i <= 5:
-		return gradientColors[0]
-	case i == 6 && j <= 42:
-		return gradientColors[1]
-	case i == 7 && j <= 49:
-		return gradientColors[2]
-	case j <= 38:
-		return gradientColors[3]
-	default:
-		return gradientColors[0]
-	}
-}
