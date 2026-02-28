@@ -355,12 +355,12 @@ func (m *mock) pushConfigChange(ctx context.Context, testSetID string, tsConfig 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			m.logger.Error("Failed to read error response body from config push", zap.Error(err))
-			return err
+			return fmt.Errorf("config push failed with status %d: failed to read response body: %w", resp.StatusCode, err)
 		}
 		m.logger.Error("API server returned an error for config push",
 			zap.Int("statusCode", resp.StatusCode),
 			zap.String("response", string(respBody)))
-		return err
+		return fmt.Errorf("config push failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	var respData MockChangeResp
