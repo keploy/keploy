@@ -62,9 +62,10 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				responseMock := make([]models.Payload, len(filteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, filteredMocks[index].Spec.GenericResponses)
 				originalFilteredMock := *filteredMocks[index]
-				filteredMocks[index].TestModeInfo.IsFiltered = false
-				filteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
+				updatedMock := originalFilteredMock
+				updatedMock.TestModeInfo.IsFiltered = false
+				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, &updatedMock)
 				if !isUpdated {
 					continue
 				}
@@ -81,9 +82,10 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
 				originalFilteredMock := *unfilteredMocks[index]
-				unfilteredMocks[index].TestModeInfo.IsFiltered = false
-				unfilteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, unfilteredMocks[index])
+				updatedMock := originalFilteredMock
+				updatedMock.TestModeInfo.IsFiltered = false
+				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, &updatedMock)
 				if !isUpdated {
 					continue
 				}

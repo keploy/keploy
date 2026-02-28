@@ -919,9 +919,10 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // updateMock processes the matched mock based on its filtered status.
 func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
 	originalMatchedMock := *matchedMock
-	matchedMock.TestModeInfo.IsFiltered = false
-	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	updatedMock := originalMatchedMock
+	updatedMock.TestModeInfo.IsFiltered = false
+	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, &updatedMock)
 	if !updated {
 		logger.Debug("failed to update matched mock")
 	}
