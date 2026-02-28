@@ -4,20 +4,20 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
-	"runtime"
-	"strings"
-
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/clilog"
 	"go.keploy.io/server/v3/pkg/platform/auth"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
-
+	"log/slog"
+	"os"
+	"runtime"
 	"runtime/pprof"
+	"strings"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -46,10 +46,21 @@ func setVersion() {
 func start(ctx context.Context) {
 	logger, logFile, err := log.New()
 	if err != nil {
-		fmt.Println("Failed to start the logger for the CLI", err)
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		return
 	}
+	// Enable debug logging if --verbose flag is passed
+	if containsVerboseFlag(os.Args) {
+		logger, _ = log.ChangeLogLevel(zap.DebugLevel)
+	}
 	utils.LogFile = logFile
+
+	level := slog.LevelInfo
+	if containsVerboseFlag(os.Args) {
+		level = slog.LevelDebug
+	}
+	baseLogger := clilog.New(level)
+	ctx = clilog.WithContext(ctx, baseLogger)
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
@@ -149,16 +160,27 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
-			fmt.Println("Error: ", err.Error())
-			fmt.Println("Run 'keploy --help' for usage.")
+		if strings.HasPrefix(err.Error(), "unknown command") ||
+			strings.HasPrefix(err.Error(), "unknown shorthand") {
+
+			clilog.FromContext(ctx).Error("invalid command usage",
+				slog.String("error", err.Error()),
+				slog.String("hint", "Run 'keploy --help' for usage."),
+			)
 			os.Exit(1)
 		}
 	}
-
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
 	// This ensures the next native run doesn't hit permission issues
 	if conf.Path != "" {
 		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
+}
+func containsVerboseFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--verbose" {
+			return true
+		}
+	}
+	return false
 }
