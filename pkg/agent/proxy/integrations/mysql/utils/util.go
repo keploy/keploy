@@ -158,8 +158,8 @@ func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 			return 0, true, 0
 		}
 		return uint64(b[1]) | uint64(b[2])<<8 | uint64(b[3])<<16 |
-				uint64(b[4])<<24 | uint64(b[5])<<32 | uint64(b[6])<<40 |
-				uint64(b[7])<<48 | uint64(b[8])<<56,
+			uint64(b[4])<<24 | uint64(b[5])<<32 | uint64(b[6])<<40 |
+			uint64(b[7])<<48 | uint64(b[8])<<56,
 			false, 9
 	}
 
@@ -203,6 +203,9 @@ func IsGenericResponse(data []byte) (string, bool) {
 }
 
 func ReadUint24(b []byte) uint32 {
+	if len(b) < 3 {
+		return 0
+	}
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
 }
 
@@ -314,6 +317,9 @@ func ParseBinaryDate(b []byte) (interface{}, int, error) {
 		// Non-NULL zero DATE (length byte present, payload length=0)
 		return ZeroDateString, 1, nil
 	}
+	if len(b) < 5 {
+		return nil, 0, fmt.Errorf("buffer too short for DATE payload: expected at least 5 bytes, got %d", len(b))
+	}
 	year := binary.LittleEndian.Uint16(b[1:3])
 	month := b[3]
 	day := b[4]
@@ -334,7 +340,7 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 		return nil, 0, fmt.Errorf("invalid DATETIME length %d (expected 0|4|7|11) - likely misaligned buffer", l)
 	}
 	if len(b) < 1+l {
-		return nil, 0, fmt.Errorf("unexpected end of buffer while reading DATETIME value , len(b)=%d, expected at least %d", len(b), 1+l)
+		return nil, 0, fmt.Errorf("unexpected end of buffer while reading DATETIME value, len(b)=%d, expected at least %d", len(b), 1+l)
 	}
 
 	p := b[1:] // start of payload after length
@@ -368,8 +374,9 @@ func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
 		}
 		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d",
 			year, month, day, hour, minute, second, us), 1 + l, nil
+	default:
+		return nil, 0, fmt.Errorf("unreachable code reached in ParseBinaryDateTime: unexpected length l=%d", l)
 	}
-	panic(fmt.Sprintf("unreachable code reached in ParseBinaryDateTime: unexpected length l=%d", l))
 }
 
 func validYMDHMS(y, m, d, hh, mm, ss int) bool {
@@ -390,6 +397,9 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 		// Non-NULL zero TIME
 		return ZeroTimeString, 1, nil
 	}
+	if len(b) < 9 {
+		return nil, 0, fmt.Errorf("buffer too short for TIME payload: expected at least 9 bytes, got %d", len(b))
+	}
 	isNegative := b[1] == 1
 	days := binary.LittleEndian.Uint32(b[2:6])
 	hours := b[6]
@@ -397,6 +407,9 @@ func ParseBinaryTime(b []byte) (interface{}, int, error) {
 	seconds := b[8]
 	var microseconds uint32
 	if length > 8 {
+		if len(b) < 13 {
+			return nil, 0, fmt.Errorf("buffer too short for TIME microseconds: expected at least 13 bytes, got %d", len(b))
+		}
 		microseconds = binary.LittleEndian.Uint32(b[9:13])
 	}
 	timeString := fmt.Sprintf("%d %02d:%02d:%02d.%06d", days, hours, minutes, seconds, microseconds)
