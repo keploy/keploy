@@ -89,8 +89,7 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 			response = "y"
 		} else {
 			m.logger.Warn("Local mock file is different from the one in the Keploy registry.")
-			// Prompt user for confirmation to override the local mock file
-			fmt.Print("The mock file present locally is different from the one in the Keploy registry. Do you want to override the local mock file with the version from the registry? (y/n): ")
+			m.logger.Warn("The mock file present locally is different from the one in the Keploy registry. Do you want to override the local mock file with the version from the registry? (y/n): ")
 		}
 
 		// Create a channel to listen for context cancellation (Ctrl+C)
@@ -463,21 +462,9 @@ func (m *mock) downloadAndSaveMock(downloadFunc func() (io.Reader, error), outpu
 
 	done := make(chan struct{})
 
-	// Spinner goroutine
+	// Spinner logic removed for structured logging compatibility
 	go func() {
-		spinnerChars := []rune{'|', '/', '-', '\\'}
-		i := 0
-		for {
-			select {
-			case <-done:
-				fmt.Print("\r") // Clear spinner line after done
-				return
-			default:
-				fmt.Printf("\rDownloading... %c", spinnerChars[i%len(spinnerChars)])
-				i++
-				timeSleep224(100 * time.Millisecond)
-			}
-		}
+		<-done
 	}()
 
 	_, err = io.Copy(file, cloudFile)

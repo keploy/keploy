@@ -14,6 +14,7 @@ import (
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
@@ -281,11 +282,11 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 	defer tfs.mu.Unlock()
 
 	if len(tfs.failures) == 0 {
-		fmt.Println("No test failures recorded.")
+		zap.L().Info("No test failures recorded.")
 		return
 	}
 
-	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
+	zap.L().Info("\n======================= MOCKS MISMATCH SUMMARY =======================")
 
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})

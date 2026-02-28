@@ -269,11 +269,7 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 	var contentBuilder strings.Builder
 	reader := bufio.NewReader(resp.Body)
 
-	if ai.Logger.Level() == zap.DebugLevel {
-		fmt.Println("Streaming results from LLM model...")
-	}
-
-	fmt.Println("Streaming results from LLM model...")
+	ai.Logger.Info("Streaming results from LLM model...")
 	if stream {
 		for {
 			line, err := reader.ReadString('\n')

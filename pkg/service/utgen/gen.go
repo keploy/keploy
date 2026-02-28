@@ -300,34 +300,26 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 
-			fmt.Printf("\n<=========================================>\n")
-			fmt.Printf(("Tests generated in Session") + "\n")
-			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-			fmt.Printf("| %s | %s | %s |\n",
-				centerAlignText("Total Test Cases", 29),
-				centerAlignText("Test Cases Passed", 29),
-				centerAlignText("Test Cases Failed", 29))
-			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
-			fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
-				centerAlignText(fmt.Sprintf("%d", totalTest), 29),
-				centerAlignText(fmt.Sprintf("%d", passedTests), 29),
-				centerAlignText(fmt.Sprintf("%d", failedBuild+noCoverageTest), 29))
-			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
-			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-			fmt.Printf(("Discarded tests in session") + "\n")
-			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-			fmt.Printf("| %s | %s |\n",
-				centerAlignText("Build failures", 40),
-				centerAlignText("No Coverage output", 40))
-			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
-			fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
-				centerAlignText(fmt.Sprintf("%d", failedBuild), 40),
-				centerAlignText(fmt.Sprintf("%d", noCoverageTest), 40))
-			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
-			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-			fmt.Printf("<=========================================>\n")
+			var sb strings.Builder
+			sb.WriteString("\n<=========================================>\n")
+			sb.WriteString("Tests generated in Session\n")
+			sb.WriteString("+-------------------------------+-------------------------------+-------------------------------+\n")
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", centerAlignText("Total Test Cases", 29), centerAlignText("Test Cases Passed", 29), centerAlignText("Test Cases Failed", 29)))
+			sb.WriteString("+-------------------------------+-------------------------------+-------------------------------+\n")
+			sb.WriteString(addHeightPadding(paddingHeight, 3, columnWidths3))
+			sb.WriteString(fmt.Sprintf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n", centerAlignText(fmt.Sprintf("%d", totalTest), 29), centerAlignText(fmt.Sprintf("%d", passedTests), 29), centerAlignText(fmt.Sprintf("%d", failedBuild+noCoverageTest), 29)))
+			sb.WriteString(addHeightPadding(paddingHeight, 3, columnWidths3))
+			sb.WriteString("+-------------------------------+-------------------------------+-------------------------------+\n")
+			sb.WriteString("Discarded tests in session\n")
+			sb.WriteString("+------------------------------------------+------------------------------------------+\n")
+			sb.WriteString(fmt.Sprintf("| %s | %s |\n", centerAlignText("Build failures", 40), centerAlignText("No Coverage output", 40)))
+			sb.WriteString("+------------------------------------------+------------------------------------------+\n")
+			sb.WriteString(addHeightPadding(paddingHeight, 2, columnWidths2))
+			sb.WriteString(fmt.Sprintf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n", centerAlignText(fmt.Sprintf("%d", failedBuild), 40), centerAlignText(fmt.Sprintf("%d", noCoverageTest), 40)))
+			sb.WriteString(addHeightPadding(paddingHeight, 2, columnWidths2))
+			sb.WriteString("+------------------------------------------+------------------------------------------+\n")
+			sb.WriteString("<=========================================>\n")
+			g.logger.Info(sb.String())
 			err = g.ai.SendCoverageUpdate(ctx, g.ai.SessionID, initialCoverage, g.cov.Current, iterationCount)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error sending coverage update")
@@ -354,40 +346,27 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 	}
-	fmt.Printf("\n<=========================================>\n")
-	fmt.Printf(("COMPLETE TEST GENERATE SUMMARY") + "\n")
-	fmt.Printf(("Total Test Summary") + "\n")
-
-	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-	fmt.Printf("| %s | %s | %s |\n",
-		centerAlignText("Total Test Cases", 29),
-		centerAlignText("Test Cases Passed", 29),
-		centerAlignText("Test Cases Failed", 29))
-
-	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
-	fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
-		centerAlignText(fmt.Sprintf("%d", g.totalTestCase), 29),
-		centerAlignText(fmt.Sprintf("%d", g.testCasePassed), 29),
-		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed+g.noCoverageTest), 29))
-	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
-	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-
-	fmt.Printf(("Discarded Cases Summary") + "\n")
-	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-	fmt.Printf("| %s | %s |\n",
-		centerAlignText("Build failures", 40),
-		centerAlignText("No Coverage output", 40))
-
-	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
-	fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
-		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed), 40),
-		centerAlignText(fmt.Sprintf("%d", g.noCoverageTest), 40))
-	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
-	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-
-	fmt.Printf("<=========================================>\n")
+	var sb2 strings.Builder
+	sb2.WriteString("\n<=========================================>\n")
+	sb2.WriteString("COMPLETE TEST GENERATE SUMMARY\n")
+	sb2.WriteString("Total Test Summary\n")
+	sb2.WriteString("+-------------------------------+-------------------------------+-------------------------------+\n")
+	sb2.WriteString(fmt.Sprintf("| %s | %s | %s |\n", centerAlignText("Total Test Cases", 29), centerAlignText("Test Cases Passed", 29), centerAlignText("Test Cases Failed", 29)))
+	sb2.WriteString("+-------------------------------+-------------------------------+-------------------------------+\n")
+	sb2.WriteString(addHeightPadding(paddingHeight, 3, columnWidths3))
+	sb2.WriteString(fmt.Sprintf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n", centerAlignText(fmt.Sprintf("%d", g.totalTestCase), 29), centerAlignText(fmt.Sprintf("%d", g.testCasePassed), 29), centerAlignText(fmt.Sprintf("%d", g.testCaseFailed+g.noCoverageTest), 29)))
+	sb2.WriteString(addHeightPadding(paddingHeight, 3, columnWidths3))
+	sb2.WriteString("+-------------------------------+-------------------------------+-------------------------------+\n")
+	sb2.WriteString("Discarded Cases Summary\n")
+	sb2.WriteString("+------------------------------------------+------------------------------------------+\n")
+	sb2.WriteString(fmt.Sprintf("| %s | %s |\n", centerAlignText("Build failures", 40), centerAlignText("No Coverage output", 40)))
+	sb2.WriteString("+------------------------------------------+------------------------------------------+\n")
+	sb2.WriteString(addHeightPadding(paddingHeight, 2, columnWidths2))
+	sb2.WriteString(fmt.Sprintf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n", centerAlignText(fmt.Sprintf("%d", g.testCaseFailed), 40), centerAlignText(fmt.Sprintf("%d", g.noCoverageTest), 40)))
+	sb2.WriteString(addHeightPadding(paddingHeight, 2, columnWidths2))
+	sb2.WriteString("+------------------------------------------+------------------------------------------+\n")
+	sb2.WriteString("<=========================================>\n")
+	g.logger.Info(sb2.String())
 	return nil
 }
 
@@ -430,25 +409,7 @@ func addHeightPadding(rows int, columns int, columnWidths []int) string {
 	return padding
 }
 
-func statusUpdater(stop <-chan bool) {
-	messages := []string{
-		"Running tests... Please wait.",
-		"Still running tests... Hang tight!",
-		"Tests are still executing... Almost there!",
-	}
-	i := 0
-	for {
-		select {
-		case <-stop:
-			fmt.Printf("\r\033[K")
-			return
-		default:
-			fmt.Printf("\r\033[K%s", messages[i%len(messages)])
-			time.Sleep(5 * time.Second)
-			i++
-		}
-	}
-}
+// Removed statusUpdater fmt.Printf based on structured logger constraint
 
 func (g *UnitTestGenerator) runCoverage() error {
 	// Perform an initial build/test command to generate coverage report and get a baseline
@@ -456,14 +417,10 @@ func (g *UnitTestGenerator) runCoverage() error {
 		g.logger.Info(fmt.Sprintf("Running test command to generate coverage report: '%s'", g.cmd))
 	}
 
-	stopStatus := make(chan bool)
-	go statusUpdater(stopStatus)
-
 	startTime := time.Now()
 
 	_, _, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir, g.logger)
 	duration := time.Since(startTime)
-	stopStatus <- true
 	g.logger.Info(fmt.Sprintf("Test command completed in %v", formatDuration(duration)))
 
 	if err != nil {
@@ -488,7 +445,7 @@ func (g *UnitTestGenerator) runCoverage() error {
 }
 
 func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount int) (*models.UTDetails, error) {
-	fmt.Println("Generating Tests...")
+	g.logger.Info("Generating Tests...")
 
 	select {
 	case <-ctx.Done():
@@ -538,12 +495,12 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 }
 
 func (g *UnitTestGenerator) setCursor(ctx context.Context) error {
-	fmt.Println("Getting indentation for new Tests...")
+	g.logger.Info("Getting indentation for new Tests...")
 	indentation, err := g.getIndentation(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to analyze test headers indentation: %w", err)
 	}
-	fmt.Println("Getting Line number for new Tests...")
+	g.logger.Info("Getting Line number for new Tests...")
 	line, err := g.getLine(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to analyze relevant line number to insert new tests: %w", err)

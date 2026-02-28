@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"os"
 
 	"go.keploy.io/server/v3/cli/provider"
@@ -31,11 +30,11 @@ func Example(_ context.Context, logger *zap.Logger, _ *config.Config, _ ServiceF
 				return err
 			}
 			if customSetup {
-				fmt.Println(provider.Examples)
+				logger.Info(provider.Examples)
 				return nil
 			}
-			fmt.Println(provider.ExampleOneClickInstall)
-			fmt.Println(provider.WithoutexampleOneClickInstall)
+			logger.Info(provider.ExampleOneClickInstall)
+			logger.Info(provider.WithoutexampleOneClickInstall)
 			return nil
 		},
 	}

@@ -14,7 +14,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -168,8 +167,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	cmd.SilenceErrors = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		PrintLogo(os.Stdout, true)
-		color.Red(fmt.Sprintf("❌ error: %v", err))
-		fmt.Println()
+		c.logger.Error("❌ error", zap.Error(err))
 		return err
 	})
 

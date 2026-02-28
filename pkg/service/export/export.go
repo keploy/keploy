@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"net/url"
 	"os"
@@ -263,7 +262,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 		return err
 	}
 
-	fmt.Println("✅ Curls successfully exported to output.json 🎉")
+	logger.Info("✅ Curls successfully exported to output.json 🎉", zap.String("format", "output.json"))
 
 	return nil
 }
