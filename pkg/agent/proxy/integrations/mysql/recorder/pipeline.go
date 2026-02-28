@@ -72,7 +72,7 @@ type peekReader interface {
 // Test load:  ~27 decodes/sec.  Headroom: ~2.3x.
 var decodeSem = make(chan struct{}, 1)
 
-const decodeThrottleDelay = 7 * time.Millisecond
+// const decodeThrottleDelay = 7 * time.Millisecond
 
 // MocksProduced is an atomic counter tracking how many mocks have been
 // successfully sent to the mocks channel across all connections.
@@ -229,10 +229,10 @@ func runRecordPipeline(
 		mock, err := decodeRawMockEntry(ctx, logger, entry, decodeCtx, connKey)
 
 		// Sleep while HOLDING sem — parks all other decode goroutines.
-		// Skip after shutdown to drain remaining entries fast.
-		if ctx.Err() == nil {
-			time.Sleep(decodeThrottleDelay)
-		}
+		// // Skip after shutdown to drain remaining entries fast.
+		// if ctx.Err() == nil {
+		// 	time.Sleep(decodeThrottleDelay)
+		// }
 		<-decodeSem
 
 		if err != nil {

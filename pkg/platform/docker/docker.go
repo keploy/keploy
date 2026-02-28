@@ -510,9 +510,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 
 	// Generate ports
-	ports := []string{
-		fmt.Sprintf("%d:%d", opts.AgentPort, opts.AgentPort),
-		fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort),
+	var ports []string
+	if opts.AgentPort != 0 {
+		ports = append(ports, fmt.Sprintf("%d:%d", opts.AgentPort, opts.AgentPort))
+	}
+	if opts.ProxyPort != 0 {
+		ports = append(ports, fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort))
 	}
 
 	ports = append(ports, opts.AppPorts...)
@@ -591,6 +594,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
 				{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
 				{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
+				{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
 			}},
 		},
 	}

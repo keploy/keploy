@@ -351,7 +351,7 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 
 // PassThrough passes network traffic bidirectionally between clientConn and the
 // destination using io.Copy. On Linux with *net.TCPConn pairs this can use
-// splice(2) for zero-copy kernel-to-kernel forwarding.
+
 func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
 	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 

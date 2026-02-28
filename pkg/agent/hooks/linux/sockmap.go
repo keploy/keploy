@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"go.uber.org/zap"
 )
 
@@ -27,9 +28,9 @@ type sockmap struct {
 	sockhash  *ebpf.Map
 	captureRB *ebpf.Map
 	sockMeta  *ebpf.Map
-	// sk_skb programs are attached to the sockhash via bpf_prog_attach
-	parserFD  int
-	verdictFD int
+	// sk_skb programs kept alive for detach
+	parser  *ebpf.Program
+	verdict *ebpf.Program
 }
 
 // loadSockmap loads the sk_skb BPF programs and sockmap maps, pins them
@@ -57,6 +58,10 @@ func (h *Hooks) loadSockmap(logger *zap.Logger) (*sockmap, error) {
 	sm.captureRB = objs.KeployCaptureRb
 	sm.sockMeta = objs.KeploySockMeta
 
+	// Keep program references for detach
+	sm.parser = objs.KeployStreamParser
+	sm.verdict = objs.KeployStreamVerdict
+
 	// Clean stale pins
 	_ = os.Remove(SockhashPinPath)
 	_ = os.Remove(CaptureRBPinPath)
@@ -81,25 +86,28 @@ func (h *Hooks) loadSockmap(logger *zap.Logger) (*sockmap, error) {
 	}
 	logger.Info("Pinned sock_meta map", zap.String("path", SockMetaPinPath))
 
-	// Attach sk_skb programs to the sockhash map.
-	// bpf_prog_attach(parser, sockhash, BPF_SK_SKB_STREAM_PARSER)
-	// bpf_prog_attach(verdict, sockhash, BPF_SK_SKB_STREAM_VERDICT)
-	parserFD := objs.KeployStreamParser.FD()
-	verdictFD := objs.KeployStreamVerdict.FD()
+	// Attach sk_skb programs to the sockhash map using cilium/ebpf's
+	// RawAttachProgram, which correctly sizes the bpf_attr struct.
 	mapFD := sm.sockhash.FD()
 
-	if err := attachSkSkb(parserFD, mapFD, BPF_SK_SKB_STREAM_PARSER); err != nil {
+	if err := link.RawAttachProgram(link.RawAttachProgramOptions{
+		Target:  mapFD,
+		Program: sm.parser,
+		Attach:  ebpf.AttachSkSKBStreamParser,
+	}); err != nil {
 		objs.Close()
 		return nil, fmt.Errorf("failed to attach stream_parser to sockhash: %w", err)
 	}
-	sm.parserFD = parserFD
 	logger.Info("Attached sk_skb stream_parser to sockhash")
 
-	if err := attachSkSkb(verdictFD, mapFD, BPF_SK_SKB_STREAM_VERDICT); err != nil {
+	if err := link.RawAttachProgram(link.RawAttachProgramOptions{
+		Target:  mapFD,
+		Program: sm.verdict,
+		Attach:  ebpf.AttachSkSKBStreamVerdict,
+	}); err != nil {
 		objs.Close()
 		return nil, fmt.Errorf("failed to attach stream_verdict to sockhash: %w", err)
 	}
-	sm.verdictFD = verdictFD
 	logger.Info("Attached sk_skb stream_verdict to sockhash")
 
 	return sm, nil
@@ -112,12 +120,28 @@ func (sm *sockmap) unload() {
 	}
 	// Detach sk_skb programs
 	if sm.sockhash != nil {
-		if sm.parserFD > 0 {
-			_ = detachSkSkb(sm.parserFD, sm.sockhash.FD(), BPF_SK_SKB_STREAM_PARSER)
+		if sm.parser != nil {
+			_ = link.RawDetachProgram(link.RawDetachProgramOptions{
+				Target:  sm.sockhash.FD(),
+				Program: sm.parser,
+				Attach:  ebpf.AttachSkSKBStreamParser,
+			})
 		}
-		if sm.verdictFD > 0 {
-			_ = detachSkSkb(sm.verdictFD, sm.sockhash.FD(), BPF_SK_SKB_STREAM_VERDICT)
+		if sm.verdict != nil {
+			_ = link.RawDetachProgram(link.RawDetachProgramOptions{
+				Target:  sm.sockhash.FD(),
+				Program: sm.verdict,
+				Attach:  ebpf.AttachSkSKBStreamVerdict,
+			})
 		}
+	}
+
+	// Close programs
+	if sm.parser != nil {
+		sm.parser.Close()
+	}
+	if sm.verdict != nil {
+		sm.verdict.Close()
 	}
 
 	// Close maps (also unpins)
