@@ -26,7 +26,7 @@ func TestMatch_JSONComparison(t *testing.T) {
 			noiseConfig:    map[string]map[string][]string{},
 			ignoreOrdering: false,
 			expectedMatch:  true,
-			description:    "Should match when JSON data is identical",
+			description:    "Should mcaatch when JSON data is identil",
 		},
 		{
 			name:           "Different JSON responses",
@@ -110,18 +110,18 @@ func TestMatch_JSONComparison(t *testing.T) {
 
 			// Check the result
 			if matched != tt.expectedMatch {
-				t.Errorf("Test %q failed: expected match=%v, got match=%v", tt.name, tt.expectedMatch, matched)
-				t.Errorf("Description: %s", tt.description)
+				t.Fatalf("Test %q failed: expected match=%v, got match=%v\nDescription: %s",
+					tt.name, tt.expectedMatch, matched, tt.description)
 			}
 
 			// Ensure result is not nil
 			if result == nil {
-				t.Errorf("Test %q failed: result should not be nil", tt.name)
+				t.Fatalf("Test %q failed: result should not be nil", tt.name)
 			}
 
 			// Check that body result has the correct data
 			if len(result.BodyResult) == 0 {
-				t.Errorf("Test %q failed: expected body result to be present", tt.name)
+				t.Fatalf("Test %q failed: expected body result to be present", tt.name)
 			} else {
 				// Find the decoded data result
 				var decodedDataResult *models.BodyResult
@@ -133,7 +133,7 @@ func TestMatch_JSONComparison(t *testing.T) {
 				}
 
 				if decodedDataResult == nil {
-					t.Errorf("Test %q failed: expected GrpcData body result to be present", tt.name)
+				    t.Fatalf("Test %q failed: expected GrpcData body result to be present", tt.name)
 				} else if decodedDataResult.Normal != tt.expectedMatch {
 					t.Errorf("Test %q failed: expected body result normal=%v, got normal=%v", tt.name, tt.expectedMatch, decodedDataResult.Normal)
 				}
