@@ -180,14 +180,15 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	hookCfg := agent.HookCfg{
-		Pid:      0,
-		IsDocker: opts.IsDocker,
-		Mode:     opts.Mode,
-		Rules:    opts.Rules,
+		Pid:        0,
+		IsDocker:   opts.IsDocker,
+		Mode:       opts.Mode,
+		Rules:      opts.Rules,
+		LowLatency: LowLatencyMode,
 	}
-	// When the Rust proxy is enabled, the Go proxy port is set to 0 (random).
+	// When the low-latency proxy is enabled, the Go proxy port is set to 0 (random).
 	// Override the eBPF proxy port so that outgoing connections are redirected
-	// to the Rust proxy (which handles egress) instead of port 0.
+	// to the proxy (which handles egress) instead of port 0.
 	if EbpfProxyPortOverride != 0 {
 		hookCfg.Port = EbpfProxyPortOverride
 	}

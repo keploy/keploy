@@ -76,6 +76,9 @@ type Hooks struct {
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
+
+	// sockmap BPF objects for low-latency mode (nil when not enabled)
+	sm *sockmap
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -172,13 +175,25 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
 
-	// Pin redirect_proxy_map to bpffs so Rust can open it directly.
+	// Pin redirect_proxy_map to bpffs so enterprise proxy can open it directly.
 	const mapPinPath = "/sys/fs/bpf/keploy_redirect_proxy_map"
 	_ = os.Remove(mapPinPath) // clean stale pin
 	if err := objs.RedirectProxyMap.Pin(mapPinPath); err != nil {
-		h.logger.Warn("Failed to pin redirect_proxy_map (Rust direct eBPF lookup will be unavailable)", zap.Error(err))
+		h.logger.Warn("Failed to pin redirect_proxy_map", zap.Error(err))
 	} else {
 		h.logger.Info("Pinned redirect_proxy_map to bpffs", zap.String("path", mapPinPath))
+	}
+
+	// In low-latency mode, also pin target_namespace_pids so enterprise
+	// can iterate it to discover target PIDs for TLS uprobe attachment.
+	if opts.LowLatency {
+		const targetPidsPin = "/sys/fs/bpf/keploy_target_namespace_pids"
+		_ = os.Remove(targetPidsPin)
+		if err := objs.TargetNamespacePids.Pin(targetPidsPin); err != nil {
+			h.logger.Warn("Failed to pin target_namespace_pids", zap.Error(err))
+		} else {
+			h.logger.Info("Pinned target_namespace_pids for TLS uprobe PID discovery")
+		}
 	}
 
 	// Get the first-mounted cgroupv2 path.
@@ -342,6 +357,23 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
+	// Load sockmap BPF programs for low-latency mode if requested.
+	// This loads sk_skb stream_parser + stream_verdict and pins the sockhash,
+	// capture ringbuf, and sock_meta maps to bpffs.
+	if opts.LowLatency {
+		sm, err := h.loadSockmap(h.logger)
+		if err != nil {
+			h.logger.Warn("Failed to load sockmap BPF programs (low-latency mode unavailable)", zap.Error(err))
+			// Non-fatal: the proxy will fall back to userspace relay
+		} else {
+			h.sm = sm
+			h.logger.Info("Sockmap BPF programs loaded and pinned for low-latency mode")
+		}
+
+		// NOTE: SSL/GoTLS uprobe BPF programs are loaded by enterprise's
+		// TLSUprobeLoader (not here in OSS). Enterprise owns all TLS capture.
+	}
+
 	return nil
 }
 
@@ -418,6 +450,13 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	// Clean up pinned eBPF maps
 	_ = os.Remove("/sys/fs/bpf/keploy_redirect_proxy_map")
+	_ = os.Remove("/sys/fs/bpf/keploy_target_namespace_pids")
+
+	// Clean up sockmap BPF resources
+	if h.sm != nil {
+		h.sm.unload()
+		h.sm = nil
+	}
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {

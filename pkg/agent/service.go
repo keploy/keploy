@@ -20,11 +20,12 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	Pid      uint32
-	IsDocker bool
-	Mode     models.Mode
-	Rules    []models.BypassRule
-	Port     uint32
+	Pid        uint32
+	IsDocker   bool
+	Mode       models.Mode
+	Rules      []models.BypassRule
+	Port       uint32
+	LowLatency bool // When true, load sockmap BPF programs for zero-copy forwarding
 }
 
 type AuxiliaryProxyHook interface {

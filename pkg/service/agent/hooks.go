@@ -79,10 +79,15 @@ func RegisterProxyHook(h agent.AuxiliaryProxyHook) {
 	ProxyHook = h
 }
 
-// EbpfProxyPortOverride is set by the enterprise Rust proxy startup to tell
-// eBPF to redirect outgoing connections to the Rust proxy port instead of the
+// EbpfProxyPortOverride is set by the enterprise proxy startup to tell
+// eBPF to redirect outgoing connections to the proxy port instead of the
 // Go proxy port. When zero (default), the normal config ProxyPort is used.
 var EbpfProxyPortOverride uint32
+
+// LowLatencyMode is set when --low-latency flag is present.
+// When true, the hooks will load sockmap BPF programs for zero-copy forwarding.
+// TLS capture BPF programs are loaded by enterprise's TLSUprobeLoader.
+var LowLatencyMode bool
 
 var ActiveIncomingProxy agent.IncomingProxy
 
