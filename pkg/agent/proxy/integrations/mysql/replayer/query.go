@@ -120,6 +120,14 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			// Handle prepared statement cleanup for COM_STMT_CLOSE
 			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
 				if closePacket, ok := commandPkt.Message.(*mysql.StmtClosePacket); ok {
+					// Record closure in history BEFORE deleting (for ID reuse tracking)
+					if decodeCtx.StmtHistory != nil {
+						decodeCtx.StmtHistory.RecordClose(closePacket.StatementID)
+						logger.Debug("Recorded COM_STMT_CLOSE in history",
+							zap.Uint32("stmt_id", closePacket.StatementID),
+							zap.Uint32("current_cycle", decodeCtx.StmtHistory.GetCurrentCycle()))
+					}
+					// Keep existing cleanup for backward compatibility
 					delete(decodeCtx.PreparedStatements, closePacket.StatementID)
 					if decodeCtx.StmtIDToQuery != nil {
 						delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
