@@ -29,13 +29,13 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }}) (Windows)
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           clean: true
 
       # --- CLI binaries (same as before) ---
       - name: Download Record Binary (${{ matrix.config.record_src }})
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.config.record_src }}
           path: record-bin
@@ -50,7 +50,7 @@ jobs:
           echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
 
       - name: Download Replay Binary (${{ matrix.config.replay_src }})
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.config.replay_src }}
           path: replay-bin
@@ -70,7 +70,7 @@ jobs:
           version: ${{ github.sha }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-go
           path: samples-go

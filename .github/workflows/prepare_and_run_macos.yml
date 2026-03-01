@@ -30,7 +30,7 @@ jobs:
           echo "Created workflow lock file: $LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
       
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
     
@@ -43,7 +43,7 @@ jobs:
       - name: Build Keploy - macOS (darwin/arm64)
         run: |
           GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: build, path: keploy }
 
   # upload-latest:
@@ -57,7 +57,7 @@ jobs:
   #         tar -xzf keploy.tar.gz
   #         chmod +x keploy
 
-  #     - uses: actions/upload-artifact@v4
+  #     - uses: actions/upload-artifact@v7
   #       with: { name: latest, path: keploy }
 
   #     - name: Clean up git config
@@ -74,7 +74,7 @@ jobs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
       image_digest: ${{ steps.digest.outputs.image_digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers

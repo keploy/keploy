@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create directories to store coverage data
         run: |
@@ -15,13 +15,13 @@ jobs:
           mkdir -p final-cov
 
       - name: Download first coverage data of gin-mongo application
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: coverage-reports-samples-go-gin-mongo-0
           path: ./temp-coverage-dir
 
       - name: Download second coverage data of gin-mongo application
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: coverage-reports-samples-go-gin-mongo-1
           path: ./temp-coverage-dir
@@ -51,7 +51,7 @@ jobs:
 
       # - name: Upload the HTML coverage report
       #   id: artifact-upload-step
-      #   uses: actions/upload-artifact@v4
+      #   uses: actions/upload-artifact@v7
       #   with:
       #     name: coverage-report-html
       #     path: coverage.html

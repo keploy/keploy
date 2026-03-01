@@ -17,7 +17,7 @@ jobs:
   build-and-upload:
     runs-on: ${{ inputs.runner }} 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
@@ -38,7 +38,7 @@ jobs:
         run: |
           mkdir -p out/build-no-race
           go build -tags=viper_bind_struct -o out/build-no-race/keploy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: build-no-race
           path: out/build-no-race/keploy
@@ -49,7 +49,7 @@ jobs:
         run: |
           mkdir -p out/build
           go build -race -tags=viper_bind_struct -o out/build/keploy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: build
           path: out/build/keploy
@@ -65,7 +65,7 @@ jobs:
           curl -L "$URL" -o keploy.tar.gz
           tar -xzf keploy.tar.gz
           chmod +x keploy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: latest, path: keploy }
 
   run_golang_linux:

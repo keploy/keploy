@@ -48,12 +48,12 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})${{ matrix.app.enable_ssl != null && format(' ssl-{0}', matrix.app.enable_ssl) || '' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.24.x'
 
@@ -74,7 +74,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-go
           path: samples-go
@@ -110,12 +110,12 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.24.x'
 
@@ -130,7 +130,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-go
           path: samples-go
@@ -162,12 +162,12 @@ jobs:
     name: dns_mock (${{ matrix.branch }}) - ${{ matrix.config.job }}
     steps:
       - name: Checkout Keploy
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.24.x'
 
@@ -182,7 +182,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout DNS Mock App
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: akashkumar7902/dns-mock-test
           ref: ${{ matrix.branch }}
@@ -215,12 +215,12 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.x'
 
@@ -236,7 +236,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-go
           path: samples-go

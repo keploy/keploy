@@ -11,17 +11,17 @@ jobs:
 #  build-ui:
 #    runs-on: ubuntu-latest
 #    steps:
-#      - uses: actions/checkout@v4
+#      - uses: actions/checkout@v6
 #        with:
 #          fetch-depth: 0
 #
 #      - name: Set up Go
-#        uses: actions/setup-go@v2
+#        uses: actions/setup-go@v6
 #        with:
 #          go-version: "1.20"
 
 #      - name: Checkout UI
-#        uses: actions/checkout@v4
+#        uses: actions/checkout@v6
 #        with:
 #          repository: keploy/ui
 #          path: ui
@@ -53,11 +53,11 @@ jobs:
     # runs-on: ubuntu-latest
 #    needs: build-ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.23"
 
@@ -68,7 +68,7 @@ jobs:
           go-cache: true
 
 #      - name: Checkout UI
-#        uses: actions/checkout@v4
+#        uses: actions/checkout@v6
 #        with:
 #          repository: keploy/ui
 #          path: ui
@@ -80,7 +80,7 @@ jobs:
 #          path: web
 #          key: ${{ hashFiles('ui/src') }}
       - name: Import Code-Signing Certificates
-        uses: Apple-Actions/import-codesign-certs@v5
+        uses: Apple-Actions/import-codesign-certs@v6
         with:
           # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
           p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}

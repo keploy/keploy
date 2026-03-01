@@ -44,7 +44,7 @@ jobs:
     name: Rerecord Fuzzer (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
@@ -68,7 +68,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.23"
 
@@ -122,7 +122,7 @@ jobs:
     name: MySQL Fuzzer (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
@@ -139,7 +139,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.23"
 
@@ -190,7 +190,7 @@ jobs:
     name: gRPC Fuzzer ${{ matrix.mode }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
@@ -207,7 +207,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.23"
 
@@ -268,7 +268,7 @@ jobs:
     name: Postgres Fuzzer (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
@@ -285,7 +285,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.23"
 
@@ -341,7 +341,7 @@ jobs:
     name: Mongo Fuzzer (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download Keploy Binary (for Record)
         id: record_keploy
@@ -356,7 +356,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ">=1.23"
 
