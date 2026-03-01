@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 
 	"go.keploy.io/server/v3/cli"
@@ -16,15 +17,12 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
-
-	"runtime/pprof"
 )
 
-// version is the version of the server and will be injected during build by ldflags, same with dsn
-// see https://goreleaser.com/customization/build/
-
+// These are injected during build using ldflags
 var version string
 var dsn string
+
 var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
@@ -46,20 +44,18 @@ func setVersion() {
 func start(ctx context.Context) {
 	logger, logFile, err := log.New()
 	if err != nil {
-		fmt.Println("Failed to start the logger for the CLI", err)
+		fmt.Println("Failed to start the logger for the CLI:", err)
 		return
 	}
 	utils.LogFile = logFile
 
-	// Early check: If Docker command detected and not running as root, re-exec with sudo
-	// This must happen before any other initialization to ensure clean process handoff
+	// Re-exec with sudo if needed (Docker commands)
 	if utils.ShouldReexecWithSudo() {
 		utils.ReexecWithSudo(logger)
-		// ReexecWithSudo calls syscall.Exec which replaces the process, so this line
-		// is only reached if there's an error (which is handled inside ReexecWithSudo)
 		return
 	}
 
+	// CPU Profiling
 	if cpuProfile := os.Getenv("CPU_PROFILE"); cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
 		if err != nil {
@@ -69,95 +65,86 @@ func start(ctx context.Context) {
 				logger.Error("could not start CPU profile", zap.Error(err))
 				f.Close()
 			} else {
-				logger.Info("CPU profiling enabled", zap.String("file", cpuProfile))
 				defer func() {
 					pprof.StopCPUProfile()
 					f.Close()
-					logger.Info("CPU profiling stopped", zap.String("file", cpuProfile))
 				}()
 			}
 		}
 	}
 
+	// Heap Profiling
 	if heapProfile := os.Getenv("HEAP_PROFILE"); heapProfile != "" {
-		logger.Info("Heap profiling enabled", zap.String("file", heapProfile))
 		defer func() {
 			f, err := os.Create(heapProfile)
 			if err != nil {
-				logger.Error("could not create Heap profile", zap.Error(err))
+				logger.Error("could not create heap profile", zap.Error(err))
 				return
 			}
 			defer f.Close()
-			runtime.GC() // get up-to-date statistics
+			runtime.GC()
 			if err := pprof.WriteHeapProfile(f); err != nil {
-				logger.Error("could not write Heap profile", zap.Error(err))
-			} else {
-				logger.Info("Heap profile written", zap.String("file", heapProfile))
+				logger.Error("could not write heap profile", zap.Error(err))
 			}
 		}()
 	}
 
+	// Cleanup
 	defer func() {
-		inDocker := os.Getenv("KEPLOY_INDOCKER")
-		if inDocker != "true" {
+		if os.Getenv("KEPLOY_INDOCKER") != "true" {
 			if utils.LogFile != nil {
-				err := utils.LogFile.Close()
-				if err != nil {
-					utils.LogError(logger, err, "Failed to close Keploy Logs")
-				}
+				_ = utils.LogFile.Close()
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
-				return
-			}
-			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-				return
-			}
+			_ = utils.DeleteFileIfNotExists(logger, "keploy-logs.txt")
+			_ = utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml")
 		}
 	}()
+
 	defer utils.Recover(logger)
 
-	// The 'umask' command is commonly used in various operating systems to regulate the permissions of newly created files.
-	// These 'umask' values subtract from the permissions assigned by the process, effectively lowering the permissions.
-	// For example, if a file is created with permissions '777' and the 'umask' is '022', the resulting permissions will be '755',
-	// reducing certain permissions for security purposes.
-	// Setting 'umask' to '0' ensures that 'keploy' can precisely control the permissions of the files it creates.
-	// However, it's important to note that this approach may not work in scenarios involving mounted volumes,
-	// as the 'umask' is set by the host system, and cannot be overridden by 'keploy' or individual processes.
+	// Set Umask
 	oldMask := utils.SetUmask()
 	defer utils.RestoreUmask(oldMask)
 
+	// Initialize Sentry if DSN provided
 	if dsn != "" {
 		utils.SentryInit(logger, dsn)
-		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
+
+	// Load config
 	conf := config.New()
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
-
-	// Capture the full command used for test runs (to be stored in report)
 	conf.Test.CmdUsed = utils.GetFullCommandUsed()
-	userDb := userDb.New(logger, conf)
-	conf.InstallationID, err = userDb.GetInstallationID(ctx)
+
+	// Get Installation ID
+	userDB := userDb.New(logger, conf)
+	conf.InstallationID, err = userDB.GetInstallationID(ctx)
 	if err != nil {
-		errMsg := "failed to get installation id"
-		utils.LogError(logger, err, errMsg)
+		utils.LogError(logger, err, "failed to get installation id")
 		os.Exit(1)
 	}
-	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
-	svcProvider := provider.NewServiceProvider(logger, conf, auth)
+	// Auth setup
+	authSvc := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
+
+	// Service Providers
+	svcProvider := provider.NewServiceProvider(logger, conf, authSvc)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
+
+	// Root CLI Command
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
+
 	if err := rootCmd.Execute(); err != nil {
-		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
-			fmt.Println("Error: ", err.Error())
+		if strings.HasPrefix(err.Error(), "unknown command") ||
+			strings.HasPrefix(err.Error(), "unknown shorthand") {
+			fmt.Println("Error:", err.Error())
 			fmt.Println("Run 'keploy --help' for usage.")
 			os.Exit(1)
 		}
 	}
 
-	// Restore keploy folder ownership if running under sudo (for Docker mode)
-	// This ensures the next native run doesn't hit permission issues
+	// Restore folder ownership (for sudo runs)
 	if conf.Path != "" {
 		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
