@@ -1478,7 +1478,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// ====== Phase 2: Execute deferred streaming tests sequentially ======
 	// Only run Phase 2 if Phase 1 completed without fatal errors and there are deferred tests.
 	if loopErr == nil && !exitLoop && len(deferredStreamingTests) > 0 {
-		r.logger.Info("executing deferred streaming tests sequentially",
+		r.logger.Info("Now executing streaming tests",
 			zap.String("testset", testSetID),
 			zap.Int("count", len(deferredStreamingTests)))
 
