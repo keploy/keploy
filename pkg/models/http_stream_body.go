@@ -182,6 +182,51 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 	if len(resp.StreamBody) > 0 {
 		return cloneStreamChunks(resp.StreamBody), true
 	}
+
+	if resp.Body != "" {
+		kind := detectStreamBodyKind(resp.Header)
+		if kind == streamBodyKindSSE {
+			chunks := parseSSEBodyToChunks(resp.Body, resp.Timestamp)
+			if len(chunks) > 0 {
+				return chunks, true
+			}
+		} else if kind == streamBodyKindRaw {
+			contentType := strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Type"))
+			isNDJSON := strings.Contains(contentType, "application/x-ndjson") || strings.Contains(contentType, "application/ndjson")
+			isTextPlain := strings.Contains(contentType, "text/plain")
+			isOctetStream := strings.Contains(contentType, "application/octet-stream")
+
+			if isOctetStream {
+				if strings.TrimSpace(resp.Body) == "" {
+					return nil, false
+				}
+				return []HTTPStreamChunk{{
+					TS: resp.Timestamp,
+					Data: []HTTPStreamDataField{{
+						Key:   "raw",
+						Value: resp.Body,
+					}},
+				}}, true
+			}
+
+			// Only safely auto-chunk known streaming structured formats to avoid false-positives on plain text files.
+			shouldChunk := isNDJSON
+			if isTextPlain {
+				// For text/plain, only treat as streaming if it has multiple lines
+				bodyNorm := normalizeModelLineEndings(resp.Body)
+				bodyNorm = strings.TrimSuffix(bodyNorm, "\n")
+				shouldChunk = strings.Contains(bodyNorm, "\n") && strings.TrimSpace(bodyNorm) != ""
+			}
+
+			if shouldChunk {
+				chunks := parseRawBodyToChunks(resp.Body, resp.Timestamp, isNDJSON)
+				if len(chunks) > 0 {
+					return chunks, true
+				}
+			}
+		}
+	}
+
 	return nil, false
 }
 
