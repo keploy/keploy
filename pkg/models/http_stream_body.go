@@ -209,13 +209,18 @@ func streamChunksForYAML(resp HTTPResp) ([]HTTPStreamChunk, bool) {
 				}}, true
 			}
 
+			hasContentLength := getHeaderValueCaseInsensitiveModel(resp.Header, "Content-Length") != ""
+			isChunked := strings.Contains(strings.ToLower(getHeaderValueCaseInsensitiveModel(resp.Header, "Transfer-Encoding")), "chunked")
+
 			// Only safely auto-chunk known streaming structured formats to avoid false-positives on plain text files.
 			shouldChunk := isNDJSON
 			if isTextPlain {
-				// For text/plain, only treat as streaming if it has multiple lines
-				bodyNorm := normalizeModelLineEndings(resp.Body)
-				bodyNorm = strings.TrimSuffix(bodyNorm, "\n")
-				shouldChunk = strings.Contains(bodyNorm, "\n") && strings.TrimSpace(bodyNorm) != ""
+				// For text/plain, it is streaming if Transfer-Encoding is chunked or Content-Length is absent.
+				if isChunked || !hasContentLength {
+					shouldChunk = true
+				} else {
+					shouldChunk = false
+				}
 			}
 
 			if shouldChunk {
