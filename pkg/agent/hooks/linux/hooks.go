@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
@@ -154,8 +155,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1770972393001
-	h.agentRegistartionMap = objs.M_1770972393002
+	h.clientRegistrationMap = objs.KeployClientRegistrationMap
+	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -299,6 +300,16 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		agentInfo.IsDocker = 1
 	}
 	agentInfo.DNSPort = int32(setupOpts.DnsPort)
+
+	// Set recording start time using CLOCK_BOOTTIME so the eBPF tracepoint
+	// can compare process start_boottime and auto-exclude pre-existing PIDs.
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
+		h.logger.Warn("failed to read CLOCK_BOOTTIME; pre-existing PID exclusion disabled", zap.Error(err))
+	} else {
+		agentInfo.RecordingStartTime = uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
+		h.logger.Info("recording start boottime set", zap.Uint64("ns", agentInfo.RecordingStartTime))
+	}
 
 	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
 	if err != nil {
