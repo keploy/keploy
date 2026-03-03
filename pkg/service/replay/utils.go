@@ -1,7 +1,6 @@
 package replay
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -16,7 +15,6 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
@@ -210,7 +208,6 @@ func isMockSubset(subset, superset []string) bool {
 
 	return true
 }
-
 
 // upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
 // consumed during the replay of a specific test case.
