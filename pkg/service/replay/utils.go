@@ -211,6 +211,30 @@ func isMockSubset(subset, superset []string) bool {
 	return true
 }
 
+
+// upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
+// consumed during the replay of a specific test case.
+func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, mockNames []string) {
+	if actualTestMockMappings == nil || testCaseID == "" || len(mockNames) == 0 {
+		return
+	}
+
+	// If the test case already has an entry, append the new mock names to it.
+	for i := range actualTestMockMappings.Tests {
+		if actualTestMockMappings.Tests[i].ID == testCaseID {
+			existing := actualTestMockMappings.Tests[i].Mocks.ToSlice()
+			actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(existing, mockNames...))
+			return
+		}
+	}
+
+	// No existing entry — create a new one.
+	actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+		ID:    testCaseID,
+		Mocks: models.FromSlice(mockNames),
+	})
+}
+
 type TestFailure struct {
 	TestSetID     string
 	TestID        string
