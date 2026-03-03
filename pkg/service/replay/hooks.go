@@ -76,20 +76,34 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
 		}
 
-		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
-
 		hostToUse := h.cfg.Test.Host
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+
+		cfg := pkg.SimulationConfig{
 			APITimeout:         h.cfg.Test.APITimeout,
 			ConfigPort:         h.cfg.Test.Port,
 			KeployPath:         h.cfg.Path,
 			ConfigHost:         hostToUse,
 			URLReplacements:    urlReplacements,
 			StreamingBodyNoise: streamBodyNoise,
-		})
+		}
+
+		// Check if this is a streaming test case
+		if pkg.IsHTTPStreamingTestCase(tc) {
+			h.logger.Debug("Simulating HTTP streaming request", zap.Any("Test case", tc.Name))
+			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
+
+			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
+				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+			}
+
+			return resp, err
+		}
+
+		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))

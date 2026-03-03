@@ -292,11 +292,25 @@ func TestSimulateHTTP_SSEStreamMatchAndEarlyClose_316(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, expectedSSEBody, resp.Body)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, capturedBody, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := tc.HTTPResp.Body
+	if !matched {
+		respBody = capturedBody
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedSSEBody, respBody)
 
 	select {
 	case <-serverClosed:
@@ -363,12 +377,25 @@ func TestSimulateHTTP_SSEStreamMismatch_317(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.NotEqual(t, tc.HTTPResp.Body, resp.Body)
-	assert.Contains(t, resp.Body, "999")
+	require.NotNil(t, streamResp)
+
+	// Compare the stream - should NOT match due to value mismatch
+	noiseKeys := map[string]struct{}{}
+	matched, capturedBody, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+
+	respBody := capturedBody
+	if matched {
+		respBody = tc.HTTPResp.Body
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.NotEqual(t, tc.HTTPResp.Body, respBody)
+	assert.Contains(t, respBody, "999")
 }
 
 func TestSimulateHTTP_SSEStreamMatch_WithStructuredExpectedBody_317A(t *testing.T) {
@@ -422,11 +449,23 @@ func TestSimulateHTTP_SSEStreamMatch_WithStructuredExpectedBody_317A(t *testing.
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, tc.HTTPResp.Body, resp.Body)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	// When matched, use tc.HTTPResp.Body (legacy body)
+	respBody := tc.HTTPResp.Body
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, respBody)
 }
 
 func TestCanonicalizeSSEFrame_318(t *testing.T) {
@@ -478,11 +517,23 @@ func TestSimulateHTTP_NDJSONStreamMatch_WithStructuredExpectedBody_318A(t *testi
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, tc.HTTPResp.Body, resp.Body)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	// When matched, use tc.HTTPResp.Body (legacy body)
+	respBody := tc.HTTPResp.Body
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, tc.HTTPResp.Body, respBody)
 }
 
 func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
@@ -535,11 +586,25 @@ func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, expectedBody, resp.Body)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := expectedBody
+	if !matched {
+		respBody = ""
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedBody, respBody)
 
 	select {
 	case <-serverClosed:
@@ -611,11 +676,25 @@ func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, expectedBody, resp.Body)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := expectedBody
+	if !matched {
+		respBody = ""
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedBody, respBody)
 
 	select {
 	case <-serverClosed:
@@ -674,11 +753,25 @@ func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
+	// Use SimulateHTTPStreaming for streaming test cases
+	streamResp, err := SimulateHTTPStreaming(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 3})
 	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, expectedBody, resp.Body)
+	require.NotNil(t, streamResp)
+
+	// Compare the stream
+	noiseKeys := map[string]struct{}{}
+	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	streamResp.Reader.Close()
+	require.NoError(t, compareErr)
+	require.True(t, matched)
+
+	respBody := expectedBody
+	if !matched {
+		respBody = ""
+	}
+
+	assert.Equal(t, http.StatusOK, streamResp.StatusCode)
+	assert.Equal(t, expectedBody, respBody)
 
 	select {
 	case <-serverClosed:
