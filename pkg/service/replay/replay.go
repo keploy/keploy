@@ -1092,16 +1092,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 	}
 
-	// deferredStreamingTest holds a streaming test case that was skipped during Phase 1
+	// streamingTest holds a streaming test case that was skipped during Phase 1
 	// and will be executed sequentially in Phase 2.
-	type deferredStreamingTest struct {
+	type streamingTest struct {
 		testCase      *models.TestCase
 		index         int
 		expectedMocks []string
 	}
 
 	// Phase 1 defers streaming tests into this list for sequential execution in Phase 2.
-	var deferredStreamingTests []deferredStreamingTest
+	var streamingTests []streamingTest
 
 	// Pre-scan: determine whether any streaming tests will actually be deferred into Phase 2
 	// (i.e., they pass the selectedTests/ignoredTests filters). This tells us whether Phase 2
@@ -1183,7 +1183,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if isCurrentTestStreaming {
 			tcCopy := *testCase
 			expectedMocksForTC := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
-			deferredStreamingTests = append(deferredStreamingTests, deferredStreamingTest{
+			streamingTests = append(streamingTests, streamingTest{
 				testCase:      &tcCopy,
 				index:         idx,
 				expectedMocks: expectedMocksForTC,
@@ -1479,17 +1479,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// ====== Phase 2: Execute deferred streaming tests sequentially ======
 	// Only run Phase 2 if Phase 1 completed without fatal errors and there are deferred tests.
-	if loopErr == nil && !exitLoop && len(deferredStreamingTests) > 0 {
+	if loopErr == nil && !exitLoop && len(streamingTests) > 0 {
 		r.logger.Info("Now executing streaming tests",
 			zap.String("testset", testSetID),
-			zap.Int("count", len(deferredStreamingTests)))
+			zap.Int("count", len(streamingTests)))
 
-		for i, deferred := range deferredStreamingTests {
+		for i, deferred := range streamingTests {
 			tc := deferred.testCase
 
 			// Set isLastTestCase on the last deferred streaming test: it is the true last
 			// test to execute in the entire run, so finalization must trigger here, not in Phase 1.
-			if i == len(deferredStreamingTests)-1 && r.isLastTestSet {
+			if i == len(streamingTests)-1 && r.isLastTestSet {
 				r.isLastTestCase = true
 				tc.IsLast = true
 			}
