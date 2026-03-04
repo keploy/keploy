@@ -7,18 +7,28 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/processlock"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
 func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	conf := config.New()
-
+	var cliLock *processlock.Lock
 	var rootCmd = &cobra.Command{
 		Use:     "keploy",
 		Short:   "Keploy CLI",
 		Example: provider.RootExamples,
 		Version: utils.Version,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			lockInstance, err := processlock.Acquire()
+			if err != nil {
+				return err
+			}
+
+			cliLock = lockInstance
+			return nil
+		},
 		PreRun: func(cmd *cobra.Command, _ []string) {
 			disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
 			provider.PrintLogo(os.Stdout, disableAnsi)
@@ -36,7 +46,14 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	})
 
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
-
+	rootCmd.PersistentPostRunE = func(cmd *cobra.Command, _ []string) error {
+		if cliLock != nil {
+			if err := cliLock.Release(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	rootCmd.SetHelpTemplate(provider.RootCustomHelpTemplate)
 
 	rootCmd.SetVersionTemplate(provider.VersionTemplate)
