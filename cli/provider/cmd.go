@@ -1043,13 +1043,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// get disable-mapping flag value
-			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
-			if err != nil {
-				errMsg := "failed to get the disable-mapping flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
+				disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+				if err != nil {
+					errMsg := "failed to get the disable-mapping flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.DisableMapping = disableMapping
 			}
-			c.cfg.DisableMapping = disableMapping
 
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
