@@ -53,6 +53,7 @@ type TestCase struct {
 	IsLast        bool                          `json:"is_last" bson:"is_last"`
 	Assertions    map[AssertionType]interface{} `json:"assertion" bson:"assertion"`
 	HasBinaryFile bool                          `json:"has_binary_file" bson:"has_binary_file"`
+	ConnectionID  string                        `json:"-" bson:"-"` // Not persisted, logging only
 	AppPort       uint16                        `json:"app_port" bson:"app_port"`
 }
 

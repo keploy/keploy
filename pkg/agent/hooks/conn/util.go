@@ -26,7 +26,7 @@ import (
 
 var GlobalTestCounter int64
 
-type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16)
+type CaptureFunc func(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16, connID string)
 
 var CaptureHook CaptureFunc = Capture
 
@@ -37,7 +37,7 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
-func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16, connID string) {
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -157,8 +157,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			Timestamp:     resTimeTest,
 			StatusMessage: http.StatusText(resp.StatusCode),
 		},
-		Noise:   map[string][]string{},
-		AppPort: appPort,
+		Noise:        map[string][]string{},
+		ConnectionID: connID,
+		AppPort:      appPort,
 		// Mocks: mocks,
 	}
 
@@ -362,7 +363,7 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 }
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16) {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, connID string) {
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -375,14 +376,15 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	// Create test case from stream data
 	testCase := &models.TestCase{
-		Version:  models.GetVersion(),
-		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
-		Kind:     models.GRPC_EXPORT,
-		Created:  time.Now().Unix(),
-		GrpcReq:  *http2Stream.GRPCReq,
-		GrpcResp: *http2Stream.GRPCResp,
-		Noise:    map[string][]string{},
-		AppPort:  appPort,
+		Version:      models.GetVersion(),
+		Name:         http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Kind:         models.GRPC_EXPORT,
+		Created:      time.Now().Unix(),
+		GrpcReq:      *http2Stream.GRPCReq,
+		GrpcResp:     *http2Stream.GRPCResp,
+		Noise:        map[string][]string{},
+		ConnectionID: connID,
+		AppPort:      appPort,
 	}
 
 	select {
