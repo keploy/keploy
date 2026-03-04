@@ -299,7 +299,7 @@ func TestSimulateHTTP_SSEStreamMatchAndEarlyClose_316(t *testing.T) {
 
 	// Compare the stream
 	noiseKeys := map[string]struct{}{}
-	matched, capturedBody, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	matched, capturedBody, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
 	streamResp.Reader.Close()
 	require.NoError(t, compareErr)
 	require.True(t, matched)
@@ -384,7 +384,7 @@ func TestSimulateHTTP_SSEStreamMismatch_317(t *testing.T) {
 
 	// Compare the stream - should NOT match due to value mismatch
 	noiseKeys := map[string]struct{}{}
-	matched, capturedBody, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	matched, capturedBody, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
 	streamResp.Reader.Close()
 	require.NoError(t, compareErr)
 
@@ -456,7 +456,7 @@ func TestSimulateHTTP_SSEStreamMatch_WithStructuredExpectedBody_317A(t *testing.
 
 	// Compare the stream
 	noiseKeys := map[string]struct{}{}
-	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
 	streamResp.Reader.Close()
 	require.NoError(t, compareErr)
 	require.True(t, matched)
@@ -524,7 +524,7 @@ func TestSimulateHTTP_NDJSONStreamMatch_WithStructuredExpectedBody_318A(t *testi
 
 	// Compare the stream
 	noiseKeys := map[string]struct{}{}
-	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
 	streamResp.Reader.Close()
 	require.NoError(t, compareErr)
 	require.True(t, matched)
@@ -593,7 +593,7 @@ func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
 
 	// Compare the stream
 	noiseKeys := map[string]struct{}{}
-	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
 	streamResp.Reader.Close()
 	require.NoError(t, compareErr)
 	require.True(t, matched)
@@ -683,7 +683,7 @@ func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
 
 	// Compare the stream
 	noiseKeys := map[string]struct{}{}
-	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
 	streamResp.Reader.Close()
 	require.NoError(t, compareErr)
 	require.True(t, matched)
@@ -760,7 +760,7 @@ func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
 
 	// Compare the stream
 	noiseKeys := map[string]struct{}{}
-	matched, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
+	matched, _, _, compareErr := CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, noiseKeys, logger)
 	streamResp.Reader.Close()
 	require.NoError(t, compareErr)
 	require.True(t, matched)

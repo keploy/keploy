@@ -1540,7 +1540,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			httpResp, ok := resp.(*models.HTTPResp)
-			var hadStreamingMismatch bool         // Track if streaming comparison failed
+			var hadStreamingMismatch bool              // Track if streaming comparison failed
 			var streamMismatch *pkg.StreamMismatchInfo // Detailed mismatch info for body result
 
 			// Calculate mock mismatch early so we can use emitFailureLogs in streaming comparison
