@@ -41,13 +41,13 @@ jobs:
             }
           }
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           clean: true
 
       # --- CLI binaries ---
       - name: Download Record Binary (${{ matrix.config.record_src }})
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.config.record_src }}
           path: record-bin
@@ -61,7 +61,7 @@ jobs:
           echo "$env:GITHUB_WORKSPACE/bin" >> $env:GITHUB_PATH
           echo "bin_name=keploy-record.exe" >> $env:GITHUB_OUTPUT
       - name: Download Replay Binary (${{ matrix.config.replay_src }})
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.config.replay_src }}
           path: replay-bin
@@ -74,7 +74,7 @@ jobs:
           Move-Item -Path ".\replay-bin\keploy.exe" -Destination ".\bin\keploy-replay.exe" -Force
           echo "bin_name=keploy-replay.exe" >> $env:GITHUB_OUTPUT
       - name: Checkout the samples-go repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-go
           path: samples-go
