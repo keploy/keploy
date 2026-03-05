@@ -89,7 +89,7 @@ jobs:
           P90_THRESHOLD: 15      # Based on baseline ~7.6ms
           P99_THRESHOLD: 70      # Based on baseline ~15-60ms (increased for CI variance)
           ERROR_RATE_THRESHOLD: 0.01
-          RPS_THRESHOLD: 100
+          RPS_THRESHOLD: 100     # Target 100 RPS (allows 1% tolerance = 99 RPS)
 
       - name: Stop Keploy
         if: always()
@@ -153,17 +153,29 @@ jobs:
               const errorRate = errorMatch ? (parseFloat(errorMatch[1]) * 100).toFixed(2) + '%' : 'N/A';
               const rps = rpsMatch ? parseFloat(rpsMatch[1]).toFixed(2) : 'N/A';
               
-              // Determine status (simplified check)
-              const passed = content.includes('✓') || !content.includes('regression');
-              const status = passed ? '✅ PASS' : '❌ FAIL';
+              // Determine status by checking for "FAILED" or "PASSED" in output
+              const hasFailed = content.includes('Run ' + (idx + 1) + ': FAILED');
+              const hasPassed = content.includes('Run ' + (idx + 1) + ': PASSED');
               
-              if (passed) passCount++;
-              else failCount++;
+              let status;
+              if (hasFailed) {
+                status = '❌ FAIL';
+                failCount++;
+              } else if (hasPassed) {
+                status = '✅ PASS';
+                passCount++;
+              } else {
+                // Fallback: check for regression indicators
+                const hasRegression = content.includes('regression') || content.includes('✗');
+                status = hasRegression ? '❌ FAIL' : '✅ PASS';
+                if (hasRegression) failCount++;
+                else passCount++;
+              }
               
               comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${errorRate} | ${rps} | ${status} |\n`;
             });
             
-            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 70ms, Error Rate < 1%, RPS >= 100\n\n';
+            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 70ms, Error Rate < 1%, RPS >= 100 (±1% tolerance)\n\n';
             
             if (failCount >= 2) {
               comment += '❌ **Result:** FAILED - ' + failCount + ' out of 3 runs showed regression\n';
