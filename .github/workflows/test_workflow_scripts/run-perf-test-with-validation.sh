@@ -186,8 +186,8 @@ for i in $(seq 1 $NUM_RUNS); do
     # Sleep between runs to allow system to stabilize
     if [ $i -lt $NUM_RUNS ]; then
         echo ""
-        echo "Waiting 10 seconds before next run..."
-        sleep 10
+        echo "Waiting 5 seconds before next run..."
+        sleep 5
     fi
 done
 

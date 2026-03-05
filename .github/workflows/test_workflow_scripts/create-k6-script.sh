@@ -14,13 +14,13 @@ export const options = {
       executor: 'constant-arrival-rate',
       rate: 100,
       timeUnit: '1s',
-      duration: '60s',
+      duration: '30s',        // Reduced from 60s to 30s
       preAllocatedVUs: 20,
       maxVUs: 100,
     },
   },
   // Track specific percentiles - P50, P90, P99 root out outliers
-  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(90)', 'p(95)', 'p(99)'],  // Removed p(99.9)
   // Set thresholds for percentiles
   thresholds: {
     'http_req_duration': [

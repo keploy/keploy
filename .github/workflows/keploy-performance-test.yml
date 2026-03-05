@@ -41,13 +41,23 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
+          cache: true
+          cache-dependency-path: keploy/go.sum
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
 
       - name: Setup k6
         uses: grafana/setup-k6-action@v1
 
       - name: Build Spring PetClinic
         working-directory: petclinic
-        run: ./mvnw clean package -DskipTests
+        run: ./mvnw clean package -DskipTests -T 1C  # Parallel build with 1 thread per core
 
       - name: Build Keploy
         working-directory: keploy
@@ -75,9 +85,9 @@ jobs:
         env:
           NUM_RUNS: 3
           REQUIRED_FAILURES: 2
-          P50_THRESHOLD: 50
-          P90_THRESHOLD: 100
-          P99_THRESHOLD: 500
+          P50_THRESHOLD: 5       # 2x baseline (2.5ms) - catches 2x regressions
+          P90_THRESHOLD: 15      # 2x baseline (7.6ms) - catches 2x regressions
+          P99_THRESHOLD: 30      # 2x baseline (15.7ms) - catches 2x regressions
           ERROR_RATE_THRESHOLD: 0.01
           RPS_THRESHOLD: 100
 
@@ -153,7 +163,7 @@ jobs:
               comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${errorRate} | ${rps} | ${status} |\n`;
             });
             
-            comment += '\n**Thresholds:** P50 < 50ms, P90 < 100ms, P99 < 500ms, Error Rate < 1%, RPS >= 100\n\n';
+            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 30ms, Error Rate < 1%, RPS >= 100\n\n';
             
             if (failCount >= 2) {
               comment += '❌ **Result:** FAILED - ' + failCount + ' out of 3 runs showed regression\n';
