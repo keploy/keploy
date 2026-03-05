@@ -3,7 +3,7 @@
 # Performance Test Runner with Multi-Run Validation
 # Runs performance tests 3 times and fails only if 2+ runs show regression
 
-set -e
+# Note: NOT using 'set -e' because we need to handle test failures gracefully
 
 # Configuration
 NUM_RUNS=${NUM_RUNS:-3}
