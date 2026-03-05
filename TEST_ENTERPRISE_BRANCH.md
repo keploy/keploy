@@ -7,7 +7,8 @@
 │ Trigger Type                                                 │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  PR (automatic)          →  Tests current PR branch         │
+│  PR (automatic)          →  Tests the PR branch             │
+│                              (developer's actual changes)    │
 │                                                              │
 │  Manual (no inputs)      →  Tests current branch            │
 │                                                              │
@@ -19,14 +20,17 @@
 
 ## Default Behavior
 
-### On Pull Requests (Automatic):
-- Tests the PR branch from the current repository
+### On Pull Requests (Automatic) - IDEAL FOR DEVELOPERS:
+- Tests the PR branch (the developer's actual code changes)
 - No manual input needed
-- Uses the code from the PR
+- Results posted as comment on the PR
+- This is how developers get automatic performance feedback
 
-### On Manual Trigger (workflow_dispatch):
+### On Manual Trigger (workflow_dispatch) - FOR TESTING OTHER BRANCHES:
 - **Without inputs**: Tests current branch
 - **With inputs**: Tests the specified repo/branch
+- Useful for testing branches before creating a PR
+- Useful for testing other repos (like enterprise)
 
 ## To test the enterprise repo (issue #1672 or any branch):
 
