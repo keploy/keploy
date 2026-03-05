@@ -198,7 +198,14 @@ for i in $(seq 1 $NUM_RUNS); do
     # Extract metrics
     metrics=$(extract_metrics "$output_file")
     
-    if check_thresholds "$metrics" $i | tee -a "$output_file"; then
+    # Check thresholds and capture output
+    threshold_output=$(check_thresholds "$metrics" $i)
+    threshold_result=$?
+    
+    # Display and log the output
+    echo "$threshold_output" | tee -a "$output_file"
+    
+    if [ $threshold_result -eq 0 ]; then
         echo "Run $i: PASSED" >> "$output_file"
         echo -e "${GREEN}Run $i: PASSED${NC}"
         run_results[$i]="PASS"
