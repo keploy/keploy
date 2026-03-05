@@ -1217,7 +1217,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 		mockSetMismatch := false
 		if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-			mockSetMismatch = !isMockSubset(mockNames, expectedMocks)
+			mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
 		}
 
 		emitFailureLogs := !mockSetMismatch
