@@ -34,11 +34,12 @@ jobs:
         with:
           path: keploy
 
-      - name: Checkout Keploy to test (custom repo/branch if specified)
+      - name: Checkout Keploy to test (only if custom repo/branch specified)
+        if: github.event.inputs.keploy_repo != '' || github.event.inputs.keploy_branch != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.keploy_repo || 'keploy/keploy' }}
-          ref: ${{ github.event.inputs.keploy_branch || github.ref }}
+          ref: ${{ github.event.inputs.keploy_branch || 'main' }}
           path: keploy-to-test
 
       - name: Checkout Spring PetClinic
@@ -58,7 +59,9 @@ jobs:
         with:
           go-version: '1.21'
           cache: true
-          cache-dependency-path: keploy-to-test/go.sum
+          cache-dependency-path: |
+            keploy/go.sum
+            keploy-to-test/go.sum
 
       - name: Cache Maven packages
         uses: actions/cache@v4
@@ -76,8 +79,18 @@ jobs:
         run: ./mvnw clean package -DskipTests -T 1C  # Parallel build with 1 thread per core
 
       - name: Build Keploy
-        working-directory: keploy-to-test
         run: |
+          # Determine which directory to build from
+          if [ -d "keploy-to-test" ]; then
+            BUILD_DIR="keploy-to-test"
+            echo "Building from custom repo/branch: keploy-to-test/"
+          else
+            BUILD_DIR="keploy"
+            echo "Building from current branch: keploy/"
+          fi
+          
+          cd "$BUILD_DIR"
+          
           # Detect project structure and build accordingly
           if [ -f "main.go" ]; then
             # Standard keploy/keploy structure
@@ -88,18 +101,24 @@ jobs:
             echo "Building from cmd/enterprise/main.go..."
             cd cmd/enterprise
             go build -o ../../keploy main.go
+            cd ../..
           else
             echo "Error: Could not find main.go"
             exit 1
           fi
           
-      - name: Copy Keploy binary to scripts directory
+          # Move binary to keploy directory if built elsewhere
+          if [ "$BUILD_DIR" != "keploy" ]; then
+            cp keploy ../keploy/keploy
+          fi
+          
+      - name: Verify Keploy binary
+        working-directory: keploy
         run: |
-          cp keploy-to-test/keploy keploy/keploy
-          chmod +x keploy/keploy
+          chmod +x keploy
           echo "Keploy binary info:"
-          ls -lh keploy/keploy
-          keploy/keploy --version || echo "Version check failed (might be expected)"
+          ls -lh keploy
+          ./keploy --version || echo "Version check failed (might be expected)"
 
       - name: Make scripts executable
         working-directory: keploy
