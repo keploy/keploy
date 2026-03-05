@@ -52,10 +52,10 @@ declare -a rps_values
 extract_metrics() {
     local output_file=$1
     
-    # Extract P50, P90, P99 from http_req_duration line
-    local p50=$(grep "http_req_duration" "$output_file" | grep -oP 'med=\K[0-9.]+' | head -1)
-    local p90=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(90\)=\K[0-9.]+' | head -1)
-    local p99=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(99\)=\K[0-9.]+' | head -1)
+    # Extract P50, P90, P99 from http_req_duration line (including units)
+    local p50=$(grep "http_req_duration" "$output_file" | grep -oP 'med=\K[0-9.]+[µm]?s' | head -1)
+    local p90=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(90\)=\K[0-9.]+[µm]?s' | head -1)
+    local p99=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(99\)=\K[0-9.]+[µm]?s' | head -1)
     
     # Extract error rate (handles both "rate=0.001" and "0.00%" formats)
     local error_rate=$(grep "http_req_failed" "$output_file" | grep -oP 'rate=\K[0-9.]+' | head -1)
@@ -189,27 +189,22 @@ for i in $(seq 1 $NUM_RUNS); do
     echo "Run $i of $NUM_RUNS" >> "$output_file"
     echo "=========================================" >> "$output_file"
     
-    # Run k6 test
-    if k6 run load-test.js 2>&1 | tee -a "$output_file"; then
-        echo "" | tee -a "$output_file"
-        echo "Checking thresholds for Run $i..." | tee -a "$output_file"
-        
-        # Extract metrics
-        metrics=$(extract_metrics "$output_file")
-        
-        if check_thresholds "$metrics" $i | tee -a "$output_file"; then
-            echo "Run $i: PASSED" >> "$output_file"
-            echo -e "${GREEN}Run $i: PASSED${NC}"
-            run_results[$i]="PASS"
-        else
-            echo "Run $i: FAILED (regression detected)" >> "$output_file"
-            echo -e "${RED}Run $i: FAILED (regression detected)${NC}"
-            run_results[$i]="FAIL"
-            ((failed_runs++))
-        fi
+    # Run k6 test (ignore exit code, we'll validate thresholds ourselves)
+    k6 run load-test.js 2>&1 | tee -a "$output_file" || true
+    
+    echo "" | tee -a "$output_file"
+    echo "Checking thresholds for Run $i..." | tee -a "$output_file"
+    
+    # Extract metrics
+    metrics=$(extract_metrics "$output_file")
+    
+    if check_thresholds "$metrics" $i | tee -a "$output_file"; then
+        echo "Run $i: PASSED" >> "$output_file"
+        echo -e "${GREEN}Run $i: PASSED${NC}"
+        run_results[$i]="PASS"
     else
-        echo "Run $i: FAILED (test execution error)" >> "$output_file"
-        echo -e "${RED}Run $i: FAILED (test execution error)${NC}"
+        echo "Run $i: FAILED (regression detected)" >> "$output_file"
+        echo -e "${RED}Run $i: FAILED (regression detected)${NC}"
         run_results[$i]="FAIL"
         ((failed_runs++))
     fi

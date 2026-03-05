@@ -21,12 +21,13 @@ export const options = {
   },
   // Track specific percentiles - P50, P90, P99 root out outliers
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(90)', 'p(95)', 'p(99)'],  // Removed p(99.9)
-  // Set thresholds for percentiles
+  // Note: Thresholds below are lenient defaults for k6's internal validation
+  // The actual validation is done by run-perf-test-with-validation.sh using stricter thresholds
   thresholds: {
     'http_req_duration': [
-      'p(50)<50',   // P50 < 50ms - median response time
-      'p(90)<100',  // P90 < 100ms - 90th percentile
-      'p(99)<500'   // P99 < 500ms - 99th percentile
+      'p(50)<5',    // P50 < 5ms - median response time
+      'p(90)<15',   // P90 < 15ms - 90th percentile
+      'p(99)<70'    // P99 < 70ms - 99th percentile
     ],
     'http_req_failed': ['rate<0.01'],  // Error rate < 1%
   },
