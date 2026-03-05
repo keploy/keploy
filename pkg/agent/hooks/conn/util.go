@@ -234,12 +234,6 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 						break
 					}
 				}
-				for _, v := range req.Header.Values(key) {
-					if rx.MatchString(v) {
-						headerMatch = true
-						break
-					}
-				}
 				if headerMatch {
 					break
 				}
