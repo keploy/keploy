@@ -1,0 +1,1 @@
+./.github/workflows/test_workflow_scripts/run-perf-test-with-validation.sh: line 165: k6: command not found

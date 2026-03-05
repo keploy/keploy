@@ -19,12 +19,16 @@ export const options = {
       maxVUs: 100,
     },
   },
-  // Track specific percentiles
-  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(80)', 'p(95)', 'p(99)', 'p(99.9)'],
+  // Track specific percentiles - P50, P90, P99 root out outliers
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
   // Set thresholds for percentiles
   thresholds: {
-    'http_req_duration': ['p(80)<100', 'p(99)<500'],
-    'http_req_failed': ['rate<0.01'],
+    'http_req_duration': [
+      'p(50)<50',   // P50 < 50ms - median response time
+      'p(90)<100',  // P90 < 100ms - 90th percentile
+      'p(99)<500'   // P99 < 500ms - 99th percentile
+    ],
+    'http_req_failed': ['rate<0.01'],  // Error rate < 1%
   },
 };
 

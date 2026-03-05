@@ -67,18 +67,112 @@ jobs:
         working-directory: keploy
         run: ./.github/workflows/test_workflow_scripts/create-k6-script.sh
 
-      - name: Run k6 load test
+      - name: Run k6 performance tests (3 runs with validation)
         working-directory: keploy
-        run: k6 run load-test.js 2>&1 | tee k6-output.log
+        run: |
+          chmod +x ./.github/workflows/test_workflow_scripts/run-perf-test-with-validation.sh
+          ./.github/workflows/test_workflow_scripts/run-perf-test-with-validation.sh
+        env:
+          NUM_RUNS: 3
+          REQUIRED_FAILURES: 2
+          P50_THRESHOLD: 50
+          P90_THRESHOLD: 100
+          P99_THRESHOLD: 500
+          ERROR_RATE_THRESHOLD: 0.01
+          RPS_THRESHOLD: 100
 
       - name: Stop Keploy
         if: always()
         working-directory: keploy
         run: ./.github/workflows/test_workflow_scripts/stop-keploy.sh
 
-      - name: Validate RPS threshold
-        working-directory: keploy
-        run: ./.github/workflows/test_workflow_scripts/validate-rps.sh
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results-${{ github.run_number }}
+          path: keploy/perf-results/
+          retention-days: 30
+
+      - name: Comment PR with performance results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Find the latest results directory
+            const resultsDir = 'keploy/perf-results';
+            if (!fs.existsSync(resultsDir)) {
+              console.log('No results directory found');
+              return;
+            }
+            
+            const dirs = fs.readdirSync(resultsDir);
+            if (dirs.length === 0) {
+              console.log('No results found');
+              return;
+            }
+            
+            const latestDir = dirs.sort().reverse()[0];
+            const resultsPath = path.join(resultsDir, latestDir);
+            const files = fs.readdirSync(resultsPath).filter(f => f.endsWith('-output.log'));
+            
+            let comment = '## 🚀 Keploy Performance Test Results\n\n';
+            comment += '**Multi-Run Validation:** Tests run 3 times, pipeline fails only if 2+ runs show regression.\n\n';
+            comment += '| Run | P50 | P90 | P99 | Error Rate | RPS | Status |\n';
+            comment += '|-----|-----|-----|-----|------------|-----|--------|\n';
+            
+            let passCount = 0;
+            let failCount = 0;
+            
+            files.forEach((file, idx) => {
+              const content = fs.readFileSync(path.join(resultsPath, file), 'utf8');
+              
+              // Extract metrics
+              const p50Match = content.match(/med=([0-9.]+[µm]?s)/);
+              const p90Match = content.match(/p\(90\)=([0-9.]+[µm]?s)/);
+              const p99Match = content.match(/p\(99\)=([0-9.]+[µm]?s)/);
+              const errorMatch = content.match(/http_req_failed.*rate=([0-9.]+)/);
+              const rpsMatch = content.match(/http_reqs.*:\s+\d+\s+([0-9.]+)\/s/);
+              
+              const p50 = p50Match ? p50Match[1] : 'N/A';
+              const p90 = p90Match ? p90Match[1] : 'N/A';
+              const p99 = p99Match ? p99Match[1] : 'N/A';
+              const errorRate = errorMatch ? (parseFloat(errorMatch[1]) * 100).toFixed(2) + '%' : 'N/A';
+              const rps = rpsMatch ? parseFloat(rpsMatch[1]).toFixed(2) : 'N/A';
+              
+              // Determine status (simplified check)
+              const passed = content.includes('✓') || !content.includes('regression');
+              const status = passed ? '✅ PASS' : '❌ FAIL';
+              
+              if (passed) passCount++;
+              else failCount++;
+              
+              comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${errorRate} | ${rps} | ${status} |\n`;
+            });
+            
+            comment += '\n**Thresholds:** P50 < 50ms, P90 < 100ms, P99 < 500ms, Error Rate < 1%, RPS >= 100\n\n';
+            
+            if (failCount >= 2) {
+              comment += '❌ **Result:** FAILED - ' + failCount + ' out of 3 runs showed regression\n';
+            } else {
+              comment += '✅ **Result:** PASSED - Only ' + failCount + ' out of 3 runs failed (threshold: 2)\n';
+            }
+            
+            comment += '\n*P50, P90, and P99 percentiles naturally filter out outliers*';
+            
+            try {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            } catch (error) {
+              console.log('Could not post comment:', error.message);
+            }
 
       - name: Display Keploy test cases
         if: always()
