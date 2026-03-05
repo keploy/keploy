@@ -12,9 +12,10 @@ RESULTS_DIR="perf-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Thresholds for regression detection (milliseconds)
-P50_THRESHOLD=${P50_THRESHOLD:-50}
-P90_THRESHOLD=${P90_THRESHOLD:-100}
-P99_THRESHOLD=${P99_THRESHOLD:-500}
+# These are defaults - the workflow typically overrides these via environment variables
+P50_THRESHOLD=${P50_THRESHOLD:-5}      # Default: 5ms (workflow can override)
+P90_THRESHOLD=${P90_THRESHOLD:-15}     # Default: 15ms (workflow can override)
+P99_THRESHOLD=${P99_THRESHOLD:-70}     # Default: 70ms (workflow can override)
 ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-0.01}  # 1%
 RPS_THRESHOLD=${RPS_THRESHOLD:-100}
 
