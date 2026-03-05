@@ -36,11 +36,17 @@
 
 2. **Click the "Actions" tab** at the top of the page
 
-3. **Find "Keploy Performance Test"** in the left sidebar (list of workflows)
+3. **In the LEFT SIDEBAR**, click on **"Keploy Performance Test"** 
+   - You should see it in the list under "All workflows"
+   - It's in the left panel, NOT the main area showing workflow runs
 
-4. **Click "Run workflow"** button (on the right side, it's a dropdown button)
+4. **After clicking the workflow name**, you'll see a blue "Run workflow" button appear on the RIGHT side
+   - It's above the list of workflow runs
+   - Next to the "Filter workflow runs" search box
 
-5. **Fill in the form that appears:**
+5. **Click "Run workflow"** - a dropdown form will appear
+
+6. **Fill in the form:**
    ```
    Use workflow from: [Branch: main ▼]  ← Select branch to run FROM
    
@@ -49,7 +55,27 @@
    keploy_branch: [main               ]  ← Type the branch to TEST
    ```
 
-6. **Click the green "Run workflow" button** at the bottom of the form
+7. **Click the green "Run workflow" button** at the bottom of the dropdown
+
+### Visual Guide:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Actions Tab                                                  │
+├──────────────┬──────────────────────────────────────────────┤
+│              │  [Run workflow ▼]  ← Click this button       │
+│ LEFT SIDEBAR │                                               │
+│              │  32 workflow runs                             │
+│ All workflows│                                               │
+│              │  ✓ Add k6 performance testing...              │
+│ > Docker     │  ✓ Add k6 performance testing...              │
+│ > Release    │  ✓ Add k6 performance testing...              │
+│ > Keploy ←───┼─ Click this first!                           │
+│   Performance│                                               │
+│   Test       │                                               │
+│              │                                               │
+└──────────────┴──────────────────────────────────────────────┘
+```
 
 ### Example Values:
 
@@ -111,14 +137,20 @@ gh workflow run keploy-performance-test.yml \
 ## Troubleshooting:
 
 **Q: I don't see the "Run workflow" button**
-- Make sure you're on the "Actions" tab
-- Make sure you're looking at the workflow list (left sidebar)
-- Click on "Keploy Performance Test" workflow name
-- The button appears on the right side above the workflow runs list
+- You're looking at the workflow runs list (main area)
+- You need to click on "Keploy Performance Test" in the LEFT SIDEBAR first
+- After clicking the workflow name, the "Run workflow" button appears on the right
+- The button is blue and says "Run workflow" with a dropdown arrow
+
+**Q: I don't see "Keploy Performance Test" in the sidebar**
+- Make sure the workflow file is committed to the repository
+- Check that you're on the correct repository (keploy/keploy)
+- Try refreshing the page
 
 **Q: The form doesn't show up**
 - Make sure you clicked the "Run workflow" dropdown button (not just the text)
 - You need write access to the repository to manually trigger workflows
+- If you don't have write access, ask a maintainer to run it for you
 
 **Q: Build fails with "Could not find main.go"**
 - Check that the repository and branch exist

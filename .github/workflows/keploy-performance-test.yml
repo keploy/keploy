@@ -41,6 +41,14 @@ jobs:
           repository: ${{ github.event.inputs.keploy_repo || 'keploy/keploy' }}
           ref: ${{ github.event.inputs.keploy_branch || 'main' }}
           path: keploy-to-test
+      
+      - name: Checkout Keploy tls-refactor branch for testing
+        if: github.event.inputs.keploy_repo == '' && github.event.inputs.keploy_branch == ''
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+          ref: tls-refactor
+          path: keploy-to-test
 
       - name: Checkout Spring PetClinic
         uses: actions/checkout@v4
