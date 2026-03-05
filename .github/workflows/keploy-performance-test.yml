@@ -127,7 +127,21 @@ jobs:
             
             const latestDir = dirs.sort().reverse()[0];
             const resultsPath = path.join(resultsDir, latestDir);
-            const files = fs.readdirSync(resultsPath).filter(f => f.endsWith('-output.log'));
+            
+            // Sort files by run number to ensure correct ordering
+            const getRunNumber = (filename) => {
+              const match = filename.match(/run-(\d+)-output\.log$/);
+              return match ? parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
+            };
+            
+            const files = fs.readdirSync(resultsPath)
+              .filter(f => f.endsWith('-output.log'))
+              .sort((a, b) => {
+                const aNum = getRunNumber(a);
+                const bNum = getRunNumber(b);
+                if (aNum !== bNum) return aNum - bNum;
+                return a.localeCompare(b);
+              });
             
             let comment = '## 🚀 Keploy Performance Test Results\n\n';
             comment += '**Multi-Run Validation:** Tests run 3 times, pipeline fails only if 2+ runs show regression.\n\n';
@@ -144,13 +158,23 @@ jobs:
               const p50Match = content.match(/med=([0-9.]+[µm]?s)/);
               const p90Match = content.match(/p\(90\)=([0-9.]+[µm]?s)/);
               const p99Match = content.match(/p\(99\)=([0-9.]+[µm]?s)/);
-              const errorMatch = content.match(/http_req_failed.*rate=([0-9.]+)/);
+              const errorMatch = content.match(/http_req_failed.*?(?:rate=([0-9.]+)|:\s*([0-9.]+)%)/);
               const rpsMatch = content.match(/http_reqs.*:\s+\d+\s+([0-9.]+)\/s/);
               
               const p50 = p50Match ? p50Match[1] : 'N/A';
               const p90 = p90Match ? p90Match[1] : 'N/A';
               const p99 = p99Match ? p99Match[1] : 'N/A';
-              const errorRate = errorMatch ? (parseFloat(errorMatch[1]) * 100).toFixed(2) + '%' : 'N/A';
+              
+              let errorRate = 'N/A';
+              if (errorMatch) {
+                const baseValue = errorMatch[1] !== undefined
+                  ? parseFloat(errorMatch[1]) * 100 // rate (0-1) -> percentage
+                  : parseFloat(errorMatch[2]);      // already a percentage
+                if (!Number.isNaN(baseValue)) {
+                  errorRate = baseValue.toFixed(2) + '%';
+                }
+              }
+              
               const rps = rpsMatch ? parseFloat(rpsMatch[1]).toFixed(2) : 'N/A';
               
               // Determine status by checking for "FAILED" or "PASSED" in output

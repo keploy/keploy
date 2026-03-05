@@ -22,11 +22,11 @@ The tests track multiple percentiles to catch different types of performance iss
 
 ### Why These Percentiles Matter
 
-- **P50** filters out the bottom 50% of outliers
-- **P90** filters out the bottom 90% of outliers
-- **P99** filters out the bottom 99% of outliers
+- **P50 (median)**: 50% of requests are faster than this value and 50% are slower — represents typical user experience.
+- **P90**: 90% of requests are faster than this value — highlights issues affecting a significant minority of users.
+- **P99**: 99% of requests are faster than this value — surfaces rare but severe tail latency problems.
 
-By tracking all three, we catch performance regressions at different severity levels while naturally filtering out statistical noise.
+By tracking all three, we understand both typical and worst-case performance and can detect regressions across the full latency distribution.
 
 ## Configuration
 

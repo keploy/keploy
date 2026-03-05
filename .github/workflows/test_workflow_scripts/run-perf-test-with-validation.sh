@@ -59,8 +59,18 @@ extract_metrics() {
     local p90=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(90\)=\K[0-9.]+' | head -1)
     local p99=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(99\)=\K[0-9.]+' | head -1)
     
-    # Extract error rate
+    # Extract error rate (handles both "rate=0.001" and "0.00%" formats)
     local error_rate=$(grep "http_req_failed" "$output_file" | grep -oP 'rate=\K[0-9.]+' | head -1)
+    if [ -z "$error_rate" ]; then
+        # Try percentage format: "http_req_failed: 0.00%"
+        local error_pct=$(grep "http_req_failed" "$output_file" | grep -oP ':\s*\K[0-9.]+(?=%)' | head -1)
+        if [ -n "$error_pct" ]; then
+            # Convert percentage to rate (0-1)
+            error_rate=$(echo "$error_pct / 100" | bc -l)
+        else
+            error_rate="0"
+        fi
+    fi
     
     # Extract RPS
     local rps=$(grep "http_reqs" "$output_file" | grep -oP ':\s+\d+\s+\K[0-9.]+(?=/s)' | head -1)
@@ -170,6 +180,18 @@ check_thresholds() {
 # Run performance tests
 failed_runs=0
 
+# Check if k6 is available
+if ! command -v k6 &> /dev/null; then
+    echo -e "${RED}❌ ERROR: k6 is not installed or not in PATH${NC}"
+    echo ""
+    echo "Please install k6:"
+    echo "  - macOS: brew install k6"
+    echo "  - Ubuntu/Debian: See https://k6.io/docs/get-started/installation/"
+    echo "  - GitHub Actions: Add 'uses: grafana/setup-k6-action@v1' to workflow"
+    echo ""
+    exit 1
+fi
+
 for i in $(seq 1 $NUM_RUNS); do
     echo ""
     echo "========================================="
@@ -178,23 +200,34 @@ for i in $(seq 1 $NUM_RUNS); do
     
     output_file="$RESULTS_DIR/$TIMESTAMP/run-${i}-output.log"
     
+    # Clear the output file for this run
+    > "$output_file"
+    
+    # Write run header to the file
+    echo "=========================================" >> "$output_file"
+    echo "Run $i of $NUM_RUNS" >> "$output_file"
+    echo "=========================================" >> "$output_file"
+    
     # Run k6 test
-    if k6 run load-test.js 2>&1 | tee "$output_file"; then
-        echo ""
-        echo "Checking thresholds for Run $i..."
+    if k6 run load-test.js 2>&1 | tee -a "$output_file"; then
+        echo "" | tee -a "$output_file"
+        echo "Checking thresholds for Run $i..." | tee -a "$output_file"
         
         # Extract metrics
         metrics=$(extract_metrics "$output_file")
         
-        if check_thresholds "$metrics" $i; then
+        if check_thresholds "$metrics" $i | tee -a "$output_file"; then
+            echo "Run $i: PASSED" >> "$output_file"
             echo -e "${GREEN}Run $i: PASSED${NC}"
             run_results[$i]="PASS"
         else
+            echo "Run $i: FAILED (regression detected)" >> "$output_file"
             echo -e "${RED}Run $i: FAILED (regression detected)${NC}"
             run_results[$i]="FAIL"
             ((failed_runs++))
         fi
     else
+        echo "Run $i: FAILED (test execution error)" >> "$output_file"
         echo -e "${RED}Run $i: FAILED (test execution error)${NC}"
         run_results[$i]="FAIL"
         ((failed_runs++))
