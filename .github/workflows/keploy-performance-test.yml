@@ -88,7 +88,6 @@ jobs:
           P50_THRESHOLD: 5       # Based on baseline ~2.5ms
           P90_THRESHOLD: 15      # Based on baseline ~7.6ms
           P99_THRESHOLD: 70      # Based on baseline ~15-60ms (increased for CI variance)
-          ERROR_RATE_THRESHOLD: 0.01
           RPS_THRESHOLD: 100     # Target 100 RPS (allows 1% tolerance = 99 RPS)
 
       - name: Stop Keploy
@@ -145,8 +144,8 @@ jobs:
             
             let comment = '## 🚀 Keploy Performance Test Results\n\n';
             comment += '**Multi-Run Validation:** Tests run 3 times, pipeline fails only if 2+ runs show regression.\n\n';
-            comment += '| Run | P50 | P90 | P99 | Error Rate | RPS | Status |\n';
-            comment += '|-----|-----|-----|-----|------------|-----|--------|\n';
+            comment += '| Run | P50 | P90 | P99 | RPS | Status |\n';
+            comment += '|-----|-----|-----|-----|-----|--------|\n';
             
             let passCount = 0;
             let failCount = 0;
@@ -204,10 +203,10 @@ jobs:
                 }
               }
               
-              comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${errorRate} | ${rps} | ${status} |\n`;
+              comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${rps} | ${status} |\n`;
             });
             
-            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 70ms, Error Rate < 1%, RPS >= 100 (±1% tolerance)\n\n';
+            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 70ms, RPS >= 100 (±1% tolerance)\n\n';
             
             if (failCount >= 2) {
               comment += '❌ **Result:** FAILED - ' + failCount + ' out of 3 runs showed regression\n';

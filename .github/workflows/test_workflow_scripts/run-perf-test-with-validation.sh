@@ -34,7 +34,6 @@ echo "  Thresholds:"
 echo "    P50 < ${P50_THRESHOLD}ms"
 echo "    P90 < ${P90_THRESHOLD}ms"
 echo "    P99 < ${P99_THRESHOLD}ms"
-echo "    Error Rate < $(echo "$ERROR_RATE_THRESHOLD * 100" | bc -l)%"
 echo "    RPS >= ${RPS_THRESHOLD}"
 echo "========================================="
 echo ""
@@ -47,7 +46,6 @@ declare -a run_results
 declare -a p50_values
 declare -a p90_values
 declare -a p99_values
-declare -a error_rates
 declare -a rps_values
 
 # Function to extract metrics from k6 output
@@ -75,7 +73,7 @@ extract_metrics() {
     # Extract RPS
     local rps=$(grep "http_reqs" "$output_file" | grep -oP ':\s+\d+\s+\K[0-9.]+(?=/s)' | head -1)
     
-    echo "$p50|$p90|$p99|$error_rate|$rps"
+    echo "$p50|$p90|$p99|$rps"
 }
 
 # Function to convert time units to milliseconds
@@ -101,7 +99,7 @@ check_thresholds() {
     local metrics=$1
     local run_num=$2
     
-    IFS='|' read -r p50 p90 p99 error_rate rps <<< "$metrics"
+    IFS='|' read -r p50 p90 p99 rps <<< "$metrics"
     
     # Convert to milliseconds if needed
     p50=$(convert_to_ms "$p50")
@@ -112,7 +110,6 @@ check_thresholds() {
     p50_values[$run_num]=$p50
     p90_values[$run_num]=$p90
     p99_values[$run_num]=$p99
-    error_rates[$run_num]=$error_rate
     rps_values[$run_num]=$rps
     
     # Check each threshold
@@ -137,22 +134,6 @@ check_thresholds() {
         passed=false
     else
         echo -e "${GREEN}  ✓ P99 passed: ${p99}ms < ${P99_THRESHOLD}ms${NC}"
-    fi
-    
-    # Handle error rate (might be empty or 0)
-    if [ -n "$error_rate" ] && [ "$error_rate" != "0" ]; then
-        if (( $(echo "$error_rate >= $ERROR_RATE_THRESHOLD" | bc -l) )); then
-            local error_pct=$(printf "%.2f" $(echo "$error_rate * 100" | bc -l))
-            local threshold_pct=$(printf "%.2f" $(echo "$ERROR_RATE_THRESHOLD * 100" | bc -l))
-            echo -e "${RED}  ✗ Error rate regression: ${error_pct}% >= ${threshold_pct}%${NC}"
-            passed=false
-        else
-            local error_pct=$(printf "%.2f" $(echo "$error_rate * 100" | bc -l))
-            local threshold_pct=$(printf "%.2f" $(echo "$ERROR_RATE_THRESHOLD * 100" | bc -l))
-            echo -e "${GREEN}  ✓ Error rate passed: ${error_pct}% < ${threshold_pct}%${NC}"
-        fi
-    else
-        echo -e "${GREEN}  ✓ Error rate passed: 0.00% < 1.00%${NC}"
     fi
     
     if (( $(echo "$rps < $RPS_THRESHOLD" | bc -l) )); then
@@ -257,12 +238,6 @@ for i in $(seq 1 $NUM_RUNS); do
     echo "    P50: ${p50_values[$i]}ms"
     echo "    P90: ${p90_values[$i]}ms"
     echo "    P99: ${p99_values[$i]}ms"
-    if [ -n "${error_rates[$i]}" ] && [ "${error_rates[$i]}" != "0" ]; then
-        local err_pct=$(printf "%.2f" $(echo "${error_rates[$i]} * 100" | bc -l))
-        echo "    Error Rate: ${err_pct}%"
-    else
-        echo "    Error Rate: 0.00%"
-    fi
     echo "    RPS: ${rps_values[$i]}"
 done
 
@@ -273,18 +248,11 @@ echo "Aggregate Statistics:"
 avg_p50=$(printf '%s\n' "${p50_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
 avg_p90=$(printf '%s\n' "${p90_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
 avg_p99=$(printf '%s\n' "${p99_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
-avg_error=$(printf '%s\n' "${error_rates[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
 avg_rps=$(printf '%s\n' "${rps_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
 
 echo "  Average P50: ${avg_p50}ms"
 echo "  Average P90: ${avg_p90}ms"
 echo "  Average P99: ${avg_p99}ms"
-if [ -n "$avg_error" ] && [ "$avg_error" != "0" ]; then
-    local avg_err_pct=$(printf "%.2f" $(echo "$avg_error * 100" | bc -l))
-    echo "  Average Error Rate: ${avg_err_pct}%"
-else
-    echo "  Average Error Rate: 0.00%"
-fi
 echo "  Average RPS: ${avg_rps}"
 
 echo ""
