@@ -113,6 +113,7 @@ type MockState struct {
 	Usage      MockUsage `json:"usage"`
 	IsFiltered bool      `json:"isFiltered"`
 	SortOrder  int64     `json:"sortOrder"`
+	Type       string    `json:"type"`
 }
 
 func (m *Mock) DeepCopy() *Mock {
