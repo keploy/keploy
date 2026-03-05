@@ -2,18 +2,18 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
 
-	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -61,11 +61,22 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		logger.Warn("Failed to dial upstream app port", zap.String("Final_App_Port", finalAppAddr), zap.Error(err))
 		return
 	}
+	// Disable Nagle's algorithm for low-latency forwarding
+	if tc, ok := upConn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
 	// This closes the upstream connection when this function returns
 	defer upConn.Close()
 
-	clientReader := bufio.NewReader(clientConn)
-	upstreamReader := bufio.NewReader(upConn)
+	// Create bidirectional TeeForwardConns for zero-latency forwarding.
+	// Forwarding goroutines start immediately — data flows at wire speed
+	// between client↔upstream. The parser reads from internal buffers
+	// containing already-forwarded data, adding zero latency to the request path.
+	clientTee := orchestrator.NewTeeForwardConn(ctx, logger, clientConn, upConn)
+	upstreamTee := orchestrator.NewTeeForwardConn(ctx, logger, upConn, clientConn)
+
+	clientReader := bufio.NewReader(clientTee)
+	upstreamReader := bufio.NewReader(upstreamTee)
 
 	for {
 
@@ -94,30 +105,29 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			if !mgr.GetFirstReqSeen() {
 				mgr.SetFirstRequestSignaled()
 			}
-
-			// we will close connection in case of keep alive (to allow multiple clients to make connections)
-			// if we don't close a connection in pm.synchronous mode, the next request from other client will be blocked
-			req.Close = true
-			req.Header.Set("Connection", "close")
+			// Note: Connection headers are not modified because raw bytes
+			// are already forwarded by TeeForwardConn at wire speed.
+			// The connection will be closed when this function returns.
 		}
 
-		reqData, err := httputil.DumpRequest(req, true)
-		if err != nil {
-			logger.Error("Failed to dump request for capturing", zap.Error(err))
+		// Read request body from TeeForwardConn buffer.
+		// The data has ALREADY been forwarded to upstream by the forwarding goroutine.
+		// We're just reading the buffered copy for test case capture.
+		var reqBodyBytes []byte
+		if req.Body != nil {
+			reqBodyBytes, err = io.ReadAll(req.Body)
 			req.Body.Close()
-			return
+			if err != nil {
+				logger.Error("Failed to read request body. Check if the client connection is still active or verify the request body format", zap.Error(err))
+				return
+			}
 		}
 
-		if err := req.Write(upConn); err != nil {
-			logger.Error("Failed to forward request to upstream", zap.Error(err))
-			req.Body.Close()
-			return
-		}
-		req.Body.Close() // Close explicitly to avoid defer leak in loop
-
+		// Read response from upstream's TeeForwardConn buffer.
+		// The response has ALREADY been forwarded to the client at wire speed.
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			logger.Error("Failed to read upstream response", zap.Error(err))
+			logger.Error("Failed to read upstream response. Check if the upstream server is running or verify network connectivity to the upstream", zap.Error(err))
 			return
 		}
 
@@ -126,43 +136,44 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			logger.Debug("Detected chunked response. Releasing lock.")
 			releaseLock()
 			chunked = true
-		} else if pm.synchronous {
-			resp.Close = true
-			resp.Header.Set("Connection", "close")
 		}
 
 		respTimestamp := time.Now()
-		respData, err := httputil.DumpResponse(resp, true)
-		if err != nil {
-			logger.Error("Failed to dump response for capturing", zap.Error(err))
+
+		// Read response body from TeeForwardConn buffer.
+		// Already forwarded to client — just reading for capture.
+		var respBodyBytes []byte
+		if resp.Body != nil {
+			respBodyBytes, err = io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if err != nil {
+				logger.Error("Failed to read response body. Check if the response was truncated or verify the upstream server response format", zap.Error(err))
+				return
+			}
+		}
+
+		if chunked && pm.synchronous {
+			// Capture test case before returning for chunked+synchronous
+			req.Header.Set("Host", req.Host)
+			req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+			resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
+			go func() {
+				defer req.Body.Close()
+				defer resp.Body.Close()
+				hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+			}()
 			return
 		}
 
-		if err := resp.Write(clientConn); err != nil {
-			logger.Error("Failed to forward response to client", zap.Error(err))
-			resp.Body.Close()
-			return
-		}
-		resp.Body.Close() // Close explicitly
-
-		if chunked && pm.synchronous { // for chunked requests/responses, we will not capture test cases in case of pm.synchronous mode
-			return
-		}
-
-		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
-		if err != nil {
-			return
-		}
-		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
-		if err != nil {
-			return
-		}
+		// Async capture — data already forwarded, just constructing test case
+		req.Header.Set("Host", req.Host)
+		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+		resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
 
 		go func() {
-			defer parsedHTTPReq.Body.Close()
-			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+			defer req.Body.Close()
+			defer resp.Body.Close()
+			hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
 		}()
 
 		if pm.synchronous {

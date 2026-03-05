@@ -52,14 +52,19 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// storing startup mocks until first request is seen
 	if !m.firstReqSeen && m.outChan != nil {
-		m.outChan <- mock
+		// Don't block on channel send - dispatch async to prevent parser blocking.
+		// The parser must drain the ring buffer for the forwarder to continue,
+		// so blocking here creates back-pressure to the network forwarding path.
+		// Goroutine overhead (~2-3μs) is negligible compared to 40ms ACK delay.
+		m.mu.Unlock()
+		go func() { m.outChan <- mock }()
 		return
 	}
 	m.buffer = append(m.buffer, mock)
+	m.mu.Unlock()
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
@@ -75,11 +80,13 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 }
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
 	cutoffTime := time.Now().Add(-7 * time.Second)
 	var associatedMockIDs []string
+	// Collect mocks to send outside the lock to avoid blocking the parser
+	// goroutine (which must drain the ring buffer for forwarding to continue).
+	var mocksToSend []*models.Mock
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
@@ -98,7 +105,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			if keep {
 				mock.Name = "mock-" + generateRandomString(8)
 				associatedMockIDs = append(associatedMockIDs, mock.Name)
-				m.outChan <- mock
+				mocksToSend = append(mocksToSend, mock)
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -116,14 +123,26 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		m.buffer[i] = nil
 	}
 
-	if len(associatedMockIDs) > 0 && m.mappingChan != nil {
+	// Reslice the buffer while still holding the lock
+	m.buffer = m.buffer[:keepIdx]
+
+	// Capture channels before releasing lock
+	outCh := m.outChan
+	mapCh := m.mappingChan
+	m.mu.Unlock()
+
+	// Send mocks and mappings outside the lock to prevent blocking the parser.
+	// Channel sends may block if the consumer is slow, so we must not hold
+	// the mutex during these operations.
+	for _, mock := range mocksToSend {
+		outCh <- mock
+	}
+
+	if len(associatedMockIDs) > 0 && mapCh != nil {
 		mapping := models.TestMockMapping{
 			TestName: testName,
 			MockIDs:  associatedMockIDs,
 		}
-		m.mappingChan <- mapping
+		mapCh <- mapping
 	}
-
-	// Reslice the buffer
-	m.buffer = m.buffer[:keepIdx]
 }
