@@ -188,7 +188,8 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 		}
 	}
 
-	var passThrough bool
+	hasInclude := false
+	matchedInclude := false
 
 	type cond struct {
 		eligible bool
@@ -202,8 +203,8 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			filter.BypassRule.Path == "" &&
 			filter.BypassRule.Port == 0)
 
-		opts := models.OutgoingOptions{Rules: []models.BypassRule{filter.BypassRule}}
-		byPassMatch := utils.IsPassThrough(logger, req, uint(dstPort), opts)
+		outgoingOpts := models.OutgoingOptions{Rules: []models.BypassRule{filter.BypassRule}}
+		byPassMatch := utils.IsPassThrough(logger, req, uint(dstPort), outgoingOpts)
 
 		//  2. URL-method rule
 		urlMethodEligible := len(filter.URLMethods) > 0
@@ -245,6 +246,7 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			{headerEligible, headerMatch},
 		}
 
+		isMatch := false
 		switch filter.MatchType {
 		case models.AND:
 			pass := true
@@ -260,8 +262,7 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				}
 			}
 			if seen && pass {
-				passThrough = true
-				return passThrough
+				isMatch = true
 			}
 
 		case models.OR:
@@ -269,14 +270,29 @@ func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 		default:
 			for _, c := range conds {
 				if c.eligible && c.match {
-					passThrough = true
-					return passThrough
+					isMatch = true
+					break
 				}
+			}
+		}
+
+		if filter.FilterPolicy == models.Include {
+			hasInclude = true
+			if isMatch {
+				matchedInclude = true
+			}
+		} else { // Exclude (default)
+			if isMatch {
+				return true // Exclude ALWAYS takes priority
 			}
 		}
 	}
 
-	return passThrough
+	if hasInclude && !matchedInclude {
+		return true
+	}
+
+	return false
 }
 
 func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
