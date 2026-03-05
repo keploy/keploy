@@ -1770,7 +1770,12 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				summaryArgs = append(summaryArgs, totalTestIgnoredSnapshot)
 			}
 			summaryFormat += "\tTotal time taken: %s\n"
-			summaryArgs = append(summaryArgs, totalTestTimeTakenStr)
+			// Substracted the user delay from total time
+			validDuration := totalTestTimeTaken - (time.Duration(r.config.Test.Delay) * time.Second)
+			if validDuration < 0 {
+				validDuration = 0
+			}
+			summaryArgs = append(summaryArgs, timeWithUnits(validDuration))
 
 			if _, err := pp.Printf(summaryFormat, summaryArgs...); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
