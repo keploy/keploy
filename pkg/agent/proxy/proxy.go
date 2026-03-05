@@ -51,11 +51,16 @@ type Proxy struct {
 	DestInfo     agent.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
 
-	MockManagers         sync.Map
 	integrationsPriority []ParserPriority
 	errChannel           chan error
 
-	sessions    *agent.Sessions
+	// session holds the single active session for this proxy.
+	// Previously this was a sync.Map keyed by appID (always 0), which is
+	// no longer needed since the proxy serves a single client-app.
+	sessionMu   sync.RWMutex
+	session     *agent.Session
+	mockManager *MockManager
+
 	synchronous bool
 
 	connMutex *sync.Mutex
@@ -110,8 +115,6 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		ipMutex:           &sync.Mutex{},
 		connMutex:         &sync.Mutex{},
 		DestInfo:          info,
-		sessions:          agent.NewSessions(),
-		MockManagers:      sync.Map{},
 		clientClose:       make(chan bool, 1),
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
@@ -121,6 +124,34 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	}
 
 	return proxy
+}
+
+// getSession returns the current session in a thread-safe manner.
+func (p *Proxy) getSession() *agent.Session {
+	p.sessionMu.RLock()
+	defer p.sessionMu.RUnlock()
+	return p.session
+}
+
+// setSession replaces the current session in a thread-safe manner.
+func (p *Proxy) setSession(s *agent.Session) {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	p.session = s
+}
+
+// getMockManager returns the current mock manager in a thread-safe manner.
+func (p *Proxy) getMockManager() *MockManager {
+	p.sessionMu.RLock()
+	defer p.sessionMu.RUnlock()
+	return p.mockManager
+}
+
+// setMockManager replaces the current mock manager in a thread-safe manner.
+func (p *Proxy) setMockManager(m *MockManager) {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	p.mockManager = m
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -294,12 +325,12 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
-		//closing all the mock channels (if any in record mode)
-		for _, mc := range p.sessions.GetAllMC() {
-			if mc != nil {
-				close(mc)
-			}
+		//closing the mock channel (if any in record mode)
+		p.sessionMu.RLock()
+		if p.session != nil && p.session.MC != nil {
+			close(p.session.MC)
 		}
+		p.sessionMu.RUnlock()
 
 		p.nsSwitchMutex.Lock()
 		if string(p.nsswitchData) != "" {
@@ -411,9 +442,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//get the session rule
-	// TODO: to remove this sessions concept because it was meant for multiple clients-apps.
-	rule, ok := p.sessions.Get(uint64(0))
-	if !ok {
+	rule := p.getSession()
+	if rule == nil {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule")
 		return err
 	}
@@ -514,15 +544,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return nil
 		}
 
-		// TODO: We have to remove the 0 key maps, since it was meant for appID keys maps for multiple clients-apps.
-		m, ok := p.MockManagers.Load(uint64(0))
-		if !ok {
+		m := p.getMockManager()
+		if m == nil {
 			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
 			return err
 		}
 
 		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), outgoingOpts)
+		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			// Send specific error type to error channel for external monitoring
@@ -747,8 +776,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	outgoingOpts.DstCfg = dstCfg
 	// get the mock manager for the current app
-	m, ok := p.MockManagers.Load(uint64(0))
-	if !ok {
+	m := p.getMockManager()
+	if m == nil {
 		utils.LogError(logger, err, "failed to fetch the mock manager")
 		return err
 	}
@@ -784,7 +813,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 		case models.MODE_TEST:
-			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
+			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -807,7 +836,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
+			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
@@ -906,14 +935,12 @@ func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certif
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
-	p.sessions.Set(uint64(0), &agent.Session{
-		ID:              uint64(0),
+	p.setSession(&agent.Session{
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
-
-	p.MockManagers.Store(uint64(0), NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	return nil
 }
@@ -921,12 +948,11 @@ func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
-	p.sessions.Set(uint64(0), &agent.Session{
-		ID:              uint64(0),
+	p.setSession(&agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.MockManagers.Store(uint64(0), NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+	p.setMockManager(NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	if !opts.Mocking {
 		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
@@ -946,23 +972,22 @@ func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 }
 
 func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	m, ok := p.MockManagers.Load(uint64(0))
-	if ok {
-		m.(*MockManager).SetFilteredMocks(filtered)
-		m.(*MockManager).SetUnFilteredMocks(unFiltered)
+	if m := p.getMockManager(); m != nil {
+		m.SetFilteredMocks(filtered)
+		m.SetUnFilteredMocks(unFiltered)
 		p.dnsCache.Purge()
 	}
 
 	return nil
 }
 
-// GetConsumedMocks returns the consumed filtered mocks for a given app id
+// GetConsumedMocks returns the consumed filtered mocks.
 func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) {
-	m, ok := p.MockManagers.Load(uint64(0))
-	if !ok {
+	m := p.getMockManager()
+	if m == nil {
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
-	return m.(*MockManager).GetConsumedMocks(), nil
+	return m.GetConsumedMocks(), nil
 }
 
 // GetErrorChannel returns the error channel for external monitoring
