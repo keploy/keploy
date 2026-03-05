@@ -2,6 +2,15 @@ name: Keploy Performance Test
 
 on:
   workflow_dispatch:
+    inputs:
+      keploy_repo:
+        description: 'Keploy repository to test (e.g., keploy/keploy or keploy/enterprise)'
+        required: false
+        default: 'keploy/keploy'
+      keploy_branch:
+        description: 'Keploy branch to test'
+        required: false
+        default: 'main'
   pull_request:
     branches: [ main ]
 
@@ -25,6 +34,13 @@ jobs:
         with:
           path: keploy
 
+      - name: Checkout Keploy to test (custom repo/branch if specified)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.keploy_repo || 'keploy/keploy' }}
+          ref: ${{ github.event.inputs.keploy_branch || github.ref }}
+          path: keploy-to-test
+
       - name: Checkout Spring PetClinic
         uses: actions/checkout@v4
         with:
@@ -42,7 +58,7 @@ jobs:
         with:
           go-version: '1.21'
           cache: true
-          cache-dependency-path: keploy/go.sum
+          cache-dependency-path: keploy-to-test/go.sum
 
       - name: Cache Maven packages
         uses: actions/cache@v4
@@ -60,10 +76,30 @@ jobs:
         run: ./mvnw clean package -DskipTests -T 1C  # Parallel build with 1 thread per core
 
       - name: Build Keploy
-        working-directory: keploy
+        working-directory: keploy-to-test
         run: |
-          # Build from current branch
-          go build -o keploy main.go
+          # Detect project structure and build accordingly
+          if [ -f "main.go" ]; then
+            # Standard keploy/keploy structure
+            echo "Building from root main.go..."
+            go build -o keploy main.go
+          elif [ -f "cmd/enterprise/main.go" ]; then
+            # Enterprise repo structure
+            echo "Building from cmd/enterprise/main.go..."
+            cd cmd/enterprise
+            go build -o ../../keploy main.go
+          else
+            echo "Error: Could not find main.go"
+            exit 1
+          fi
+          
+      - name: Copy Keploy binary to scripts directory
+        run: |
+          cp keploy-to-test/keploy keploy/keploy
+          chmod +x keploy/keploy
+          echo "Keploy binary info:"
+          ls -lh keploy/keploy
+          keploy/keploy --version || echo "Version check failed (might be expected)"
 
       - name: Make scripts executable
         working-directory: keploy
