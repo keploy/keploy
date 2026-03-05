@@ -35,9 +35,6 @@ echo "    P50 < ${P50_THRESHOLD}ms"
 echo "    P90 < ${P90_THRESHOLD}ms"
 echo "    P99 < ${P99_THRESHOLD}ms"
 echo "    RPS >= ${RPS_THRESHOLD}"
-echo ""
-echo "⚠️  NOTE: If P99_THRESHOLD is set very low (e.g., 10ms), tests will fail"
-echo "    This is useful for testing the failure detection logic"
 echo "========================================="
 echo ""
 
@@ -210,11 +207,11 @@ for i in $(seq 1 $NUM_RUNS); do
     
     if [ $threshold_result -eq 0 ]; then
         echo "Run $i: PASSED" >> "$output_file"
-        echo -e "${GREEN}✅ Run $i: PASSED${NC}"
+        echo -e "${GREEN}Run $i: PASSED${NC}"
         run_results[$i]="PASS"
     else
         echo "Run $i: FAILED (regression detected)" >> "$output_file"
-        echo -e "${RED}❌ Run $i: FAILED (regression detected)${NC}"
+        echo -e "${RED}Run $i: FAILED (regression detected)${NC}"
         run_results[$i]="FAIL"
         ((failed_runs++))
     fi

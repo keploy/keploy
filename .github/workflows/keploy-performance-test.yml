@@ -142,7 +142,7 @@ jobs:
           REQUIRED_FAILURES: 2
           P50_THRESHOLD: 5       # Based on baseline ~2.5ms
           P90_THRESHOLD: 15      # Based on baseline ~7.6ms
-          P99_THRESHOLD: 10      # TEMPORARILY SET TO 10ms TO TEST FAILURE LOGIC
+          P99_THRESHOLD: 70      # Based on baseline ~15-60ms (increased for CI variance)
           RPS_THRESHOLD: 100     # Target 100 RPS (allows 1% tolerance = 99 RPS)
 
       - name: Stop Keploy
