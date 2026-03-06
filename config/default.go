@@ -24,6 +24,7 @@ incomingProxyPort: %d
 dnsPort: 26789
 debug: false
 disableANSI: false
+theme: "light"
 disableTele: false
 generateGithubActions: false
 containerName: ""

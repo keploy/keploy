@@ -60,6 +60,17 @@ var (
 	PassThroughHosts = []string{"^dc\\.services\\.visualstudio\\.com$"}
 )
 
+// Theme represents the CLI color theme.
+type Theme string
+
+const (
+	ThemeLight Theme = "light" // default theme, optimized for light terminal backgrounds
+	ThemeDark  Theme = "dark"  // optimized for dark terminal backgrounds
+)
+
+// CurrentTheme holds the active theme for the CLI session.
+var CurrentTheme Theme = ThemeLight
+
 var orangeColorSGR = []color.Attribute{38, 5, 208}
 
 var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -70,12 +81,18 @@ var HighlightString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
 		return fmt.Sprint(a)
 	}
+	if CurrentTheme == ThemeDark {
+		return color.New(color.FgHiCyan).SprintFunc()(a)
+	}
 	return color.New(orangeColorSGR...).SprintFunc()(a)
 }
 
 var HighlightPassingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
 		return fmt.Sprint(a)
+	}
+	if CurrentTheme == ThemeDark {
+		return color.New(color.FgHiGreen).SprintFunc()(a)
 	}
 	return color.New(color.FgGreen).SprintFunc()(a)
 }
@@ -84,12 +101,18 @@ var HighlightFailingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
 		return fmt.Sprint(a)
 	}
+	if CurrentTheme == ThemeDark {
+		return color.New(color.FgHiRed).SprintFunc()(a)
+	}
 	return color.New(color.FgRed).SprintFunc()(a)
 }
 
 var HighlightGrayString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
 		return fmt.Sprint(a)
+	}
+	if CurrentTheme == ThemeDark {
+		return color.New(color.FgWhite).SprintFunc()(a)
 	}
 	return color.New(color.FgHiBlack).SprintFunc()(a)
 }
@@ -113,6 +136,22 @@ var GetPassingColorScheme = func() pp.ColorScheme {
 	if IsAnsiDisabled {
 		return defaultColorScheme
 	}
+	if CurrentTheme == ThemeDark {
+		return pp.ColorScheme{
+			String:          pp.Green | pp.Bold,
+			StringQuotation: pp.Green | pp.Bold,
+			FieldName:       pp.Cyan,
+			Integer:         pp.Cyan | pp.Bold,
+			StructName:      pp.White | pp.Bold,
+			Bool:            pp.Yellow | pp.Bold,
+			Float:           pp.Magenta | pp.Bold,
+			EscapedChar:     pp.Magenta | pp.Bold,
+			PointerAdress:   pp.Cyan | pp.Bold,
+			Nil:             pp.Yellow | pp.Bold,
+			Time:            pp.Cyan | pp.Bold,
+			ObjectLength:    pp.Cyan,
+		}
+	}
 	return pp.ColorScheme{
 		String:          pp.Green,
 		StringQuotation: pp.Green | pp.Bold,
@@ -132,6 +171,22 @@ var GetPassingColorScheme = func() pp.ColorScheme {
 var GetFailingColorScheme = func() pp.ColorScheme {
 	if IsAnsiDisabled {
 		return defaultColorScheme
+	}
+	if CurrentTheme == ThemeDark {
+		return pp.ColorScheme{
+			Bool:            pp.Yellow | pp.Bold,
+			Integer:         pp.Cyan | pp.Bold,
+			Float:           pp.Magenta | pp.Bold,
+			String:          pp.Red | pp.Bold,
+			StringQuotation: pp.Red | pp.Bold,
+			EscapedChar:     pp.Magenta | pp.Bold,
+			FieldName:       pp.Yellow | pp.Bold,
+			PointerAdress:   pp.Cyan | pp.Bold,
+			Nil:             pp.Yellow | pp.Bold,
+			Time:            pp.Cyan | pp.Bold,
+			StructName:      pp.White | pp.Bold,
+			ObjectLength:    pp.Cyan,
+		}
 	}
 	return pp.ColorScheme{
 		Bool:            pp.Cyan | pp.Bold,

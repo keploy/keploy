@@ -27,6 +27,7 @@ type Config struct {
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	Theme                 string              `json:"theme" yaml:"theme" mapstructure:"theme"`
 	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
 	ContainerName         string              `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string              `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
