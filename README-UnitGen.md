@@ -200,7 +200,9 @@ Configure Keploy using command-line flags:
   --testDir ""
   --llmBaseUrl "https://api.openai.com/v1"
   --model "gpt-4o"
-  --llmApiVersion "
+  --llmApiVersion ""
+  --temperature 0.0
+  --reasoning-effort ""
 ```
 
 - `sourceFilePath`: Path to the source file for which tests are to be generated.
@@ -213,7 +215,9 @@ Configure Keploy using command-line flags:
 - `testDir`: Directory where tests will be written.
 - `llmBaseUrl`: Base url of the llm.
 - `model`: Specifies the AI model to use (default "gpt-4o").
-- `llmApiVersion`: API version of the llm if any (default "")
+- `llmApiVersion`: API version of the llm if any (default "").
+- `temperature`: Temperature parameter for the AI model (0.0-2.0). Lower values are more deterministic, higher values more creative (default 0.0).
+- `reasoning-effort`: Reasoning effort for the AI model (low, medium, high). Controls the depth of reasoning (default "").
 
 # Frequently Asked Questions
 
