@@ -722,6 +722,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var failure int
 	var obsolete int
 	var ignored int
+	var obsoleteTestCaseIDs []string // Track obsolete test case IDs for deletion
 	var totalConsumedMocks = map[string]models.MockState{}
 
 	testSetStatus := models.TestSetStatusPassed
@@ -1344,6 +1345,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else if mockSetMismatch {
 			testStatus = models.TestStatusObsolete
 			obsolete++
+			obsoleteTestCaseIDs = append(obsoleteTestCaseIDs, testCase.Name)
 		} else {
 			testStatus = models.TestStatusFailed
 			failure++
