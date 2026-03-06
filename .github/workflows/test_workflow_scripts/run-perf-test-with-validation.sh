@@ -16,7 +16,6 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 P50_THRESHOLD=${P50_THRESHOLD:-5}      # Default: 5ms (workflow can override)
 P90_THRESHOLD=${P90_THRESHOLD:-15}     # Default: 15ms (workflow can override)
 P99_THRESHOLD=${P99_THRESHOLD:-70}     # Default: 70ms (workflow can override)
-ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-0.01}  # 1%
 RPS_THRESHOLD=${RPS_THRESHOLD:-100}
 
 # Colors for output
@@ -58,19 +57,6 @@ extract_metrics() {
     local p90=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(90\)=\K[0-9.]+[µm]?s' | head -1)
     local p99=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(99\)=\K[0-9.]+[µm]?s' | head -1)
     
-    # Extract error rate (handles both "rate=0.001" and "0.00%" formats)
-    local error_rate=$(grep "http_req_failed" "$output_file" | grep -oP 'rate=\K[0-9.]+' | head -1)
-    if [ -z "$error_rate" ]; then
-        # Try percentage format: "http_req_failed: 0.00%"
-        local error_pct=$(grep "http_req_failed" "$output_file" | grep -oP ':\s*\K[0-9.]+(?=%)' | head -1)
-        if [ -n "$error_pct" ]; then
-            # Convert percentage to rate (0-1)
-            error_rate=$(echo "$error_pct / 100" | bc -l)
-        else
-            error_rate="0"
-        fi
-    fi
-    
     # Extract RPS
     local rps=$(grep "http_reqs" "$output_file" | grep -oP ':\s+\d+\s+\K[0-9.]+(?=/s)' | head -1)
     
@@ -81,15 +67,16 @@ extract_metrics() {
 convert_to_ms() {
     local value=$1
     
-    # Check if value contains 'ms', 's', 'µs', etc.
+    # Check if value contains 'ms', 'µs', 'us', 's', etc.
+    # Order matters: check µs/us before generic 's' to avoid false matches
     if [[ $value == *"ms"* ]]; then
         echo "$value" | sed 's/ms//'
-    elif [[ $value == *"s"* ]]; then
-        local num=$(echo "$value" | sed 's/s//')
-        echo "$(echo "$num * 1000" | bc)"
     elif [[ $value == *"µs"* ]] || [[ $value == *"us"* ]]; then
         local num=$(echo "$value" | sed 's/[µu]s//')
-        echo "$(echo "$num / 1000" | bc -l)"
+        echo "$(echo "scale=3; $num / 1000" | bc -l)"
+    elif [[ $value == *"s"* ]]; then
+        local num=$(echo "$value" | sed 's/s//')
+        echo "$(echo "scale=3; $num * 1000" | bc -l)"
     else
         echo "$value"
     fi
@@ -106,12 +93,6 @@ check_thresholds() {
     p50=$(convert_to_ms "$p50")
     p90=$(convert_to_ms "$p90")
     p99=$(convert_to_ms "$p99")
-    
-    # Store values for summary
-    p50_values[$run_num]=$p50
-    p90_values[$run_num]=$p90
-    p99_values[$run_num]=$p99
-    rps_values[$run_num]=$rps
     
     # Check each threshold
     local passed=true
@@ -198,6 +179,13 @@ for i in $(seq 1 $NUM_RUNS); do
     
     # Extract metrics
     metrics=$(extract_metrics "$output_file")
+    
+    # Parse and store metrics in parent shell
+    IFS='|' read -r p50_raw p90_raw p99_raw rps_raw <<< "$metrics"
+    p50_values[$i]=$(convert_to_ms "$p50_raw")
+    p90_values[$i]=$(convert_to_ms "$p90_raw")
+    p99_values[$i]=$(convert_to_ms "$p99_raw")
+    rps_values[$i]=$rps_raw
     
     # Check thresholds and capture output
     threshold_output=$(check_thresholds "$metrics" $i)
