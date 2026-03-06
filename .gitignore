@@ -62,4 +62,4 @@ testdata
 # Ignore the debug_bin
 __debug_bin*
 keploy
-extraparsers.go
+extraparsers.gocoverage
