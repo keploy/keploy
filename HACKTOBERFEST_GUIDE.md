@@ -67,14 +67,19 @@ You can choose from a carefully curated selection of Hacktoberfest requests that
 
 The open source community needs you. Do you have what it takes to join the community and build a better future? We’re here to help you.
 
+<!-- Community platforms are defined in community_platforms.json — keep in sync -->
 <p align="center">
-  <a href="https://x.com/keployio" target="_blank"><img src="https://img.shields.io/badge/X-1D9BF0.svg?style=for-the-badge&logo=X&logoColor=white"></a>
+  <a href="https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg" target="_blank"><img src="https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white"></a>
   	&nbsp;
-   <a href="https://www.linkedin.com/company/keploy/" target="_blank"><img src="https://img.shields.io/badge/LinkedIn-0A66C2.svg?style=for-the-badge&logo=LinkedIn&logoColor=white"></a>
+  <a href="https://github.com/keploy" target="_blank"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white"></a>
   	&nbsp;
-   <a href="https://community.keploy.io/" target="_blank"><img src="https://img.shields.io/badge/Blog-0A0A0A.svg?style=for-the-badge&logo=rss&logoColor=white"></a>
+  <a href="https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg" target="_blank"><img src="https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white"></a>
   	&nbsp;
-   <a href="https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg" target="_blank"><img src="https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white"></a>
+  <a href="https://testgpt.substack.com/" target="_blank"><img src="https://img.shields.io/badge/Substack-FF6719?style=for-the-badge&logo=substack&logoColor=white"></a>
+  	&nbsp;
+  <a href="https://x.com/Keployio" target="_blank"><img src="https://img.shields.io/badge/X-%231DA1F2.svg?style=for-the-badge&logo=X&logoColor=white"></a>
+  	&nbsp;
+  <a href="https://keploy.io/blog" target="_blank"><img src="https://img.shields.io/badge/Blog-0A0A0A?style=for-the-badge&logo=rss&logoColor=white"></a>
   	&nbsp;
 </p>
 
