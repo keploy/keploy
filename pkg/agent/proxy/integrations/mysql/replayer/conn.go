@@ -166,6 +166,9 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		}
 
 		// handle the TLS connection and get the upgraded client connection
+		// NOTE: In test/replay mode, we only upgrade the CLIENT connection (app -> proxy).
+		// There's no server connection to upgrade since we're replaying mocks, not connecting upstream.
+		// pTls.HandleTLSConnection is the centralized TLS handler used across all parsers.
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
 			clientConn, _, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)

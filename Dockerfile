@@ -5,7 +5,6 @@ FROM golang:1.24 AS build
 WORKDIR /app
 
 # Define build arguments for ldflags
-ARG SENTRY_DSN_DOCKER
 ARG VERSION
 ARG SERVER_URL
 

@@ -3,7 +3,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -24,6 +23,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -34,6 +34,11 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// outgoingTLSSessionCache is shared across all outgoing TLS connections.
+// Without this, every proxy→destination dial does a full TLS handshake (~10-30 ms).
+// With it, repeat connections to the same host resume (~1-3 ms).
+var outgoingTLSSessionCache = tls.NewLRUClientSessionCache(256)
 
 type ParserPriority struct {
 	Priority   int
@@ -80,6 +85,17 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+}
+
+// tuneTCPConn applies low-latency TCP tuning to a connection:
+// - TCP_NODELAY: disable Nagle's algorithm
+// - TCP_QUICKACK: disable delayed ACKs
+// - Enlarged socket buffers: reduce TCP back-pressure on bursty traffic
+func tuneTCPConn(tc *net.TCPConn) {
+	_ = tc.SetNoDelay(true)
+	orchestrator.SetTCPQuickACK(tc)
+	_ = tc.SetReadBuffer(2 * 1024 * 1024)  // 2 MB receive buffer
+	_ = tc.SetWriteBuffer(2 * 1024 * 1024) // 2 MB send buffer
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -280,7 +296,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	defer func(listener net.Listener) {
 		err := listener.Close()
 
-		if err != nil {
+		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}
 		p.logger.Debug("proxy stopped...")
@@ -312,45 +328,43 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		p.nsSwitchMutex.Unlock()
 	}()
 
+	// Close the listener when context is cancelled to unblock Accept().
+	// This avoids creating a goroutine + two channels per accept iteration.
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+
 	for {
-		clientConnCh := make(chan net.Conn, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			defer utils.Recover(p.logger)
-			conn, err := listener.Accept()
-			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
-					errCh <- nil
-					return
-				}
-				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-				errCh <- err
-				return
-			}
-			clientConnCh <- conn
-		}()
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-errCh:
-			return err
-		// handle the client connection
-		case clientConn := <-clientConnCh:
-			clientConnErrGrp.Go(func() error {
-				defer util.Recover(p.logger, clientConn, nil)
-				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil && err != io.EOF {
-					// Network closed errors are expected when client closes connection (e.g., app shutdown)
-					// Only log as error if it's not a shutdown/network closed error
-					if isShutdownError(err) || isNetworkClosedErr(err) {
-						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
-					} else {
-						utils.LogError(p.logger, err, "failed to handle the client connection")
-					}
-				}
+		clientConn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
 				return nil
-			})
+			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				return nil
+			}
+			utils.LogError(p.logger, err, "failed to accept connection to the proxy")
+			return err
 		}
+		// Disable Nagle's algorithm and enable quick ACKs for low-latency forwarding
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			tuneTCPConn(tc)
+		}
+		clientConnErrGrp.Go(func() error {
+			defer util.Recover(p.logger, clientConn, nil)
+			err := p.handleConnection(clientConnCtx, clientConn)
+			if err != nil && err != io.EOF {
+				// Network closed errors are expected when client closes connection (e.g., app shutdown)
+				// Only log as error if it's not a shutdown/network closed error
+				if isShutdownError(err) || isNetworkClosedErr(err) {
+					p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
+				} else {
+					utils.LogError(p.logger, err, "failed to handle the client connection")
+				}
+			}
+			return nil
+		})
 	}
 }
 
@@ -479,6 +493,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
 		}
+		if tc, ok := dstConn.(*net.TCPConn); ok {
+			tuneTCPConn(tc)
+		}
 
 		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
 		if err != nil {
@@ -498,6 +515,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
+			}
+			if tc, ok := dstConn.(*net.TCPConn); ok {
+				tuneTCPConn(tc)
 			}
 
 			dstCfg := &models.ConditionalDstCfg{
@@ -536,35 +556,33 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
-	reader := bufio.NewReader(srcConn)
-	initialData := make([]byte, 5)
-	// reading the initial data from the client connection to determine if the connection is a TLS handshake
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
+	// Read 5 bytes directly instead of allocating a 4KB bufio.Reader just to peek.
+	peekBuf := make([]byte, 5)
+	n, peekErr := io.ReadFull(srcConn, peekBuf)
+	if n == 0 {
+		if peekErr == io.EOF || peekErr == io.ErrUnexpectedEOF {
+			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(peekErr))
 			return nil
 		}
-		// Network closed errors are expected when client closes connection (e.g., app shutdown)
-		if isShutdownError(err) || isNetworkClosedErr(err) {
-			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(err))
+		if isShutdownError(peekErr) || isNetworkClosedErr(peekErr) {
+			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(peekErr))
 		} else {
-			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+			utils.LogError(p.logger, peekErr, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		}
-		return err
+		return peekErr
 	}
-
-	multiReader := io.MultiReader(reader, srcConn)
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: multiReader,
-		Logger: p.logger,
-	}
+	testBuffer := peekBuf[:n]
 
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
+		// Prepend the consumed peek bytes back so the TLS handler sees the full ClientHello.
+		srcConn = &util.Conn{
+			Conn:   srcConn,
+			Reader: io.MultiReader(bytes.NewReader(testBuffer), srcConn),
+			Logger: p.logger,
+		}
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
@@ -596,8 +614,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
-	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+	if isTLS {
+		// TLS: srcConn is a fresh tls.Conn after handshake, read normally.
+		initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+	} else {
+		// Non-TLS: the 5 peek bytes were consumed from the raw conn.
+		// Read the rest of the initial data from the raw conn and prepend
+		// the peek bytes to form the complete initial buffer.
+		// This avoids a MultiReader short-read issue where ReadBytes returns
+		// only the 5 prepended bytes (short read < 32KB buffer) instead of
+		// continuing to read from the actual connection.
+		restBuf, err2 := util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+		if err2 != nil {
+			err = err2
+		} else {
+			initialBuf = append(testBuffer, restBuf...)
+		}
+	}
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err
@@ -640,7 +673,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
 		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
 
-		moreBuf, err := util.ReadWithTimeout(srcConn, 150*time.Millisecond)
+		moreBuf, err := util.ReadWithTimeout(srcConn, 5*time.Millisecond)
 		if err != nil {
 			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
 			return err
@@ -655,6 +688,72 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Conn:   srcConn,
 		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
 		Logger: p.logger,
+	}
+
+	// Handle PostgreSQL in-protocol SSL at proxy level (Record mode only)
+	// PostgreSQL SSLRequest is sent after TCP connection, not before (unlike HTTPS).
+	// We detect it here and handle the SSL negotiation at proxy level so parsers
+	// receive plaintext connections.
+	if rule.Mode == models.MODE_RECORD && pTls.IsPostgresSSLRequest(initialBuf) {
+		logger.Debug("Detected PostgreSQL SSLRequest, handling SSL at proxy level")
+
+		// Dial the destination server first
+		dstConn, err = net.Dial("tcp", dstAddr)
+		if err != nil {
+			utils.LogError(logger, err, "failed to dial PostgreSQL server for SSL negotiation. Verify the server is running and accessible at the configured address")
+			return err
+		}
+		if tc, ok := dstConn.(*net.TCPConn); ok {
+			tuneTCPConn(tc)
+		}
+
+		// Extract the underlying connection from the util.Conn wrapper
+		underlyingConn := srcConn
+		if uc, ok := srcConn.(*util.Conn); ok {
+			underlyingConn = uc.Conn
+		}
+
+		// Handle the SSL negotiation - this will:
+		// 1. Forward SSLRequest to server
+		// 2. Get server response ('S' or 'N')
+		// 3. Forward response to client
+		// 4. If 'S', upgrade both connections to TLS
+		srcConn, dstConn, err = pTls.HandlePostgresSSL(
+			ctx, logger, underlyingConn, dstConn,
+			initialBuf, sourcePort, rule.Backdate,
+		)
+		if err != nil {
+			utils.LogError(logger, err, "failed to handle PostgreSQL SSL negotiation. Check if the server supports SSL and the TLS configuration is correct")
+			return err
+		}
+
+		// Inject a synthetic SSLRequest/SSLResponse config mock for backward compatibility.
+		// The main branch replayer expects this config mock when it encounters SSLRequest
+		// during replay. Without it, mocks recorded with proxy-level SSL break on main.
+		connID := ""
+		if v, ok := parserCtx.Value(models.ClientConnectionIDKey).(string); ok {
+			connID = v
+		}
+		rule.MC <- pTls.NewPostgresSSLConfigMock(connID)
+		logger.Debug("Injected synthetic SSLRequest/SSLResponse config mock for backward compatibility")
+
+		// After SSL negotiation, we need to read the next packet (StartupMessage)
+		// and wrap it in the srcConn so parsers see it
+		nextBuf, err := util.ReadInitialBuf(parserCtx, logger, srcConn)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read post-SSL PostgreSQL packet. The connection may have been closed unexpectedly - check server logs")
+			return err
+		}
+
+		// Update initialBuf with the post-SSL packet
+		initialBuf = nextBuf
+		srcConn = &util.Conn{
+			Conn:   srcConn,
+			Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+			Logger: p.logger,
+		}
+
+		logger.Debug("PostgreSQL SSL handled at proxy level, continuing with plaintext connections")
 	}
 
 	dstCfg := &models.ConditionalDstCfg{
@@ -705,6 +804,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
 			NextProtos:         nextProtos,
+			ClientSessionCache: outgoingTLSSessionCache, // reuse TLS sessions with destination
 		}
 
 		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
@@ -735,11 +835,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
 	} else {
-		if rule.Mode != models.MODE_TEST {
+		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
+		if rule.Mode != models.MODE_TEST && dstConn == nil {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
+			}
+			if tc, ok := dstConn.(*net.TCPConn); ok {
+				tuneTCPConn(tc)
 			}
 		}
 		dstCfg.Addr = dstAddr
