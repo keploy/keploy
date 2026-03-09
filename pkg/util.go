@@ -45,20 +45,40 @@ var templateValuesMu sync.RWMutex
 
 const maxStreamTokenSize = 10 * 1024 * 1024
 
-type httpStreamMode string
+// HTTPStreamMode represents the type of HTTP streaming response.
+type HTTPStreamMode string
 
 const (
-	httpStreamModeNone      httpStreamMode = "none"
-	httpStreamModeSSE       httpStreamMode = "sse"
-	httpStreamModeNDJSON    httpStreamMode = "ndjson"
-	httpStreamModeMultipart httpStreamMode = "multipart"
-	httpStreamModePlainText httpStreamMode = "plain-text"
-	httpStreamModeBinary    httpStreamMode = "binary"
+	HTTPStreamModeNone      HTTPStreamMode = "none"
+	HTTPStreamModeSSE       HTTPStreamMode = "sse"
+	HTTPStreamModeNDJSON    HTTPStreamMode = "ndjson"
+	HTTPStreamModeMultipart HTTPStreamMode = "multipart"
+	HTTPStreamModePlainText HTTPStreamMode = "plain-text"
+	HTTPStreamModeBinary    HTTPStreamMode = "binary"
 )
 
-type httpStreamConfig struct {
-	Mode     httpStreamMode
+// HTTPStreamConfig holds configuration for HTTP streaming responses.
+type HTTPStreamConfig struct {
+	Mode     HTTPStreamMode
 	Boundary string
+}
+
+// StreamMismatchInfo holds details about a streaming frame mismatch for reporting.
+type StreamMismatchInfo struct {
+	FrameIndex    int    // Index of the mismatched frame (-1 if no specific frame)
+	ExpectedFrame string // The expected frame content
+	ActualFrame   string // The actual frame content received
+	Reason        string // Description of why frames don't match
+}
+
+// StreamingHTTPResponse holds the response metadata and a reader for streaming responses.
+// The caller is responsible for reading from the Reader and closing it when done.
+type StreamingHTTPResponse struct {
+	StatusCode    int
+	StatusMessage string
+	Header        map[string]string
+	Reader        io.ReadCloser
+	StreamConfig  HTTPStreamConfig
 }
 
 func InitSortCounter(counter int64) {
@@ -184,6 +204,7 @@ func IsTime(stringDate string) bool {
 
 type SimulationConfig struct {
 	APITimeout         uint64
+	RequestTimeout     time.Duration
 	ConfigPort         uint32
 	KeployPath         string
 	ConfigHost         string
@@ -191,16 +212,24 @@ type SimulationConfig struct {
 	StreamingBodyNoise map[string][]string
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
-	var resp *models.HTTPResp
-	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
+// preparedHTTPRequest holds the prepared HTTP request and client for execution.
+type preparedHTTPRequest struct {
+	Request *http.Request
+	Client  *http.Client
+}
 
-	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
+// prepareHTTPRequest handles all common request preparation logic shared between
+// SimulateHTTP and SimulateHTTPStreaming: URL decoding, template rendering,
+// body loading, multipart construction, compression, and client creation.
+func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*preparedHTTPRequest, error) {
+	// case in which URL string has encoded template placeholders
+	if strings.Contains(tc.HTTPReq.URL, "%7B") {
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
 			tc.HTTPReq.URL = decoded
 		}
 	}
+
 	// TODO: adjust this logic in the render function in order to remove the redundant code.
 	// Convert testcase to string and render template values before simulation.
 	templateValuesMu.RLock()
@@ -289,6 +318,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
+	// Build multipart body if needed
 	contentType := tc.HTTPReq.Header["Content-Type"]
 	if strings.HasPrefix(contentType, "multipart/form-data") && len(tc.HTTPReq.Form) > 0 {
 		var body bytes.Buffer
@@ -391,8 +421,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-
 	// Determine which URL/port to use for test execution.
 	// Priority logic (refined):
 	// 1. Check replaceWith against the ORIGINAL test case URL.
@@ -423,7 +451,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if tc.IsLast {
 		req.Header.Set("KEPLOY-LAST-TESTCASE", "true")
 	}
-	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]
@@ -432,23 +459,16 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		req.Host = hostHeader
 	}
 
-	APITimeout := cfg.APITimeout
-	if detectHTTPStreamConfig(tc, nil).Mode != httpStreamModeNone {
-		APITimeout = ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
-	}
-	requestTimeout := time.Second * time.Duration(APITimeout)
-
 	// Creating the client and disabling redirects
-	var client *http.Client
-
 	_, hasAcceptEncoding := req.Header["Accept-Encoding"]
 	disableCompression := !hasAcceptEncoding
 
+	var client *http.Client
 	keepAlive, ok := req.Header["Connection"]
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
 		logger.Debug("simulating request with conn:keep-alive")
 		client = &http.Client{
-			Timeout: requestTimeout,
+			Timeout: cfg.RequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -459,7 +479,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
 		logger.Debug("simulating request with conn:close")
 		client = &http.Client{
-			Timeout: requestTimeout,
+			Timeout: cfg.RequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -471,7 +491,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else {
 		logger.Debug("simulating request with conn:keep-alive (maxIdleConn=1)")
 		client = &http.Client{
-			Timeout: requestTimeout,
+			Timeout: cfg.RequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -483,7 +503,28 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	httpResp, errHTTPReq := client.Do(req)
+	return &preparedHTTPRequest{
+		Request: req,
+		Client:  client,
+	}, nil
+}
+
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
+	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
+
+	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+
+	// Prepare the HTTP request using the shared helper
+	cfg.RequestTimeout = time.Second * time.Duration(cfg.APITimeout)
+	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
+
+	// Execute the request
+	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -497,104 +538,39 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}()
 
+	// Read full response body
+	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
+	if errReadRespBody != nil {
+		utils.LogError(logger, errReadRespBody, "failed reading response body")
+		return nil, errReadRespBody
+	}
+
+	// Decompress if needed
+	if httpResp.Header.Get("Content-Encoding") != "" {
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode response body")
+			return nil, err
+		}
+	}
+
 	statusMessage := http.StatusText(httpResp.StatusCode)
-	bodyForTemplateUpdate := []byte{}
 
-	streamCfg := detectHTTPStreamConfig(tc, httpResp)
-	if streamCfg.Mode != httpStreamModeNone {
-		logger.Debug("detected HTTP streaming response in test mode; validating stream incrementally",
-			zap.String("testcase", tc.Name),
-			zap.String("content_type", httpResp.Header.Get("Content-Type")),
-			zap.String("stream_mode", string(streamCfg.Mode)))
-
-		streamReader := io.Reader(httpResp.Body)
-		contentEncoding := strings.ToLower(strings.TrimSpace(httpResp.Header.Get("Content-Encoding")))
-		var streamReaderCloser io.Closer
-		switch contentEncoding {
-		case "gzip":
-			gzipReader, gzErr := gzip.NewReader(httpResp.Body)
-			if gzErr != nil {
-				utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response. Verify the response is valid gzip-encoded data, or check if the server is sending uncompressed content despite the Content-Encoding header.")
-				return nil, gzErr
-			}
-			streamReader = gzipReader
-			streamReaderCloser = gzipReader
-		case "br":
-			streamReader = brotli.NewReader(httpResp.Body)
-		case "":
-			// no-op
-		default:
-			logger.Debug("unsupported content-encoding for stream; comparing raw response body",
-				zap.String("content_encoding", contentEncoding))
-		}
-		if streamReaderCloser != nil {
-			defer streamReaderCloser.Close()
-		}
-
-		streamNoiseKeys := collectStreamingGlobalNoiseKeys(cfg.StreamingBodyNoise, tc.Noise)
-		streamMatched, capturedStreamBody, streamErr := compareHTTPStream(tc.HTTPResp, streamReader, streamCfg, streamNoiseKeys, logger)
-		if streamErr != nil {
-			utils.LogError(logger, streamErr, "failed to read streaming response body. Check network connectivity, verify the server is responding correctly, or increase the API timeout if the stream is slow.")
-			return nil, streamErr
-		}
-
-		if !streamMatched {
-			logger.Debug("streaming response mismatch detected for testcase", zap.String("testcase", tc.Name), zap.String("mode", string(streamCfg.Mode)))
-		}
-
-		bodyForMatcher := capturedStreamBody
-		if streamMatched {
-			// Stream content is validated chunk-by-chunk above, so use the stored body to keep
-			// existing matcher semantics stable and avoid formatting drift false negatives.
-			bodyForMatcher = tc.HTTPResp.Body
-		}
-
-		resp = &models.HTTPResp{
-			StatusCode:    httpResp.StatusCode,
-			StatusMessage: statusMessage,
-			Body:          bodyForMatcher,
-			Header:        ToYamlHTTPHeader(httpResp.Header),
-		}
-		bodyForTemplateUpdate = []byte(capturedStreamBody)
-	} else {
-		respBody, errReadRespBody := io.ReadAll(httpResp.Body)
-		if errReadRespBody != nil {
-			utils.LogError(logger, errReadRespBody, "failed reading response body")
-			return nil, errReadRespBody
-		}
-
-		if httpResp.Header.Get("Content-Encoding") != "" {
-			respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
-			if err != nil {
-				utils.LogError(logger, err, "failed to decode response body")
-				return nil, err
-			}
-		}
-
-		resp = &models.HTTPResp{
-			StatusCode:    httpResp.StatusCode,
-			StatusMessage: statusMessage,
-			Body:          string(respBody),
-			Header:        ToYamlHTTPHeader(httpResp.Header),
-		}
-		bodyForTemplateUpdate = respBody
+	resp := &models.HTTPResp{
+		StatusCode:    httpResp.StatusCode,
+		StatusMessage: statusMessage,
+		Body:          string(respBody),
+		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
 	templateValuesMu.Lock()
 	defer templateValuesMu.Unlock()
 
-	if len(utils.TemplatizedValues) > 0 && len(bodyForTemplateUpdate) > 0 {
+	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
 
-		prev := make(map[string]interface{}, len(utils.TemplatizedValues))
-		for k, v := range utils.TemplatizedValues {
-			prev[k] = v
-		}
-
-		respForTemplate := *resp
-		respForTemplate.Body = string(bodyForTemplateUpdate)
-		updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, respForTemplate, utils.TemplatizedValues)
+		updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
 		if updated {
 			logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
 		}
@@ -602,7 +578,104 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	return resp, errHTTPReq
 }
 
-func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStreamConfig {
+// SimulateHTTPStreaming sends an HTTP request and returns the streaming response with a reader.
+// The caller is responsible for reading from the response Reader and closing it when done.
+// Use CompareHTTPStream to compare the streaming response with expected values.
+func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*StreamingHTTPResponse, error) {
+	logger.Info("starting streaming test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+
+	// Calculate streaming timeout
+	APITimeout := ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
+	cfg.RequestTimeout = time.Second * time.Duration(APITimeout)
+
+	// Prepare the HTTP request using the shared helper
+	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
+
+	// Execute the request
+	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	if errHTTPReq != nil {
+		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		return nil, errHTTPReq
+	}
+
+	statusMessage := http.StatusText(httpResp.StatusCode)
+	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
+
+	logger.Debug("detected HTTP streaming response",
+		zap.String("testcase", tc.Name),
+		zap.String("content_type", httpResp.Header.Get("Content-Type")),
+		zap.String("stream_mode", string(streamCfg.Mode)))
+
+	// Wrap the response body with decompression if needed
+	streamReader := io.ReadCloser(httpResp.Body)
+	contentEncoding := strings.ToLower(strings.TrimSpace(httpResp.Header.Get("Content-Encoding")))
+	switch contentEncoding {
+	case "gzip":
+		gzipReader, gzErr := gzip.NewReader(httpResp.Body)
+		if gzErr != nil {
+			httpResp.Body.Close()
+			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+			return nil, gzErr
+		}
+		streamReader = &gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}
+	case "br":
+		streamReader = &brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}
+	case "":
+		// no-op, use httpResp.Body directly
+	default:
+		logger.Debug("unsupported content-encoding for stream; returning raw response body",
+			zap.String("content_encoding", contentEncoding))
+	}
+
+	return &StreamingHTTPResponse{
+		StatusCode:    httpResp.StatusCode,
+		StatusMessage: statusMessage,
+		Header:        ToYamlHTTPHeader(httpResp.Header),
+		Reader:        streamReader,
+		StreamConfig:  streamCfg,
+	}, nil
+}
+
+// gzipReadCloser wraps a gzip reader and its underlying body to close both.
+type gzipReadCloser struct {
+	gzipReader *gzip.Reader
+	underlying io.ReadCloser
+}
+
+func (g *gzipReadCloser) Read(p []byte) (int, error) {
+	return g.gzipReader.Read(p)
+}
+
+func (g *gzipReadCloser) Close() error {
+	gzErr := g.gzipReader.Close()
+	underErr := g.underlying.Close()
+	if gzErr != nil {
+		return gzErr
+	}
+	return underErr
+}
+
+// brotliReadCloser wraps a brotli reader and its underlying body.
+type brotliReadCloser struct {
+	reader     io.Reader
+	underlying io.ReadCloser
+}
+
+func (b *brotliReadCloser) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (b *brotliReadCloser) Close() error {
+	return b.underlying.Close()
+}
+
+// DetectHTTPStreamConfig detects the streaming mode of an HTTP response based on content type and other factors.
+func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStreamConfig {
 	contentType := ""
 	if resp != nil {
 		contentType = resp.Header.Get("Content-Type")
@@ -626,50 +699,36 @@ func detectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) httpStream
 	switch mediaType {
 	case "text/event-stream":
 		if isSSETestCase(tc, resp) {
-			return httpStreamConfig{Mode: httpStreamModeSSE}
+			return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
 		}
-		if tc != nil && looksLikeSSEPayload(tc.HTTPResp.Body) {
-			return httpStreamConfig{Mode: httpStreamModeSSE}
-		}
-		return httpStreamConfig{Mode: httpStreamModePlainText}
+		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
 	case "application/x-ndjson", "application/ndjson":
-		return httpStreamConfig{Mode: httpStreamModeNDJSON}
+		return HTTPStreamConfig{Mode: HTTPStreamModeNDJSON}
 	case "multipart/x-mixed-replace", "multipart/mixed":
 		boundary := strings.TrimSpace(params["boundary"])
 		if boundary == "" && tc != nil {
 			boundary = boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type"))
 		}
 		if boundary != "" {
-			return httpStreamConfig{Mode: httpStreamModeMultipart, Boundary: boundary}
+			return HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: boundary}
 		}
 	case "text/plain":
 		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return httpStreamConfig{Mode: httpStreamModePlainText}
+			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
 		}
 		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return httpStreamConfig{Mode: httpStreamModePlainText}
-		}
-		if tc != nil && looksLikeLineDelimitedStreamingPayload(tc.HTTPResp.Body) {
-			return httpStreamConfig{Mode: httpStreamModePlainText}
+			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
 		}
 	case "application/octet-stream":
 		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return httpStreamConfig{Mode: httpStreamModeBinary}
+			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
 		}
 		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return httpStreamConfig{Mode: httpStreamModeBinary}
+			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
 		}
 	}
 
-	if isSSETestCase(tc, resp) {
-		return httpStreamConfig{Mode: httpStreamModeSSE}
-	}
-
-	if tc != nil && isLikelyStreamingHTTPResponse(tc, resp) && looksLikeNDJSONPayload(tc.HTTPResp.Body) {
-		return httpStreamConfig{Mode: httpStreamModeNDJSON}
-	}
-
-	return httpStreamConfig{Mode: httpStreamModeNone}
+	return HTTPStreamConfig{Mode: HTTPStreamModeNone}
 }
 
 // IsHTTPStreamingTestCase returns true if the testcase response is identified as a stream format
@@ -678,23 +737,25 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 	if tc == nil {
 		return false
 	}
-	return detectHTTPStreamConfig(tc, nil).Mode != httpStreamModeNone
+	return DetectHTTPStreamConfig(tc, nil).Mode != HTTPStreamModeNone
 }
 
-func compareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg httpStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+// CompareHTTPStream compares an expected HTTP response with a streaming response.
+// It returns whether they match, the captured body content, mismatch details (if any), and any error.
+func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	switch cfg.Mode {
-	case httpStreamModeSSE:
+	case HTTPStreamModeSSE:
 		return compareSSEStream(expectedResp, stream, jsonNoiseKeys, logger)
-	case httpStreamModeNDJSON:
+	case HTTPStreamModeNDJSON:
 		return compareNDJSONStream(expectedResp, stream, jsonNoiseKeys, logger)
-	case httpStreamModeMultipart:
+	case HTTPStreamModeMultipart:
 		return compareMultipartStream(expectedResp, stream, cfg.Boundary, jsonNoiseKeys, logger)
-	case httpStreamModePlainText:
+	case HTTPStreamModePlainText:
 		return comparePlainTextStream(expectedResp, stream, logger)
-	case httpStreamModeBinary:
+	case HTTPStreamModeBinary:
 		return compareBinaryStream(expectedResp, stream, logger)
 	default:
-		return false, "", fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
+		return false, "", nil, fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
 }
 
@@ -733,7 +794,9 @@ func ComputeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) 
 	return streamTimeoutSeconds
 }
 
-func collectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNoise map[string][]string) map[string]struct{} {
+// CollectStreamingGlobalNoiseKeys extracts noise keys from global body noise and test case noise configurations
+// that should be ignored during streaming response comparison.
+func CollectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNoise map[string][]string) map[string]struct{} {
 	keys := make(map[string]struct{})
 	add := func(candidate string) {
 		candidate = strings.ToLower(strings.TrimSpace(candidate))
@@ -825,46 +888,12 @@ func isLikelyStreamingHTTPResponse(tc *models.TestCase, resp *http.Response) boo
 	return false
 }
 
-func looksLikeSSEPayload(body string) bool {
-	body = normalizeLineEndings(body)
-	return strings.Contains(body, "\n\n") && (strings.Contains(body, "\ndata:") || strings.HasPrefix(body, "data:") || strings.Contains(body, "\nevent:") || strings.HasPrefix(body, "event:"))
-}
-
-func looksLikeNDJSONPayload(body string) bool {
-	scanner := bufio.NewScanner(strings.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-
-	nonEmpty := 0
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		nonEmpty++
-		var js interface{}
-		if json.Unmarshal([]byte(line), &js) != nil {
-			return false
-		}
-	}
-
-	return nonEmpty > 0
-}
-
-func looksLikeLineDelimitedStreamingPayload(body string) bool {
-	body = normalizeLineEndings(body)
-	body = strings.TrimSuffix(body, "\n")
-	if strings.TrimSpace(body) == "" {
-		return false
-	}
-	return strings.Contains(body, "\n")
-}
-
 type expectedSSEFrame struct {
 	fields []sseField
 	raw    string
 }
 
-func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	expectedQueue := extractExpectedSSEQueue(expectedResp)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -895,7 +924,13 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 				zap.String("reason", reason),
 				zap.String("expected_frame", expectedFrame.raw),
 				zap.String("actual_frame", frame))
-			return false, strings.Join(actualQueue, "\n\n"), nil
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expectedFrame.raw,
+				ActualFrame:   frame,
+				Reason:        reason,
+			}
+			return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
 		}
 
 		nextExpected++
@@ -907,20 +942,31 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n\n"), err
+		return false, strings.Join(actualQueue, "\n\n"), nil, err
 	}
 
 	if nextExpected < len(expectedQueue) {
 		logger.Debug("SSE stream ended before all expected frames were received",
 			zap.Int("expected_frames", len(expectedQueue)),
 			zap.Int("matched_frames", nextExpected))
-		return false, strings.Join(actualQueue, "\n\n"), nil
+		// Build expected frames that were not received
+		var missingFrames []string
+		for i := nextExpected; i < len(expectedQueue); i++ {
+			missingFrames = append(missingFrames, expectedQueue[i].raw)
+		}
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: strings.Join(missingFrames, "\n\n"),
+			ActualFrame:   "(stream ended - no more frames)",
+			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
 	}
 
-	return true, strings.Join(actualQueue, "\n\n"), nil
+	return true, strings.Join(actualQueue, "\n\n"), nil, nil
 }
 
-func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -953,7 +999,13 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 				zap.String("reason", reason),
 				zap.String("expected_frame", expected),
 				zap.String("actual_frame", line))
-			return false, strings.Join(actualQueue, "\n"), nil
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expected,
+				ActualFrame:   line,
+				Reason:        reason,
+			}
+			return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
 		}
 
 		nextExpected++
@@ -965,20 +1017,26 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), err
+		return false, strings.Join(actualQueue, "\n"), nil, err
 	}
 
 	if nextExpected < len(expectedQueue) {
 		logger.Debug("NDJSON stream ended before all expected frames were received",
 			zap.Int("expected_frames", len(expectedQueue)),
 			zap.Int("matched_frames", nextExpected))
-		return false, strings.Join(actualQueue, "\n"), nil
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: expectedQueue[nextExpected],
+			ActualFrame:   "(stream ended - no more frames)",
+			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
 	}
 
-	return true, strings.Join(actualQueue, "\n"), nil
+	return true, strings.Join(actualQueue, "\n"), nil, nil
 }
 
-func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
@@ -1002,7 +1060,13 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 				zap.Int("frame_index", nextExpected),
 				zap.Int("expected_size", len(expected)),
 				zap.Int("actual_size", len(line)))
-			return false, strings.Join(actualQueue, "\n"), nil
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expected,
+				ActualFrame:   line,
+				Reason:        fmt.Sprintf("size mismatch: expected %d bytes, got %d bytes", len(expected), len(line)),
+			}
+			return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
 		}
 
 		nextExpected++
@@ -1014,20 +1078,26 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), err
+		return false, strings.Join(actualQueue, "\n"), nil, err
 	}
 
 	if nextExpected < len(expectedQueue) {
 		logger.Debug("plain-text stream ended before all expected frames were received",
 			zap.Int("expected_frames", len(expectedQueue)),
 			zap.Int("matched_frames", nextExpected))
-		return false, strings.Join(actualQueue, "\n"), nil
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: expectedQueue[nextExpected],
+			ActualFrame:   "(stream ended - no more frames)",
+			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
 	}
 
-	return true, strings.Join(actualQueue, "\n"), nil
+	return true, strings.Join(actualQueue, "\n"), nil, nil
 }
 
-func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, error) {
+func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	expectedSize := len([]byte(expectedResp.Body))
 	if structuredSize, ok := expectedStructuredRawSize(expectedResp.StreamBody); ok {
 		expectedSize = structuredSize
@@ -1052,7 +1122,7 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 			break
 		}
 		if err != nil {
-			return false, strconv.Itoa(actualSize), err
+			return false, strconv.Itoa(actualSize), nil, err
 		}
 	}
 
@@ -1060,89 +1130,81 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 		logger.Debug("binary stream size mismatch",
 			zap.Int("expected_size", expectedSize),
 			zap.Int("actual_size", actualSize))
-		return false, strconv.Itoa(actualSize), nil
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    0,
+			ExpectedFrame: fmt.Sprintf("%d bytes", expectedSize),
+			ActualFrame:   fmt.Sprintf("%d bytes", actualSize),
+			Reason:        fmt.Sprintf("size mismatch: expected %d bytes, got %d bytes", expectedSize, actualSize),
+		}
+		return false, strconv.Itoa(actualSize), mismatchInfo, nil
 	}
 
-	return true, strconv.Itoa(actualSize), nil
+	return true, strconv.Itoa(actualSize), nil, nil
 }
 
 func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
-	if len(expectedResp.StreamBody) > 0 {
-		queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
-		for _, chunk := range expectedResp.StreamBody {
-			if len(chunk.Data) == 0 {
+	if len(expectedResp.StreamBody) == 0 {
+		return nil
+	}
+	queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
+	for _, chunk := range expectedResp.StreamBody {
+		if len(chunk.Data) == 0 {
+			continue
+		}
+		fields := make([]sseField, 0, len(chunk.Data))
+		lines := make([]string, 0, len(chunk.Data))
+		for _, dataField := range chunk.Data {
+			key := strings.TrimSpace(dataField.Key)
+			if key == "" {
 				continue
 			}
-			fields := make([]sseField, 0, len(chunk.Data))
-			lines := make([]string, 0, len(chunk.Data))
-			for _, dataField := range chunk.Data {
-				key := strings.TrimSpace(dataField.Key)
-				if key == "" {
-					continue
-				}
-				if strings.EqualFold(key, "comment") {
-					fields = append(fields, sseField{
-						key:      ":",
-						value:    dataField.Value,
-						hasValue: true,
-						comment:  true,
-					})
-					lines = append(lines, ":"+dataField.Value)
-					continue
-				}
-
-				lowerKey := strings.ToLower(key)
+			if strings.EqualFold(key, "comment") {
 				fields = append(fields, sseField{
-					key:      lowerKey,
+					key:      ":",
 					value:    dataField.Value,
 					hasValue: true,
+					comment:  true,
 				})
-				lines = append(lines, lowerKey+":"+dataField.Value)
-			}
-			if len(fields) == 0 {
+				lines = append(lines, ":"+dataField.Value)
 				continue
 			}
-			queue = append(queue, expectedSSEFrame{
-				fields: fields,
-				raw:    strings.Join(lines, "\n"),
-			})
-		}
-		if len(queue) > 0 {
-			return queue
-		}
-	}
 
-	legacyQueue := splitSSEQueue(expectedResp.Body)
-	queue := make([]expectedSSEFrame, 0, len(legacyQueue))
-	for _, frame := range legacyQueue {
+			lowerKey := strings.ToLower(key)
+			fields = append(fields, sseField{
+				key:      lowerKey,
+				value:    dataField.Value,
+				hasValue: true,
+			})
+			lines = append(lines, lowerKey+":"+dataField.Value)
+		}
+		if len(fields) == 0 {
+			continue
+		}
 		queue = append(queue, expectedSSEFrame{
-			fields: parseSSEFrame(frame),
-			raw:    frame,
+			fields: fields,
+			raw:    strings.Join(lines, "\n"),
 		})
 	}
 	return queue
 }
 
 func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
-	if len(expectedResp.StreamBody) > 0 {
-		queue := make([]string, 0, len(expectedResp.StreamBody))
-		for _, chunk := range expectedResp.StreamBody {
-			raw, ok := streamChunkFieldValue(chunk, "raw")
-			if !ok {
-				continue
-			}
-			raw = canonicalizer(raw)
-			if ignoreEmpty && raw == "" {
-				continue
-			}
-			queue = append(queue, raw)
-		}
-		if len(queue) > 0 {
-			return queue
-		}
+	if len(expectedResp.StreamBody) == 0 {
+		return nil
 	}
-
-	return splitLineQueue(expectedResp.Body, canonicalizer, ignoreEmpty)
+	queue := make([]string, 0, len(expectedResp.StreamBody))
+	for _, chunk := range expectedResp.StreamBody {
+		raw, ok := streamChunkFieldValue(chunk, "raw")
+		if !ok {
+			continue
+		}
+		raw = canonicalizer(raw)
+		if ignoreEmpty && raw == "" {
+			continue
+		}
+		queue = append(queue, raw)
+	}
+	return queue
 }
 
 func expectedStructuredRawSize(chunks []models.HTTPStreamChunk) (int, bool) {
@@ -1396,15 +1458,15 @@ func removeGlobalNoiseKeys(node any, jsonNoiseKeys map[string]struct{}) any {
 	}
 }
 
-func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, error) {
+func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	if strings.TrimSpace(boundary) == "" {
-		return false, "", fmt.Errorf("missing multipart boundary for stream comparison")
+		return false, "", nil, fmt.Errorf("missing multipart boundary for stream comparison")
 	}
 
 	expectedBody := expectedResp.Body
 	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), boundary)
 	if err != nil {
-		return false, "", err
+		return false, "", nil, err
 	}
 
 	actualQueue := make([]string, 0, len(expectedQueue))
@@ -1417,13 +1479,13 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 			break
 		}
 		if partErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), partErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partErr
 		}
 
 		actualPart, partReadErr := readMultipartPart(part)
 		_ = part.Close()
 		if partReadErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), partReadErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partReadErr
 		}
 
 		if nextExpected >= len(expectedQueue) {
@@ -1441,7 +1503,13 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 				zap.String("reason", reason),
 				zap.String("expected_part", expected.describe()),
 				zap.String("actual_part", actualPart.describe()))
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expected.describe(),
+				ActualFrame:   actualPart.describe(),
+				Reason:        reason,
+			}
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), mismatchInfo, nil
 		}
 
 		nextExpected++
@@ -1456,10 +1524,16 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		logger.Debug("multipart stream ended before all expected parts were received",
 			zap.Int("expected_parts", len(expectedQueue)),
 			zap.Int("matched_parts", nextExpected))
-		return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: expectedQueue[nextExpected].describe(),
+			ActualFrame:   "(stream ended - no more parts)",
+			Reason:        fmt.Sprintf("expected %d parts but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), mismatchInfo, nil
 	}
 
-	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil
+	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, nil
 }
 
 type multipartPartPayload struct {
@@ -1577,22 +1651,6 @@ func isJSONContentType(contentType string) bool {
 	return contentType == "application/json" || strings.HasSuffix(contentType, "+json") || contentType == "application/x-ndjson" || contentType == "application/ndjson"
 }
 
-func splitLineQueue(body string, canonicalizer func(string) string, ignoreEmpty bool) []string {
-	scanner := bufio.NewScanner(strings.NewReader(normalizeLineEndings(body)))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-
-	queue := []string{}
-	for scanner.Scan() {
-		line := canonicalizer(scanner.Text())
-		if ignoreEmpty && line == "" {
-			continue
-		}
-		queue = append(queue, line)
-	}
-
-	return queue
-}
-
 func canonicalizeNDJSONLine(line string) string {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -1636,24 +1694,6 @@ func splitSSEFrames(data []byte, atEOF bool) (int, []byte, error) {
 	default:
 		return doubleCRLFIdx + len("\r\n\r\n"), data[:doubleCRLFIdx], nil
 	}
-}
-
-func splitSSEQueue(body string) []string {
-	scanner := bufio.NewScanner(strings.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-	scanner.Split(splitSSEFrames)
-
-	queue := []string{}
-	for scanner.Scan() {
-		frame := normalizeLineEndings(scanner.Text())
-		frame = strings.Trim(frame, "\n")
-		if strings.TrimSpace(frame) == "" {
-			continue
-		}
-		queue = append(queue, frame)
-	}
-
-	return queue
 }
 
 func canonicalizeSSEFrame(frame string) string {

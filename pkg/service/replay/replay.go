@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,21 +54,24 @@ const UNKNOWN_TEST = "UNKNOWN_TEST"
 var HookImpl TestHooks
 
 type Replayer struct {
-	logger          *zap.Logger
-	testDB          TestDB
-	mockDB          MockDB
-	mappingDB       MappingDB
-	reportDB        ReportDB
-	testSetConf     TestSetConfig
-	telemetry       Telemetry
-	instrumentation Instrumentation
-	config          *config.Config
-	auth            service.Auth
-	mock            *mock
-	instrument      bool
-	isLastTestSet   bool
-	isLastTestCase  bool
-	runDomainSet    *telemetry.DomainSet // collects host domains across a test run for telemetry
+	logger             *zap.Logger
+	testDB             TestDB
+	mockDB             MockDB
+	mappingDB          MappingDB
+	reportDB           ReportDB
+	testSetConf        TestSetConfig
+	telemetry          Telemetry
+	instrumentation    Instrumentation
+	config             *config.Config
+	auth               service.Auth
+	mock               *mock
+	instrument         bool
+	isLastTestSet      bool
+	isLastTestCase     bool
+	runDomainSet       *telemetry.DomainSet // collects host domains across a test run for telemetry
+	testRunTestSets    []string             // all test set IDs for the current run (used by RunTestSet)
+	testRunID          string               // current test run ID (used by RunTestSet)
+	afterTestRunCalled bool                 // guards duplicate AfterTestRun calls
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -254,6 +256,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
+	r.afterTestRunCalled = false
 	var flakyTestSets []string
 	var testSets []string
 	runDomainSet := telemetry.NewDomainSet()
@@ -270,6 +273,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+	r.testRunTestSets = testSets
+	r.testRunID = testRunID
 	firstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
@@ -537,9 +542,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		//executing afterTestRun hook, executed after running all the test-sets
-		err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to execute after test run hook")
+		if !r.afterTestRunCalled {
+			err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to execute after test run hook")
+			}
 		}
 	}
 
@@ -1087,41 +1094,43 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		totalConsumedMocks[m.Name] = m
 	}
 
-	asyncHTTPResults := make(chan asyncHTTPResult, len(testCases))
-	var asyncHTTPWG sync.WaitGroup
-	var activeAsyncStreaming int32
-	var asyncMockFilterPinned bool
-	var firstRecordedTS time.Time // recorded timestamp of the first test in a streaming sequence
-	var firstReplayedAt time.Time // wall-clock time when that first test was actually replayed
-	hasAsyncStreaming := false
-	sharedProxyErrCancel := func() {}
-	sharedProxyErrMonitorStarted := false
-	asyncCounters := asyncResultCounters{
-		success:       &success,
-		failure:       &failure,
-		obsolete:      &obsolete,
-		testSetStatus: &testSetStatus,
-	}
-	processAsyncResult := func(asyncRes asyncHTTPResult) error {
-		return r.processAsyncHTTPResult(
-			runTestSetCtx,
-			testRunID,
-			testSetID,
-			asyncRes,
-			totalConsumedMocks,
-			actualTestMockMappings,
-			asyncCounters,
-		)
+	// streamingTest holds a streaming test case that was skipped during Phase 1
+	// and will be executed sequentially in Phase 2.
+	type streamingTest struct {
+		testCase      *models.TestCase
+		index         int
+		expectedMocks []string
 	}
 
-	for idx, testCase := range testCases {
-		if err := drainAsyncHTTPResults(asyncHTTPResults, false, processAsyncResult); err != nil {
-			loopErr = err
+	// Phase 1 defers streaming tests into this list for sequential execution in Phase 2.
+	var streamingTests []streamingTest
+
+	// Pre-scan: determine whether any streaming tests will actually be deferred into Phase 2
+	// (i.e., they pass the selectedTests/ignoredTests filters). This tells us whether Phase 2
+	// will run, so we know which phase should set r.isLastTestCase / testCase.IsLast.
+	hasEffectiveStreamingTests := false
+	for _, tc := range testCases {
+		if tc == nil {
+			continue
+		}
+		if _, ok := selectedTests[tc.Name]; !ok && len(selectedTests) != 0 {
+			continue
+		}
+		if _, ok := ignoredTests[tc.Name]; ok {
+			continue
+		}
+		if tc.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(tc) {
+			hasEffectiveStreamingTests = true
 			break
 		}
+	}
 
+	// ====== Phase 1: Execute normal (non-streaming) tests ======
+	for idx, testCase := range testCases {
 		// check if its the last test case running
-		if idx == len(testCases)-1 && r.isLastTestSet {
+		// Only set isLastTestCase here when Phase 2 will be empty (no deferred streaming tests).
+		// If Phase 2 will run, it is responsible for setting isLastTestCase on its final iteration.
+		if idx == len(testCases)-1 && r.isLastTestSet && !hasEffectiveStreamingTests {
 			r.isLastTestCase = true
 			testCase.IsLast = true
 		}
@@ -1171,25 +1180,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		streamingReplayActive := atomic.LoadInt32(&activeAsyncStreaming) > 0
-
-		// Determine whether to preserve inter-request timing based on streaming replay status and test case characteristics.
-		preserveInterRequestTiming := streamingReplayActive
-		if testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase) {
-			preserveInterRequestTiming = true
+		// Phase 1: If this is a streaming test case, defer it for Phase 2.
+		isCurrentTestStreaming := testCase != nil && testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
+		if isCurrentTestStreaming {
+			tcCopy := *testCase
+			expectedMocksForTC := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
+			streamingTests = append(streamingTests, streamingTest{
+				testCase:      &tcCopy,
+				index:         idx,
+				expectedMocks: expectedMocksForTC,
+			})
+			r.logger.Debug("deferring streaming test case",
+				zap.String("testcase", testCase.Name),
+				zap.String("testset", testSetID))
+			continue
 		}
 
-		err = r.preserveRecordedRequestTiming(runTestSetCtx, testCase, preserveInterRequestTiming, &firstRecordedTS, &firstReplayedAt)
-		if err != nil {
-			loopErr = err
-			break
-		}
-
-		if !streamingReplayActive {
-			asyncMockFilterPinned = false
-		}
-
-		isAsyncStreamingHTTP := testCase.Kind == models.HTTP && pkg.IsHTTPStreamingTestCase(testCase)
 		var testStatus models.TestStatus
 		var testResult *models.Result
 		var testPass bool
@@ -1203,28 +1209,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			reqTime = testCase.GrpcReq.Timestamp
 			respTime = testCase.GrpcResp.Timestamp
 		}
-		skipMockFilterUpdate := false
-		if isAsyncStreamingHTTP {
-			reqTime, respTime = effectiveStreamMockWindow(testCase, r.config.Test.APITimeout)
-		} else if !useMappingBased && streamingReplayActive {
-			// During active async stream replay, keep a wide timestamp window to avoid
-			// narrowing agent-side mock set and starving in-flight stream dependencies.
-			reqTime = models.BaseTime
-			respTime = time.Now().UTC()
 
-			// For non-mapping-based filtering, once an async streaming HTTP test case is encountered, we pin the mock filter parameters to avoid updating them with every subsequent test case, which could interfere with the streaming replay. The filter will be unpinned once the streaming replay is no longer active.
-			skipMockFilterUpdate = asyncMockFilterPinned
-		}
-
-		if !skipMockFilterUpdate {
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to update mock parameters on agent")
-				break
-			}
-			if !useMappingBased && streamingReplayActive && !isAsyncStreamingHTTP {
-				asyncMockFilterPinned = true
-			}
+		err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+			break
 		}
 
 		// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
@@ -1232,31 +1221,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		if isAsyncStreamingHTTP {
-			hasAsyncStreaming = true
-			if !sharedProxyErrMonitorStarted {
-				sharedProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
-				sharedProxyErrCancel = cancel
-				sharedProxyErrMonitorStarted = true
-				go r.monitorProxyErrors(sharedProxyErrCtx, testSetID, "")
-			}
-
-			tcCopy := *testCase
-			expectedMocks := append([]string(nil), expectedTestMockMappings[testCase.Name]...)
-
-			asyncHTTPWG.Add(1)
-			atomic.AddInt32(&activeAsyncStreaming, 1)
-			go func(tc models.TestCase, expectedMocks []string, started time.Time) {
-				defer asyncHTTPWG.Done()
-				defer atomic.AddInt32(&activeAsyncStreaming, -1)
-				r.runAsyncStreamingRequest(runTestSetCtx, tc, testSetID, started, expectedMocks, useMappingBased, isMappingEnabled, asyncHTTPResults)
-			}(tcCopy, expectedMocks, started)
-
-			continue
-		}
-
+		// Start a per-test proxy error monitor for sync test cases.
 		testCaseProxyErrCancel := func() {}
-		if !hasAsyncStreaming {
+		{
 			testCaseProxyErrCtx, cancel := context.WithCancel(runTestSetCtx)
 			testCaseProxyErrCancel = cancel
 			go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
@@ -1312,15 +1279,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		switch testCase.Kind {
 		case models.HTTP:
+			// Phase 1 only handles regular (non-streaming) HTTP responses
+			// All streaming tests are deferred to Phase 2
 			httpResp, ok := resp.(*models.HTTPResp)
 			if !ok {
-				r.logger.Error("invalid response type for HTTP test case")
+				r.logger.Error("invalid response type for HTTP test case (expected *models.HTTPResp)")
 				failure++
 				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
+					utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
 					break
 				}
 				continue
@@ -1510,13 +1479,296 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		runTestSetCtxCancel()
 	}
 
-	asyncHTTPWG.Wait()
-	close(asyncHTTPResults)
-	if err := drainAsyncHTTPResults(asyncHTTPResults, true, processAsyncResult); err != nil && loopErr == nil {
-		loopErr = err
-	}
-	if sharedProxyErrMonitorStarted {
-		sharedProxyErrCancel()
+	// ====== Phase 2: Execute deferred streaming tests sequentially ======
+	// Only run Phase 2 if Phase 1 completed without fatal errors and there are deferred tests.
+	if loopErr == nil && !exitLoop && len(streamingTests) > 0 {
+		r.logger.Info("Now executing streaming tests",
+			zap.String("testset", testSetID),
+			zap.Int("count", len(streamingTests)))
+
+		for i, deferred := range streamingTests {
+			tc := deferred.testCase
+
+			// Set isLastTestCase on the last deferred streaming test: it is the true last
+			// test to execute in the entire run, so finalization must trigger here, not in Phase 1.
+			if i == len(streamingTests)-1 && r.isLastTestSet {
+				r.isLastTestCase = true
+				tc.IsLast = true
+			}
+
+			// Check for exit signals before each streaming test
+			select {
+			case <-exitLoopChan:
+				testSetStatus = testSetStatusByErrChan
+				exitLoop = true
+			default:
+			}
+			if exitLoop {
+				break
+			}
+
+			// Mock Window: Calculate the effective mock filter window for streaming
+			// using the request timestamp to the response timestamp plus a timeout buffer.
+			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
+				loopErr = err
+				break
+			}
+
+			// Proxy Monitor: Start a per-test proxy error monitor.
+			streamProxyErrCtx, streamProxyErrCancel := context.WithCancel(runTestSetCtx)
+			go r.monitorProxyErrors(streamProxyErrCtx, testSetID, tc.Name)
+
+			// Execute: Call SimulateRequest synchronously (blocks until stream is done).
+			started := time.Now().UTC()
+			resp, simErr := HookImpl.SimulateRequest(runTestSetCtx, tc, testSetID)
+
+			// Cleanup: Cancel the proxy error monitor immediately after simulation.
+			streamProxyErrCancel()
+
+			if simErr != nil {
+				utils.LogError(r.logger, simErr, "failed to simulate streaming request")
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+				testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, simErr.Error())
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for simulation error")
+					break
+				}
+				continue
+			}
+
+			httpResp, ok := resp.(*models.HTTPResp)
+			var hadStreamingMismatch bool              // Track if streaming comparison failed
+			var streamMismatch *pkg.StreamMismatchInfo // Detailed mismatch info for body result
+
+			// Calculate mock mismatch early so we can use emitFailureLogs in streaming comparison
+			mockNames := make([]string, 0)
+			if r.instrument {
+				consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+				} else {
+					for _, m := range consumedMocks {
+						totalConsumedMocks[m.Name] = m
+						mockNames = append(mockNames, m.Name)
+					}
+				}
+			}
+
+			expectedMocks := deferred.expectedMocks
+			mockSetMismatch := false
+			hasExpectedMocks := len(expectedMocks) > 0
+			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
+				mockSetMismatch = !isMockSubset(mockNames, expectedMocks)
+			}
+			emitFailureLogs := !mockSetMismatch
+
+			if !ok {
+				// Handle streaming response type
+				streamResp, streamOk := resp.(*pkg.StreamingHTTPResponse)
+				if streamOk {
+					noiseConfig := r.config.Test.GlobalNoise.Global
+					if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
+						noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+					}
+					streamBodyNoise := map[string][]string{}
+					if bodyNoise, ok := noiseConfig["body"]; ok {
+						streamBodyNoise = cloneNoiseMap(bodyNoise)
+					}
+					jsonNoiseKeys := pkg.CollectStreamingGlobalNoiseKeys(streamBodyNoise, tc.Noise)
+
+					streamMatched, capturedBody, streamMismatchInfo, streamErr := pkg.CompareHTTPStream(tc.HTTPResp, streamResp.Reader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)
+					if closeErr := streamResp.Reader.Close(); closeErr != nil {
+						r.logger.Debug("failed to close streaming response reader", zap.Error(closeErr))
+					}
+
+					if streamErr != nil {
+						r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						failure++
+						testSetStatus = models.TestSetStatusFailed
+						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr.Error())
+						loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+						if loopErr != nil {
+							utils.LogError(r.logger, loopErr, "failed to save streaming test result")
+							break
+						}
+						continue
+					}
+
+					if !streamMatched {
+						r.logger.Error("streaming response mismatch detected", zap.String("testcase", tc.Name))
+						hadStreamingMismatch = true
+						streamMismatch = streamMismatchInfo
+						// Suppress HTTP matcher logs since we detected streaming mismatch
+						emitFailureLogs = false
+						// Create HTTPResp with captured body for proper diff display
+						httpResp = &models.HTTPResp{
+							StatusCode:    streamResp.StatusCode,
+							StatusMessage: streamResp.StatusMessage,
+							Body:          capturedBody,
+							Header:        streamResp.Header,
+						}
+						// Will be compared by CompareHTTPResp below
+					} else {
+						bodyForMatcher := capturedBody
+						if streamMatched {
+							bodyForMatcher = tc.HTTPResp.Body
+						}
+
+						httpResp = &models.HTTPResp{
+							StatusCode:    streamResp.StatusCode,
+							StatusMessage: streamResp.StatusMessage,
+							Body:          bodyForMatcher,
+							Header:        streamResp.Header,
+						}
+					}
+				} else {
+					r.logger.Error("invalid response type for streaming HTTP test case")
+					failure++
+					testSetStatus = models.TestSetStatusFailed
+					testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, "invalid response type for streaming HTTP test case")
+					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+					if loopErr != nil {
+						utils.LogError(r.logger, loopErr, "failed to insert streaming test case result for type assertion error")
+						break
+					}
+					continue
+				}
+			}
+
+			// Update consumed mocks map.
+			if r.instrument {
+				consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get consumed filtered mocks for streaming test")
+				}
+				for _, m := range consumedMocks {
+					totalConsumedMocks[m.Name] = m
+				}
+			}
+
+			testPass, testResult := r.CompareHTTPResp(tc, httpResp, testSetID, emitFailureLogs)
+			// Override testPass if streaming comparison failed
+			// (HTTP matcher skips body comparison for non-JSON bodies by default)
+			if hadStreamingMismatch {
+				testPass = false
+				// Add body result showing the mismatched frame diff
+				if streamMismatch != nil {
+					expectedFrameDisplay := fmt.Sprintf("Frame %d: %s", streamMismatch.FrameIndex, streamMismatch.ExpectedFrame)
+					actualFrameDisplay := fmt.Sprintf("Frame %d: %s", streamMismatch.FrameIndex, streamMismatch.ActualFrame)
+					if streamMismatch.Reason != "" {
+						actualFrameDisplay = fmt.Sprintf("Frame %d (%s): %s", streamMismatch.FrameIndex, streamMismatch.Reason, streamMismatch.ActualFrame)
+					}
+					testResult.BodyResult = append(testResult.BodyResult, models.BodyResult{
+						Normal:   false,
+						Type:     models.Plain,
+						Expected: expectedFrameDisplay,
+						Actual:   actualFrameDisplay,
+					})
+					// Display the streaming frame diff in same format as HTTP matcher
+					logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
+					logDiffs.PushBodyDiff(expectedFrameDisplay, actualFrameDisplay, nil)
+					_ = logDiffs.Render()
+				}
+				// Log failure message in same format as HTTP matcher
+				r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(tc.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(false)))
+				// Print user-facing failure message with red color on test case ID only (matching HTTP matcher style)
+				fmt.Printf("\nTestrun failed for testcase with id: \"%s%s%s\"\n\n--------------------------------------------------------------------\n\n",
+					"\033[91m", tc.Name, "\033[0m")
+			}
+
+			upsertActualTestMockMapping(actualTestMockMappings, tc.Name, mockNames)
+
+			// Log consumed mocks for streaming test
+			r.logger.Debug("consumed mocks for streaming test case",
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseID", tc.Name),
+				zap.Strings("mockNames", mockNames))
+
+			if mockSetMismatch {
+				if testPass {
+					r.logger.Debug("mock mapping mismatch ignored because streaming testcase passed",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+				} else {
+					r.logger.Error("mock mapping mismatch detected for streaming testcase; marking as obsolete",
+						zap.String("testcase", tc.Name),
+						zap.String("testset", testSetID),
+						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("actualMocks", mockNames))
+					mockMismatchFailures.AddFailure(testSetID, tc.Name, expectedMocks, mockNames)
+				}
+			}
+
+			if !testPass {
+				r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(tc.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
+			} else {
+				r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(tc.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
+			}
+
+			//  Record: Update counters and persist result.
+			var testStatus models.TestStatus
+			if testPass {
+				testStatus = models.TestStatusPassed
+				success++
+			} else if mockSetMismatch {
+				testStatus = models.TestStatusObsolete
+				obsolete++
+			} else {
+				testStatus = models.TestStatusFailed
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+			}
+
+			if testResult != nil {
+				testCaseResult := &models.TestResult{
+					Kind:       models.HTTP,
+					Name:       testSetID,
+					Status:     testStatus,
+					Started:    started.Unix(),
+					Completed:  time.Now().UTC().Unix(),
+					TestCaseID: tc.Name,
+					Req: models.HTTPReq{
+						Method:     tc.HTTPReq.Method,
+						ProtoMajor: tc.HTTPReq.ProtoMajor,
+						ProtoMinor: tc.HTTPReq.ProtoMinor,
+						URL:        tc.HTTPReq.URL,
+						URLParams:  tc.HTTPReq.URLParams,
+						Header:     tc.HTTPReq.Header,
+						Body:       tc.HTTPReq.Body,
+						Binary:     tc.HTTPReq.Binary,
+						Form:       tc.HTTPReq.Form,
+						Timestamp:  tc.HTTPReq.Timestamp,
+					},
+					Res:          *httpResp,
+					TestCasePath: filepath.Join(r.config.Path, testSetID),
+					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					Noise:        tc.Noise,
+					Result:       *testResult,
+					TimeTaken:    time.Since(started).String(),
+				}
+
+				if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
+					testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
+					testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
+				}
+
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, "failed to save streaming test result")
+					break
+				}
+			} else {
+				utils.LogError(r.logger, nil, "streaming test result is nil")
+				break
+			}
+		}
 	}
 
 	timeTaken := time.Since(startTime)
@@ -1713,6 +1965,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
 			}
+		}
+	}
+
+	// In Docker Compose mode, RunTestSet's defer block stops the agent container.
+	// We must call AfterTestRun HERE (before defer fires) while the agent is alive.
+	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
+		r.afterTestRunCalled = true
+		if hookErr := HookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
+			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
 
