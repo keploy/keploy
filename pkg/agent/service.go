@@ -53,6 +53,7 @@ type Proxy interface {
 
 type IncomingProxy interface {
 	Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase
+	GetTCChan() chan *models.TestCase
 }
 
 type ProxyOptions struct {

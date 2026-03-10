@@ -4,6 +4,7 @@ go 1.24.4
 
 toolchain go1.24.6
 
+
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cilium/ebpf v0.19.0

@@ -125,6 +125,10 @@ func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOp
 	return pm.tcChan
 }
 
+func (pm *IngressProxyManager) GetTCChan() chan *models.TestCase {
+	return pm.tcChan
+}
+
 // Ensure starts a new ingress proxy on the given original app pory if it's not already running.
 func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPort, newAppPort uint16) {
 	pm.mu.Lock()
@@ -134,13 +138,13 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 		return
 	}
 
-	// If Rust proxy is wired up, delegate forwarding to it
+	// If an external proxy (like Rust or sockmap) is wired up, delegate forwarding to it
 	if pm.sendIngressCmd != nil {
 		if err := pm.sendIngressCmd(origAppPort, newAppPort); err != nil {
-			pm.logger.Error("Failed to send StartIngress command to Rust proxy, falling back to Go",
+			pm.logger.Error("Failed to send StartIngress command to external proxy, falling back to Go",
 				zap.Uint16("orig_port", origAppPort), zap.Error(err))
 		} else {
-			pm.logger.Info("Delegated ingress forwarding to Rust proxy",
+			pm.logger.Info("Delegated ingress forwarding to external proxy",
 				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
 			// Mark as active with a no-op stop (Rust manages the listener lifetime)
 			pm.mu.Lock()

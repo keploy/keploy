@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
@@ -37,6 +39,16 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
 				return nil
 			}
+
+			// Force-exit safety net: if the agent doesn't shut down cleanly
+			// within 10 seconds of context cancellation, force exit.
+			go func() {
+				<-ctx.Done()
+				time.Sleep(6 * time.Second)
+				logger.Warn("Agent shutdown timed out after 10s, forcing exit")
+				os.Exit(0)
+			}()
+
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
@@ -51,7 +63,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
 						return
 					}
-					routes.StartAgentServer(logger, p, router)
+					routes.StartAgentServer(ctx, logger, p, router)
 				}
 			}()
 
