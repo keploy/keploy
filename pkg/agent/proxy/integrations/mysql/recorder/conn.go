@@ -30,6 +30,11 @@ type handshakeResult struct {
 	// Connections to use for the command phase (may be TLS-upgraded).
 	ClientConn net.Conn
 	DestConn   net.Conn
+
+	// TLSOnly is set when TLS was detected but MITM was skipped (SkipTLSMITM mode).
+	// When true, only handshake mocks were captured; the command phase is encrypted
+	// and should not be parsed from this data source.
+	TLSOnly bool
 }
 
 // handleHandshake performs the MySQL connection-phase handshake synchronously.
@@ -148,6 +153,24 @@ func handleHandshake(ctx context.Context, logger *zap.Logger, clientConn, destCo
 
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
+			// If SkipTLSMITM is set, do not perform TLS interception.
+			// Record the plaintext handshake portion and return.
+			// The encrypted command phase will be captured separately by
+			// JSSE/SSL uprobes which provide decrypted plaintext.
+			if opts.SkipTLSMITM {
+				resTimestamp := time.Now()
+				result.TLSOnly = true
+				result.Mocks = []RawMockEntry{{
+					ReqPackets:   reqPackets,
+					RespPackets:  respPackets,
+					CmdType:      mysql.HandshakeV10,
+					MockType:     "config",
+					ReqTimestamp: reqTimestamp,
+					ResTimestamp: resTimestamp,
+				}}
+				return result, nil
+			}
+
 			tlsClient, _, err := pTls.HandleTLSConnection(ctx, logger, wrappedClient, opts.Backdate)
 			if err != nil {
 				return nil, fmt.Errorf("failed to handle TLS connection: %w", err)

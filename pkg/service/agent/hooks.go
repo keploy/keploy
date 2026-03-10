@@ -94,3 +94,10 @@ var ActiveIncomingProxy agent.IncomingProxy
 func RegisterIncomingProxy(ip agent.IncomingProxy) {
 	ActiveIncomingProxy = ip
 }
+
+// JSSECapturePort is the fixed port on which the JSSE capture listener
+// accepts connections from Java agents. Using a fixed port allows eBPF
+// to add it to the pass-through list at registration time, preventing
+// the Java agent's connection from being intercepted and redirected
+// through the sockmap proxy.
+const JSSECapturePort uint16 = 42507

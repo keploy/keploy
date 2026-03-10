@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
+	agentSvc "go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
 
@@ -488,13 +489,19 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 	}
 
 	ports := agent.GetPortToSendToKernel(ctx, rules)
+
+	// In low-latency mode, add the JSSE capture listener port to pass-through
+	// so the Java agent's TCP connection to it is not intercepted by eBPF.
+	if agentSvc.LowLatencyMode {
+		ports = append(ports, uint(agentSvc.JSSECapturePort))
+	}
+
 	for i := 0; i < 10; i++ {
 		if len(ports) <= i {
 			clientInfo.PassThroughPorts[i] = -1
 			continue
 		}
-		// Copy the port, casting from uint32 to int32
-		clientInfo.PassThroughPorts[i] = int32(rules[i].Port)
+		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
 

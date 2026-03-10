@@ -244,6 +244,7 @@ func decodeTextResultSetResponse(ctx context.Context, logger *zap.Logger, entry 
 	decoded, err := wire.DecodePayloadFast(ctx, logger, firstPkt, decodeCtx)
 	if err != nil {
 		logger.Debug("failed to decode result set metadata", zap.Error(err))
+		decoded = rawPacketBundle(firstPkt)
 	}
 
 	textRes, ok := decoded.Message.(*mysql.TextResultSet)
@@ -329,6 +330,7 @@ func decodeBinaryResultSetResponse(ctx context.Context, logger *zap.Logger, entr
 	decoded, err := wire.DecodePayloadFast(ctx, logger, firstPkt, decodeCtx)
 	if err != nil {
 		logger.Debug("failed to decode binary result set metadata", zap.Error(err))
+		decoded = rawPacketBundle(firstPkt)
 	}
 
 	binRes, ok := decoded.Message.(*mysql.BinaryProtocolResultSet)

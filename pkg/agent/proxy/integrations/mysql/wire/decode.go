@@ -85,7 +85,11 @@ func DecodePayloadFast(ctx context.Context, logger *zap.Logger, data []byte, dec
 
 	parsedPacket, err := decodePacketFast(ctx, logger, packet, lastOp, decodeCtx)
 	if err != nil {
-		return &mysql.PacketBundle{}, fmt.Errorf("failed to decode packet: %w", err)
+		// Return the partially-parsed packet so callers still get a valid
+		// Header (non-nil).  Previous code returned &mysql.PacketBundle{}
+		// which left Header nil and caused nil-pointer panics in callers
+		// that accessed decoded.Header.Type.
+		return parsedPacket, fmt.Errorf("failed to decode packet: %w", err)
 	}
 
 	return parsedPacket, nil
