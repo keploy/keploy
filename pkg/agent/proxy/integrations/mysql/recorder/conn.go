@@ -482,8 +482,15 @@ func handlePlainPasswordSync(clientConn, destConn net.Conn) (reqPackets, respPac
 // Uses the same logic as mysqlUtils.ReadPacketBufferOrdered but works on
 // plain net.Conn (no Peeker interface needed).
 func readPacketSync(conn net.Conn) ([]byte, error) {
-	// If the conn supports Peek (e.g. bufio.Reader wrapper), use the optimised path.
-	if peeker, ok := conn.(mysqlUtils.Peeker); ok {
+	return readPacketFromReader(conn)
+}
+
+// readPacketFromReader reads a single MySQL packet from any io.Reader.
+// If the reader supports Peek (e.g. *bufio.Reader), the optimised peek
+// path is used; otherwise falls back to reading the 4-byte header first.
+func readPacketFromReader(r io.Reader) ([]byte, error) {
+	// If the reader supports Peek (e.g. bufio.Reader wrapper), use the optimised path.
+	if peeker, ok := r.(mysqlUtils.Peeker); ok {
 		header, err := peeker.Peek(4)
 		if err != nil {
 			return nil, err
@@ -491,7 +498,7 @@ func readPacketSync(conn net.Conn) ([]byte, error) {
 		payloadLength := mysqlUtils.GetPayloadLength(header[:3])
 		totalLen := 4 + int(payloadLength)
 		packet := make([]byte, totalLen)
-		if _, err := io.ReadFull(conn, packet); err != nil {
+		if _, err := io.ReadFull(r, packet); err != nil {
 			return nil, err
 		}
 		return packet, nil
@@ -499,7 +506,7 @@ func readPacketSync(conn net.Conn) ([]byte, error) {
 
 	// Standard path: read 4-byte header first.
 	var header [4]byte
-	if _, err := io.ReadFull(conn, header[:]); err != nil {
+	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return nil, err
 	}
 
@@ -509,7 +516,7 @@ func readPacketSync(conn net.Conn) ([]byte, error) {
 	copy(packet, header[:])
 
 	if payloadLength > 0 {
-		if _, err := io.ReadFull(conn, packet[4:]); err != nil {
+		if _, err := io.ReadFull(r, packet[4:]); err != nil {
 			return packet[:4], err
 		}
 	}

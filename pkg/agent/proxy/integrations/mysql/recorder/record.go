@@ -55,6 +55,9 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		defer close(errCh)
 
 		var hsResult *handshakeResult
+		// clientBuf/serverBuf are created in post-TLS mode and reused
+		// for both auth detection and the command-phase pipeline.
+		var clientBuf, serverBuf *bufio.Reader
 
 		if postTLSMode {
 			// Post-TLS (JSSE/SSL uprobe): data starts after the TLS handshake.
@@ -90,25 +93,45 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 				},
 			}
 
-			// In post-TLS mode, the JSSE data starts with HandshakeResponse41
-			// (client→server) and auth exchange (server→client). We need to
-			// consume and record these as a config mock, then proceed to
-			// command phase.
-			logger.Info("MySQL post-TLS: consuming auth exchange from JSSE data")
-			authMocks, err := consumePostTLSAuth(ctx, logger, clientConn, destConn)
-			if err != nil {
-				if err != io.EOF {
-					logger.Warn("post-TLS auth consumption failed", zap.Error(err))
-				} else {
-					logger.Info("post-TLS auth consumption got EOF")
-					errCh <- err
-					return nil
-				}
+			// Wrap conns in bufio.Readers early so we can Peek before
+			// deciding whether auth consumption is needed.  The same
+			// readers are reused for the command-phase pipeline later.
+			clientBuf = bufio.NewReaderSize(clientConn, 64*1024)
+			serverBuf = bufio.NewReaderSize(destConn, 64*1024)
+
+			// Determine whether this connection starts with an auth exchange
+			// or is already in command phase (e.g., pooled connection reuse).
+			//
+			// In MySQL STARTTLS, HandshakeResponse41 continues the pre-TLS
+			// sequence numbers: HandshakeV10 (seq=0) → SSLRequest (seq=1) →
+			// TLS → HandshakeResponse41 (seq=2).  Command-phase packets
+			// always start with seq=0.
+			needAuth := true
+			hdr, peekErr := clientBuf.Peek(4)
+			if peekErr == nil && hdr[3] == 0 {
+				// seq=0 → command phase, not auth.  This happens when JSSE
+				// attaches to a JVM with already-authenticated pool connections.
+				needAuth = false
+				logger.Info("MySQL post-TLS: seq=0, skipping auth (pooled connection)")
 			}
-			logger.Info("MySQL post-TLS auth consumed successfully",
-				zap.Int("authMocks", len(authMocks)))
-			if len(authMocks) > 0 {
-				hsResult.Mocks = authMocks
+
+			if needAuth {
+				logger.Info("MySQL post-TLS: consuming auth exchange from JSSE data")
+				authMocks, err := consumePostTLSAuth(ctx, logger, clientBuf, serverBuf)
+				if err != nil {
+					if err != io.EOF {
+						logger.Warn("post-TLS auth consumption failed", zap.Error(err))
+					} else {
+						logger.Info("post-TLS auth consumption got EOF")
+						errCh <- err
+						return nil
+					}
+				}
+				logger.Info("MySQL post-TLS auth consumed successfully",
+					zap.Int("authMocks", len(authMocks)))
+				if len(authMocks) > 0 {
+					hsResult.Mocks = authMocks
+				}
 			}
 		} else {
 			// Standard path: synchronous handshake.
@@ -162,11 +185,20 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		// (which satisfies peekReader) and read directly.
 		var clientSrc, serverSrc peekReader
 		if postTLSMode {
-			// Direct readers — no forwarding goroutines, no ring buffers.
-			// SimulatedConn.Read() blocks until Push() feeds data or Close()
-			// signals EOF, which is exactly right.
-			clientSrc = bufio.NewReaderSize(cmdClientConn, 64*1024)
-			serverSrc = bufio.NewReaderSize(cmdDestConn, 64*1024)
+			// Reuse the bufio.Readers created above (before auth detection).
+			// They already wrap the SimulatedConns and any data consumed
+			// by consumePostTLSAuth has been properly drained.
+			clientSrc = clientBuf
+			serverSrc = serverBuf
+
+			// SimulatedConn.Read() doesn't respect context cancellation — it
+			// blocks on a channel. When ctx is cancelled (recording stops),
+			// close both conns so Read() returns EOF and the pipeline unblocks.
+			go func() {
+				<-ctx.Done()
+				cmdClientConn.Close()
+				cmdDestConn.Close()
+			}()
 		} else {
 			// Two TeeForwardConns: one per direction.
 			// Each reads from src, forwards to dest at wire speed, and
@@ -262,13 +294,13 @@ var _ = time.Now
 //
 // We consume these auth packets as "config" mock entries. The actual command
 // phase starts after auth completes (server sends OK with 0x00 marker).
-func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn) ([]RawMockEntry, error) {
+func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, destConn io.Reader) ([]RawMockEntry, error) {
 	var reqPackets [][]byte
 	var respPackets [][]byte
 	reqTimestamp := time.Now()
 
 	// Read HandshakeResponse41 from client.
-	hsResp, err := readPacketSync(clientConn)
+	hsResp, err := readPacketFromReader(clientConn)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +312,7 @@ func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, des
 			return nil, ctx.Err()
 		}
 
-		authResp, err := readPacketSync(destConn)
+		authResp, err := readPacketFromReader(destConn)
 		if err != nil {
 			return nil, err
 		}
@@ -313,7 +345,7 @@ func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, des
 				ResTimestamp: resTimestamp,
 			}}, nil
 		case 0xFE: // AuthSwitchRequest — need to respond
-			switchResp, err := readPacketSync(clientConn)
+			switchResp, err := readPacketFromReader(clientConn)
 			if err != nil {
 				logger.Debug("post-TLS auth: failed to read switch response", zap.Error(err))
 				break
@@ -330,7 +362,7 @@ func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, des
 					logger.Debug("post-TLS auth: fast auth success, waiting for OK from server")
 					continue
 				case 0x04: // PerformFullAuthentication — client sends password over TLS.
-					clientData, err := readPacketSync(clientConn)
+					clientData, err := readPacketFromReader(clientConn)
 					if err != nil {
 						logger.Debug("post-TLS auth: failed to read full auth client data", zap.Error(err))
 						break
@@ -340,7 +372,7 @@ func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, des
 				}
 			}
 			// Unknown AuthMoreData mechanism — try reading client response as fallback.
-			moreData, err := readPacketSync(clientConn)
+			moreData, err := readPacketFromReader(clientConn)
 			if err != nil {
 				logger.Debug("post-TLS auth: failed to read more auth data", zap.Error(err))
 				break
