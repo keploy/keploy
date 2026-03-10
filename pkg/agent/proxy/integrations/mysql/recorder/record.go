@@ -117,7 +117,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 			if needAuth {
 				logger.Info("MySQL post-TLS: consuming auth exchange from JSSE data")
-				authMocks, err := consumePostTLSAuth(ctx, logger, clientBuf, serverBuf)
+				authMocks, err := consumePostTLSAuth(ctx, logger, clientBuf, serverBuf, syntheticGreeting)
 				if err != nil {
 					if err != io.EOF {
 						logger.Warn("post-TLS auth consumption failed", zap.Error(err))
@@ -129,7 +129,36 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 				}
 				logger.Info("MySQL post-TLS auth consumed successfully",
 					zap.Int("authMocks", len(authMocks)))
+
+				// Try to merge relay-path handshake data (HandshakeV10 + SSLRequest)
+				// with the post-TLS auth packets (HandshakeResponse41 +
+				// AuthMoreData + OK) into a single combined config mock.
+				// This is best-effort: if the store isn't available or has no
+				// data, the auth mock is still usable (decoded via synthetic greeting).
 				if len(authMocks) > 0 {
+					if store, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore); ok && store != nil {
+						destPort := uint16(0)
+						if opts.DstCfg != nil {
+							destPort = uint16(opts.DstCfg.Port)
+						}
+						hsData, found := store.PopWait(destPort, 2*time.Second)
+						if found {
+							// Prepend relay handshake packets: SSLRequest before
+							// HandshakeResponse41, HandshakeV10 before AuthMoreData.
+							authMocks[0].ReqPackets = append(hsData.ReqPackets, authMocks[0].ReqPackets...)
+							authMocks[0].RespPackets = append(hsData.RespPackets, authMocks[0].RespPackets...)
+							authMocks[0].ReqTimestamp = hsData.ReqTimestamp
+							// Clear ServerGreeting — the merged mock has the real
+							// HandshakeV10 in RespPackets, so decodeHandshakeConfig
+							// doesn't need the synthetic pre-population.
+							authMocks[0].ServerGreeting = nil
+							logger.Info("MySQL post-TLS: merged relay handshake with auth exchange",
+								zap.Int("reqPackets", len(authMocks[0].ReqPackets)),
+								zap.Int("respPackets", len(authMocks[0].RespPackets)))
+						} else {
+							logger.Warn("MySQL post-TLS: no relay handshake data in store, using synthetic greeting for decode")
+						}
+					}
 					hsResult.Mocks = authMocks
 				}
 			}
@@ -151,6 +180,29 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		// be captured by JSSE/SSL uprobes separately.
 		if hsResult.TLSOnly {
 			logger.Debug("MySQL TLS-only mode: recording handshake config mock, command phase handled by JSSE/SSL uprobes")
+
+			// Always push to the TLSHandshakeStore if available (sockmap
+			// low-latency mode) so the post-TLS Record() call (JSSE/SSL
+			// uprobe) can merge the handshake into a combined config mock.
+			if store, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore); ok && store != nil {
+				destPort := uint16(0)
+				if opts.DstCfg != nil {
+					destPort = uint16(opts.DstCfg.Port)
+				}
+				for _, entry := range hsResult.Mocks {
+					store.Push(destPort, models.TLSHandshakeEntry{
+						ReqPackets:   entry.ReqPackets,
+						RespPackets:  entry.RespPackets,
+						ReqTimestamp: entry.ReqTimestamp,
+					})
+				}
+				logger.Info("MySQL TLS-only: pushed handshake to store for post-TLS merge",
+					zap.Uint16("destPort", destPort),
+					zap.Int("entries", len(hsResult.Mocks)))
+			}
+
+			// Always send the handshake mock directly too so we never lose
+			// data even if the JSSE/SSL path doesn't fire or merge fails.
 			connID := ""
 			if v := ctx.Value(models.ClientConnectionIDKey); v != nil {
 				connID = v.(string)
@@ -294,7 +346,10 @@ var _ = time.Now
 //
 // We consume these auth packets as "config" mock entries. The actual command
 // phase starts after auth completes (server sends OK with 0x00 marker).
-func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, destConn io.Reader) ([]RawMockEntry, error) {
+//
+// The serverGreeting parameter is the synthetic greeting used for decode
+// context pre-population when the real HandshakeV10 isn't in the packets.
+func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, destConn io.Reader, serverGreeting *mysql.HandshakeV10Packet) ([]RawMockEntry, error) {
 	var reqPackets [][]byte
 	var respPackets [][]byte
 	reqTimestamp := time.Now()
@@ -327,22 +382,24 @@ func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, des
 		case mysql.OK: // 0x00 — auth complete
 			resTimestamp := time.Now()
 			return []RawMockEntry{{
-				ReqPackets:   reqPackets,
-				RespPackets:  respPackets,
-				CmdType:      mysql.HandshakeV10,
-				MockType:     "config",
-				ReqTimestamp: reqTimestamp,
-				ResTimestamp: resTimestamp,
+				ReqPackets:     reqPackets,
+				RespPackets:    respPackets,
+				CmdType:        mysql.HandshakeV10,
+				MockType:       "config",
+				ReqTimestamp:   reqTimestamp,
+				ResTimestamp:   resTimestamp,
+				ServerGreeting: serverGreeting,
 			}}, nil
 		case mysql.ERR: // 0xFF — auth failed
 			resTimestamp := time.Now()
 			return []RawMockEntry{{
-				ReqPackets:   reqPackets,
-				RespPackets:  respPackets,
-				CmdType:      mysql.HandshakeV10,
-				MockType:     "config",
-				ReqTimestamp: reqTimestamp,
-				ResTimestamp: resTimestamp,
+				ReqPackets:     reqPackets,
+				RespPackets:    respPackets,
+				CmdType:        mysql.HandshakeV10,
+				MockType:       "config",
+				ReqTimestamp:   reqTimestamp,
+				ResTimestamp:   resTimestamp,
+				ServerGreeting: serverGreeting,
 			}}, nil
 		case 0xFE: // AuthSwitchRequest — need to respond
 			switchResp, err := readPacketFromReader(clientConn)
@@ -385,23 +442,25 @@ func consumePostTLSAuth(ctx context.Context, logger *zap.Logger, clientConn, des
 				zap.Uint8("marker", marker))
 			resTimestamp := time.Now()
 			return []RawMockEntry{{
-				ReqPackets:   reqPackets,
-				RespPackets:  respPackets,
-				CmdType:      mysql.HandshakeV10,
-				MockType:     "config",
-				ReqTimestamp: reqTimestamp,
-				ResTimestamp: resTimestamp,
+				ReqPackets:     reqPackets,
+				RespPackets:    respPackets,
+				CmdType:        mysql.HandshakeV10,
+				MockType:       "config",
+				ReqTimestamp:   reqTimestamp,
+				ResTimestamp:   resTimestamp,
+				ServerGreeting: serverGreeting,
 			}}, nil
 		}
 	}
 
 	resTimestamp := time.Now()
 	return []RawMockEntry{{
-		ReqPackets:   reqPackets,
-		RespPackets:  respPackets,
-		CmdType:      mysql.HandshakeV10,
-		MockType:     "config",
-		ReqTimestamp: reqTimestamp,
-		ResTimestamp: resTimestamp,
+		ReqPackets:     reqPackets,
+		RespPackets:    respPackets,
+		CmdType:        mysql.HandshakeV10,
+		MockType:       "config",
+		ReqTimestamp:   reqTimestamp,
+		ResTimestamp:   resTimestamp,
+		ServerGreeting: serverGreeting,
 	}}, nil
 }

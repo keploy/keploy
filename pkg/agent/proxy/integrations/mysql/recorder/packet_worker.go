@@ -575,6 +575,19 @@ func decodeHandshakeConfig(
 		requestOp = decoded.Header.Type
 	}
 
+	// If a ServerGreeting was provided (post-TLS auth mock), pre-populate
+	// the decode context so packets that need the greeting (e.g. OK,
+	// AuthMoreData) decode correctly even without HandshakeV10 in RespPackets.
+	if entry.ServerGreeting != nil {
+		decodeCtx.PluginName = entry.ServerGreeting.AuthPluginName
+		decodeCtx.ServerGreeting = entry.ServerGreeting
+		decodeCtx.ServerGreetings.Store(connKey, entry.ServerGreeting)
+		decodeCtx.UseSSL = true
+		// Set lastOp to HandshakeV10 so the first req is decoded as
+		// HandshakeResponse41 (the post-TLS auth starts there).
+		decodeCtx.LastOp.Store(connKey, mysql.HandshakeV10)
+	}
+
 	// ── Step 1: Server Greeting (always first) ──
 	if ri < len(entry.RespPackets) {
 		decoded := decodePkt(entry.RespPackets[ri])

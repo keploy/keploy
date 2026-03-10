@@ -56,6 +56,12 @@ type RawMockEntry struct {
 
 	ReqTimestamp time.Time
 	ResTimestamp time.Time
+
+	// ServerGreeting is set for post-TLS auth mocks where the HandshakeV10
+	// raw packet is NOT in RespPackets (because it was captured separately
+	// by the relay path). The decode pipeline uses it to pre-populate the
+	// decode context so AuthMoreData/OK packets decode correctly.
+	ServerGreeting *mysql.HandshakeV10Packet
 }
 
 // handshakeState holds the minimal information extracted from the MySQL
