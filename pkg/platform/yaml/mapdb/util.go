@@ -41,7 +41,7 @@ func GetMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]model
 	return testMockMappings
 }
 
-// CreateMappings converts map[string][]models.MockEntry to models.Mapping
+// CreateMappingStructure converts map[string][]models.MockEntry to models.Mapping
 func CreateMappingStructure(testSetID string, testMockMappings map[string][]models.MockEntry, logger *zap.Logger) *models.Mapping {
 	mapping := &models.Mapping{
 		Version:   string(models.V1Beta1),

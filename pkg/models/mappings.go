@@ -54,7 +54,7 @@ func (t *Test) UnmarshalYAML(node *yaml.Node) error {
 		Mocks []MockEntry `yaml:"mocks"`
 	}
 	var nf NewFormat
-	if err := node.Decode(&nf); err == nil && len(nf.Mocks) > 0 {
+	if err := node.Decode(&nf); err == nil {
 		t.ID = nf.ID
 		t.Mocks = nf.Mocks
 		return nil
@@ -91,7 +91,7 @@ func (t *Test) UnmarshalJSON(data []byte) error {
 		Mocks []MockEntry `json:"mocks"`
 	}
 	var nf NewFormat
-	if err := json.Unmarshal(data, &nf); err == nil && len(nf.Mocks) > 0 {
+	if err := json.Unmarshal(data, &nf); err == nil {
 		t.ID = nf.ID
 		t.Mocks = nf.Mocks
 		return nil

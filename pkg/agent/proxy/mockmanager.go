@@ -322,6 +322,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			IsFiltered: new.TestModeInfo.IsFiltered,
 			SortOrder:  new.TestModeInfo.SortOrder,
 			Type:       new.Spec.Metadata["type"],
+			Timestamp:  new.Spec.ReqTimestampMock.Unix(),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -364,6 +365,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
 			Type:       mock.Spec.Metadata["type"],
+			Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -397,6 +399,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
 			Type:       mock.Spec.Metadata["type"],
+			Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -426,6 +429,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		IsFiltered: mock.TestModeInfo.IsFiltered,
 		SortOrder:  mock.TestModeInfo.SortOrder,
 		Type:       mock.Spec.Metadata["type"],
+		Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
 	}); err != nil {
 		if m.logger != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))

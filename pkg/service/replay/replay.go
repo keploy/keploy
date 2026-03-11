@@ -1306,7 +1306,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				newMocks = append(newMocks, models.MockEntry{
 					Name:      m.Name,
 					Kind:      string(m.Kind),
-					Timestamp: m.SortOrder,
+					Timestamp: m.Timestamp,
 				})
 			}
 
@@ -2459,4 +2459,19 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 	r.logger.Debug("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
 		zap.String("testSetID", testSetID))
 	return false, defaultMappings
+}
+
+// isMockSubset checks if all expected mocks are present in the actual mocks list
+func isMockSubset(actual []string, expected []string) bool {
+	actualMap := make(map[string]bool)
+	for _, mock := range actual {
+		actualMap[mock] = true
+	}
+
+	for _, mock := range expected {
+		if !actualMap[mock] {
+			return false
+		}
+	}
+	return true
 }

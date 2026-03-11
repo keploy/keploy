@@ -115,6 +115,7 @@ type MockState struct {
 	IsFiltered bool      `json:"isFiltered"`
 	SortOrder  int64     `json:"sortOrder"`
 	Type       string    `json:"type"`
+	Timestamp  int64     `json:"timestamp"`
 }
 
 func (m *Mock) DeepCopy() *Mock {
