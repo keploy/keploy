@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -141,10 +140,8 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	for i := 0; i < len(m.buffer); i++ {
 		mock := m.buffer[i]
 
-		// Check for STRICTLY BEFORE condition
 		if mock.Spec.ReqTimestampMock.Before(timestamp) {
-			fmt.Println("delting mock :", mock.Name)
-			continue // Skip it to "delete" it
+			continue
 		}
 
 		// Keep the mock
@@ -161,14 +158,11 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	m.buffer = m.buffer[:keepIdx]
 }
 
-// --- NEW: Async Dedup Queue Implementation ---
-
 type DedupJob struct {
 	ReqTimestamp time.Time
-	ResTimestamp time.Time // NEW: needed for ResolveRange
-	// TestName     string    // NEW: needed for ResolveRange
-	Resolved    bool
-	IsDuplicate bool
+	ResTimestamp time.Time
+	Resolved     bool
+	IsDuplicate  bool
 }
 
 type DedupQueue struct {
@@ -180,7 +174,6 @@ var globalDedupQueue = &DedupQueue{
 	queue: make([]*DedupJob, 0),
 }
 
-// GetDedupQueue returns the global deduplication queue singleton.
 func GetDedupQueue() *DedupQueue {
 	return globalDedupQueue
 }
@@ -212,24 +205,17 @@ func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp t
 
 		// If the oldest request hasn't been resolved yet, halt and wait.
 		if !head.Resolved {
-			fmt.Println("exiting from here")
 			break
 		}
 
 		// If it is a duplicate, perform the strict cleanup.
 		if head.IsDuplicate && mockMgr != nil {
-			fmt.Println("deleting mocks strictly before :", head.ReqTimestamp)
 			mockMgr.DeleteMocksStrictlyBefore(head.ReqTimestamp)
 		} else if head.IsDuplicate == false && mockMgr != nil {
-			// UNIQUE: Pass the EnableMapping flag down to ResolveRange
 			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, "", true, enableMapping)
 
 		}
 
-		// Note: For unique (non-duplicate) requests, we simply pop them.
-		// Insertion of unique mocks happens independently as per your requirements.
-
-		// Pop the resolved head off the queue
 		dq.queue = dq.queue[1:]
 	}
 }
