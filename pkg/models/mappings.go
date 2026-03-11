@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -9,65 +10,120 @@ import (
 
 const MappingKind = "TestMocksMapping"
 
-// MocksArray is a custom type that serializes as a comma-separated string
-type MocksArray []string
-
-// MarshalJSON implements json.Marshaler interface
-func (m MocksArray) MarshalJSON() ([]byte, error) {
-	return json.Marshal(strings.Join(m, ","))
-}
-
-// UnmarshalJSON implements json.Unmarshaler interface
-func (m *MocksArray) UnmarshalJSON(data []byte) error {
-	var str string
-	if err := json.Unmarshal(data, &str); err != nil {
-		return err
-	}
-	if str == "" {
-		*m = MocksArray{}
-		return nil
-	}
-	*m = MocksArray(strings.Split(str, ","))
-	return nil
-}
-
-// MarshalYAML implements yaml.Marshaler interface
-func (m MocksArray) MarshalYAML() (interface{}, error) {
-	return strings.Join(m, ","), nil
-}
-
-// UnmarshalYAML implements yaml.Unmarshaler interface
-func (m *MocksArray) UnmarshalYAML(node *yaml.Node) error {
-	var str string
-	if err := node.Decode(&str); err != nil {
-		return err
-	}
-	if str == "" {
-		*m = MocksArray{}
-		return nil
-	}
-	*m = MocksArray(strings.Split(str, ","))
-	return nil
-}
-
-// ToSlice returns the underlying string slice
-func (m MocksArray) ToSlice() []string {
-	return []string(m)
-}
-
-// FromSlice creates a MocksArray from a string slice
-func FromSlice(slice []string) MocksArray {
-	return MocksArray(slice)
+// MockEntry represents a single mock entry with its name and kind.
+type MockEntry struct {
+	Name      string `json:"name" yaml:"name" bson:"name"`
+	Kind      string `json:"kind" yaml:"kind" bson:"kind"`
+	Timestamp int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty" bson:"timestamp,omitempty"`
 }
 
 type Mapping struct {
-	Version   string `json:"version" yaml:"version"`
-	Kind      string `json:"kind" yaml:"kind"`
-	TestSetID string `json:"testSetId" yaml:"test_set_id"`
-	Tests     []Test `json:"tests" yaml:"tests"`
+	Version   string `json:"version" yaml:"version" bson:"version"`
+	Kind      string `json:"kind" yaml:"kind" bson:"kind"`
+	TestSetID string `json:"testSetId" yaml:"test_set_id" bson:"test_set_id"`
+	Tests     []Test `json:"tests" yaml:"tests" bson:"tests"`
 }
 
 type Test struct {
-	ID    string     `json:"id" yaml:"id"`
-	Mocks MocksArray `json:"mocks" yaml:"mocks"`
+	ID    string      `json:"id" yaml:"id" bson:"id"`
+	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
+}
+
+// UnmarshalYAML provides backward compatibility for the old comma-separated
+// string format while supporting the new array-of-objects format.
+//
+// Old format:
+//
+//	tests:
+//	  - id: test-1
+//	    mocks: "mock-0,mock-1,mock-2"
+//
+// New format:
+//
+//	tests:
+//	  - id: test-1
+//	    mocks:
+//	      - name: mock-0
+//	        kind: HTTP
+//	      - name: mock-1
+//	        kind: Redis
+func (t *Test) UnmarshalYAML(node *yaml.Node) error {
+	// Try new format first (mocks as array of objects)
+	type NewFormat struct {
+		ID    string      `yaml:"id"`
+		Mocks []MockEntry `yaml:"mocks"`
+	}
+	var nf NewFormat
+	if err := node.Decode(&nf); err == nil && len(nf.Mocks) > 0 {
+		t.ID = nf.ID
+		t.Mocks = nf.Mocks
+		return nil
+	}
+
+	// Fall back to old format (mocks as comma-separated string)
+	type OldFormat struct {
+		ID    string `yaml:"id"`
+		Mocks string `yaml:"mocks"`
+	}
+	var of OldFormat
+	if err := node.Decode(&of); err == nil {
+		t.ID = of.ID
+		if of.Mocks != "" {
+			for _, name := range strings.Split(of.Mocks, ",") {
+				name = strings.TrimSpace(name)
+				if name != "" {
+					t.Mocks = append(t.Mocks, MockEntry{Name: name})
+				}
+			}
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to unmarshal Test from YAML")
+}
+
+// UnmarshalJSON provides backward compatibility for the old comma-separated
+// string format while supporting the new array-of-objects format in JSON.
+func (t *Test) UnmarshalJSON(data []byte) error {
+	// Try new format first (mocks as array of objects)
+	type NewFormat struct {
+		ID    string      `json:"id"`
+		Mocks []MockEntry `json:"mocks"`
+	}
+	var nf NewFormat
+	if err := json.Unmarshal(data, &nf); err == nil && len(nf.Mocks) > 0 {
+		t.ID = nf.ID
+		t.Mocks = nf.Mocks
+		return nil
+	}
+
+	// Try old format (mocks as comma-separated string)
+	type OldFormat struct {
+		ID    string `json:"id"`
+		Mocks string `json:"mocks"`
+	}
+	var of OldFormat
+	if err := json.Unmarshal(data, &of); err == nil {
+		t.ID = of.ID
+		if of.Mocks != "" {
+			for _, name := range strings.Split(of.Mocks, ",") {
+				name = strings.TrimSpace(name)
+				if name != "" {
+					t.Mocks = append(t.Mocks, MockEntry{Name: name})
+				}
+			}
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to unmarshal Test from JSON")
+}
+
+// MockNames returns the names of all mocks as a string slice (for backward compatibility).
+func (t *Test) MockNames() []string {
+	names := make([]string, len(t.Mocks))
+	for i, m := range t.Mocks {
+		names[i] = m.Name
+	}
+	return names
 }

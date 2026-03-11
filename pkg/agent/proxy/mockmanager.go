@@ -317,6 +317,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if updatedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:       new.Name,
+			Kind:       new.Kind,
 			Usage:      models.Updated,
 			IsFiltered: new.TestModeInfo.IsFiltered,
 			SortOrder:  new.TestModeInfo.SortOrder,
@@ -357,6 +358,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:       mock.Name,
+			Kind:       mock.Kind,
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
@@ -388,6 +390,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:       mock.Name,
+			Kind:       mock.Kind,
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
@@ -415,6 +418,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 	}
 	if err := m.flagMockAsUsed(models.MockState{
 		Name:       mock.Name,
+		Kind:       mock.Kind,
 		Usage:      models.Updated,
 		IsFiltered: mock.TestModeInfo.IsFiltered,
 		SortOrder:  mock.TestModeInfo.SortOrder,

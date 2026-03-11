@@ -223,7 +223,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingTestSet string, isMappingEnabled bool) (bool, error) {
 
-	var mappings = make(map[string][]string)
+	var mappings = make(map[string][]models.MockEntry)
 
 	//replay the recorded testcases
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
@@ -546,9 +546,13 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		copy(finalMocks, collectedMocks)
 		mockMutex.Unlock()
 		if len(finalMocks) > 0 {
-			mappings[tc.Name] = make([]string, 0)
+			mappings[tc.Name] = make([]models.MockEntry, 0)
 			for _, mock := range finalMocks {
-				mappings[tc.Name] = append(mappings[tc.Name], mock.Name)
+				mappings[tc.Name] = append(mappings[tc.Name], models.MockEntry{
+					Name:      mock.Name,
+					Kind:      string(mock.Kind),
+					Timestamp: mock.Spec.ReqTimestampMock.Unix(),
+				})
 			}
 		}
 	}
@@ -563,7 +567,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		for tcID, mocks := range mappings {
 			mapping.Tests = append(mapping.Tests, models.Test{
 				ID:    tcID,
-				Mocks: models.FromSlice(mocks),
+				Mocks: mocks,
 			})
 		}
 

@@ -35,7 +35,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 	fullFilePath := filepath.Join(mappingPath, fileName+".yaml")
 
-	finalMappings := make(map[string][]string)
+	finalMappings := make(map[string][]models.MockEntry)
 
 	// Check if file exists
 	exists, err := yaml.FileExists(ctx, db.logger, mappingPath, fileName)
@@ -59,13 +59,13 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 
 		// Convert existing struct data into our map for merging
 		for _, t := range existingConfig.Tests {
-			finalMappings[t.ID] = t.Mocks.ToSlice()
+			finalMappings[t.ID] = t.Mocks
 		}
 	}
 
 	// Overwrite existing keys, add new ones from the incoming mapping
 	for _, t := range mapping.Tests {
-		finalMappings[t.ID] = t.Mocks.ToSlice()
+		finalMappings[t.ID] = t.Mocks
 	}
 
 	newMapping := CreateMappingStructure(testSetID, finalMappings, db.logger)
@@ -91,7 +91,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 
 // Upsert updates a single test-mock mapping.
 // If the file doesn't exist, it creates it.
-func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string, mockIDs []string) error {
+func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string, mockEntries []models.MockEntry) error {
 
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -135,18 +135,16 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 	found := false
 	for i, t := range mapping.Tests {
 		if t.ID == testID {
-			// Update existing entry
-			mapping.Tests[i].Mocks = models.FromSlice(mockIDs)
+			mapping.Tests[i].Mocks = mockEntries
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		// Append new entry
 		newTest := models.Test{
 			ID:    testID,
-			Mocks: models.FromSlice(mockIDs),
+			Mocks: mockEntries,
 		}
 		mapping.Tests = append(mapping.Tests, newTest)
 	}
@@ -173,14 +171,14 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 	db.logger.Debug("Successfully upserted test-mock mapping",
 		zap.String("testSetID", testSetID),
 		zap.String("testID", testID),
-		zap.Int("mockCount", len(mockIDs)))
+		zap.Int("mockCount", len(mockEntries)))
 
 	return nil
 }
 
 // Get reads test-mock mappings from a YAML file
 // Returns: testMockMappings, mappingFilePresent, error
-func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]string, bool, error) {
+func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error) {
 	// Create the file path
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -201,7 +199,7 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]st
 		db.logger.Debug("Mapping file does not exist, returning empty mappings",
 			zap.String("testSetID", testSetID),
 			zap.String("path", mappingPath))
-		return make(map[string][]string), false, nil
+		return make(map[string][]models.MockEntry), false, nil
 	}
 
 	// Read the file
