@@ -77,11 +77,22 @@ const (
 	// dnsCacheTTL is the default time-to-live for cached DNS entries.
 	// Entries expire automatically after this duration.
 	dnsCacheTTL = 30 * time.Second
+
+	// recordedDNSMocksMaxSize is the maximum number of entries in the DNS deduplication tracker.
+	recordedDNSMocksMaxSize = 1024
+	// recordedDNSMocksTTL is the TTL for recorded DNS mock entries.
+	// Recording sessions typically don't last longer than this.
+	recordedDNSMocksTTL = 30 * time.Minute
 )
 
 // newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
 func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
+}
+
+// newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
+func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
+	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
 }
 
 func generateCacheKey(name string, qtype uint16) string {
@@ -490,7 +501,7 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 }
 
 // generateDNSDedupeKey creates a unique key for DNS mock deduplication.
-// The key is based on the DNS question (name + type) and response (rcode + answer data).
+// The key is based on the DNS question (name + type + class) and response (rcode + answer data).
 // TTL values are excluded to avoid treating responses with different TTLs as different.
 // This ensures identical DNS queries with identical responses are recorded only once.
 func generateDNSDedupeKey(question dns.Question, resp *dns.Msg) string {
@@ -513,9 +524,10 @@ func generateDNSDedupeKey(question dns.Question, resp *dns.Msg) string {
 	sort.Strings(answerParts)
 	answerSummary := strings.Join(answerParts, "|")
 
-	return fmt.Sprintf("%s:%d:%d:%s",
+	return fmt.Sprintf("%s:%d:%d:%d:%s",
 		dns.Fqdn(question.Name),
 		question.Qtype,
+		question.Qclass,
 		resp.Rcode,
 		answerSummary,
 	)
@@ -605,13 +617,15 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	// Generate a unique key based on the DNS query and response.
 	// If we've already recorded this exact query+response combination, skip recording.
 	dedupeKey := generateDNSDedupeKey(question, in)
-	if _, alreadyRecorded := p.recordedDNSMocks.LoadOrStore(dedupeKey, true); alreadyRecorded {
+	if _, alreadyRecorded := p.recordedDNSMocks.Get(dedupeKey); alreadyRecorded {
 		p.logger.Debug("Skipping duplicate DNS mock",
 			zap.String("query", question.Name),
 			zap.String("qtype", dns.TypeToString[question.Qtype]),
 		)
 		return resp, nil
 	}
+	// Mark as recorded
+	p.recordedDNSMocks.Add(dedupeKey, true)
 	// ============================================
 
 	resTime := time.Now().UTC()

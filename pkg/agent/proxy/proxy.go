@@ -78,8 +78,9 @@ type Proxy struct {
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
 	// recordedDNSMocks tracks DNS queries that have already been recorded
-	// to avoid recording duplicate mocks. Key format: "name:qtype:rcode:answerSummary"
-	recordedDNSMocks sync.Map
+	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass:rcode:answerSummary"
+	// Uses bounded LRU with TTL to prevent unbounded memory growth.
+	recordedDNSMocks *expirable.LRU[string, bool]
 
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
@@ -122,6 +123,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
 
 	return proxy
@@ -144,7 +146,7 @@ func (p *Proxy) IsGracefulShutdown() bool {
 // This should be called when starting a new recording session to ensure
 // DNS mocks are recorded fresh for the new session.
 func (p *Proxy) ResetRecordedDNSMocks() {
-	p.recordedDNSMocks = sync.Map{}
+	p.recordedDNSMocks = newRecordedDNSMocksCache()
 	p.logger.Debug("DNS mock deduplication tracker reset")
 }
 
