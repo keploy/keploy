@@ -657,6 +657,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 			return resp, nil
 		}
 	}
+	session.MC <- mock
 	return resp, nil
 }
 
