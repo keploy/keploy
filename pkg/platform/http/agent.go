@@ -39,6 +39,7 @@ import (
 const (
 	agentReadyTimeout       = 2 * time.Minute
 	agentReadyRetryInterval = 2 * time.Second
+	agentAPITimeout         = 2 * time.Minute // timeout for agent API calls
 )
 
 // TODO: Need to refactor this file
@@ -61,7 +62,7 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 	return &AgentClient{
 		logger:       logger,
 		dockerClient: client,
-		client:       http.Client{},
+		client:       http.Client{Timeout: agentAPITimeout},
 		conf:         c,
 	}
 }

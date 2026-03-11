@@ -5,7 +5,8 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"net/http"
-
+	"time"
+	"go.uber.org/zap"
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -85,6 +86,9 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
+
+	start := time.Now()
+
 	w.Header().Set("Content-Type", "application/json")
 	var updateParamsReq models.UpdateMockParamsReq
 	err := json.NewDecoder(r.Body).Decode(&updateParamsReq)
@@ -110,6 +114,8 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		render.Status(r, http.StatusInternalServerError)
 		return
 	}
+
+	a.logger.Info("Time taken to update mock params duration :", zap.String("duration", time.Since(start).String()))
 
 	render.JSON(w, r, updateParamsRes)
 	render.Status(r, http.StatusOK)
