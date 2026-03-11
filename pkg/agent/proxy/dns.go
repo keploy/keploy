@@ -564,14 +564,14 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		},
 	}
 
-	if session.Synchronous {
-		if mgr := syncMock.Get(); mgr != nil {
-			mgr.SetOutputChannel(session.MC)
-			mgr.AddMock(mock)
-			return resp, nil
-		}
+	// if session.Synchronous {
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.SetOutputChannel(session.MC)
+		mgr.AddMock(mock)
+		return resp, nil
 	}
-	session.MC <- mock
+	// }
+	// session.MC <- mock
 	return resp, nil
 }
 

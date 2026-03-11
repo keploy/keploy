@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -73,7 +74,7 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	defer m.mu.Unlock()
 	return m.firstReqSeen
 }
-func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool) {
+func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -116,7 +117,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		m.buffer[i] = nil
 	}
 
-	if len(associatedMockIDs) > 0 && m.mappingChan != nil {
+	if len(associatedMockIDs) > 0 && m.mappingChan != nil && mapping {
 		mapping := models.TestMockMapping{
 			TestName: testName,
 			MockIDs:  associatedMockIDs,
@@ -126,4 +127,109 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 
 	// Reslice the buffer
 	m.buffer = m.buffer[:keepIdx]
+}
+
+// NEW: DeleteMocksStrictlyBefore removes all mocks older than the specific request timestamp
+func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	keepIdx := 0
+	for i := 0; i < len(m.buffer); i++ {
+		mock := m.buffer[i]
+
+		// Check for STRICTLY BEFORE condition
+		if mock.Spec.ReqTimestampMock.Before(timestamp) {
+			fmt.Println("delting mock :", mock.Name)
+			continue // Skip it to "delete" it
+		}
+
+		// Keep the mock
+		m.buffer[keepIdx] = mock
+		keepIdx++
+	}
+
+	// Memory Cleanup: Nil out the deleted entries to allow GC to reclaim the memory
+	for i := keepIdx; i < len(m.buffer); i++ {
+		m.buffer[i] = nil
+	}
+
+	// Reslice the buffer
+	m.buffer = m.buffer[:keepIdx]
+}
+
+// --- NEW: Async Dedup Queue Implementation ---
+
+type DedupJob struct {
+	ReqTimestamp time.Time
+	ResTimestamp time.Time // NEW: needed for ResolveRange
+	// TestName     string    // NEW: needed for ResolveRange
+	Resolved    bool
+	IsDuplicate bool
+}
+
+type DedupQueue struct {
+	mu    sync.Mutex
+	queue []*DedupJob
+}
+
+var globalDedupQueue = &DedupQueue{
+	queue: make([]*DedupJob, 0),
+}
+
+// GetDedupQueue returns the global deduplication queue singleton.
+func GetDedupQueue() *DedupQueue {
+	return globalDedupQueue
+}
+
+// Enqueue adds a request to the end of the queue as soon as it's encountered.
+func (dq *DedupQueue) Enqueue(reqTime time.Time) *DedupJob {
+	dq.mu.Lock()
+	defer dq.mu.Unlock()
+	job := &DedupJob{
+		ReqTimestamp: reqTime,
+		Resolved:     false,
+	}
+	dq.queue = append(dq.queue, job)
+	return job
+}
+
+// ResolveJob marks a job as resolved and attempts to process the queue from the head.
+func (dq *DedupQueue) ResolveJob(job *DedupJob, isDuplicate bool, resTimestamp time.Time, enableMapping bool, mockMgr *SyncMockManager) {
+	dq.mu.Lock()
+	defer dq.mu.Unlock()
+
+	job.IsDuplicate = isDuplicate
+	job.Resolved = true
+	job.ResTimestamp = resTimestamp
+
+	// Always process from the head to ensure strict FIFO ordering
+	for len(dq.queue) > 0 {
+		head := dq.queue[0]
+
+		// If the oldest request hasn't been resolved yet, halt and wait.
+		if !head.Resolved {
+			fmt.Println("exiting from here")
+			break
+		}
+
+		// If it is a duplicate, perform the strict cleanup.
+		if head.IsDuplicate && mockMgr != nil {
+			fmt.Println("deleting mocks strictly before :", head.ReqTimestamp)
+			mockMgr.DeleteMocksStrictlyBefore(head.ReqTimestamp)
+		} else if head.IsDuplicate == false && mockMgr != nil {
+			// UNIQUE: Pass the EnableMapping flag down to ResolveRange
+			mockMgr.ResolveRange(head.ReqTimestamp, head.ResTimestamp, "", true, enableMapping)
+
+		}
+
+		// Note: For unique (non-duplicate) requests, we simply pop them.
+		// Insertion of unique mocks happens independently as per your requirements.
+
+		// Pop the resolved head off the queue
+		dq.queue = dq.queue[1:]
+	}
 }
