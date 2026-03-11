@@ -543,6 +543,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 			Metadata: map[string]string{
 				"name":  "DNS",
 				"qtype": dns.TypeToString[question.Qtype],
+				"type":  "config",
 			},
 			DNSReq: &models.DNSReq{
 				Name:   dns.Fqdn(question.Name),
@@ -563,14 +564,11 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		},
 	}
 
-	if session.Synchronous {
-		if mgr := syncMock.Get(); mgr != nil {
-			mgr.SetOutputChannel(session.MC)
-			mgr.AddMock(mock)
-			return resp, nil
-		}
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.SetOutputChannel(session.MC)
+		mgr.AddMock(mock)
+		return resp, nil
 	}
-	session.MC <- mock
 	return resp, nil
 }
 

@@ -321,6 +321,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			Usage:      models.Updated,
 			IsFiltered: new.TestModeInfo.IsFiltered,
 			SortOrder:  new.TestModeInfo.SortOrder,
+			Type:       new.Spec.Metadata["type"],
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -362,6 +363,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
+			Type:       mock.Spec.Metadata["type"],
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -394,6 +396,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
+			Type:       mock.Spec.Metadata["type"],
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -422,6 +425,7 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		Usage:      models.Updated,
 		IsFiltered: mock.TestModeInfo.IsFiltered,
 		SortOrder:  mock.TestModeInfo.SortOrder,
+		Type:       mock.Spec.Metadata["type"],
 	}); err != nil {
 		if m.logger != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
