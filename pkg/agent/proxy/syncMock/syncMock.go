@@ -128,7 +128,6 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	m.buffer = m.buffer[:keepIdx]
 }
 
-// NEW: DeleteMocksStrictlyBefore removes all mocks older than the specific request timestamp
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	if m == nil {
 		return
