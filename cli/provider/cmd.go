@@ -964,13 +964,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
 				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
-			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
-				if c.cfg.ContainerName == "" {
-					utils.LogError(c.logger, nil, "Couldn't find containerName")
-					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --container-name flag or containerName in config file")
-				}
-			}
+		}
+
+		if utils.CmdType(c.cfg.Command) == utils.DockerCompose && c.cfg.ContainerName == "" {
+			utils.LogError(c.logger, nil, "container name not found for docker compose command", zap.String("cmd", c.cfg.Command))
+			c.logger.Info(
+				"To fix this, rerun Keploy with --container-name set to the target Docker Compose service name (or its container_name if defined)",
+				zap.String("example", fmt.Sprintf(`keploy record -c %q --container-name <service-name>`, c.cfg.Command)),
+			)
+			return errors.New("missing required --container-name flag or containerName in config file for docker compose")
 		}
 
 		absPath, err := utils.GetAbsPath(c.cfg.Path)

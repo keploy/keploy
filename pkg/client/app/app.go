@@ -145,6 +145,10 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 func (a *App) SetupCompose(extraArgs []string) error {
 	if a.container == "" {
 		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
+		a.logger.Info(
+			"To fix this, rerun Keploy with --container-name set to the target Docker Compose service name (or its container_name if defined)",
+			zap.String("example", fmt.Sprintf(`keploy record -c %q --container-name <service-name>`, a.cmd)),
+		)
 		return errors.New("container name not found")
 	}
 
@@ -165,6 +169,12 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	serviceInfo, err := a.docker.FindContainerInComposeFiles(paths, a.container)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to find container in compose files")
+		if strings.Contains(err.Error(), "not found in any of the provided docker-compose files") {
+			a.logger.Info(
+				"To fix this, make sure --container-name matches the target Docker Compose service name (or its container_name if defined)",
+				zap.String("containerName", a.container),
+			)
+		}
 		return err
 	}
 
