@@ -78,7 +78,7 @@ type Proxy struct {
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
 	// recordedDNSMocks tracks DNS queries that have already been recorded
-	// to avoid recording duplicate mocks. Key format: "name:qtype:rcode:answerHash"
+	// to avoid recording duplicate mocks. Key format: "name:qtype:rcode:answerSummary"
 	recordedDNSMocks sync.Map
 
 	// isGracefulShutdown indicates the application is shutting down gracefully
@@ -918,6 +918,8 @@ func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certif
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
+	// Reset DNS mock deduplication tracker for fresh recording
+	p.ResetRecordedDNSMocks()
 	p.sessions.Set(uint64(0), &agent.Session{
 		ID:              uint64(0),
 		Mode:            models.MODE_RECORD,

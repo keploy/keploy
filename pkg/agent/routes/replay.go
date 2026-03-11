@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
-	"go.uber.org/zap"
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +115,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.logger.Info("Time taken to update mock params duration :", zap.String("duration", time.Since(start).String()))
+	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
 
 	render.JSON(w, r, updateParamsRes)
 	render.Status(r, http.StatusOK)
