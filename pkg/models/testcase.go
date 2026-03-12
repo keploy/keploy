@@ -54,6 +54,7 @@ type TestCase struct {
 	Assertions    map[AssertionType]interface{} `json:"assertion" bson:"assertion"`
 	HasBinaryFile bool                          `json:"has_binary_file" bson:"has_binary_file"`
 	AppPort       uint16                        `json:"app_port" bson:"app_port"`
+	Metadata      map[string]string             `json:"metadata,omitempty" bson:"metadata,omitempty"`
 }
 
 func (tc *TestCase) GetKind() string {

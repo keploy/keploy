@@ -159,10 +159,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
+		capCfg := hooksUtils.CaptureConfig{
+			Synchronous: pm.synchronous,
+			AppPort:     actualPort,
+			ClientAddr:  clientConn.RemoteAddr().String(),
+		}
 		go func() {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, capCfg)
 		}()
 
 		if pm.synchronous {
