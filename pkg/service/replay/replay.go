@@ -732,6 +732,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var expectedTestMockMappings map[string][]models.MockEntry
 	var useMappingBased bool
 	var isMappingEnabled bool
+	mockMetadataByName := make(map[string]models.MockEntry)
 	isMappingEnabled = !r.config.DisableMapping
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
@@ -851,6 +852,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		indexMockEntryMetadata(mockMetadataByName, filteredMocks, unfilteredMocks)
 
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
@@ -928,6 +930,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		indexMockEntryMetadata(mockMetadataByName, filteredMocks, unfilteredMocks)
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
 			for _, m := range filteredMocks {
@@ -1303,11 +1306,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if len(consumedMocks) > 0 {
 			var newMocks []models.MockEntry
 			for _, m := range consumedMocks {
-				newMocks = append(newMocks, models.MockEntry{
-					Name:      m.Name,
-					Kind:      string(m.Kind),
-					Timestamp: m.Timestamp,
-				})
+				newMocks = append(newMocks, hydrateMockEntryMetadata(m, mockMetadataByName))
 			}
 
 			found := false
@@ -1671,6 +1670,54 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 		return nil, nil, err
 	}
 	return filtered, unfiltered, err
+}
+
+func indexMockEntryMetadata(index map[string]models.MockEntry, groups ...[]*models.Mock) {
+	for _, group := range groups {
+		for _, mock := range group {
+			if mock == nil || mock.Name == "" {
+				continue
+			}
+
+			entry := models.MockEntry{
+				Name: mock.Name,
+				Kind: string(mock.Kind),
+			}
+			if ts := mock.Spec.ReqTimestampMock.Unix(); ts > 1 {
+				entry.Timestamp = ts
+			}
+
+			index[mock.Name] = entry
+		}
+	}
+}
+
+func hydrateMockEntryMetadata(state models.MockState, fallback map[string]models.MockEntry) models.MockEntry {
+	entry := models.MockEntry{
+		Name:      state.Name,
+		Kind:      string(state.Kind),
+		Timestamp: state.Timestamp,
+	}
+
+	if state.Name == "" {
+		return entry
+	}
+
+	meta, ok := fallback[state.Name]
+	if !ok {
+		return entry
+	}
+
+	if entry.Kind == "" {
+		entry.Kind = meta.Kind
+	}
+
+	// Older/misaligned consumed-mock payloads can leak sort-order values here.
+	if entry.Timestamp <= 1 || (state.SortOrder > 0 && entry.Timestamp == state.SortOrder && meta.Timestamp > 1) {
+		entry.Timestamp = meta.Timestamp
+	}
+
+	return entry
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of sending filtered mocks
