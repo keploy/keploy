@@ -44,9 +44,19 @@ jobs:
     steps:
       - name: Upload latest release
         run: |
-          TAG=$(curl -s https://api.github.com/repos/keploy/keploy/releases | jq -r '[.[] | select(.tag_name | startswith("v2"))][0].tag_name')
+          # We intentionally pin to the newest v2.x tag (v3 is the latest overall).
+          # Using the Releases API without paging can miss old v2 releases and return null.
+          TAG=$(
+            curl -fsSL "https://api.github.com/repos/keploy/keploy/tags?per_page=100" \
+              | jq -r '[.[].name | select(startswith("v2."))][0]'
+          )
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "Failed to resolve latest v2 tag" >&2
+            exit 1
+          fi
+
           URL="https://github.com/keploy/keploy/releases/download/${TAG}/keploy_linux_amd64.tar.gz"
-          curl -L "$URL" -o keploy.tar.gz
+          curl -fL "$URL" -o keploy.tar.gz
           tar -xzf keploy.tar.gz
           chmod +x keploy
       - uses: actions/upload-artifact@v4
