@@ -29,9 +29,8 @@ type Test struct {
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 }
 
-type compatTestFormat struct {
+type persistedTestFormat struct {
 	ID          string      `json:"id" yaml:"id"`
-	Mocks       string      `json:"mocks" yaml:"mocks"`
 	MockEntries []MockEntry `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
 }
 
@@ -46,11 +45,11 @@ type stringSliceTestFormat struct {
 }
 
 func (t Test) MarshalYAML() (interface{}, error) {
-	return t.compatFormat(), nil
+	return t.persistedFormat(), nil
 }
 
 func (t Test) MarshalJSON() ([]byte, error) {
-	return json.Marshal(t.compatFormat())
+	return json.Marshal(t.persistedFormat())
 }
 
 // UnmarshalYAML provides backward compatibility for the old comma-separated
@@ -73,9 +72,19 @@ func (t Test) MarshalJSON() ([]byte, error) {
 //	        kind: Redis
 func (t *Test) UnmarshalYAML(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
-	var compat compatTestFormat
-	if err := node.Decode(&compat); err == nil {
-		t.applyDecodedMocks(compat.ID, compat.MockEntries, compat.Mocks)
+	var persisted persistedTestFormat
+	if err := node.Decode(&persisted); err == nil && nodeHasField(node, "mock_entries") {
+		t.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+		return nil
+	}
+
+	type legacyTestFormat struct {
+		ID    string `yaml:"id"`
+		Mocks string `yaml:"mocks"`
+	}
+	var legacy legacyTestFormat
+	if err := node.Decode(&legacy); err == nil {
+		t.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
 		return nil
 	}
 
@@ -98,9 +107,19 @@ func (t *Test) UnmarshalYAML(node *yaml.Node) error {
 // UnmarshalJSON provides backward compatibility for the old comma-separated
 // string format while supporting the structured formats used by newer builds.
 func (t *Test) UnmarshalJSON(data []byte) error {
-	var compat compatTestFormat
-	if err := json.Unmarshal(data, &compat); err == nil {
-		t.applyDecodedMocks(compat.ID, compat.MockEntries, compat.Mocks)
+	var persisted persistedTestFormat
+	if err := json.Unmarshal(data, &persisted); err == nil && jsonContainsField(data, "mock_entries") {
+		t.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+		return nil
+	}
+
+	type legacyTestFormat struct {
+		ID    string `json:"id"`
+		Mocks string `json:"mocks"`
+	}
+	var legacy legacyTestFormat
+	if err := json.Unmarshal(data, &legacy); err == nil {
+		t.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
 		return nil
 	}
 
@@ -128,10 +147,9 @@ func (t *Test) MockNames() []string {
 	return names
 }
 
-func (t Test) compatFormat() compatTestFormat {
-	return compatTestFormat{
+func (t Test) persistedFormat() persistedTestFormat {
+	return persistedTestFormat{
 		ID:          t.ID,
-		Mocks:       strings.Join(t.MockNames(), ","),
 		MockEntries: append([]MockEntry(nil), t.Mocks...),
 	}
 }
@@ -174,4 +192,26 @@ func mockEntriesFromNames(names []string) []MockEntry {
 		}
 	}
 	return entries
+}
+
+func nodeHasField(node *yaml.Node, field string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == field {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonContainsField(data []byte, field string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw[field]
+	return ok
 }
