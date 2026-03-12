@@ -18,13 +18,13 @@ type MockEntry struct {
 }
 
 type Mapping struct {
-	Version   string `json:"version" yaml:"version" bson:"version"`
-	Kind      string `json:"kind" yaml:"kind" bson:"kind"`
-	TestSetID string `json:"testSetId" yaml:"test_set_id" bson:"test_set_id"`
-	Tests     []Test `json:"tests" yaml:"tests" bson:"tests"`
+	Version   string           `json:"version" yaml:"version" bson:"version"`
+	Kind      string           `json:"kind" yaml:"kind" bson:"kind"`
+	TestSetID string           `json:"testSetId" yaml:"test_set_id" bson:"test_set_id"`
+	TestCases []MappedTestCase `json:"tests" yaml:"tests" bson:"tests"`
 }
 
-type Test struct {
+type MappedTestCase struct {
 	ID    string      `json:"id" yaml:"id" bson:"id"`
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 }
@@ -44,12 +44,12 @@ type stringSliceTestFormat struct {
 	Mocks []string `json:"mocks" yaml:"mocks"`
 }
 
-func (t Test) MarshalYAML() (interface{}, error) {
-	return t.persistedFormat(), nil
+func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
+	return tc.persistedFormat(), nil
 }
 
-func (t Test) MarshalJSON() ([]byte, error) {
-	return json.Marshal(t.persistedFormat())
+func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
+	return json.Marshal(tc.persistedFormat())
 }
 
 // UnmarshalYAML provides backward compatibility for the old comma-separated
@@ -70,11 +70,11 @@ func (t Test) MarshalJSON() ([]byte, error) {
 //	        kind: HTTP
 //	      - name: mock-1
 //	        kind: Redis
-func (t *Test) UnmarshalYAML(node *yaml.Node) error {
+func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
 	if err := node.Decode(&persisted); err == nil && nodeHasField(node, "mock_entries") {
-		t.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
 		return nil
 	}
 
@@ -84,32 +84,32 @@ func (t *Test) UnmarshalYAML(node *yaml.Node) error {
 	}
 	var legacy legacyTestFormat
 	if err := node.Decode(&legacy); err == nil {
-		t.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := node.Decode(&structured); err == nil {
-		t.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
 		return nil
 	}
 
 	// Accept a string slice too so intermediate/custom fixtures remain readable.
 	var stringSlice stringSliceTestFormat
 	if err := node.Decode(&stringSlice); err == nil {
-		t.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
 		return nil
 	}
 
-	return fmt.Errorf("failed to unmarshal Test from YAML")
+	return fmt.Errorf("failed to unmarshal mapped test case from YAML")
 }
 
 // UnmarshalJSON provides backward compatibility for the old comma-separated
 // string format while supporting the structured formats used by newer builds.
-func (t *Test) UnmarshalJSON(data []byte) error {
+func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	var persisted persistedTestFormat
 	if err := json.Unmarshal(data, &persisted); err == nil && jsonContainsField(data, "mock_entries") {
-		t.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
+		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "")
 		return nil
 	}
 
@@ -119,49 +119,49 @@ func (t *Test) UnmarshalJSON(data []byte) error {
 	}
 	var legacy legacyTestFormat
 	if err := json.Unmarshal(data, &legacy); err == nil {
-		t.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
+		tc.applyDecodedMocks(legacy.ID, nil, legacy.Mocks)
 		return nil
 	}
 
 	var structured structuredTestFormat
 	if err := json.Unmarshal(data, &structured); err == nil {
-		t.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		tc.applyDecodedMocks(structured.ID, structured.Mocks, "")
 		return nil
 	}
 
 	var stringSlice stringSliceTestFormat
 	if err := json.Unmarshal(data, &stringSlice); err == nil {
-		t.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
+		tc.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
 		return nil
 	}
 
-	return fmt.Errorf("failed to unmarshal Test from JSON")
+	return fmt.Errorf("failed to unmarshal mapped test case from JSON")
 }
 
 // MockNames returns the names of all mocks as a string slice (for backward compatibility).
-func (t *Test) MockNames() []string {
-	names := make([]string, len(t.Mocks))
-	for i, m := range t.Mocks {
+func (tc *MappedTestCase) MockNames() []string {
+	names := make([]string, len(tc.Mocks))
+	for i, m := range tc.Mocks {
 		names[i] = m.Name
 	}
 	return names
 }
 
-func (t Test) persistedFormat() persistedTestFormat {
+func (tc MappedTestCase) persistedFormat() persistedTestFormat {
 	return persistedTestFormat{
-		ID:          t.ID,
-		MockEntries: append([]MockEntry(nil), t.Mocks...),
+		ID:          tc.ID,
+		MockEntries: append([]MockEntry(nil), tc.Mocks...),
 	}
 }
 
-func (t *Test) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string) {
-	t.ID = id
-	t.Mocks = nil
+func (tc *MappedTestCase) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string) {
+	tc.ID = id
+	tc.Mocks = nil
 	if len(mockEntries) > 0 {
-		t.Mocks = append([]MockEntry(nil), mockEntries...)
+		tc.Mocks = append([]MockEntry(nil), mockEntries...)
 		return
 	}
-	t.Mocks = parseLegacyMocks(legacyMocks)
+	tc.Mocks = parseLegacyMocks(legacyMocks)
 }
 
 func parseLegacyMocks(mocks string) []MockEntry {

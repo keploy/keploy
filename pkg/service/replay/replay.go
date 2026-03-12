@@ -1311,15 +1311,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			found := false
-			for i, t := range actualTestMockMappings.Tests {
+			for i, t := range actualTestMockMappings.TestCases {
 				if t.ID == testCase.Name {
-					actualTestMockMappings.Tests[i].Mocks = append(actualTestMockMappings.Tests[i].Mocks, newMocks...)
+					actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
 					found = true
 					break
 				}
 			}
 			if !found {
-				actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+				actualTestMockMappings.TestCases = append(actualTestMockMappings.TestCases, models.MappedTestCase{
 					ID:    testCase.Name,
 					Mocks: newMocks,
 				})
@@ -1548,7 +1548,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings.Tests)))
+				zap.Int("numTests", len(actualTestMockMappings.TestCases)))
 		}
 	}
 

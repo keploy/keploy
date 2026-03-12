@@ -58,13 +58,13 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		}
 
 		// Convert existing struct data into our map for merging
-		for _, t := range existingConfig.Tests {
+		for _, t := range existingConfig.TestCases {
 			finalMappings[t.ID] = t.Mocks
 		}
 	}
 
 	// Overwrite existing keys, add new ones from the incoming mapping
-	for _, t := range mapping.Tests {
+	for _, t := range mapping.TestCases {
 		finalMappings[t.ID] = t.Mocks
 	}
 
@@ -128,25 +128,25 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 			Version:   string(models.V1Beta1),
 			Kind:      models.MappingKind,
 			TestSetID: testSetID,
-			Tests:     []models.Test{},
+			TestCases: []models.MappedTestCase{},
 		}
 	}
 
 	found := false
-	for i, t := range mapping.Tests {
+	for i, t := range mapping.TestCases {
 		if t.ID == testID {
-			mapping.Tests[i].Mocks = mockEntries
+			mapping.TestCases[i].Mocks = mockEntries
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		newTest := models.Test{
+		newTest := models.MappedTestCase{
 			ID:    testID,
 			Mocks: mockEntries,
 		}
-		mapping.Tests = append(mapping.Tests, newTest)
+		mapping.TestCases = append(mapping.TestCases, newTest)
 	}
 
 	yamlData, err := EncodeMapping(mapping, db.logger)

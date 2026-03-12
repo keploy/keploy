@@ -565,7 +565,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			TestSetID: mappingTestSet,
 		}
 		for tcID, mocks := range mappings {
-			mapping.Tests = append(mapping.Tests, models.Test{
+			mapping.TestCases = append(mapping.TestCases, models.MappedTestCase{
 				ID:    tcID,
 				Mocks: mocks,
 			})

@@ -30,7 +30,7 @@ func DecodeMapping(yamlData []byte, logger *zap.Logger) (*models.Mapping, error)
 func GetMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]models.MockEntry {
 	testMockMappings := make(map[string][]models.MockEntry)
 
-	for _, test := range mapping.Tests {
+	for _, test := range mapping.TestCases {
 		testMockMappings[test.ID] = test.Mocks
 	}
 
@@ -51,11 +51,11 @@ func CreateMappingStructure(testSetID string, testMockMappings map[string][]mode
 
 	// Convert the map to the structured format
 	for testName, mockEntries := range testMockMappings {
-		test := models.Test{
+		test := models.MappedTestCase{
 			ID:    testName,
 			Mocks: mockEntries,
 		}
-		mapping.Tests = append(mapping.Tests, test)
+		mapping.TestCases = append(mapping.TestCases, test)
 	}
 
 	return mapping
