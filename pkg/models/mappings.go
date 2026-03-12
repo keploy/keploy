@@ -29,8 +29,32 @@ type Test struct {
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 }
 
+type compatTestFormat struct {
+	ID          string      `json:"id" yaml:"id"`
+	Mocks       string      `json:"mocks" yaml:"mocks"`
+	MockEntries []MockEntry `json:"mock_entries,omitempty" yaml:"mock_entries,omitempty"`
+}
+
+type structuredTestFormat struct {
+	ID    string      `json:"id" yaml:"id"`
+	Mocks []MockEntry `json:"mocks" yaml:"mocks"`
+}
+
+type stringSliceTestFormat struct {
+	ID    string   `json:"id" yaml:"id"`
+	Mocks []string `json:"mocks" yaml:"mocks"`
+}
+
+func (t Test) MarshalYAML() (interface{}, error) {
+	return t.compatFormat(), nil
+}
+
+func (t Test) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.compatFormat())
+}
+
 // UnmarshalYAML provides backward compatibility for the old comma-separated
-// string format while supporting the new array-of-objects format.
+// string format while supporting the structured formats used by newer builds.
 //
 // Old format:
 //
@@ -38,7 +62,7 @@ type Test struct {
 //	  - id: test-1
 //	    mocks: "mock-0,mock-1,mock-2"
 //
-// New format:
+// Structured format:
 //
 //	tests:
 //	  - id: test-1
@@ -48,34 +72,23 @@ type Test struct {
 //	      - name: mock-1
 //	        kind: Redis
 func (t *Test) UnmarshalYAML(node *yaml.Node) error {
-	// Try new format first (mocks as array of objects)
-	type NewFormat struct {
-		ID    string      `yaml:"id"`
-		Mocks []MockEntry `yaml:"mocks"`
-	}
-	var nf NewFormat
-	if err := node.Decode(&nf); err == nil {
-		t.ID = nf.ID
-		t.Mocks = nf.Mocks
+	// Prefer the backward-compatible persisted format first.
+	var compat compatTestFormat
+	if err := node.Decode(&compat); err == nil {
+		t.applyDecodedMocks(compat.ID, compat.MockEntries, compat.Mocks)
 		return nil
 	}
 
-	// Fall back to old format (mocks as comma-separated string)
-	type OldFormat struct {
-		ID    string `yaml:"id"`
-		Mocks string `yaml:"mocks"`
+	var structured structuredTestFormat
+	if err := node.Decode(&structured); err == nil {
+		t.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		return nil
 	}
-	var of OldFormat
-	if err := node.Decode(&of); err == nil {
-		t.ID = of.ID
-		if of.Mocks != "" {
-			for _, name := range strings.Split(of.Mocks, ",") {
-				name = strings.TrimSpace(name)
-				if name != "" {
-					t.Mocks = append(t.Mocks, MockEntry{Name: name})
-				}
-			}
-		}
+
+	// Accept a string slice too so intermediate/custom fixtures remain readable.
+	var stringSlice stringSliceTestFormat
+	if err := node.Decode(&stringSlice); err == nil {
+		t.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
 		return nil
 	}
 
@@ -83,36 +96,23 @@ func (t *Test) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // UnmarshalJSON provides backward compatibility for the old comma-separated
-// string format while supporting the new array-of-objects format in JSON.
+// string format while supporting the structured formats used by newer builds.
 func (t *Test) UnmarshalJSON(data []byte) error {
-	// Try new format first (mocks as array of objects)
-	type NewFormat struct {
-		ID    string      `json:"id"`
-		Mocks []MockEntry `json:"mocks"`
-	}
-	var nf NewFormat
-	if err := json.Unmarshal(data, &nf); err == nil {
-		t.ID = nf.ID
-		t.Mocks = nf.Mocks
+	var compat compatTestFormat
+	if err := json.Unmarshal(data, &compat); err == nil {
+		t.applyDecodedMocks(compat.ID, compat.MockEntries, compat.Mocks)
 		return nil
 	}
 
-	// Try old format (mocks as comma-separated string)
-	type OldFormat struct {
-		ID    string `json:"id"`
-		Mocks string `json:"mocks"`
+	var structured structuredTestFormat
+	if err := json.Unmarshal(data, &structured); err == nil {
+		t.applyDecodedMocks(structured.ID, structured.Mocks, "")
+		return nil
 	}
-	var of OldFormat
-	if err := json.Unmarshal(data, &of); err == nil {
-		t.ID = of.ID
-		if of.Mocks != "" {
-			for _, name := range strings.Split(of.Mocks, ",") {
-				name = strings.TrimSpace(name)
-				if name != "" {
-					t.Mocks = append(t.Mocks, MockEntry{Name: name})
-				}
-			}
-		}
+
+	var stringSlice stringSliceTestFormat
+	if err := json.Unmarshal(data, &stringSlice); err == nil {
+		t.applyDecodedMocks(stringSlice.ID, mockEntriesFromNames(stringSlice.Mocks), "")
 		return nil
 	}
 
@@ -126,4 +126,52 @@ func (t *Test) MockNames() []string {
 		names[i] = m.Name
 	}
 	return names
+}
+
+func (t Test) compatFormat() compatTestFormat {
+	return compatTestFormat{
+		ID:          t.ID,
+		Mocks:       strings.Join(t.MockNames(), ","),
+		MockEntries: append([]MockEntry(nil), t.Mocks...),
+	}
+}
+
+func (t *Test) applyDecodedMocks(id string, mockEntries []MockEntry, legacyMocks string) {
+	t.ID = id
+	t.Mocks = nil
+	if len(mockEntries) > 0 {
+		t.Mocks = append([]MockEntry(nil), mockEntries...)
+		return
+	}
+	t.Mocks = parseLegacyMocks(legacyMocks)
+}
+
+func parseLegacyMocks(mocks string) []MockEntry {
+	if mocks == "" {
+		return nil
+	}
+
+	var entries []MockEntry
+	for _, name := range strings.Split(mocks, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			entries = append(entries, MockEntry{Name: name})
+		}
+	}
+	return entries
+}
+
+func mockEntriesFromNames(names []string) []MockEntry {
+	if len(names) == 0 {
+		return nil
+	}
+
+	entries := make([]MockEntry, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			entries = append(entries, MockEntry{Name: name})
+		}
+	}
+	return entries
 }
