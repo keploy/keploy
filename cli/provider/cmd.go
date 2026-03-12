@@ -338,6 +338,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
 		cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 		cmd.Flags().Bool("disable-mapping", true, "Disable mapping of testcases during test and rerecord mode")
+		cmd.Flags().Bool("iterative-test", c.cfg.IterativeTest, "Enable iterative test mode")
 		cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 		if cmd.Name() == "rerecord" {
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
@@ -1050,6 +1051,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.DisableMapping = disableMapping
+
+			iterativeTest, err := cmd.Flags().GetBool("iterative-test")
+			if err != nil {
+				errMsg := "failed to get the iterative-test flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.IterativeTest = iterativeTest
 
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
