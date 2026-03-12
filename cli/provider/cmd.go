@@ -966,7 +966,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		if utils.CmdType(c.cfg.Command) == utils.DockerCompose && c.cfg.ContainerName == "" {
+		if utils.CmdType(c.cfg.CommandType) == utils.DockerCompose && c.cfg.ContainerName == "" {
 			utils.LogError(c.logger, nil, "container name not found for docker compose command", zap.String("cmd", c.cfg.Command))
 			c.logger.Info(
 				"To fix this, rerun Keploy with --container-name set to the target Docker Compose service name (or its container_name if defined)",
