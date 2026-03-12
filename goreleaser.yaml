@@ -1,4 +1,9 @@
 # GoReleaser configuration
+release:
+  # Do not mark release as latest automatically
+  # This allows manual control via GitHub UI
+  make_latest: false
+
 archives:
  -
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"

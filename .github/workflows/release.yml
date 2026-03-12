@@ -96,8 +96,8 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: v1.26.2
-          args: release --rm-dist --skip-validate
+          version: ~> v2
+          args: release --clean --skip=validate
         env:
           AC_PROVIDER: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
