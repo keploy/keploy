@@ -16,9 +16,11 @@
 
 <p align="center">
 <a href="https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg"><img src="https://img.shields.io/badge/Slack-4A154B?style=flat&logo=slack&logoColor=white" alt="Slack" /></a>
-  <a href="https://www.linkedin.com/company/keploy/"><img src="https://img.shields.io/badge/LinkedIn-%230077B5.svg?style=flat&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
+  <a href="https://github.com/keploy"><img src="https://img.shields.io/badge/GitHub-181717?style=flat&logo=github&logoColor=white" alt="GitHub" /></a>
   <a href="https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg"><img src="https://img.shields.io/badge/YouTube-%23FF0000.svg?style=flat&logo=YouTube&logoColor=white" alt="YouTube" /></a>
-  <a href="https://x.com/Keployio"><img src="https://img.shields.io/badge/X-%231DA1F2.svg?style=flat&logo=X&logoColor=white" alt="X" /></a>
+  <a href="https://testgpt.substack.com/"><img src="https://img.shields.io/badge/Substack-FF6719?style=flat&logo=substack&logoColor=white" alt="Substack" /></a>
+  <a href="https://x.com/Keployio"><img src="https://img.shields.io/badge/X-%231DA1F2.svg?style=flat&logo=X&logoColor=white" alt="X (Twitter)" /></a>
+  <a href="https://keploy.io/blog"><img src="https://img.shields.io/badge/Blog-0A0A0A?style=flat&logo=rss&logoColor=white" alt="Blog" /></a>
 </p>
 
 <p align="center">
@@ -202,11 +204,13 @@ Prefer a calendar invite? Mention your availability in the email—we’ll send 
 
 ## Documentation & Community
 
-- 📘 [Documentation](https://keploy.io/docs/) — Explore the full docs
-- 💬 [Slack Community](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg) — Join the conversation
-- 📜 [Contribution Guidelines](https://keploy.io/docs/keploy-explained/contribution-guide/)
-- ❤️ [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
-- 📢 [Blog](https://keploy.io/blog/) — Read articles and updates
+<!-- Community platforms are defined in community_platforms.json — keep in sync -->
+- 💬 [Slack](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg) — Live support, discussions, and quick answers.
+- 🐙 [GitHub](https://github.com/keploy) — Contribute and collaborate on code.
+- 📺 [YouTube](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg) — Tutorials, demos, and community meetups.
+- 📰 [Substack](https://testgpt.substack.com/) — Technical deep dives and newsletters.
+- 🐦 [X (Twitter)](https://x.com/Keployio) — Product updates and announcements.
+- 📢 [Blog](https://keploy.io/blog) — Read articles and updates.
 
 ---
 
