@@ -320,6 +320,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			Usage:      models.Updated,
 			IsFiltered: new.TestModeInfo.IsFiltered,
 			SortOrder:  new.TestModeInfo.SortOrder,
+			Type:       new.Spec.Metadata["type"],
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -360,6 +361,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
+			Type:       mock.Spec.Metadata["type"],
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -391,6 +393,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
 			SortOrder:  mock.TestModeInfo.SortOrder,
+			Type:       mock.Spec.Metadata["type"],
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -406,8 +409,29 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	return deletedGlobal
 }
 
-// ---------- bookkeeping ----------
+// MarkMockAsUsed marks the given mock as used (consumed) without modifying
+// its sort order or removing it from any tree. This is intended for parsers
+// (e.g. mongo v2) that need to record mock usage without changing mock ordering.
+func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
+	if mock.Name == "" {
+		return false
+	}
+	if err := m.flagMockAsUsed(models.MockState{
+		Name:       mock.Name,
+		Usage:      models.Updated,
+		IsFiltered: mock.TestModeInfo.IsFiltered,
+		SortOrder:  mock.TestModeInfo.SortOrder,
+		Type:       mock.Spec.Metadata["type"],
+	}); err != nil {
+		if m.logger != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+		return false
+	}
+	return true
+}
 
+// ---------- bookkeeping ----------
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")

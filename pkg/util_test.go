@@ -36,7 +36,7 @@ func TestSimulateHTTP_NewRequestError_303(t *testing.T) {
 	}
 
 	// Act
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0, "")
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10})
 
 	// Assert
 	require.Error(t, err)
@@ -134,7 +134,7 @@ func TestSimulateHTTP_MultipartRebuildWithPaths_314(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0, "")
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -219,7 +219,7 @@ func TestSimulateHTTP_MultipartRebuildWithFileNames_315(t *testing.T) {
 		},
 	}
 
-	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, 10, 0, "")
+	resp, err := SimulateHTTP(ctx, tc, "test-set", logger, SimulationConfig{APITimeout: 10})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -429,5 +429,184 @@ func TestFilterMocks_678(t *testing.T) {
 		// Sorted unfiltered part
 		assert.Equal(t, "mock1", result[3].Name)
 		assert.Equal(t, "mock3", result[4].Name)
+	})
+}
+
+// TestHasExplicitPort_IPv6_777 validates the hasExplicitPort function with various host strings,
+// including IPv4, IPv6, and hostnames, both with and without ports.
+func TestHasExplicitPort_IPv6_777(t *testing.T) {
+	testCases := []struct {
+		name     string
+		host     string
+		expected bool
+	}{
+		{"IPv4WithPort", "127.0.0.1:8080", true},
+		{"IPv4WithoutPort", "127.0.0.1", false},
+		{"IPv6WithPort", "[::1]:8080", true},
+		{"IPv6WithoutPort", "[::1]", false},
+		{"IPv6WithoutBrackets", "::1", false}, // Invalid for SplitHostPort, so false
+		{"HostnameWithPort", "localhost:8080", true},
+		{"HostnameWithoutPort", "localhost", false},
+		{"InvalidPort", "localhost:http", false},    // Non-numeric port
+		{"FullURL", "http://localhost:8080", false}, // SplitHostPort fails on scheme
+		{"IPv6ComplexWithPort", "[2001:db8::1]:8080", true},
+		{"IPv6ComplexWithoutPort", "[2001:db8::1]", false},
+		{"ColonInPath", "localhost:8080/foo", false}, // SplitHostPort fails
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, hasExplicitPort(tc.host))
+		})
+	}
+}
+
+func TestResolveTestTarget(t *testing.T) {
+	logger := zap.NewNop()
+
+	tests := []struct {
+		name            string
+		originalTarget  string
+		urlReplacements map[string]string
+		configHost      string
+		appPort         uint16
+		configPort      uint32
+		isHTTP          bool
+		expectedTarget  string
+		expectError     bool
+	}{
+		// HTTP Scenarios
+		{
+			name:           "HTTP_NoOverrides",
+			originalTarget: "http://example.com/api",
+			isHTTP:         true,
+			expectedTarget: "http://example.com:80/api",
+		},
+		{
+			name:           "HTTP_AppPortOverride",
+			originalTarget: "http://example.com/api",
+			appPort:        8080,
+			isHTTP:         true,
+			expectedTarget: "http://example.com:8080/api",
+		},
+		{
+			name:           "HTTP_ConfigPortOverride",
+			originalTarget: "http://example.com/api",
+			appPort:        8080,
+			configPort:     9090,
+			isHTTP:         true,
+			expectedTarget: "http://example.com:9090/api",
+		},
+		{
+			name:           "HTTP_ConfigHostOverride",
+			originalTarget: "http://example.com/api",
+			configHost:     "localhost",
+			isHTTP:         true,
+			expectedTarget: "http://localhost:80/api",
+		},
+		{
+			name:            "HTTP_ReplacementWithPort_Final",
+			originalTarget:  "http://example.com/api",
+			urlReplacements: map[string]string{"example.com": "localhost:3000"},
+			configPort:      9090, // Should be ignored
+			isHTTP:          true,
+			expectedTarget:  "http://localhost:3000/api",
+		},
+		{
+			name:            "HTTP_ReplacementWithoutPort_AppliesOverrides",
+			originalTarget:  "http://example.com/api",
+			urlReplacements: map[string]string{"example.com": "new-host"},
+			configPort:      9090,
+			isHTTP:          true,
+			expectedTarget:  "http://new-host:9090/api",
+		},
+		{
+			name:           "HTTPS_DefaultPort",
+			originalTarget: "https://example.com/api",
+			isHTTP:         true,
+			expectedTarget: "https://example.com:443/api",
+		},
+
+		// gRPC Scenarios
+		{
+			name:           "GRPC_NoOverrides",
+			originalTarget: "example.com",
+			isHTTP:         false,
+			expectedTarget: "example.com:443",
+		},
+		{
+			name:           "GRPC_ExistingPort_NoOverrides",
+			originalTarget: "example.com:50051",
+			isHTTP:         false,
+			expectedTarget: "example.com:50051",
+		},
+		{
+			name:           "GRPC_AppPortOverride",
+			originalTarget: "example.com",
+			appPort:        8080,
+			isHTTP:         false,
+			expectedTarget: "example.com:8080",
+		},
+		{
+			name:           "GRPC_ConfigPortOverride",
+			originalTarget: "example.com",
+			configPort:     9090,
+			isHTTP:         false,
+			expectedTarget: "example.com:9090",
+		},
+		{
+			name:           "GRPC_ConfigHostOverride",
+			originalTarget: "example.com:50051",
+			configHost:     "localhost",
+			isHTTP:         false,
+			expectedTarget: "localhost:50051",
+		},
+		{
+			name:            "GRPC_ReplacementWithPort_Final",
+			originalTarget:  "example.com:50051",
+			urlReplacements: map[string]string{"example.com": "localhost:3000"},
+			configPort:      9090, // Should be ignored
+			isHTTP:          false,
+			expectedTarget:  "localhost:3000:50051", // Replacement is literal substitution first
+		},
+		{
+			name:            "GRPC_ReplacementWithPort_ExactMatch",
+			originalTarget:  "example.com",
+			urlReplacements: map[string]string{"example.com": "localhost:3000"},
+			configPort:      9090,
+			isHTTP:          false,
+			expectedTarget:  "localhost:3000",
+		},
+		{
+			name:           "GRPC_IPv6_Host",
+			originalTarget: "[::1]:50051",
+			configPort:     9090,
+			isHTTP:         false,
+			expectedTarget: "[::1]:9090",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedTarget, got)
+			}
+		})
+	}
+}
+
+func TestResolveTestTarget_EdgeCases(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("HTTP_InvalidURL", func(t *testing.T) {
+		_, err := ResolveTestTarget("http://[::1]:namedport", nil, "", 0, 0, true, logger)
+		assert.Error(t, err)
+	})
+
+	t.Run("GRPC_ConfigHost_ReplaceError", func(t *testing.T) {
+		// Mock logic or ensure specific error condition if possible, though ReplaceGrpcHost is robust
 	})
 }

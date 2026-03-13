@@ -54,21 +54,24 @@ const UNKNOWN_TEST = "UNKNOWN_TEST"
 var HookImpl TestHooks
 
 type Replayer struct {
-	logger          *zap.Logger
-	testDB          TestDB
-	mockDB          MockDB
-	mappingDB       MappingDB
-	reportDB        ReportDB
-	testSetConf     TestSetConfig
-	telemetry       Telemetry
-	instrumentation Instrumentation
-	config          *config.Config
-	auth            service.Auth
-	mock            *mock
-	instrument      bool
-	isLastTestSet   bool
-	isLastTestCase  bool
-	runDomainSet    *telemetry.DomainSet // collects host domains across a test run for telemetry
+	logger             *zap.Logger
+	testDB             TestDB
+	mockDB             MockDB
+	mappingDB          MappingDB
+	reportDB           ReportDB
+	testSetConf        TestSetConfig
+	telemetry          Telemetry
+	instrumentation    Instrumentation
+	config             *config.Config
+	auth               service.Auth
+	mock               *mock
+	instrument         bool
+	isLastTestSet      bool
+	isLastTestCase     bool
+	runDomainSet       *telemetry.DomainSet // collects host domains across a test run for telemetry
+	testRunTestSets    []string             // all test set IDs for the current run (used by RunTestSet)
+	testRunID          string               // current test run ID (used by RunTestSet)
+	afterTestRunCalled bool                 // guards duplicate AfterTestRun calls
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -253,6 +256,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
+	r.afterTestRunCalled = false
 	var flakyTestSets []string
 	var testSets []string
 	runDomainSet := telemetry.NewDomainSet()
@@ -269,6 +273,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+	r.testRunTestSets = testSets
+	r.testRunID = testRunID
 	firstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
@@ -536,9 +542,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		//executing afterTestRun hook, executed after running all the test-sets
-		err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to execute after test run hook")
+		if !r.afterTestRunCalled {
+			err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to execute after test run hook")
+			}
 		}
 	}
 
@@ -1076,6 +1084,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 	}
+	r.logger.Debug("consumed mocks during initial setup",
+		zap.String("testSetID", testSetID),
+		zap.Int("count", len(consumedMocks)),
+		zap.Any("mocks", consumedMocks))
 	for _, m := range consumedMocks {
 		totalConsumedMocks[m.Name] = m
 	}
@@ -1154,34 +1166,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		// Handle host replacement - use user-provided host or default to localhost
-		// This is necessary because the agent architecture doesn't intercept the test runner's
-		// network requests (unlike the eBPF approach in v2), so we need to explicitly
-		// replace the recorded hostname with a reachable address.
-		hostToUse := r.config.Test.Host
-		if hostToUse == "" {
-			hostToUse = "localhost"
-		}
-		err = r.replaceHostInTestCase(testCase, hostToUse, "target host")
-		if err != nil {
-			break
-		}
-
-		// Handle user-provided http port replacement
-		if r.config.Test.Port != 0 && testCase.Kind == models.HTTP {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.Port)))
-			if err != nil {
-				break
-			}
-		}
-
-		// Handle user-provided grpc port replacement
-		if r.config.Test.GRPCPort != 0 && testCase.Kind == models.GRPC_EXPORT {
-			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.GRPCPort)))
-			if err != nil {
-				break
-			}
-		}
+		// Host and Port replacements are now handled inside SimulateHTTP/SimulateGRPC via config parameters.
+		// This ensures that replaceWith configuration takes precedence over global host/port overrides.
 
 		started := time.Now().UTC()
 
@@ -1211,6 +1197,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
+			r.logger.Debug("consumed mocks after test case simulation",
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseID", testCase.Name),
+				zap.Int("count", len(consumedMocks)),
+				zap.Any("mocks", consumedMocks))
 			for _, m := range consumedMocks {
 				totalConsumedMocks[m.Name] = m
 			}
@@ -1226,7 +1217,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 		mockSetMismatch := false
 		if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-			mockSetMismatch = !isMockSubset(mockNames, expectedMocks)
+			mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
 		}
 
 		emitFailureLogs := !mockSetMismatch
@@ -1319,7 +1310,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// log the consumed mocks during the test run of the test case for test set
-		r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
+		r.logger.Debug("consumed mocks for test case",
+			zap.String("testSetID", testSetID),
+			zap.String("testCaseID", testCase.Name),
+			zap.Strings("mockNames", mockNames),
+			zap.Any("mocks", consumedMocks))
 
 		if mockSetMismatch {
 			if testPass {
@@ -1530,7 +1525,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled {
+	if testSetStatus == models.TestSetStatusPassed && obsolete == 0 && r.instrument && isMappingEnabled && r.config.Test.UpdateTestMapping {
 		if err := r.StoreMappings(ctx, actualTestMockMappings); err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
@@ -1632,6 +1627,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
 			}
+		}
+	}
+
+	// In Docker Compose mode, RunTestSet's defer block stops the agent container.
+	// We must call AfterTestRun HERE (before defer fires) while the agent is alive.
+	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
+		r.afterTestRunCalled = true
+		if hookErr := HookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
+			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
 

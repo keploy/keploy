@@ -28,19 +28,25 @@ var customComparator = func(a, b interface{}) int {
 }
 
 type TreeDb struct {
-	rbt *redblacktree.Tree
-	mu  sync.RWMutex // RWMutex: many reads, few writes
+	rbt     *redblacktree.Tree
+	idIndex map[int]models.TestModeInfo // O(1) lookup by ID
+	mu      sync.RWMutex                // RWMutex: many reads, few writes
 }
 
 func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
 	return &TreeDb{
-		rbt: redblacktree.NewWith(comparator),
+		rbt:     redblacktree.NewWith(comparator),
+		idIndex: make(map[int]models.TestModeInfo),
 	}
 }
 
 func (db *TreeDb) insert(key interface{}, obj interface{}) {
 	db.mu.Lock()
 	db.rbt.Put(key, obj)
+	// Update ID index
+	if info, ok := key.(models.TestModeInfo); ok {
+		db.idIndex[info.ID] = info
+	}
 	db.mu.Unlock()
 }
 
@@ -52,24 +58,59 @@ func (db *TreeDb) delete(key interface{}) bool {
 		return false
 	}
 	db.rbt.Remove(key)
+	// Remove from ID index
+	if info, ok := key.(models.TestModeInfo); ok {
+		delete(db.idIndex, info.ID)
+	}
 	return true
 }
 
 func (db *TreeDb) update(oldKey interface{}, newKey interface{}, newObj interface{}) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
+	oldInfo, okOld := oldKey.(models.TestModeInfo)
+	newInfo, okNew := newKey.(models.TestModeInfo)
+
+	// First try exact match
 	_, found := db.rbt.Get(oldKey)
-	if !found {
+	if found {
+		db.rbt.Remove(oldKey)
+		db.rbt.Put(newKey, newObj)
+		// Update ID index
+		if okOld {
+			delete(db.idIndex, oldInfo.ID)
+		}
+		if okNew {
+			db.idIndex[newInfo.ID] = newInfo
+		}
+		return true
+	}
+
+	// If exact match fails, use ID index for O(1) lookup
+	if !okOld {
 		return false
 	}
-	db.rbt.Remove(oldKey)
+
+	currentKey, exists := db.idIndex[oldInfo.ID]
+	if !exists {
+		return false
+	}
+
+	// Found by ID, update it
+	db.rbt.Remove(currentKey)
 	db.rbt.Put(newKey, newObj)
+	delete(db.idIndex, oldInfo.ID)
+	if okNew {
+		db.idIndex[newInfo.ID] = newInfo
+	}
 	return true
 }
 
 func (db *TreeDb) deleteAll() {
 	db.mu.Lock()
 	db.rbt.Clear()
+	db.idIndex = make(map[int]models.TestModeInfo) // Reset ID index
 	db.mu.Unlock()
 }
 
