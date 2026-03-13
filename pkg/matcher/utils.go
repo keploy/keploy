@@ -1022,14 +1022,18 @@ func (s *SchemaDiffPrinter) Render() error {
 
 	var opts []tablewriter.Option
 	opts = append(opts, tablewriter.WithRowAutoWrap(0))
-	if !models.IsAnsiDisabled {
-		opts = append(opts, tablewriter.WithRenderer(renderer.NewColorized(renderer.ColorizedConfig{
-			Header: renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
-		})))
-	}
 	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignLeft))
 	table := tablewriter.NewTable(s.out, opts...)
-	table.Header([]string{"Schema Check Failed", "Expected", "Actual"})
+
+	headerReason := "Schema Check Failed"
+	headerExpected := "Expected"
+	headerActual := "Actual"
+	if !models.IsAnsiDisabled {
+		headerReason = color.New(color.FgHiRed).Sprint(headerReason)
+		headerExpected = color.New(color.FgHiGreen).Sprint(headerExpected)
+		headerActual = color.New(color.FgHiRed).Sprint(headerActual)
+	}
+	table.Header([]string{headerReason, headerExpected, headerActual})
 
 	for _, e := range s.errors {
 		exp := e.Expected
