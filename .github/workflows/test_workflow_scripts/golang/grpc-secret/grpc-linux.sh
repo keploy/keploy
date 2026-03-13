@@ -9,6 +9,8 @@
 #
 set -Eeuo pipefail
 
+APP_PORT=50051
+
 echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
 
 # --- Sanity Checks ---
@@ -38,9 +40,66 @@ cleanup() {
     pkill -9 -f keploy || true
     pkill -9 -f "go run" || true
     pkill -9 -f grpc-secret || true
+    kill_listeners_on_port "$APP_PORT"
     echo "Cleanup complete."
 }
 trap cleanup EXIT
+
+kill_listeners_on_port() {
+    local port=$1
+    local pids
+
+    pids=$(sudo lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+
+    echo "Found listeners on port $port: $pids"
+    echo "$pids" | xargs -r sudo kill 2>/dev/null || true
+    sleep 2
+
+    pids=$(sudo lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "Force killing listeners on port $port: $pids"
+        echo "$pids" | xargs -r sudo kill -9 2>/dev/null || true
+    fi
+}
+
+wait_for_port_state() {
+    local port=$1
+    local expected_state=$2
+
+    for _ in {1..15}; do
+        if sudo lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+            if [ "$expected_state" = "open" ]; then
+                echo "Port $port is open."
+                return 0
+            fi
+        else
+            if [ "$expected_state" = "free" ]; then
+                echo "Port $port is free."
+                return 0
+            fi
+        fi
+
+        if [ "$expected_state" = "open" ]; then
+            echo "Port $port not yet open, retrying in 2 seconds..."
+        else
+            echo "Port $port still in use, retrying in 2 seconds..."
+        fi
+        sleep 2
+    done
+
+    echo "Timed out waiting for port $port to become $expected_state."
+    sudo lsof -i -P -n | grep LISTEN || true
+    exit 1
+}
+
+ensure_port_available() {
+    local port=$1
+    kill_listeners_on_port "$port"
+    wait_for_port_state "$port" free
+}
 
 # Function to cleanup any remaining keploy processes
 cleanup_keploy() {
@@ -118,7 +177,8 @@ kill_keploy_process() {
 # Send all 4 gRPC requests
 send_grpc_requests() {
     echo "Waiting for gRPC server to be ready..."
-    sleep 10
+    wait_for_port_state "$APP_PORT" open
+    sleep 2
     
     echo "Sending all 4 gRPC requests..."
     
@@ -238,6 +298,7 @@ echo "🧪 Starting gRPC Secret Sanitize Testing"
 
 # Reset state before each run
 cleanup
+ensure_port_available "$APP_PORT"
 rm -rf ./keploy*
 "$RECORD_BIN" config --generate
 sleep 3
@@ -253,6 +314,7 @@ echo "📝 Phase 1: Recording 2 test sets with all 4 endpoints..."
 for i in 1 2; do
     app_name="grpcSecret_${i}"
     echo "Recording iteration $i..."
+    ensure_port_available "$APP_PORT"
     
     # Start keploy record in background
     "$RECORD_BIN" record -c "./grpc-secret" --generateGithubActions=false 2>&1 | tee ${app_name}.txt &
@@ -265,6 +327,7 @@ for i in 1 2; do
     
     # Kill keploy
     kill_keploy_process
+    wait_for_port_state "$APP_PORT" free
     
     # Check for errors and race conditions
     check_for_errors "${app_name}.txt"
@@ -275,6 +338,7 @@ done
 
 # --- Run keploy test (before sanitize) ---
 echo "🧪 Phase 2: Running keploy test (before sanitize)..."
+ensure_port_available "$APP_PORT"
 "$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_before_sanitize.txt || true
 
 # Check for errors and race conditions
@@ -299,6 +363,7 @@ echo "✅ Sanitization complete"
 
 # --- Run keploy test (after sanitize) ---
 echo "🧪 Phase 4: Running keploy test (after sanitize)..."
+ensure_port_available "$APP_PORT"
 "$REPLAY_BIN" test -c "./grpc-secret" --delay 10 --generateGithubActions=false 2>&1 | tee test_after_sanitize.txt || true
 
 # Check for errors and race conditions
@@ -318,4 +383,3 @@ cleanup_keploy
 
 echo "🎉 gRPC Secret Sanitize Testing completed successfully!"
 exit 0
-

@@ -68,7 +68,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
@@ -139,7 +139,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
@@ -207,7 +207,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
@@ -285,7 +285,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
@@ -356,7 +356,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 

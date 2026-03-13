@@ -6,8 +6,8 @@ import (
 	"os"
 
 	"github.com/fatih/color"
-	"go.keploy.io/server/v3/pkg/compat/tablewriter"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/compat/tablewriter"
 	schemaMatcher "go.keploy.io/server/v3/pkg/matcher/schema"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"

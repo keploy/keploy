@@ -53,15 +53,18 @@ jobs:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - name: Install yq
+        env:
+          YQ_VERSION: v4.52.4
         run: |
-          curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o yq
           chmod +x yq
-          sudo mv yq /usr/bin/
+          sudo mv yq /usr/local/bin/yq
+          yq --version
           
       - id: record
         uses: ./.github/actions/download-binary
@@ -115,7 +118,7 @@ jobs:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
@@ -167,7 +170,7 @@ jobs:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
@@ -220,15 +223,18 @@ jobs:
           repository: keploy/keploy
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - name: Install yq
+        env:
+          YQ_VERSION: v4.52.4
         run: |
-          curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o yq
           chmod +x yq
-          sudo mv yq /usr/bin/
+          sudo mv yq /usr/local/bin/yq
+          yq --version
 
       - id: replay
         uses: ./.github/actions/download-binary
