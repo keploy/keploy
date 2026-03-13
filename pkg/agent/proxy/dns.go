@@ -127,10 +127,10 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 
-	session, hasSession := p.sessions.Get(uint64(0))
+	session := p.getSession()
 	mode := models.GetMode()
 	mockingEnabled := true
-	if hasSession && session != nil {
+	if session != nil {
 		mode = session.Mode
 		mockingEnabled = session.Mocking
 	}
@@ -286,12 +286,8 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 }
 
 func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool) {
-	mgrIface, ok := p.MockManagers.Load(uint64(0))
-	if !ok {
-		return dnsCacheEntry{}, false
-	}
-	mgr, ok := mgrIface.(*MockManager)
-	if !ok || mgr == nil {
+	mgr := p.getMockManager()
+	if mgr == nil {
 		return dnsCacheEntry{}, false
 	}
 
