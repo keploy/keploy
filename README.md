@@ -210,6 +210,14 @@ Prefer a calendar invite? Mention your availability in the email—we’ll send 
 
 ---
 
+## Known Issues & Bug Fixes
+
+| Status | Severity | Description |
+|--------|----------|-------------|
+| ✅ Fixed | **Critical** | **Proxy `readyChan` double-send deadlock** — The `StartProxy` goroutine wrapper sent to `readyChan` after `start()` returned, but `start()` already sends exactly once internally. On the capacity-1 buffered channel this caused a permanent goroutine deadlock when the proxy port was already in use (e.g., rapid restart, port conflict). Fixed by removing the redundant send in the `g.Go` closure. See [`pkg/agent/proxy/proxy.go`](pkg/agent/proxy/proxy.go). |
+
+---
+
 ## Contribute & Collaborate
 
 Whether you're new or experienced, your input matters. Help us improve Keploy by contributing code, reporting issues, or sharing feedback.

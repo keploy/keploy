@@ -192,7 +192,9 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		err := p.start(ctx, readyChan)
-		readyChan <- err
+		// Don't send to readyChan here — start() already signals readiness/failure
+		// via readyChan internally. A second send on this capacity-1 channel would
+		// deadlock when the buffer is full (e.g., port already in use).
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
 			return err
