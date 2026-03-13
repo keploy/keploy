@@ -20,7 +20,7 @@ runs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ">=1.24"
+        go-version: ">=1.26"
         cache: ${{ inputs.go-cache }}
 
     # --- Linux/macOS: Add Known Hosts ---

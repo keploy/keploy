@@ -21,6 +21,8 @@ import (
 	"github.com/fatih/color"
 	jsonDiff "github.com/keploy/jsonDiff"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -844,14 +846,16 @@ func (d *DiffsPrinter) Render() error {
 		return nil
 	}
 
-	table := tablewriter.NewWriter(d.out)
-	table.SetAutoWrapText(false)
-	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-
+	var opts []tablewriter.Option
+	opts = append(opts, tablewriter.WithRowAutoWrap(0))
 	if !models.IsAnsiDisabled {
-		table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+		opts = append(opts, tablewriter.WithRenderer(renderer.NewColorized(renderer.ColorizedConfig{
+			Header: renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
+		})))
 	}
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
+	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
+	table := tablewriter.NewTable(d.out, opts...)
+	table.Header([]string{fmt.Sprintf("Diffs %v", d.testCase)})
 
 	for _, e := range diffs {
 		if strings.TrimSpace(e) != "" {
@@ -881,8 +885,7 @@ func (d *DiffsPrinter) Render() error {
 			endPaint = yellowPaint(endPaint)
 		}
 
-		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
+		table.Header([]string{initalPart + midPartpaint + endPaint})
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 
@@ -891,14 +894,16 @@ func (d *DiffsPrinter) Render() error {
 }
 func (d *DiffsPrinter) TableWriter(diffs []string) error {
 
-	table := tablewriter.NewWriter(d.out)
-	table.SetAutoWrapText(false)
-	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
-
+	var opts []tablewriter.Option
+	opts = append(opts, tablewriter.WithRowAutoWrap(0))
 	if !models.IsAnsiDisabled {
-		table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+		opts = append(opts, tablewriter.WithRenderer(renderer.NewColorized(renderer.ColorizedConfig{
+			Header: renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
+		})))
 	}
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
+	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
+	table := tablewriter.NewTable(d.out, opts...)
+	table.Header([]string{fmt.Sprintf("Diffs %v", d.testCase)})
 
 	for _, e := range diffs {
 		table.Append([]string{e})
@@ -925,8 +930,7 @@ func (d *DiffsPrinter) TableWriter(diffs []string) error {
 			endPaint = yellowPaint(endPaint)
 		}
 
-		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
+		table.Header([]string{initalPart + midPartpaint + endPaint})
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 	table.Render()
@@ -1018,18 +1022,16 @@ func (s *SchemaDiffPrinter) Render() error {
 		return nil
 	}
 
-	table := tablewriter.NewWriter(s.out)
-	table.SetAutoWrapText(false)
-	table.SetHeader([]string{"Schema Check Failed", "Expected", "Actual"})
-
+	var opts []tablewriter.Option
+	opts = append(opts, tablewriter.WithRowAutoWrap(0))
 	if !models.IsAnsiDisabled {
-		table.SetHeaderColor(
-			tablewriter.Colors{tablewriter.FgHiRedColor},
-			tablewriter.Colors{tablewriter.FgHiGreenColor},
-			tablewriter.Colors{tablewriter.FgHiRedColor},
-		)
+		opts = append(opts, tablewriter.WithRenderer(renderer.NewColorized(renderer.ColorizedConfig{
+			Header: renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
+		})))
 	}
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignLeft))
+	table := tablewriter.NewTable(s.out, opts...)
+	table.Header([]string{"Schema Check Failed", "Expected", "Actual"})
 
 	for _, e := range s.errors {
 		exp := e.Expected
@@ -1243,12 +1245,9 @@ func truncateStrings(exp, act string) (string, string) {
 }
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
-	table := tablewriter.NewWriter(buf)
-
+	align := tw.AlignLeft
 	if centerize {
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
-	} else {
-		table.SetAlignment(tablewriter.ALIGN_LEFT)
+		align = tw.AlignCenter
 	}
 
 	// Apply truncation logic
@@ -1259,11 +1258,14 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 		act = stripANSI(act)
 	}
 
-	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
-	table.SetAutoWrapText(false)
-	table.SetBorder(false)
-	table.SetColMinWidth(0, maxLineLength)
-	table.SetColMinWidth(1, maxLineLength)
+	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
+	table := tablewriter.NewTable(buf,
+		tablewriter.WithRowAutoWrap(0),
+		tablewriter.WithRowAlignment(align),
+		tablewriter.WithRendition(tw.Rendition{Borders: tw.Border{Left: tw.Off, Right: tw.Off, Top: tw.Off, Bottom: tw.Off}}),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
@@ -1272,12 +1274,9 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 // expectActualTableWithColors creates a table with colored expected (red) and actual (green) values
 func expectActualTableWithColors(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
-	table := tablewriter.NewWriter(buf)
-
+	align := tw.AlignLeft
 	if centerize {
-		table.SetAlignment(tablewriter.ALIGN_CENTER)
-	} else {
-		table.SetAlignment(tablewriter.ALIGN_LEFT)
+		align = tw.AlignCenter
 	}
 
 	// Apply truncation logic before processing
@@ -1299,11 +1298,14 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 	exp = wrapTextWithAnsi(exp)
 	act = wrapTextWithAnsi(act)
 
-	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
-	table.SetAutoWrapText(false)
-	table.SetBorder(false)
-	table.SetColMinWidth(0, maxLineLength)
-	table.SetColMinWidth(1, maxLineLength)
+	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
+	table := tablewriter.NewTable(buf,
+		tablewriter.WithRowAutoWrap(0),
+		tablewriter.WithRowAlignment(align),
+		tablewriter.WithRendition(tw.Rendition{Borders: tw.Border{Left: tw.Off, Right: tw.Off, Top: tw.Off, Bottom: tw.Off}}),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
