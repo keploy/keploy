@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -79,11 +80,42 @@ func FprintWrapper(newLine bool, wr io.Writer, a ...interface{}) {
 
 // Get the color for the logo at position (i, j)
 func getLogoColor(i, j int) string {
+	if models.CurrentTheme == models.ThemeDark {
+		return getDarkLogoColor(i, j)
+	}
+	return getLightLogoColor(i, j)
+}
+
+// getLightLogoColor returns the gradient color for the light theme logo
+func getLightLogoColor(i, j int) string {
 	gradientColors := []string{
 		"\033[38;5;202m", // Dark Orange
 		"\033[38;5;208m",
 		"\033[38;5;214m", // Light Orange
 		"\033[38;5;226m", // Light Yellow
+	}
+
+	switch {
+	case i <= 5:
+		return gradientColors[0]
+	case i == 6 && j <= 42:
+		return gradientColors[1]
+	case i == 7 && j <= 49:
+		return gradientColors[2]
+	case j <= 38:
+		return gradientColors[3]
+	default:
+		return gradientColors[0]
+	}
+}
+
+// getDarkLogoColor returns the gradient color for the dark theme logo
+func getDarkLogoColor(i, j int) string {
+	gradientColors := []string{
+		"\033[38;5;39m",  // Bright Blue
+		"\033[38;5;45m",  // Cyan
+		"\033[38;5;51m",  // Light Cyan
+		"\033[38;5;123m", // Bright Cyan
 	}
 
 	switch {

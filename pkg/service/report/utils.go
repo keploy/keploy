@@ -81,9 +81,15 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail, obsol
 
 	const (
 		reset = "\x1b[0m"
-		blue  = "\x1b[34;1m" // Blue and Bold
-		red   = "\x1b[31;1m" // Red and Bold
 	)
+	var blue, red string
+	if models.CurrentTheme == models.ThemeDark {
+		blue = "\x1b[36;1m" // Bright Cyan for dark backgrounds
+		red = "\x1b[93m"    // Bright Yellow for dark backgrounds
+	} else {
+		blue = "\x1b[34;1m" // Blue and Bold
+		red = "\x1b[31;1m"  // Red and Bold
+	}
 
 	timeStr := "N/A"
 	if dur > 0 {
@@ -143,11 +149,18 @@ func applyCliColorsToDiff(diff string) string {
 
 	// ANSI Constants
 	const (
-		reset  = "\x1b[0m"
-		yellow = "\x1b[33m"
-		red    = "\x1b[31m"
-		green  = "\x1b[32m"
+		reset = "\x1b[0m"
 	)
+	var yellow, red, green string
+	if models.CurrentTheme == models.ThemeDark {
+		yellow = "\x1b[93m"   // Bright Yellow
+		red = "\x1b[91m"      // Bright Red
+		green = "\x1b[92m"    // Bright Green
+	} else {
+		yellow = "\x1b[33m"
+		red = "\x1b[31m"
+		green = "\x1b[32m"
+	}
 
 	var sb strings.Builder
 	sb.Grow(len(diff) + 100)

@@ -285,6 +285,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
+		cmd.PersistentFlags().String("theme", c.cfg.Theme, "Set the color theme for CLI output (light or dark)")
 		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -418,6 +419,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"generateGithubActions": "generate-github-actions",
 		"disableTele":           "disable-tele",
 		"disableANSI":           "disable-ansi",
+		"theme":                 "theme",
 		"selectedTests":         "selected-tests",
 		"testReport":            "test-report",
 		"enableTesting":         "enable-testing",
@@ -652,6 +654,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.logger.Info("Color encoding is disabled")
+	}
+
+	// Set the CLI color theme
+	switch models.Theme(c.cfg.Theme) {
+	case models.ThemeDark:
+		models.CurrentTheme = models.ThemeDark
+		c.logger.Info("Dark mode theme is enabled")
+	case models.ThemeLight, "":
+		models.CurrentTheme = models.ThemeLight
+	default:
+		c.logger.Warn("Unknown theme value, falling back to light theme", zap.String("theme", c.cfg.Theme))
+		models.CurrentTheme = models.ThemeLight
 	}
 
 	if cmd.Name() == "test" {
@@ -1357,6 +1371,7 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.Test.IgnoreOrdering = c.cfg.Test.IgnoreOrdering
 	defaultCfg.Test.Language = c.cfg.Test.Language
 	defaultCfg.DisableANSI = c.cfg.DisableANSI
+	defaultCfg.Theme = c.cfg.Theme
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
 	defaultCfg.Test.DisableLineCoverage = c.cfg.Test.DisableLineCoverage
