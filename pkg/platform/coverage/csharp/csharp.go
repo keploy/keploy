@@ -69,7 +69,7 @@ func (cs *Csharp) PreProcess(_ bool) (string, error) {
 
 	// download dotnet coverage
 	dotnetPath := filepath.Join(os.TempDir(), "dotnet")
-	err = os.MkdirAll(dotnetPath, 0777)
+	err = os.MkdirAll(dotnetPath, models.DirPermPrivate)
 
 	if err != nil {
 		cs.logger.Debug("failed to create dotnet directory: %s", zap.Error(err))
