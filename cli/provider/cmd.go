@@ -308,7 +308,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
-
+		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
+		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
@@ -325,6 +326,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	case "record":
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
+		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
+		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
 	case "test", "rerecord":
@@ -1016,6 +1019,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
+			enableSampling, err := cmd.Flags().GetInt("enable-sampling")
+			if err != nil {
+				errMsg := "failed to get the enable-sampling flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.EnableSampling = enableSampling
 		}
 
 		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
@@ -1303,6 +1314,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.Synchronous = synchronous
+
+		enableSampling, err := cmd.Flags().GetInt("enable-sampling")
+		if err != nil {
+			errMsg := "failed to get the enable-sampling flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.EnableSampling = enableSampling
+		
 		buildDelay, err := cmd.Flags().GetUint64("build-delay")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get build-delay flag")
