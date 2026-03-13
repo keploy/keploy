@@ -1,0 +1,61 @@
+name: Colima Docker Test (macOS)
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: "Docker image tag or digest to pull"
+        required: false
+        type: string
+
+jobs:
+  colima_docker_test:
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Keploy binary
+        run: |
+          go build -o keploy .
+          chmod +x keploy
+          echo "Keploy binary built successfully"
+
+      - name: Install Colima, QEMU and Docker CLI
+        run: |
+          brew install qemu colima docker docker-compose
+          echo "Colima, QEMU and Docker CLI installed"
+
+      - name: Checkout samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Run Colima test
+        env:
+          RECORD_BIN: ${{ github.workspace }}/keploy
+          REPLAY_BIN: ${{ github.workspace }}/keploy
+          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/colima/colima-docker-macos.sh
+
+      - name: Kill running script processes
+        if: always()
+        continue-on-error: true
+        run: |
+          pkill -f "bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/colima/colima-docker-macos.sh" || true
+
+      - name: Stop Colima
+        if: always()
+        continue-on-error: true
+        run: |
+          colima stop || true
