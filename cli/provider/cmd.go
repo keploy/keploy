@@ -511,7 +511,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	}
 
 	// 4) Use provided configPath and convert to absolute path
-	configPath, err := cmd.Flags().GetString("config-path")
+  configPath, err := cmd.Flags().GetString("config-path")
 	if err != nil {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
@@ -526,9 +526,9 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	}
 	configPath = absConfigPath
 
+
 	c.logger.Debug("config path is ", zap.String("configPath", configPath))
 
-	// 5) Read base keploy.yml exactly like before
 	viper.SetConfigName("keploy")
 	viper.SetConfigType("yml")
 	viper.AddConfigPath(configPath)
