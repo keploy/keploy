@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -76,11 +77,22 @@ const (
 	// dnsCacheTTL is the default time-to-live for cached DNS entries.
 	// Entries expire automatically after this duration.
 	dnsCacheTTL = 30 * time.Second
+
+	// recordedDNSMocksMaxSize is the maximum number of entries in the DNS deduplication tracker.
+	recordedDNSMocksMaxSize = 1024
+	// recordedDNSMocksTTL is the TTL for recorded DNS mock entries.
+	// Recording sessions typically don't last longer than this.
+	recordedDNSMocksTTL = 30 * time.Minute
 )
 
 // newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
 func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
+}
+
+// newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
+func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
+	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
 }
 
 func generateCacheKey(name string, qtype uint16) string {
@@ -283,8 +295,12 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 		return dnsCacheEntry{}, false
 	}
 
-	const maxRetries = 5
+	const maxRetries = 3 // Reduced from 5 since we return result anyway after exhausting retries
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Add small backoff between retries to reduce contention
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*5) * time.Millisecond)
+		}
 		mocks, err := mgr.GetUnFilteredMocksByKind(models.DNS)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to get dns mocks")
@@ -321,6 +337,7 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 				p.logger.Warn("DNS mock update exhausted retries, returning matched response to avoid DNS timeout",
 					zap.String("mockName", matchedMock.Name),
 					zap.String("query", question.Name),
+					zap.Int("attempts", maxRetries),
 				)
 				return resp, true
 			}
@@ -340,6 +357,7 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 				p.logger.Warn("DNS mock update exhausted retries, returning matched response to avoid DNS timeout",
 					zap.String("mockName", matchedMock.Name),
 					zap.String("query", question.Name),
+					zap.Int("attempts", maxRetries),
 				)
 				return resp, true
 			}
@@ -440,6 +458,14 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
 	id, isFiltered, sortOrder := matchedMock.TestModeInfo.ID, matchedMock.TestModeInfo.IsFiltered, matchedMock.TestModeInfo.SortOrder
 
+	// Log the update attempt for debugging
+	p.logger.Debug("Attempting DNS mock update",
+		zap.String("mockName", matchedMock.Name),
+		zap.Int("id", id),
+		zap.Bool("isFiltered", isFiltered),
+		zap.Int64("sortOrder", sortOrder),
+	)
+
 	originalMatchedMock := &models.Mock{
 		Name: matchedMock.Name,
 		Kind: matchedMock.Kind,
@@ -463,7 +489,60 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 		},
 	}
 
-	return mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
+	result := mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
+	if !result {
+		p.logger.Debug("DNS mock update failed - mock not found with expected key",
+			zap.String("mockName", matchedMock.Name),
+			zap.Int("expectedID", id),
+			zap.Int64("expectedSortOrder", sortOrder),
+		)
+	}
+	return result
+}
+
+// generateDNSDedupeKey creates a unique key for DNS mock deduplication.
+// The key is based on the DNS question (name + type + class) and response (rcode + answer data).
+// TTL values are excluded to avoid treating responses with different TTLs as different.
+// This ensures identical DNS queries with identical responses are recorded only once.
+func generateDNSDedupeKey(question dns.Question, resp *dns.Msg) string {
+	// Build answer summary: extract answer data without TTL for stable deduplication
+	// DNS RR string format: "name TTL class type data"
+	// We want to capture: name, type, and data - but ignore TTL which changes over time
+	var answerParts []string
+	for _, rr := range resp.Answer {
+		// Extract the header and data separately to exclude TTL
+		hdr := rr.Header()
+		// Create a stable representation: name:type:data
+		// The RR's actual data (IP address, etc.) is obtained by removing the header
+		rrStr := rr.String()
+		// RR format: "name TTL class type data..."
+		// We'll just use the type and the data portion
+		answerParts = append(answerParts, fmt.Sprintf("%d:%s", hdr.Rrtype, extractRRData(rrStr)))
+	}
+
+	// Sort answer parts to handle answer reordering (e.g., round-robin DNS)
+	sort.Strings(answerParts)
+	answerSummary := strings.Join(answerParts, "|")
+
+	return fmt.Sprintf("%s:%d:%d:%d:%s",
+		dns.Fqdn(question.Name),
+		question.Qtype,
+		question.Qclass,
+		resp.Rcode,
+		answerSummary,
+	)
+}
+
+// extractRRData extracts the data portion of a DNS RR string, excluding name, TTL, class, and type.
+// Input format: "example.com. 300 IN A 104.18.27.120"
+// Output: "104.18.27.120"
+func extractRRData(rrStr string) string {
+	// Split by whitespace and skip: name, TTL, class, type (first 4 fields)
+	parts := strings.Fields(rrStr)
+	if len(parts) > 4 {
+		return strings.Join(parts[4:], " ")
+	}
+	return rrStr
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
@@ -534,6 +613,21 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		return resp, nil
 	}
 
+	// ========== DNS MOCK DEDUPLICATION ==========
+	// Generate a unique key based on the DNS query and response.
+	// If we've already recorded this exact query+response combination, skip recording.
+	dedupeKey := generateDNSDedupeKey(question, in)
+	if _, alreadyRecorded := p.recordedDNSMocks.Get(dedupeKey); alreadyRecorded {
+		p.logger.Debug("Skipping duplicate DNS mock",
+			zap.String("query", question.Name),
+			zap.String("qtype", dns.TypeToString[question.Qtype]),
+		)
+		return resp, nil
+	}
+	// Mark as recorded
+	p.recordedDNSMocks.Add(dedupeKey, true)
+	// ============================================
+
 	resTime := time.Now().UTC()
 	mock := &models.Mock{
 		Version: models.GetVersion(),
@@ -543,6 +637,7 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 			Metadata: map[string]string{
 				"name":  "DNS",
 				"qtype": dns.TypeToString[question.Qtype],
+				"type":  "config",
 			},
 			DNSReq: &models.DNSReq{
 				Name:   dns.Fqdn(question.Name),
@@ -562,6 +657,12 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 			ResTimestampMock: resTime,
 		},
 	}
+
+	p.logger.Debug("Recording new DNS mock",
+		zap.String("query", question.Name),
+		zap.String("qtype", dns.TypeToString[question.Qtype]),
+		zap.Int("rcode", in.Rcode),
+	)
 
 	if session.Synchronous {
 		if mgr := syncMock.Get(); mgr != nil {

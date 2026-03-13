@@ -197,7 +197,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 			return
 		}
 
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
