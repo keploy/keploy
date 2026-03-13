@@ -77,6 +77,11 @@ type Proxy struct {
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
+	// recordedDNSMocks tracks DNS queries that have already been recorded
+	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass:rcode:answerSummary"
+	// Uses bounded LRU with TTL to prevent unbounded memory growth.
+	recordedDNSMocks *expirable.LRU[string, bool]
+
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
@@ -118,6 +123,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
 
 	return proxy
@@ -134,6 +140,14 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
 func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
+}
+
+// ResetRecordedDNSMocks clears the DNS mock deduplication tracker.
+// This should be called when starting a new recording session to ensure
+// DNS mocks are recorded fresh for the new session.
+func (p *Proxy) ResetRecordedDNSMocks() {
+	p.recordedDNSMocks = newRecordedDNSMocksCache()
+	p.logger.Debug("DNS mock deduplication tracker reset")
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -911,6 +925,8 @@ func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certif
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
+	// Reset DNS mock deduplication tracker for fresh recording
+	p.ResetRecordedDNSMocks()
 	p.sessions.Set(uint64(0), &agent.Session{
 		ID:              uint64(0),
 		Mode:            models.MODE_RECORD,

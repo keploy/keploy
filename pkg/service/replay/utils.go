@@ -193,19 +193,22 @@ func getFailedTCs(results []models.TestResult) []string {
 	return ids
 }
 
-func isMockSubset(subset, superset []string) bool {
-	supersetCounts := make(map[string]int)
-	for _, mock := range superset {
-		supersetCounts[mock]++
+func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
+	expectedMap := make(map[string]bool)
+	for _, name := range expectedMocks {
+		expectedMap[name] = true
 	}
 
-	for _, mock := range subset {
-		if supersetCounts[mock] == 0 {
-			return false
+	for _, m := range consumedMocks {
+		if !expectedMap[m.Name] {
+			// Found an extra mock in the actual run
+			if m.Type != "config" {
+				// This is NOT a config mock, so it IS a mismatch
+				return false
+			}
+			// If Type is "config", we ignore it as an extra mock
 		}
-		supersetCounts[mock]--
 	}
-
 	return true
 }
 
