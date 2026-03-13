@@ -35,23 +35,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var (
-	completeTestReport   = make(map[string]TestReportVerdict)
-	firstRun             bool
-	completeTestReportMu sync.RWMutex
-	totalTests           int
-	totalTestPassed      int
-	totalTestFailed      int
-	totalTestObsolete    int
-	totalTestIgnored     int
-	totalTestTimeTaken   time.Duration
-)
-var failedTCsBySetID = make(map[string][]string)
-var mockMismatchFailures = NewTestFailureStore()
-
 const UNKNOWN_TEST = "UNKNOWN_TEST"
-
-var HookImpl TestHooks
 
 type Replayer struct {
 	logger             *zap.Logger
@@ -72,6 +56,19 @@ type Replayer struct {
 	testRunTestSets    []string             // all test set IDs for the current run (used by RunTestSet)
 	testRunID          string               // current test run ID (used by RunTestSet)
 	afterTestRunCalled bool                 // guards duplicate AfterTestRun calls
+	hookImpl           TestHooks
+
+	completeTestReport   map[string]TestReportVerdict
+	firstRun             bool
+	completeTestReportMu sync.RWMutex
+	totalTests           int
+	totalTestPassed      int
+	totalTestFailed      int
+	totalTestObsolete    int
+	totalTestIgnored     int
+	totalTestTimeTaken   time.Duration
+	failedTCsBySetID     map[string][]string
+	mockMismatchFailures *TestFailureStore
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -84,10 +81,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		tsConfigDB: testSetConf,
 	}
 
-	// set the request emulator for simulating test case requests, if not set
-	if HookImpl == nil {
-		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, instrumentation, mock))
-	}
+	defaultHook := NewHooks(logger, config, testSetConf, storage, auth, instrumentation, mock)
 
 	instrument := config.Command != ""
 	return &Replayer{
@@ -103,7 +97,23 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		instrument:      instrument,
 		auth:            auth,
 		mock:            mock,
+		hookImpl:        defaultHook,
+
+		completeTestReport:   make(map[string]TestReportVerdict),
+		failedTCsBySetID:     make(map[string][]string),
+		mockMismatchFailures: NewTestFailureStore(),
 	}
+}
+
+func (r *Replayer) SetTestHooks(testHooks TestHooks) {
+	if testHooks == nil {
+		return
+	}
+	r.hookImpl = testHooks
+}
+
+func (r *Replayer) GetTestHooks() TestHooks {
+	return r.hookImpl
 }
 
 func (r *Replayer) Start(ctx context.Context) error {
@@ -169,13 +179,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf("%s", errMsg)
 	}
 
-	completeTestReportMu.Lock()
-	completeTestReport = make(map[string]TestReportVerdict)
-	totalTests, totalTestPassed, totalTestFailed, totalTestObsolete, totalTestIgnored = 0, 0, 0, 0, 0
-	totalTestTimeTaken = 0
-	completeTestReportMu.Unlock()
-	failedTCsBySetID = make(map[string][]string)
-	mockMismatchFailures = NewTestFailureStore()
+	r.completeTestReportMu.Lock()
+	r.completeTestReport = make(map[string]TestReportVerdict)
+	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
+	r.totalTestTimeTaken = 0
+	r.completeTestReportMu.Unlock()
+	r.failedTCsBySetID = make(map[string][]string)
+	r.mockMismatchFailures = NewTestFailureStore()
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
@@ -275,12 +285,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 	natsort.Sort(testSets)
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
-	firstRun = true
+	r.firstRun = true
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
 
-		err := HookImpl.BeforeTestSetRun(ctx, testSet)
+		err := r.hookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -304,14 +314,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.isLastTestSet = true
 		}
 
-		completeTestReportMu.RLock()
-		initTotal := totalTests
-		initPassed := totalTestPassed
-		initFailed := totalTestFailed
-		initObsolete := totalTestObsolete
-		initIgnored := totalTestIgnored
-		initTimeTaken := totalTestTimeTaken
-		completeTestReportMu.RUnlock()
+		r.completeTestReportMu.RLock()
+		initTotal := r.totalTests
+		initPassed := r.totalTestPassed
+		initFailed := r.totalTestFailed
+		initObsolete := r.totalTestObsolete
+		initIgnored := r.totalTestIgnored
+		initTimeTaken := r.totalTestTimeTaken
+		r.completeTestReportMu.RUnlock()
 
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
@@ -327,14 +337,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
 			// gathered from rerunning, instead only metrics from the last rerun would get added to the variables.
-			completeTestReportMu.Lock()
-			totalTests = initTotal
-			totalTestPassed = initPassed
-			totalTestFailed = initFailed
-			totalTestObsolete = initObsolete
-			totalTestIgnored = initIgnored
-			totalTestTimeTaken = initTimeTaken
-			completeTestReportMu.Unlock()
+			r.completeTestReportMu.Lock()
+			r.totalTests = initTotal
+			r.totalTestPassed = initPassed
+			r.totalTestFailed = initFailed
+			r.totalTestObsolete = initObsolete
+			r.totalTestIgnored = initIgnored
+			r.totalTestTimeTaken = initTimeTaken
+			r.completeTestReportMu.Unlock()
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, false)
@@ -383,7 +393,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				break
 			}
 			failedTcIDs := getFailedTCs(tcResults)
-			failedTCsBySetID[testSet] = failedTcIDs
+			r.failedTCsBySetID[testSet] = failedTcIDs
 
 			// checking for flakiness when --must-pass flag is not set
 			// else if --must-pass is set, delete the failed testcases and rerun
@@ -453,7 +463,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		}
 
-		err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
+		err = r.hookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
 		}
@@ -491,10 +501,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
-	completeTestReportMu.RLock()
-	passed := totalTestPassed
-	failed := totalTestFailed
-	completeTestReportMu.RUnlock()
+	r.completeTestReportMu.RLock()
+	passed := r.totalTestPassed
+	failed := r.totalTestFailed
+	r.completeTestReportMu.RUnlock()
 	r.telemetry.TestRun(passed, failed, len(testSets), testRunStatus, map[string]interface{}{
 		"host-domains": runDomainSet.ToSlice(),
 	})
@@ -507,9 +517,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 
-		if !testRunResult && len(mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
+		if !testRunResult && len(r.mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
 			failuresByTestSet := make(map[string]bool)
-			for _, failure := range mockMismatchFailures.GetFailures() {
+			for _, failure := range r.mockMismatchFailures.GetFailures() {
 				failuresByTestSet[failure.TestSetID] = true
 			}
 
@@ -521,7 +531,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
 
 			if r.config.Debug {
-				mockMismatchFailures.PrintFailuresTable()
+				r.mockMismatchFailures.PrintFailuresTable()
 			}
 		}
 		coverageData := models.TestCoverage{}
@@ -543,7 +553,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 		//executing afterTestRun hook, executed after running all the test-sets
 		if !r.afterTestRunCalled {
-			err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+			err = r.hookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to execute after test run hook")
 			}
@@ -683,12 +693,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			timeTaken: timeTaken.String(),
 		}
 
-		completeTestReportMu.Lock()
-		completeTestReport[testSetID] = verdict
-		totalTests += testReport.Total
-		totalTestIgnored += testReport.Ignored
-		totalTestTimeTaken += timeTaken
-		completeTestReportMu.Unlock()
+		r.completeTestReportMu.Lock()
+		r.completeTestReport[testSetID] = verdict
+		r.totalTests += testReport.Total
+		r.totalTestIgnored += testReport.Ignored
+		r.totalTestTimeTaken += timeTaken
+		r.completeTestReportMu.Unlock()
 
 		return models.TestSetStatusIgnored, nil
 	}
@@ -796,12 +806,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		// In case of Docker Compose : since for every test set the agent and application are restarted, hence each test set can be considered as an indicidual test run
 		// We also need the firstRun for knowing the first test set run in the whole test mode for purpose like cleanup
-		err := HookImpl.BeforeTestSetCompose(ctx, testRunID, firstRun)
+		err := r.hookImpl.BeforeTestSetCompose(ctx, testRunID, r.firstRun)
 		if err != nil {
 			stopReason := fmt.Sprintf("failed to run BeforeTestSetCompose hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
 		}
-		firstRun = false
+		r.firstRun = false
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
@@ -943,13 +953,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "failed to store mocks on agent")
 			return models.TestSetStatusFailed, err
 		}
-		if firstRun {
-			err = HookImpl.BeforeTestRun(ctx, testRunID)
+		if r.firstRun {
+			err = r.hookImpl.BeforeTestRun(ctx, testRunID)
 			if err != nil {
 				stopReason := fmt.Sprintf("failed to run before test run hook: %v", err)
 				utils.LogError(r.logger, err, stopReason)
 			}
-			firstRun = false
+			r.firstRun = false
 		}
 		isMappingEnabled := !r.config.DisableMapping
 
@@ -1081,7 +1091,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		TestSetID: testSetID,
 	}
 	var consumedMocks []models.MockState
-	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
+	consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 	}
@@ -1214,7 +1224,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
 			go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
 
-			resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
+			resp, loopErr := r.hookImpl.SimulateRequest(runTestSetCtx, testCase, testSetID)
 
 			// Stop monitoring for this specific test case
 			testCaseProxyErrCancel()
@@ -1233,7 +1243,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if r.instrument {
-				consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx)
+				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 				}
@@ -1369,7 +1379,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", expectedMocks),
 						zap.Strings("actualMocks", mockNames))
-					mockMismatchFailures.AddFailure(testSetID, testCase.Name, expectedMocks, mockNames)
+					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, expectedMocks, mockNames)
 				}
 			}
 
@@ -1505,7 +1515,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	err = HookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
+	err = r.hookImpl.BeforeTestResult(ctx, testRunID, testSetID, testCaseResults)
 	if err != nil {
 		stopReason := fmt.Sprintf("failed to run before test result hook: %v", err)
 		utils.LogError(r.logger, err, stopReason)
@@ -1606,15 +1616,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		timeTaken: timeTaken.String(),
 	}
 
-	completeTestReportMu.Lock()
-	completeTestReport[testSetID] = verdict
-	totalTests += testReport.Total
-	totalTestPassed += testReport.Success
-	totalTestFailed += testReport.Failure
-	totalTestObsolete += testReport.Obsolete
-	totalTestIgnored += testReport.Ignored
-	totalTestTimeTaken += timeTaken
-	completeTestReportMu.Unlock()
+	r.completeTestReportMu.Lock()
+	r.completeTestReport[testSetID] = verdict
+	r.totalTests += testReport.Total
+	r.totalTestPassed += testReport.Success
+	r.totalTestFailed += testReport.Failure
+	r.totalTestObsolete += testReport.Obsolete
+	r.totalTestIgnored += testReport.Ignored
+	r.totalTestTimeTaken += timeTaken
+	r.completeTestReportMu.Unlock()
 
 	timeTakenStr := timeWithUnits(timeTaken)
 
@@ -1693,7 +1703,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// We must call AfterTestRun HERE (before defer fires) while the agent is alive.
 	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
 		r.afterTestRunCalled = true
-		if hookErr := HookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
+		if hookErr := r.hookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
 			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
@@ -1780,18 +1790,18 @@ func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
-	completeTestReportMu.RLock()
-	totalTestsSnapshot := totalTests
-	totalTestPassedSnapshot := totalTestPassed
-	totalTestFailedSnapshot := totalTestFailed
-	totalTestObsoleteSnapshot := totalTestObsolete
-	totalTestIgnoredSnapshot := totalTestIgnored
-	totalTestTimeTakenSnapshot := totalTestTimeTaken
-	reportSnapshot := make(map[string]TestReportVerdict, len(completeTestReport))
-	for key, val := range completeTestReport {
+	r.completeTestReportMu.RLock()
+	totalTestsSnapshot := r.totalTests
+	totalTestPassedSnapshot := r.totalTestPassed
+	totalTestFailedSnapshot := r.totalTestFailed
+	totalTestObsoleteSnapshot := r.totalTestObsolete
+	totalTestIgnoredSnapshot := r.totalTestIgnored
+	totalTestTimeTakenSnapshot := r.totalTestTimeTaken
+	reportSnapshot := make(map[string]TestReportVerdict, len(r.completeTestReport))
+	for key, val := range r.completeTestReport {
 		reportSnapshot[key] = val
 	}
-	completeTestReportMu.RUnlock()
+	r.completeTestReportMu.RUnlock()
 
 	if totalTestsSnapshot > 0 {
 		testSuiteNames := make([]string, 0, len(reportSnapshot))
@@ -1886,7 +1896,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 				if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
 					failedCasesStr := "-"
-					if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+					if failedCases, ok := r.failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
 						failedCasesStr = strings.Join(failedCases, ", ")
 					}
 					format.WriteString("\t%s")
@@ -1953,7 +1963,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 				if totalTestFailedSnapshot > 0 && !r.config.Test.MustPass {
 					failedCasesStr := "-"
-					if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+					if failedCases, ok := r.failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
 						failedCasesStr = strings.Join(failedCases, ", ")
 					}
 					format.WriteString("\t\t%s")
@@ -2058,10 +2068,6 @@ func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
 
 func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
-}
-
-func SetTestHooks(testHooks TestHooks) {
-	HookImpl = testHooks
 }
 
 // CreateFailedTestResult creates a test result for failed test cases
@@ -2458,7 +2464,7 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 				// Handle typed ParserError
 				switch parserErr.ParserErrorType {
 				case models.ErrMockNotFound:
-					mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
+					r.mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
 				}
 			}
 
