@@ -1122,7 +1122,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testsToRun := activeTestCases
 	finalTestCaseResults := make(map[string]*models.TestResult)
 	itr := 1
-	if r.config.IterativeTest {
+	if r.config.RetryPassing {
 		itr = 3
 	}
 	for replay := 0; replay < itr; replay++ {
