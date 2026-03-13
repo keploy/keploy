@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
@@ -101,11 +100,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Header.Set("Connection", "close")
 		}
 
-		reqData, err := httputil.DumpRequest(req, true)
-		if err != nil {
-			logger.Error("Failed to dump request for capturing", zap.Error(err))
-			req.Body.Close()
-			return
+		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		if req.Body != nil && req.Body != http.NoBody {
+			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
 
 		if err := req.Write(upConn); err != nil {
@@ -132,11 +129,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		respTimestamp := time.Now()
-		respData, err := httputil.DumpResponse(resp, true)
-		if err != nil {
-			logger.Error("Failed to dump response for capturing", zap.Error(err))
-			resp.Body.Close()
-			return
+		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		if resp.Body != nil && resp.Body != http.NoBody {
+			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
 
 		if err := resp.Write(clientConn); err != nil {
@@ -150,8 +145,33 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
+		if reqCapture.Truncated() || respCapture.Truncated() {
+			logger.Debug("Skipping HTTP capture because body exceeded capture budget while streaming",
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.String("url", req.URL.String()),
+				zap.String("method", req.Method),
+			)
+			if pm.synchronous {
+				return
+			}
+			continue
+		}
+
+		reqData, err := dumpCapturedRequest(req, reqCapture.Bytes())
+		if err != nil {
+			logger.Error("Failed to dump captured request", zap.Error(err))
+			return
+		}
+
 		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 		if err != nil {
+			return
+		}
+
+		respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respCapture.Bytes())
+		if err != nil {
+			logger.Error("Failed to dump captured response", zap.Error(err))
 			return
 		}
 		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
