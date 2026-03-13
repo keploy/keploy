@@ -785,6 +785,16 @@ func NewDiffsPrinterOut(out io.Writer, testCase string) DiffsPrinter {
 	}
 }
 
+func newDiffTableRenderer() *renderer.Colorized {
+	return renderer.NewColorized(renderer.ColorizedConfig{
+		Header:    renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
+		Column:    renderer.Tint{Columns: []renderer.Tint{}},
+		Footer:    renderer.Tint{FG: renderer.Colors{color.FgYellow}},
+		Border:    renderer.Tint{FG: renderer.Colors{color.FgWhite}},
+		Separator: renderer.Tint{FG: renderer.Colors{color.FgWhite}},
+	})
+}
+
 func (d *DiffsPrinter) PushTypeDiff(exp, act string) {
 	d.typeExp, d.typeAct = exp, act
 }
@@ -849,9 +859,7 @@ func (d *DiffsPrinter) Render() error {
 	var opts []tablewriter.Option
 	opts = append(opts, tablewriter.WithRowAutoWrap(0))
 	if !models.IsAnsiDisabled {
-		opts = append(opts, tablewriter.WithRenderer(renderer.NewColorized(renderer.ColorizedConfig{
-			Header: renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
-		})))
+		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
 	}
 	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
 	table := tablewriter.NewTable(d.out, opts...)
@@ -896,9 +904,7 @@ func (d *DiffsPrinter) TableWriter(diffs []string) error {
 	var opts []tablewriter.Option
 	opts = append(opts, tablewriter.WithRowAutoWrap(0))
 	if !models.IsAnsiDisabled {
-		opts = append(opts, tablewriter.WithRenderer(renderer.NewColorized(renderer.ColorizedConfig{
-			Header: renderer.Tint{FG: renderer.Colors{color.FgHiRed}},
-		})))
+		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
 	}
 	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
 	table := tablewriter.NewTable(d.out, opts...)
@@ -1022,18 +1028,12 @@ func (s *SchemaDiffPrinter) Render() error {
 
 	var opts []tablewriter.Option
 	opts = append(opts, tablewriter.WithRowAutoWrap(0))
+	if !models.IsAnsiDisabled {
+		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
+	}
 	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignLeft))
 	table := tablewriter.NewTable(s.out, opts...)
-
-	headerReason := "Schema Check Failed"
-	headerExpected := "Expected"
-	headerActual := "Actual"
-	if !models.IsAnsiDisabled {
-		headerReason = color.New(color.FgHiRed).Sprint(headerReason)
-		headerExpected = color.New(color.FgHiGreen).Sprint(headerExpected)
-		headerActual = color.New(color.FgHiRed).Sprint(headerActual)
-	}
-	table.Header([]string{headerReason, headerExpected, headerActual})
+	table.Header([]string{"Schema Check Failed", "Expected", "Actual"})
 
 	for _, e := range s.errors {
 		exp := e.Expected
