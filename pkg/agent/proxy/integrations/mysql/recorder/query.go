@@ -205,30 +205,36 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
 
-		// Read the EOF packet for parameter definition
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-		if err != nil {
-			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
+		// When CLIENT_DEPRECATE_EOF is negotiated (MySQL 5.7.5+), the server omits
+		// EOF packets between parameter definitions and column definitions.
+		if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+			// Read the EOF packet for parameter definition
+			eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			if err != nil {
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read EOF packet for parameter definition")
+				}
+				return nil, err
 			}
-			return nil, err
+
+			// Write the EOF packet for parameter definition to the client
+			_, err = clientConn.Write(eofData)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write EOF packet for parameter definition to the client")
+				return nil, err
+			}
+
+			// Validate the EOF packet for parameter definition
+			if !mysqlUtils.IsEOFPacket(eofData) {
+				return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
+			}
+
+			responseOk.EOFAfterParamDefs = eofData
+
+			logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
+		} else {
+			logger.Debug("Skipping EOF after param defs (CLIENT_DEPRECATE_EOF is set)")
 		}
-
-		// Write the EOF packet for parameter definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for parameter definition to the client")
-			return nil, err
-		}
-
-		// Validate the EOF packet for parameter definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for parameter definition, got %v", eofData)
-		}
-
-		responseOk.EOFAfterParamDefs = eofData
-
-		logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
 	}
 
 	//See if there are any columns
@@ -262,30 +268,36 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
 
-		// Read the EOF packet for column definition
-		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-		if err != nil {
-			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read EOF packet for column definition")
+		// When CLIENT_DEPRECATE_EOF is negotiated (MySQL 5.7.5+), the server omits
+		// EOF packets between parameter definitions and column definitions.
+		if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+			// Read the EOF packet for column definition
+			eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+			if err != nil {
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read EOF packet for column definition")
+				}
+				return nil, err
 			}
-			return nil, err
+
+			// Write the EOF packet for column definition to the client
+			_, err = clientConn.Write(eofData)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
+				return nil, err
+			}
+
+			// Validate the EOF packet for column definition
+			if !mysqlUtils.IsEOFPacket(eofData) {
+				return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling prepared statement response", eofData)
+			}
+
+			responseOk.EOFAfterColumnDefs = eofData
+
+			logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
+		} else {
+			logger.Debug("Skipping EOF after column defs (CLIENT_DEPRECATE_EOF is set)")
 		}
-
-		// Write the EOF packet for column definition to the client
-		_, err = clientConn.Write(eofData)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
-			return nil, err
-		}
-
-		// Validate the EOF packet for column definition
-		if !mysqlUtils.IsEOFPacket(eofData) {
-			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling prepared statement response", eofData)
-		}
-
-		responseOk.EOFAfterColumnDefs = eofData
-
-		logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
 	}
 
 	//set the lastOp to COM_STMT_PREPARE_OK
@@ -399,12 +411,21 @@ rowLoop:
 			// }
 
 			// Break if the data packet is an EOF packet, But we need to check for generic response
-			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
+			// Right now we are just checking for EOF/OK packet as we couldn't differentiate between the generic response and row data packet.
+			// When CLIENT_DEPRECATE_EOF is set (MySQL 5.7.5+), the server sends an OK packet instead of EOF at the end of the result set.
 			if mysqlUtils.IsEOFPacket(data) {
 				logger.Debug("Found EOF packet after row data in text resultset")
 				textResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
 					Type: mysql.StatusToString(mysql.EOF),
+				}
+				break rowLoop
+			}
+			if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF != 0 && mysqlUtils.IsOKPacket(data) {
+				logger.Debug("Found OK packet after row data in text resultset (CLIENT_DEPRECATE_EOF is set)")
+				textResultSet.FinalResponse = &mysql.GenericResponse{
+					Data: data,
+					Type: mysql.StatusToString(mysql.OK),
 				}
 				break rowLoop
 			}
@@ -469,28 +490,34 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 
 	logger.Debug("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
 
-	// Read the EOF packet for column definition
-	eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-	if err != nil {
-		if err != io.EOF {
-			utils.LogError(logger, err, "failed to read EOF packet for column definition")
+	// When CLIENT_DEPRECATE_EOF is negotiated (MySQL 5.7.5+), the server omits the
+	// EOF packet that normally follows column definitions in a binary result set.
+	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+		// Read the EOF packet for column definition
+		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		if err != nil {
+			if err != io.EOF {
+				utils.LogError(logger, err, "failed to read EOF packet for column definition")
+			}
+			return nil, err
 		}
-		return nil, err
-	}
 
-	// Write the EOF packet for column definition to the client
-	_, err = clientConn.Write(eofData)
-	if err != nil {
-		utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
-		return nil, err
-	}
+		// Write the EOF packet for column definition to the client
+		_, err = clientConn.Write(eofData)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
+			return nil, err
+		}
 
-	// Validate the EOF packet for column definition
-	if !mysqlUtils.IsEOFPacket(eofData) {
-		return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling BinaryProtocolResultSet", eofData)
-	}
+		// Validate the EOF packet for column definition
+		if !mysqlUtils.IsEOFPacket(eofData) {
+			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling BinaryProtocolResultSet", eofData)
+		}
 
-	binaryResultSet.EOFAfterColumns = eofData
+		binaryResultSet.EOFAfterColumns = eofData
+	} else {
+		logger.Debug("Skipping EOF after column defs in binary result set (CLIENT_DEPRECATE_EOF is set)")
+	}
 
 	// Read the row data packets
 rowLoop:
@@ -529,12 +556,21 @@ rowLoop:
 			// }
 
 			// Break if the data packet is an EOF packet, But we need to check for generic response
-			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
+			// Right now we are just checking for EOF/OK packet as we couldn't differentiate between the generic response and row data packet.
+			// When CLIENT_DEPRECATE_EOF is set (MySQL 5.7.5+), the server sends an OK packet instead of EOF at the end of the result set.
 			if mysqlUtils.IsEOFPacket(data) {
 				logger.Debug("Found EOF packet after row data in binary resultset")
 				binaryResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
 					Type: mysql.StatusToString(mysql.EOF),
+				}
+				break rowLoop
+			}
+			if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF != 0 && mysqlUtils.IsOKPacket(data) {
+				logger.Debug("Found OK packet after row data in binary resultset (CLIENT_DEPRECATE_EOF is set)")
+				binaryResultSet.FinalResponse = &mysql.GenericResponse{
+					Data: data,
+					Type: mysql.StatusToString(mysql.OK),
 				}
 				break rowLoop
 			}
