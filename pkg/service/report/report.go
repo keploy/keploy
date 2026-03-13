@@ -14,11 +14,13 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/runregistry"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -378,13 +380,31 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			return nil
 		}
 	}
-
 	if r.config.Report.Summary {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
 			return fmt.Errorf("failed to collect reports for summary: %w", err)
 		}
-		return r.printSummary(reports)
+		if err := r.printSummary(reports); err != nil {
+			return err
+		}
+
+		summary := extractSummary(reports)
+
+		run := runregistry.TestRun{
+			ID:        uuid.New().String(),
+			Timestamp: time.Now(),
+			Total:     summary.Total,
+			Passed:    summary.Passed,
+			Failed:    summary.Failed,
+			Duration:  summary.Duration,
+		}
+
+		if err := runregistry.RegisterRun(run); err != nil {
+			r.logger.Warn("failed to register test run", zap.Error(err))
+		}
+		return nil
+
 	}
 
 	// Specific test-case(s)
@@ -981,4 +1001,36 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 		return fmt.Errorf("failed to render default body diffs: %w", err)
 	}
 	return nil
+}
+
+// RunSummary holds aggregated test results
+type RunSummary struct {
+	Total    int
+	Passed   int
+	Failed   int
+	Duration time.Duration
+}
+
+func extractSummary(reports map[string]*models.TestReport) RunSummary {
+	var total, passed, failed int
+	var totalDuration time.Duration
+
+	for _, rep := range reports {
+		total += rep.Total
+		passed += rep.Success
+		failed += rep.Failure
+
+		if rep.TimeTaken != "" {
+			if parsed, err := time.ParseDuration(rep.TimeTaken); err == nil {
+				totalDuration += parsed
+			}
+		}
+	}
+
+	return RunSummary{
+		Total:    total,
+		Passed:   passed,
+		Failed:   failed,
+		Duration: totalDuration,
+	}
 }
