@@ -38,6 +38,7 @@ type Config struct {
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
+	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []models.BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	EnableTesting         bool                `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
