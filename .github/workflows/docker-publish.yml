@@ -6,8 +6,8 @@ name: Docker
 # documentation.
 
 on:
-  push:
-    tags: [ 'v*.*.*' ]
+  release:
+    types: [published]
 
 env:
   # Use docker.io for Docker Hub if empty
