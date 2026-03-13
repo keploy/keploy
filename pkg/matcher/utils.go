@@ -885,7 +885,6 @@ func (d *DiffsPrinter) Render() error {
 			endPaint = yellowPaint(endPaint)
 		}
 
-		table.Header([]string{initalPart + midPartpaint + endPaint})
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 
@@ -930,7 +929,6 @@ func (d *DiffsPrinter) TableWriter(diffs []string) error {
 			endPaint = yellowPaint(endPaint)
 		}
 
-		table.Header([]string{initalPart + midPartpaint + endPaint})
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 	table.Render()
@@ -1038,9 +1036,6 @@ func (s *SchemaDiffPrinter) Render() error {
 		act := e.Actual
 		reason := e.Reason
 
-		if !models.IsAnsiDisabled {
-			// Colorize reason if needed, or keep plain
-		}
 		table.Append([]string{reason, exp, act})
 	}
 
