@@ -1322,7 +1322,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.EnableSampling = enableSampling
-		
+
 		buildDelay, err := cmd.Flags().GetUint64("build-delay")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get build-delay flag")
