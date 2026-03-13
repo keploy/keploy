@@ -1,0 +1,8 @@
+# Binary output
+mock-server
+test-client
+
+# Keploy artifacts
+keploy.yml
+keploy_agent.log
+stubs/

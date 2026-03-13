@@ -37,6 +37,7 @@ type Config struct {
 	Gen                   UtGen               `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize           `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord            `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
+	Stub                  Stub                `json:"stub" yaml:"stub" mapstructure:"stub"`
 	DisableMapping        bool                `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	RetryPassing          bool                `json:"retryPassing" yaml:"retryPassing" mapstructure:"retryPassing"`
 	ConfigPath            string              `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
@@ -90,6 +91,15 @@ type Record struct {
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+}
+
+// Stub is used for mock-only recording/replaying with external test frameworks
+type Stub struct {
+	Name          string        `json:"name" yaml:"name" mapstructure:"name"`                   // Name of the stub/mock set (auto-generated if empty)
+	Path          string        `json:"path" yaml:"path" mapstructure:"path"`                   // Path to store/load mocks
+	RecordTimer   time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"` // Timer for stub recording
+	MongoPassword string        `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
+	Ports         []uint        `json:"ports" yaml:"ports" mapstructure:"ports"`               // Additional ports to intercept
 }
 
 type ReRecord struct {

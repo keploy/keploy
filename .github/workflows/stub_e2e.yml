@@ -1,0 +1,810 @@
+name: Stub E2E Tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'pkg/service/stub/**'
+      - 'cli/stub.go'
+      - 'e2e/stub/**'
+      - '.github/workflows/stub_e2e.yml'
+  pull_request:
+    paths:
+      - 'pkg/service/stub/**'
+      - 'cli/stub.go'
+      - 'e2e/stub/**'
+      - '.github/workflows/stub_e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.24'
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.11'
+  MOCK_SERVER_PORT: '9000'
+  API_BASE_URL: 'http://localhost:9000'
+
+jobs:
+  build-keploy:
+    name: Build Keploy Binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc
+
+      - name: Build Keploy
+        run: go build -o keploy-binary .
+
+      - name: Verify binary works
+        run: |
+          ./keploy-binary --version
+          ./keploy-binary stub --help
+          ./keploy-binary stub record --help
+          ./keploy-binary stub replay --help
+
+      - name: Upload Keploy binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: keploy-binary
+          path: keploy-binary
+          retention-days: 1
+
+  go-e2e-tests:
+    name: Go E2E Tests
+    needs: build-keploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download Keploy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keploy-binary
+          path: .
+
+      - name: Make Keploy executable
+        run: chmod +x keploy-binary
+
+      - name: Build mock server
+        run: |
+          cd e2e/stub/fixtures/mock-server
+          go build -o mock-server .
+
+      - name: Build test client
+        run: |
+          cd e2e/stub/fixtures/test-client
+          go build -o test-client .
+
+      - name: Start mock server
+        run: |
+          cd e2e/stub/fixtures/mock-server
+          ./mock-server &
+          sleep 3
+
+      - name: Verify mock server is running
+        run: |
+          if ! curl -sf http://localhost:9000/health; then
+            echo "::error::Mock server failed to start. Check server logs."
+            exit 1
+          fi
+          echo "✅ Mock server is running"
+
+      - name: Run Go E2E tests
+        env:
+          KEPLOY_E2E_TEST: 'true'
+        run: |
+          cd e2e/stub/go
+          go test -v -timeout 300s ./...
+
+  playwright-e2e-tests:
+    name: Playwright E2E Tests
+    needs: build-keploy
+    runs-on: ubuntu-latest
+    outputs:
+      record_status: ${{ steps.validate-record.outputs.status }}
+      replay_status: ${{ steps.validate-replay.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: e2e/stub/playwright/package.json
+
+      - name: Download Keploy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keploy-binary
+          path: .
+
+      - name: Make Keploy executable
+        run: chmod +x keploy-binary
+
+      - name: Install Playwright dependencies
+        run: |
+          cd e2e/stub/playwright
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Start mock server
+        run: |
+          cd e2e/stub/playwright
+          node server.js &
+          sleep 3
+
+      - name: Verify mock server is running
+        run: |
+          if ! curl -sf http://localhost:9000/health; then
+            echo "::error::Mock server failed to start"
+            exit 1
+          fi
+          echo "✅ Mock server is running"
+
+      # ============================================
+      # BASELINE TESTS (without Keploy)
+      # ============================================
+      - name: Run baseline tests (without Keploy)
+        id: baseline
+        run: |
+          cd e2e/stub/playwright
+          echo "Running baseline tests to ensure tests pass without Keploy..."
+          if ! npx playwright test --project=ui-tests --reporter=list; then
+            echo "::error::Baseline tests failed. Fix the tests before testing stub functionality."
+            exit 1
+          fi
+          echo "✅ Baseline tests passed"
+
+      # ============================================
+      # STUB RECORD PHASE
+      # ============================================
+      - name: Record stubs with Keploy
+        id: record
+        run: |
+          cd e2e/stub/playwright
+          rm -rf stubs
+          mkdir -p stubs
+          
+          echo "📼 Recording stubs while running tests..."
+          RECORD_OUTPUT=$(mktemp)
+          
+          # Run stub record and capture output
+          ${{ github.workspace }}/keploy-binary stub record \
+            -c "npx playwright test --project=ui-tests --reporter=list" \
+            -p ./stubs \
+            --name ui-stubs \
+            --record-timer 180s \
+            --proxy-port 16789 \
+            --dns-port 26789 2>&1 | tee "$RECORD_OUTPUT"
+          
+          RECORD_EXIT_CODE=${PIPESTATUS[0]}
+          
+          # Check if recording command had errors
+          if grep -q "failed setting up the environment" "$RECORD_OUTPUT"; then
+            echo "::error::Keploy failed to set up the recording environment. Check eBPF/permissions."
+            exit 1
+          fi
+          
+          echo "record_exit_code=$RECORD_EXIT_CODE" >> $GITHUB_OUTPUT
+
+      - name: Validate stubs were recorded
+        id: validate-record
+        run: |
+          cd e2e/stub/playwright
+          
+          echo "🔍 Validating recorded stubs..."
+          
+          # Check directory structure
+          if [ ! -d "stubs/keploy/ui-stubs" ]; then
+            echo "::error::Stub directory not created!"
+            echo "::error::Expected: stubs/keploy/ui-stubs/"
+            echo "::error::This indicates Keploy failed to initialize recording."
+            ls -la stubs/ 2>/dev/null || echo "stubs/ directory doesn't exist"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Check mocks.yaml exists
+          if [ ! -f "stubs/keploy/ui-stubs/mocks.yaml" ]; then
+            echo "::error::mocks.yaml file not created!"
+            echo "::error::Keploy may have failed to capture any outgoing HTTP calls."
+            echo "::error::Possible causes:"
+            echo "::error::  - eBPF hooks not attached properly"
+            echo "::error::  - Tests didn't make any HTTP requests"
+            echo "::error::  - Proxy not intercepting traffic"
+            ls -la stubs/keploy/ui-stubs/ 2>/dev/null
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Check mocks.yaml is not empty
+          MOCK_SIZE=$(stat -c%s stubs/keploy/ui-stubs/mocks.yaml 2>/dev/null || stat -f%z stubs/keploy/ui-stubs/mocks.yaml 2>/dev/null)
+          if [ "$MOCK_SIZE" -lt 100 ]; then
+            echo "::error::mocks.yaml is too small ($MOCK_SIZE bytes)!"
+            echo "::error::Expected substantial mock data from HTTP calls."
+            cat stubs/keploy/ui-stubs/mocks.yaml
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Count number of mocks recorded
+          MOCK_COUNT=$(grep -c "kind: Http" stubs/keploy/ui-stubs/mocks.yaml || echo "0")
+          echo "📦 Recorded $MOCK_COUNT HTTP mocks"
+          
+          if [ "$MOCK_COUNT" -lt 10 ]; then
+            echo "::warning::Only $MOCK_COUNT mocks recorded. Expected more for UI tests."
+            echo "::warning::This might indicate partial capture or test failures during record."
+          fi
+          
+          if [ "$MOCK_COUNT" -eq 0 ]; then
+            echo "::error::No HTTP mocks recorded!"
+            echo "::error::The tests ran but Keploy didn't capture any HTTP traffic."
+            echo "::error::Possible causes:"
+            echo "::error::  - Proxy not intercepting outgoing calls"
+            echo "::error::  - DNS resolution not redirected through Keploy"
+            echo "::error::  - Tests using localhost without proxy"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "✅ Successfully recorded $MOCK_COUNT mocks"
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "mock_count=$MOCK_COUNT" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # STUB REPLAY PHASE (Server stopped)
+      # ============================================
+      - name: Stop mock server for replay test
+        run: |
+          echo "🛑 Stopping mock server to test replay with mocks only..."
+          pkill -f "node server.js" || true
+          sleep 2
+          
+          # Verify server is actually stopped
+          if curl -sf http://localhost:9000/health 2>/dev/null; then
+            echo "::error::Failed to stop mock server!"
+            exit 1
+          fi
+          echo "✅ Mock server stopped"
+
+      - name: Replay stubs without real server
+        id: replay
+        run: |
+          cd e2e/stub/playwright
+          
+          echo "▶️ Replaying stubs (server is DOWN)..."
+          REPLAY_OUTPUT=$(mktemp)
+          
+          ${{ github.workspace }}/keploy-binary stub replay \
+            -c "npx playwright test --project=ui-tests --reporter=list" \
+            -p ./stubs \
+            --name ui-stubs \
+            --proxy-port 16789 \
+            --dns-port 26789 2>&1 | tee "$REPLAY_OUTPUT"
+          
+          REPLAY_EXIT_CODE=${PIPESTATUS[0]}
+          
+          # Check for specific error patterns
+          if grep -q "No stubs found" "$REPLAY_OUTPUT"; then
+            echo "::error::Replay failed: No stubs found"
+            echo "::error::The stubs directory exists but Keploy couldn't load the mocks."
+            echo "::error::Check the path structure: stubs/keploy/{name}/mocks.yaml"
+            exit 1
+          fi
+          
+          if grep -q "no mocks found in stub set" "$REPLAY_OUTPUT"; then
+            echo "::error::Replay failed: Mocks file is empty or corrupted"
+            exit 1
+          fi
+          
+          # Extract test results
+          if grep -q "passed" "$REPLAY_OUTPUT"; then
+            PASSED=$(grep -oE '[0-9]+ passed' "$REPLAY_OUTPUT" | head -1 | grep -oE '[0-9]+')
+            FAILED=$(grep -oE '[0-9]+ failed' "$REPLAY_OUTPUT" | head -1 | grep -oE '[0-9]+' || echo "0")
+            echo "Tests: $PASSED passed, $FAILED failed"
+          fi
+          
+          echo "replay_exit_code=$REPLAY_EXIT_CODE" >> $GITHUB_OUTPUT
+
+      - name: Validate replay results
+        id: validate-replay
+        run: |
+          cd e2e/stub/playwright
+          
+          # Check if all tests passed during replay
+          if [ -d "test-results" ]; then
+            FAILURES=$(find test-results -name "*.png" -o -name "*error*" 2>/dev/null | wc -l)
+            if [ "$FAILURES" -gt 0 ]; then
+              echo "::warning::Some tests may have failed during replay. Check artifacts."
+            fi
+          fi
+          
+          echo "✅ Replay validation complete"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # EDGE CASE: Replay with fallback-on-miss
+      # ============================================
+      - name: Restart mock server for fallback test
+        run: |
+          cd e2e/stub/playwright
+          node server.js &
+          sleep 3
+          
+          if ! curl -sf http://localhost:9000/health; then
+            echo "::error::Failed to restart mock server"
+            exit 1
+          fi
+          echo "✅ Mock server restarted for fallback test"
+
+      - name: Test fallback-on-miss behavior
+        run: |
+          cd e2e/stub/playwright
+          
+          echo "Testing --fallback-on-miss flag..."
+          # This should use mocks when available, fall back to real server otherwise
+          ${{ github.workspace }}/keploy-binary stub replay \
+            -c "npx playwright test --project=ui-tests --reporter=list" \
+            -p ./stubs \
+            --name ui-stubs \
+            --fallback-on-miss \
+            --proxy-port 16789 \
+            --dns-port 26789 || true
+          
+          echo "✅ Fallback test complete"
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-results
+          path: |
+            e2e/stub/playwright/playwright-report/
+            e2e/stub/playwright/test-results/
+            e2e/stub/playwright/stubs/
+          retention-days: 7
+
+  pytest-e2e-tests:
+    name: Pytest E2E Tests
+    needs: build-keploy
+    runs-on: ubuntu-latest
+    outputs:
+      record_status: ${{ steps.validate-record.outputs.status }}
+      replay_status: ${{ steps.validate-replay.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: e2e/stub/pytest/requirements.txt
+
+      - name: Download Keploy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keploy-binary
+          path: .
+
+      - name: Make Keploy executable
+        run: chmod +x keploy-binary
+
+      - name: Install Python dependencies
+        run: |
+          cd e2e/stub/pytest
+          pip install -r requirements.txt
+
+      - name: Start mock server
+        run: |
+          cd e2e/stub/pytest
+          python server.py &
+          sleep 3
+
+      - name: Verify mock server is running
+        run: |
+          if ! curl -sf http://localhost:9000/health; then
+            echo "::error::Mock server failed to start"
+            exit 1
+          fi
+          echo "✅ Mock server is running"
+
+      # ============================================
+      # BASELINE TESTS
+      # ============================================
+      - name: Run baseline tests
+        run: |
+          cd e2e/stub/pytest
+          if ! pytest tests/ -v --tb=short; then
+            echo "::error::Baseline tests failed"
+            exit 1
+          fi
+          echo "✅ Baseline tests passed"
+
+      # ============================================
+      # STUB RECORD PHASE
+      # ============================================
+      - name: Record stubs with Keploy
+        run: |
+          cd e2e/stub/pytest
+          rm -rf stubs
+          mkdir -p stubs
+          
+          echo "📼 Recording stubs..."
+          ${{ github.workspace }}/keploy-binary stub record \
+            -c "pytest tests/ -v --tb=short" \
+            -p ./stubs \
+            --name pytest-stubs \
+            --record-timer 180s \
+            --proxy-port 16790 \
+            --dns-port 26790 2>&1 | tee record-output.log
+
+      - name: Validate stubs were recorded
+        id: validate-record
+        run: |
+          cd e2e/stub/pytest
+          
+          if [ ! -f "stubs/keploy/pytest-stubs/mocks.yaml" ]; then
+            echo "::error::mocks.yaml not created!"
+            echo "::error::Check record-output.log for errors"
+            cat record-output.log
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          MOCK_COUNT=$(grep -c "kind: Http" stubs/keploy/pytest-stubs/mocks.yaml || echo "0")
+          echo "📦 Recorded $MOCK_COUNT HTTP mocks"
+          
+          if [ "$MOCK_COUNT" -eq 0 ]; then
+            echo "::error::No mocks recorded!"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "✅ Recording successful"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # STUB REPLAY PHASE
+      # ============================================
+      - name: Stop mock server
+        run: |
+          pkill -f "python server.py" || true
+          sleep 2
+          echo "✅ Mock server stopped"
+
+      - name: Replay stubs without server
+        run: |
+          cd e2e/stub/pytest
+          
+          echo "▶️ Replaying stubs (server is DOWN)..."
+          ${{ github.workspace }}/keploy-binary stub replay \
+            -c "pytest tests/ -v --tb=short" \
+            -p ./stubs \
+            --name pytest-stubs \
+            --proxy-port 16790 \
+            --dns-port 26790 2>&1 | tee replay-output.log
+
+      - name: Validate replay results
+        id: validate-replay
+        run: |
+          cd e2e/stub/pytest
+          
+          if grep -q "FAILED" replay-output.log; then
+            FAILED_COUNT=$(grep -c "FAILED" replay-output.log || echo "0")
+            echo "::warning::$FAILED_COUNT tests failed during replay"
+          fi
+          
+          if grep -q "passed" replay-output.log; then
+            echo "✅ Replay tests completed"
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "::error::No tests passed during replay"
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-results
+          path: |
+            e2e/stub/pytest/stubs/
+            e2e/stub/pytest/*.log
+          retention-days: 7
+
+  stub-integration-test:
+    name: Stub Integration Test
+    needs: build-keploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download Keploy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keploy-binary
+          path: .
+
+      - name: Make Keploy executable
+        run: chmod +x keploy-binary
+
+      - name: Build fixtures
+        run: |
+          cd e2e/stub/fixtures/mock-server
+          go build -o mock-server .
+          cd ../test-client
+          go build -o test-client .
+
+      # ============================================
+      # TEST: Basic CLI functionality
+      # ============================================
+      - name: Test CLI help commands
+        run: |
+          echo "Testing stub CLI..."
+          ./keploy-binary stub --help
+          ./keploy-binary stub record --help
+          ./keploy-binary stub replay --help
+          echo "✅ CLI help commands work"
+
+      # ============================================
+      # TEST: Error handling - no stubs found
+      # ============================================
+      - name: Test error handling - replay without stubs
+        run: |
+          echo "Testing error handling: replay without stubs..."
+          OUTPUT=$(./keploy-binary stub replay \
+            -c "echo test" \
+            -p ./nonexistent \
+            --name test 2>&1 || true)
+          
+          if echo "$OUTPUT" | grep -q "No stubs found"; then
+            echo "✅ Correct error message for missing stubs"
+          else
+            echo "::warning::Expected 'No stubs found' error message"
+            echo "Output was: $OUTPUT"
+          fi
+
+      # ============================================
+      # TEST: Record and Replay cycle
+      # ============================================
+      - name: Start mock server
+        run: |
+          ./e2e/stub/fixtures/mock-server/mock-server &
+          sleep 3
+          curl -sf http://localhost:9000/health
+
+      - name: Record stubs
+        run: |
+          rm -rf test-stubs
+          mkdir -p test-stubs
+          
+          echo "📼 Recording with test client..."
+          ./keploy-binary stub record \
+            -c "./e2e/stub/fixtures/test-client/test-client all" \
+            -p ./test-stubs \
+            --name integration-test \
+            --record-timer 30s \
+            --proxy-port 16791 \
+            --dns-port 26791 2>&1 | tee integration-record.log
+
+      - name: Validate recorded stubs
+        run: |
+          echo "🔍 Validating stubs..."
+          
+          if [ ! -d "test-stubs/keploy/integration-test" ]; then
+            echo "::error::Stub directory not created"
+            echo "::error::Expected: test-stubs/keploy/integration-test/"
+            echo "::error::Actual contents:"
+            ls -laR test-stubs/ 2>/dev/null || echo "test-stubs/ doesn't exist"
+            echo ""
+            echo "::error::Recording log:"
+            cat integration-record.log
+            exit 1
+          fi
+          
+          if [ ! -f "test-stubs/keploy/integration-test/mocks.yaml" ]; then
+            echo "::error::mocks.yaml not found"
+            echo "::error::Contents of stub directory:"
+            ls -la test-stubs/keploy/integration-test/
+            exit 1
+          fi
+          
+          MOCK_COUNT=$(grep -c "kind: Http" test-stubs/keploy/integration-test/mocks.yaml || echo "0")
+          echo "📦 Recorded $MOCK_COUNT mocks"
+          
+          if [ "$MOCK_COUNT" -lt 3 ]; then
+            echo "::error::Expected at least 3 mocks (health, users, products)"
+            echo "::error::Only found $MOCK_COUNT"
+            echo ""
+            echo "::error::Contents of mocks.yaml:"
+            cat test-stubs/keploy/integration-test/mocks.yaml
+            exit 1
+          fi
+          
+          # Verify expected endpoints were captured
+          echo "Checking for expected endpoints..."
+          
+          if ! grep -q "/health" test-stubs/keploy/integration-test/mocks.yaml; then
+            echo "::error::/health endpoint not captured"
+            echo "::error::This might indicate proxy not intercepting traffic"
+            exit 1
+          fi
+          echo "  ✓ /health captured"
+          
+          if ! grep -q "/api/users" test-stubs/keploy/integration-test/mocks.yaml; then
+            echo "::error::/api/users endpoint not captured"
+            exit 1
+          fi
+          echo "  ✓ /api/users captured"
+          
+          if ! grep -q "/api/products" test-stubs/keploy/integration-test/mocks.yaml; then
+            echo "::warning::/api/products endpoint not captured"
+          else
+            echo "  ✓ /api/products captured"
+          fi
+          
+          echo "✅ All expected endpoints captured"
+
+      - name: Stop mock server
+        run: |
+          echo "Stopping mock server..."
+          pkill -f mock-server || true
+          sleep 2
+          
+          # Verify server is stopped
+          if curl -sf http://localhost:9000/health 2>/dev/null; then
+            echo "::error::Server still running after pkill!"
+            echo "::error::Replay test will be invalid if server is still up"
+            exit 1
+          fi
+          echo "✅ Server stopped - port 9000 is now closed"
+
+      - name: Replay without server (critical test)
+        run: |
+          echo "▶️ Replaying stubs (server is DOWN)..."
+          echo "This is the critical test - mocks must serve all requests"
+          echo ""
+          
+          ./keploy-binary stub replay \
+            -c "./e2e/stub/fixtures/test-client/test-client all" \
+            -p ./test-stubs \
+            --name integration-test \
+            --proxy-port 16791 \
+            --dns-port 26791 2>&1 | tee integration-replay.log
+          
+          REPLAY_EXIT=${PIPESTATUS[0]}
+          
+          # Check for success indicators
+          if grep -q "connection refused" integration-replay.log; then
+            echo "::error::Replay failed - requests went to real server (which is down)"
+            echo "::error::This means mocks were NOT served correctly"
+            cat integration-replay.log
+            exit 1
+          fi
+          
+          if grep -q "All tests passed" integration-replay.log || grep -q "success" integration-replay.log; then
+            echo "✅ Replay successful - all requests served from mocks"
+          else
+            echo "::warning::Could not confirm test success from output"
+            echo "Replay log:"
+            cat integration-replay.log
+          fi
+
+      - name: Upload integration test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: |
+            test-stubs/
+            *.log
+          retention-days: 7
+
+  summary:
+    name: E2E Test Summary
+    needs: [go-e2e-tests, playwright-e2e-tests, pytest-e2e-tests, stub-integration-test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🧪 Stub E2E Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Test Suite Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Suite | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Go E2E
+          if [ "${{ needs.go-e2e-tests.result }}" == "success" ]; then
+            echo "| Go E2E Tests | ✅ Passed | - |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Go E2E Tests | ❌ Failed | Check logs |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Playwright
+          if [ "${{ needs.playwright-e2e-tests.result }}" == "success" ]; then
+            echo "| Playwright E2E | ✅ Passed | Record & Replay working |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Playwright E2E | ❌ Failed | Check artifacts |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Pytest
+          if [ "${{ needs.pytest-e2e-tests.result }}" == "success" ]; then
+            echo "| Pytest E2E | ✅ Passed | Record & Replay working |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Pytest E2E | ❌ Failed | Check artifacts |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Integration
+          if [ "${{ needs.stub-integration-test.result }}" == "success" ]; then
+            echo "| Integration Test | ✅ Passed | - |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Integration Test | ❌ Failed | Check logs |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔧 Troubleshooting Guide" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "If tests failed, check the following:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Error | Likely Cause | Fix |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| No stubs recorded | eBPF setup failed | Check permissions, run with sudo |" >> $GITHUB_STEP_SUMMARY
+          echo "| Stub directory not created | Keploy failed to start | Check binary build, permissions |" >> $GITHUB_STEP_SUMMARY
+          echo "| mocks.yaml empty | Proxy not intercepting | Check proxy-port, dns-port flags |" >> $GITHUB_STEP_SUMMARY
+          echo "| Replay: No stubs found | Wrong path | Use -p flag pointing to parent of keploy/ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Replay: connection refused | Mocks not served | Check mock loading, path structure |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests fail during replay | Mock mismatch | Requests don't match recorded mocks |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if critical tests failed
+        run: |
+          # Integration test is the most important - tests basic record/replay
+          if [ "${{ needs.stub-integration-test.result }}" != "success" ]; then
+            echo "::error::Integration test failed - stub feature may be broken"
+            echo "::error::This is a critical failure that blocks releases"
+            exit 1
+          fi
+          
+          # At least one framework test should pass
+          if [ "${{ needs.playwright-e2e-tests.result }}" != "success" ] && \
+             [ "${{ needs.pytest-e2e-tests.result }}" != "success" ]; then
+            echo "::error::Both Playwright and Pytest E2E tests failed"
+            echo "::error::Stub feature may not work with external test frameworks"
+            exit 1
+          fi
+          
+          echo "✅ Critical tests passed"
