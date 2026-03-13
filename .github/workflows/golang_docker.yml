@@ -20,6 +20,9 @@ jobs:
           - name: echo-sql
             path: echo-sql
             script_dir: echo_sql
+          - name: tls-dadjoke
+            path: tls-dadjoke
+            script_dir: tls_dadjoke
         config:
           - job: record_latest_replay_build
             record_src: latest
