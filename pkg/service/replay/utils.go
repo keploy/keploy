@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/olekukonko/tablewriter"
+	"go.keploy.io/server/v3/pkg/compat/tablewriter"
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"

@@ -23,9 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: ">=1.23"
+          go-version-file: go.mod
           cache: false
 
       - name: Check for direct import of keploy/integrations

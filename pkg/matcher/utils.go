@@ -20,7 +20,7 @@ import (
 	"github.com/7sDream/geko"
 	"github.com/fatih/color"
 	jsonDiff "github.com/keploy/jsonDiff"
-	"github.com/olekukonko/tablewriter"
+	"go.keploy.io/server/v3/pkg/compat/tablewriter"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"

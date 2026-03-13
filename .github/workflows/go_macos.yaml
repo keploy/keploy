@@ -13,13 +13,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: ">=1.23"
+          go-version-file: go.mod
 
       - name: Build amd64
         run: GOARCH=amd64 go build -v ./...
 
       - name: Build arm64
         run: GOARCH=arm64 go build -v ./...
-
