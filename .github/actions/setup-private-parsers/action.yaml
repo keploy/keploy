@@ -18,9 +18,9 @@ runs:
   using: composite
   steps:
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: ">=1.26"
+        go-version-file: go.mod
         cache: ${{ inputs.go-cache }}
 
     # --- Linux/macOS: Add Known Hosts ---
