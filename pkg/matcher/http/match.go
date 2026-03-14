@@ -441,7 +441,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 	}
 
-	if !skipSuccessMsg {
+	// When emitFailureLogs is false, caller is handling logging themselves (e.g., streaming comparison)
+	// so we skip the success message as well
+	if !skipSuccessMsg && emitFailureLogs {
 		newLogger := ppNew234()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
