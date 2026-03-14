@@ -156,7 +156,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.Synchronous {
 			alias += " --sync"
 		}
-
+		if opts.EnableSampling > 0 {
+			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
+		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
 		}
@@ -220,6 +222,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.Synchronous {
 				alias += " --sync"
 			}
+			if opts.EnableSampling > 0 {
+				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
+			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
 			}
@@ -267,6 +272,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --sync"
+		}
+		if opts.EnableSampling > 0 {
+			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
@@ -331,6 +339,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.Synchronous {
 				alias += " --sync"
 			}
+			if opts.EnableSampling > 0 {
+				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
+			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
 			}
@@ -379,6 +390,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --sync"
+		}
+		if opts.EnableSampling > 0 {
+			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
