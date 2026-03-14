@@ -1628,61 +1628,80 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	timeTakenStr := timeWithUnits(timeTaken)
 
+	successRate := 0.0
+if testReport.Total > 0 {
+    successRate = (float64(testReport.Success) / float64(testReport.Total)) * 100
+}
+
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 
-		if !r.config.DisableANSI {
-			if testSetStatus == models.TestSetStatusFailed {
-				pp.SetColorScheme(models.GetFailingColorScheme())
-			} else {
-				pp.SetColorScheme(models.GetPassingColorScheme())
-			}
+	if !r.config.DisableANSI {
 
-			summaryFormat := "\n <=========================================> \n" +
-				"  TESTRUN SUMMARY. For test-set: %s\n" +
-				"\tTotal tests:        %s\n" +
-				"\tTotal test passed:  %s\n" +
-				"\tTotal test failed:  %s\n"
-
-			args := []interface{}{testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure}
-			if testReport.Obsolete > 0 {
-				summaryFormat += "\tTotal test obsolete: %s\n"
-				args = append(args, testReport.Obsolete)
-			}
-
-			if testReport.Ignored > 0 {
-				summaryFormat += "\tTotal test ignored: %s\n"
-				args = append(args, testReport.Ignored)
-			}
-
-			summaryFormat += "\tTime Taken:         %s\n <=========================================> \n\n"
-			args = append(args, timeTakenStr)
-
-			if _, err := pp.Printf(summaryFormat, args...); err != nil {
-				utils.LogError(r.logger, err, "failed to print testrun summary")
-			}
-
+		if testSetStatus == models.TestSetStatusFailed {
+			pp.SetColorScheme(models.GetFailingColorScheme())
 		} else {
-			var sb strings.Builder
-			sb.WriteString("\n <=========================================> \n")
-			sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testReport.TestSet))
-			sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
-			sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
-			sb.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", testReport.Failure))
-			if testReport.Obsolete > 0 {
-				sb.WriteString(fmt.Sprintf("\tTotal test obsolete: %d\n", testReport.Obsolete))
-			}
-
-			if testReport.Ignored > 0 {
-				sb.WriteString(fmt.Sprintf("\tTotal test ignored: %d\n", testReport.Ignored))
-			}
-
-			sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
-			sb.WriteString(" <=========================================> \n\n")
-
-			fmt.Print(sb.String())
+			pp.SetColorScheme(models.GetPassingColorScheme())
 		}
-	}
 
+		summaryFormat := "\n <=========================================> \n" +
+			"  TESTRUN SUMMARY. For test-set: %s\n" +
+			"\tTotal tests:        %d\n" +
+			"\tTotal test passed:  %d\n" +
+			"\tTotal test failed:  %d\n"
+
+		args := []interface{}{
+			testReport.TestSet,
+			testReport.Total,
+			testReport.Success,
+			testReport.Failure,
+		}
+
+		if testReport.Obsolete > 0 {
+			summaryFormat += "\tTotal test obsolete: %d\n"
+			args = append(args, testReport.Obsolete)
+		}
+
+		if testReport.Ignored > 0 {
+			summaryFormat += "\tTotal test ignored:  %d\n"
+			args = append(args, testReport.Ignored)
+		}
+
+		summaryFormat += "\tSuccess Rate:       %.2f%%\n"
+		args = append(args, successRate)
+
+		summaryFormat += "\tTime Taken:         %s\n"
+		summaryFormat += " <=========================================> \n\n"
+		args = append(args, timeTakenStr)
+
+		if _, err := pp.Printf(summaryFormat, args...); err != nil {
+			utils.LogError(r.logger, err, "failed to print testrun summary")
+		}
+
+	} else {
+
+		var sb strings.Builder
+		sb.WriteString("\n <=========================================> \n")
+		sb.WriteString(fmt.Sprintf("  TESTRUN SUMMARY. For test-set: %s\n", testReport.TestSet))
+		sb.WriteString(fmt.Sprintf("\tTotal tests:        %d\n", testReport.Total))
+		sb.WriteString(fmt.Sprintf("\tTotal test passed:  %d\n", testReport.Success))
+		sb.WriteString(fmt.Sprintf("\tTotal test failed:  %d\n", testReport.Failure))
+
+		if testReport.Obsolete > 0 {
+			sb.WriteString(fmt.Sprintf("\tTotal test obsolete: %d\n", testReport.Obsolete))
+		}
+
+		if testReport.Ignored > 0 {
+			sb.WriteString(fmt.Sprintf("\tTotal test ignored:  %d\n", testReport.Ignored))
+		}
+
+		sb.WriteString(fmt.Sprintf("\tSuccess Rate:       %.2f%%\n", successRate))
+		sb.WriteString(fmt.Sprintf("\tTime Taken:         %s\n", timeTakenStr))
+		sb.WriteString(" <=========================================> \n\n")
+
+		fmt.Print(sb.String())
+	}
+}
+		
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
