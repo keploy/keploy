@@ -2,13 +2,13 @@ package cli
 
 import (
 	"context"
-
-	"go.keploy.io/server/v3/utils"
-
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/internal/clilog"
 	replaySvc "go.keploy.io/server/v3/pkg/service/replay"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"log/slog"
 )
 
 func init() {
@@ -24,30 +24,35 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, cmd.Name())
+			l := clilog.FromContext(cmd.Context())
+			svc, err := serviceFactory.GetService(cmd.Context(), cmd.Name())
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
+				l.Error("failed to get service",
+					slog.String("error", err.Error()),
+				)
 				return nil
 			}
 			var replay replaySvc.Service
 			var ok bool
 			if replay, ok = svc.(replaySvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+				l.Error("service doesn't satisfy replay service interface")
 				return nil
 			}
 			// defering the stop function to stop keploy in case of any error in test or in case of context cancellation
 			defer func() {
 				select {
-				case <-ctx.Done():
+				case <-cmd.Context().Done():
 					break
 				default:
 					utils.ExecCancel()
 				}
 			}()
-			err = replay.Start(ctx)
+			err = replay.Start(cmd.Context())
 			if err != nil {
-				if ctx.Err() != context.Canceled {
-					utils.LogError(logger, err, "failed to replay")
+				if cmd.Context().Err() != context.Canceled {
+					l.Error("failed to replay",
+						slog.String("error", err.Error()),
+					)
 				}
 			}
 
