@@ -865,7 +865,7 @@ func (d *DiffsPrinter) Render() error {
 	}
 	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
 	table := tablewriter.NewTable(d.out, opts...)
-	table.Header([]string{fmt.Sprintf("Diffs %v", d.testCase)})
+	table.Header([]string{d.testCase})
 
 	for _, e := range diffs {
 		if strings.TrimSpace(e) != "" {
@@ -912,7 +912,7 @@ func (d *DiffsPrinter) TableWriter(diffs []string) error {
 	}
 	opts = append(opts, tablewriter.WithRowAlignment(tw.AlignCenter))
 	table := tablewriter.NewTable(d.out, opts...)
-	table.Header([]string{fmt.Sprintf("Diffs %v", d.testCase)})
+	table.Header([]string{d.testCase})
 
 	for _, e := range diffs {
 		table.Append([]string{e})
@@ -1251,9 +1251,9 @@ func truncateStrings(exp, act string) (string, string) {
 }
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
-	align := tw.AlignLeft
+	rowAlign := tw.AlignLeft
 	if centerize {
-		align = tw.AlignCenter
+		rowAlign = tw.AlignCenter
 	}
 
 	// Apply truncation logic
@@ -1267,9 +1267,9 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
 	table := tablewriter.NewTable(buf,
 		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
-		tablewriter.WithHeaderAlignment(align),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
 		tablewriter.WithRowAutoWrap(tw.WrapNone),
-		tablewriter.WithRowAlignment(align),
+		tablewriter.WithRowAlignment(rowAlign),
 		tablewriter.WithRendition(tw.Rendition{Borders: tw.BorderNone}),
 		tablewriter.WithColumnWidths(colWidths),
 	)
@@ -1282,9 +1282,9 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 // expectActualTableWithColors creates a table with colored expected (red) and actual (green) values
 func expectActualTableWithColors(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
-	align := tw.AlignLeft
+	rowAlign := tw.AlignLeft
 	if centerize {
-		align = tw.AlignCenter
+		rowAlign = tw.AlignCenter
 	}
 
 	// Apply truncation logic before processing
@@ -1309,9 +1309,9 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
 	table := tablewriter.NewTable(buf,
 		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
-		tablewriter.WithHeaderAlignment(align),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
 		tablewriter.WithRowAutoWrap(tw.WrapNone),
-		tablewriter.WithRowAlignment(align),
+		tablewriter.WithRowAlignment(rowAlign),
 		tablewriter.WithRendition(tw.Rendition{Borders: tw.BorderNone}),
 		tablewriter.WithColumnWidths(colWidths),
 	)
