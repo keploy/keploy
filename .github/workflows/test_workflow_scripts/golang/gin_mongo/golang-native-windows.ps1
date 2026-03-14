@@ -45,6 +45,77 @@ function Drain-JobOutput {
     }
 }
 
+function Test-RecordingComplete {
+    param(
+        [Parameter(Mandatory)] [int] $TestSetIndex,
+        [int] $MinTests = 5
+    )
+
+    $testDir = Join-Path ".\keploy" "test-set-$TestSetIndex\tests"
+    $testFiles = @(Get-ChildItem -Path $testDir -Filter "test-*.yaml" -ErrorAction SilentlyContinue)
+    if ($testFiles.Count -lt $MinTests) {
+        return $false
+    }
+
+    $testSetRoot = Join-Path ".\keploy" "test-set-$TestSetIndex"
+    $mockFiles = @(
+        Get-ChildItem -Path $testSetRoot -Filter "mocks.yaml" -File -Recurse -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $testSetRoot -Filter "mock*.yaml" -File -Recurse -ErrorAction SilentlyContinue
+    ) | Where-Object { $null -ne $_ }
+
+    return ($mockFiles | Where-Object { $_.Length -gt 0 }).Count -gt 0
+}
+
+function Wait-ForRecordingArtifacts {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Job] $Job,
+        [Parameter(Mandatory)] [string] $LogFile,
+        [Parameter(Mandatory)] [int] $TestSetIndex,
+        [int] $MinTests = 5,
+        [int] $TimeoutSeconds = 60
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Drain-JobOutput -Job $Job -LogFile $LogFile
+
+        if (Test-RecordingComplete -TestSetIndex $TestSetIndex -MinTests $MinTests) {
+            return $true
+        }
+
+        if ($Job.State -ne 'Running') {
+            break
+        }
+
+        Start-Sleep -Seconds 3
+    }
+
+    Drain-JobOutput -Job $Job -LogFile $LogFile
+    return (Test-RecordingComplete -TestSetIndex $TestSetIndex -MinTests $MinTests)
+}
+
+function Get-RecordProcessId {
+    $recordProc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -match 'keploy.*record' } |
+      Sort-Object CreationDate -Descending |
+      Select-Object -First 1
+
+    if ($recordProc) {
+        return $recordProc.ProcessId
+    }
+
+    $fallbackProc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -match 'ginApp.exe' } |
+      Sort-Object CreationDate -Descending |
+      Select-Object -First 1
+
+    if ($fallbackProc) {
+        return $fallbackProc.ProcessId
+    }
+
+    return $null
+}
+
 # --- Helper: Send Traffic ---
 function Send-Request {
     param(
@@ -57,7 +128,7 @@ function Send-Request {
     $retries = 0
     $maxRetries = 20
 
-    Write-Host "Waiting for Port $port to open..."
+    Write-Host "Waiting for app to respond on $baseUrl/CJBKJd92..."
 
     while ($true) {
         Drain-JobOutput -Job $Job -LogFile $LogFile
@@ -73,20 +144,21 @@ function Send-Request {
         }
 
         try {
-            $tcpClient = New-Object System.Net.Sockets.TcpClient
-            $tcpClient.Connect("localhost", $port)
-            if ($tcpClient.Connected) {
-                $tcpClient.Close()
+            $response = Invoke-WebRequest -Method Get -Uri "$baseUrl/CJBKJd92" -SkipHttpErrorCheck -TimeoutSec 5
+            if ($response.StatusCode -in @(404, 303)) {
                 break
             }
+            $retries++
+            Start-Sleep -Seconds 3
         } catch {
             $retries++
             Start-Sleep -Seconds 3
         }
     }
 
-    Write-Host "✅ Port $port is open. App started."
+    Write-Host "✅ Application is responding. Proceeding with recording traffic."
     Drain-JobOutput -Job $Job -LogFile $LogFile
+    Start-Sleep -Seconds 2
 
     try {
         Write-Host "Sending traffic..."
@@ -185,6 +257,7 @@ if (-not (Test-Path ".\ginApp.exe")) {
 for ($i = 1; $i -le 2; $i++) {
     $appName = "ginApp_${i}" 
     $logFile = "${appName}.txt"
+    $testSetIndex = $i - 1
     
     Write-Host "`n=== Iteration ${i}: Recording ==="
     $currentDir = (Get-Location).Path
@@ -211,19 +284,28 @@ for ($i = 1; $i -le 2; $i++) {
         exit 1
     }
 
-    Write-Host "Waiting 5 seconds for recording..."
-    Start-Sleep -Seconds 5
+    Write-Host "Waiting for test-set-$testSetIndex tests and mocks to flush..."
+    $artifactsReady = Wait-ForRecordingArtifacts -Job $recJob -LogFile $logFile -TestSetIndex $testSetIndex -MinTests 5 -TimeoutSeconds 60
 
-    $REC_PROC = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -match 'keploy.*record' -or $_.CommandLine -match 'ginApp.exe' } |
-      Select-Object -First 1
+    $recordPid = Get-RecordProcessId
 
-    if ($REC_PROC) { Kill-Tree -ProcessId $REC_PROC.ProcessId }
+    if ($recordPid) {
+        Kill-Tree -ProcessId $recordPid
+    } else {
+        Write-Warning "Could not find a running keploy record process to stop."
+    }
+
+    Wait-Job -Job $recJob -Timeout 15 | Out-Null
 
     Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
     Drain-JobOutput -Job $recJob -LogFile $logFile
     Write-Host "⬆️⬆️⬆️ End Keploy Record Logs ⬆️⬆️⬆️`n"
     
+    if (-not $artifactsReady) {
+        Write-Error "Recording artifacts were not fully written for test-set-$testSetIndex."
+        exit 1
+    }
+
     Remove-Job $recJob -Force
 
     # Scan for errors, but apply filter
