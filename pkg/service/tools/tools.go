@@ -15,7 +15,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/charmbracelet/glamour"
+	glamour "charm.land/glamour/v2"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/service"
 	"go.keploy.io/server/v3/pkg/service/export"
@@ -117,7 +117,7 @@ func (t *Tools) Update(ctx context.Context) error {
 	var renderer *glamour.TermRenderer
 
 	var termRendererOpts []glamour.TermRendererOption
-	termRendererOpts = append(termRendererOpts, glamour.WithAutoStyle(), glamour.WithWordWrap(0))
+	termRendererOpts = append(termRendererOpts, glamour.WithEnvironmentConfig(), glamour.WithWordWrap(0))
 
 	renderer, err = glamour.NewTermRenderer(termRendererOpts...)
 	if err != nil {
