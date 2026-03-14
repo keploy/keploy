@@ -857,7 +857,9 @@ func (d *DiffsPrinter) Render() error {
 	}
 
 	var opts []tablewriter.Option
-	opts = append(opts, tablewriter.WithRowAutoWrap(0))
+	opts = append(opts, tablewriter.WithHeaderAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithRowAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithTrimSpace(tw.Off))
 	if !models.IsAnsiDisabled {
 		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
 	}
@@ -902,7 +904,9 @@ func (d *DiffsPrinter) Render() error {
 func (d *DiffsPrinter) TableWriter(diffs []string) error {
 
 	var opts []tablewriter.Option
-	opts = append(opts, tablewriter.WithRowAutoWrap(0))
+	opts = append(opts, tablewriter.WithHeaderAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithRowAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithTrimSpace(tw.Off))
 	if !models.IsAnsiDisabled {
 		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
 	}
@@ -1027,7 +1031,10 @@ func (s *SchemaDiffPrinter) Render() error {
 	}
 
 	var opts []tablewriter.Option
-	opts = append(opts, tablewriter.WithRowAutoWrap(0))
+	opts = append(opts, tablewriter.WithHeaderAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithHeaderAlignment(tw.AlignLeft))
+	opts = append(opts, tablewriter.WithRowAutoWrap(tw.WrapNone))
+	opts = append(opts, tablewriter.WithTrimSpace(tw.Off))
 	if !models.IsAnsiDisabled {
 		opts = append(opts, tablewriter.WithRenderer(newDiffTableRenderer()))
 	}
@@ -1259,9 +1266,11 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 
 	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
 	table := tablewriter.NewTable(buf,
-		tablewriter.WithRowAutoWrap(0),
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithHeaderAlignment(align),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
 		tablewriter.WithRowAlignment(align),
-		tablewriter.WithRendition(tw.Rendition{Borders: tw.Border{Left: tw.Off, Right: tw.Off, Top: tw.Off, Bottom: tw.Off}}),
+		tablewriter.WithRendition(tw.Rendition{Borders: tw.BorderNone}),
 		tablewriter.WithColumnWidths(colWidths),
 	)
 	table.Header([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
@@ -1299,9 +1308,11 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 
 	colWidths := tw.NewMapper[int, int]().Set(0, maxLineLength).Set(1, maxLineLength)
 	table := tablewriter.NewTable(buf,
-		tablewriter.WithRowAutoWrap(0),
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithHeaderAlignment(align),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
 		tablewriter.WithRowAlignment(align),
-		tablewriter.WithRendition(tw.Rendition{Borders: tw.Border{Left: tw.Off, Right: tw.Off, Top: tw.Off, Bottom: tw.Off}}),
+		tablewriter.WithRendition(tw.Rendition{Borders: tw.BorderNone}),
 		tablewriter.WithColumnWidths(colWidths),
 	)
 	table.Header([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
