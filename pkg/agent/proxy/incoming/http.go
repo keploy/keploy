@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -68,9 +67,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// Get the actual destination address
 	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
-	// Determine the correct port
+	// Determine the correct port for the test case:
+	// On Windows, getActualDestination resolves the real destination dynamically,
+	// so we extract the port from the resolved address.
+	// On non-Windows (Linux/Docker), getActualDestination returns the fallback (newAppAddr)
+	// which contains the eBPF-redirected port, NOT the original app port.
+	// In that case, we use the passed-in appPort which carries the correct OrigAppPort.
 	actualPort := appPort
 	if finalAppAddr != newAppAddr {
+		// Destination was dynamically resolved (Windows) — extract port from resolved address
 		actualPort = extractPortFromAddr(finalAppAddr, appPort)
 	}
 
@@ -102,7 +107,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		reqTimestamp := time.Now()
 		var chunked bool = false
 
-		// 2. Request modifications for Sync/Sampling modes
+		// Request modifications for Sync/Sampling modes
 		if forceCloseMode {
 			if req.ContentLength == -1 || isChunked(req.TransferEncoding) {
 				logger.Debug("Detected chunked request. Releasing lock early.")
@@ -141,7 +146,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
-		// 3. Response modifications for Sync/Sampling modes
+		// Response modifications for Sync/Sampling modes
 		if forceCloseMode {
 			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
 				logger.Debug("Detected chunked response. Releasing lock early.")
@@ -169,15 +174,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		resp.Body.Close()
 
-		// 4. Capture Evaluation
+		// Capture Evaluation
 		shouldCapture := true
 		if forceCloseMode {
 			if chunked {
-				// Requirement: "ignore the chunked requests"
 				shouldCapture = false
 			} else if pm.sampling && !acquiredLock {
-				fmt.Println("caling the overflowing method")
-				// Requirement: "if there are more concurrent requests... we will simply ignore them"
 				shouldCapture = false
 			}
 		}
@@ -197,7 +199,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 		}
 
-		// 5. Enforce Keep-Alive Teardown
 		// Break the keep-alive loop and exit if we are in sync/sampling mode
 		if forceCloseMode {
 			return
