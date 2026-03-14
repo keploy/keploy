@@ -1,0 +1,50 @@
+# === Build Stage ===
+FROM golang:1.24 AS build
+
+# Set the working directory
+WORKDIR /app
+
+# Define build arguments for ldflags
+ARG SENTRY_DSN_DOCKER
+ARG VERSION
+ARG SERVER_URL
+
+ENV GOPRIVATE=github.com/keploy/*
+RUN git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+# Add GitHub's host key to known_hosts to avoid SSH host verification failure
+RUN mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
+# Copy the Go module files and download dependencies
+COPY go.mod go.sum /app/
+RUN --mount=type=ssh go mod download
+
+# Copy the contents of the current directory into the build container
+COPY . /app
+
+# Build the keploy binary
+# setting GOMAXPROCS to avoid crashing qemu while building different arch with docker buildx
+# ref - https://github.com/golang/go/issues/70329#issuecomment-2559049444
+RUN GOMAXPROCS=2 go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITTHUB_APP_CLIENT_ID" -o keploy .
+
+# === Runtime Stage ===
+FROM debian:bookworm-slim
+
+ENV KEPLOY_INDOCKER=true
+
+# Update the package lists and install required packages
+RUN apt-get update
+RUN apt-get install -y ca-certificates curl sudo && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the keploy binary and the entrypoint script from the build container
+COPY --from=build /app/keploy /app/keploy
+COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
+
+# windows comapatibility
+RUN sed -i 's/\r$//' /app/entrypoint.sh
+
+# Make the entrypoint.sh file executable
+RUN chmod +x /app/entrypoint.sh
+
+# Set the entrypoint
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent","--is-docker"]
