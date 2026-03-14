@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -248,7 +249,19 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 		return nil, readErr
 	}
 
-	logger.Debug("received initial buffer", zap.Any("size", len(initialBuf)), zap.Any("initial buffer", initialBuf))
+	preview := initialBuf
+	const previewLimit = 256
+	truncated := false
+	if len(preview) > previewLimit {
+		preview = preview[:previewLimit]
+		truncated = true
+	}
+	logger.Debug("received initial buffer",
+		zap.Int("size", len(initialBuf)),
+		zap.Int("preview_size", len(preview)),
+		zap.Bool("preview_truncated", truncated),
+		zap.String("initial_buffer_preview_base64", base64.StdEncoding.EncodeToString(preview)),
+	)
 	return initialBuf, nil
 }
 
