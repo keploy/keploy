@@ -100,6 +100,7 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	ConfigPath        string
 	ExtraArgs         []string
+	EnableSampling    int
 }
 
 type RunOptions struct {
