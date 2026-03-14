@@ -46,8 +46,12 @@ func setVersion() {
 func start(ctx context.Context) {
 	logger, logFile, err := log.New()
 	if err != nil {
-		fmt.Println("Failed to start the logger for the CLI", err)
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		return
+	}
+	// Enable debug logging if --verbose flag is passed
+	if containsVerboseFlag(os.Args) {
+		logger, _ = log.ChangeLogLevel(zap.DebugLevel)
 	}
 	utils.LogFile = logFile
 
@@ -149,16 +153,26 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
-			fmt.Println("Error: ", err.Error())
+		if strings.HasPrefix(err.Error(), "unknown command") ||
+			strings.HasPrefix(err.Error(), "unknown shorthand") {
+
+			logger.Error("invalid command usage", zap.Error(err))
+
 			fmt.Println("Run 'keploy --help' for usage.")
 			os.Exit(1)
 		}
 	}
-
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
 	// This ensures the next native run doesn't hit permission issues
 	if conf.Path != "" {
 		utils.RestoreKeployFolderOwnership(logger, conf.Path)
 	}
+}
+func containsVerboseFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--verbose" {
+			return true
+		}
+	}
+	return false
 }
