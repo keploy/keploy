@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
@@ -159,8 +158,6 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
-					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
-
 				}
 				errChannel <- err
 				return
@@ -464,7 +461,11 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	passthroughContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	go func() {
+		defer wg.Done()
 		defer Recover(logger, clientConn, nil)
 		defer close(destBufferChannel)
 		defer func(destConn net.Conn) {
@@ -478,9 +479,16 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	}()
 
 	go func() {
+		defer wg.Done()
 		defer Recover(logger, clientConn, nil)
 		defer close(clientBufferChannel)
 		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
+	}()
+
+	// Goroutine to close errChannel after both ReadBuffConn goroutines finish
+	go func() {
+		wg.Wait()
+		close(errChannel)
 	}()
 
 	for {
@@ -489,6 +497,9 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			return nil, ctx.Err()
 
 		case buffer := <-clientBufferChannel:
+			if len(buffer) == 0 {
+				continue
+			}
 			_, err := destConn.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write subsequent request to destination")
@@ -496,6 +507,9 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 			}
 
 		case buffer := <-destBufferChannel:
+			if len(buffer) == 0 {
+				continue
+			}
 			_, err := clientConn.Write(buffer)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -505,7 +519,11 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				return nil, err
 			}
 
-		case err := <-errChannel:
+		case err, ok := <-errChannel:
+			if !ok {
+				// errChannel closed, no more errors
+				continue
+			}
 			// nolint:staticcheck
 			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 				if err == io.EOF {
