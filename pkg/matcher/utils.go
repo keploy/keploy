@@ -520,10 +520,7 @@ func compareZip(exp *interface{}, act *interface{}, key string, rev map[interfac
 			return
 		}
 		// Walk by index. We only normalize where both sides have an element.
-		n := len(ev.List)
-		if len(aa.List) < n {
-			n = len(aa.List)
-		}
+		n := min(len(aa.List), len(ev.List))
 		for i := 0; i < n; i++ {
 			child := ev.List[i]
 			compareZip(&child, &aa.List[i], "", rev)
@@ -535,10 +532,7 @@ func compareZip(exp *interface{}, act *interface{}, key string, rev map[interfac
 		if !ok {
 			return
 		}
-		n := len(ev)
-		if len(aarr) < n {
-			n = len(aarr)
-		}
+		n := min(len(aarr), len(ev))
 		for i := 0; i < n; i++ {
 			child := ev[i]
 			compareZip(&child, &aarr[i], "", rev)
@@ -1199,20 +1193,14 @@ func truncateStrings(exp, act string) (string, string) {
 		if diff > maxDiff {
 			if expLen > actLen {
 				// Expected is larger, truncate it
-				newExpLen := actLen + maxDiff
-				if newExpLen > maxBytes {
-					newExpLen = maxBytes
-				}
+				newExpLen := min(actLen+maxDiff, maxBytes)
 				if newExpLen < expLen {
 					exp = exp[:newExpLen]
 					expTruncated = true
 				}
 			} else {
 				// Actual is larger, truncate it
-				newActLen := expLen + maxDiff
-				if newActLen > maxBytes {
-					newActLen = maxBytes
-				}
+				newActLen := min(expLen+maxDiff, maxBytes)
 				if newActLen < actLen {
 					act = act[:newActLen]
 					actTruncated = true
