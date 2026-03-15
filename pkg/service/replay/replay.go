@@ -1210,10 +1210,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				respTime = testCase.GrpcResp.Timestamp
 			}
 
-		expectedNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
-		for i, m := range expectedTestMockMappings[testCase.Name] {
-			expectedNames[i] = m.Name
-		}
+			expectedNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
+			for i, m := range expectedTestMockMappings[testCase.Name] {
+				expectedNames[i] = m.Name
+			}
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters on agent")
@@ -1271,10 +1271,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 			mockSetMismatch := false
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-			expectedMockNames := make([]string, len(expectedMocks))
-			for i, m := range expectedMocks {
-				expectedMockNames[i] = m.Name
-			}
+				expectedMockNames := make([]string, len(expectedMocks))
+				for i, m := range expectedMocks {
+					expectedMockNames[i] = m.Name
+				}
 				mockSetMismatch = !isMockSubset(mockNames, expectedMockNames)
 			}
 
@@ -1350,31 +1350,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 			}
 
-		if len(consumedMocks) > 0 {
-			var newMocks []models.MockEntry
-			for _, m := range consumedMocks {
-				newMocks = append(newMocks, models.MockEntry{
-					Name:      m.Name,
-					Kind:      string(m.Kind),
-					Timestamp: m.Timestamp,
-				})
-			}
+			if len(consumedMocks) > 0 {
+				var newMocks []models.MockEntry
+				for _, m := range consumedMocks {
+					newMocks = append(newMocks, models.MockEntry{
+						Name:      m.Name,
+						Kind:      string(m.Kind),
+						Timestamp: m.Timestamp,
+					})
+				}
 
-			found := false
-			for i, t := range actualTestMockMappings.TestCases {
-				if t.ID == testCase.Name {
-					actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
-					found = true
-					break
+				found := false
+				for i, t := range actualTestMockMappings.TestCases {
+					if t.ID == testCase.Name {
+						actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
+						found = true
+						break
+					}
+				}
+				if !found {
+					actualTestMockMappings.TestCases = append(actualTestMockMappings.TestCases, models.MappedTestCase{
+						ID:    testCase.Name,
+						Mocks: newMocks,
+					})
 				}
 			}
-			if !found {
-				actualTestMockMappings.TestCases = append(actualTestMockMappings.TestCases, models.MappedTestCase{
-					ID:    testCase.Name,
-					Mocks: newMocks,
-				})
-			}
-		}
 
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Debug("consumed mocks for test case",
