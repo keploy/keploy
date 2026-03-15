@@ -311,7 +311,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				insertMockErrChan <- err
 			} else {
 				if tempID != "" && mock.Name != "" {
-					correlationMap.Store(tempID, mock.Name)
+					correlationMap.Store(tempID, models.MockEntry{Name: mock.Name, Kind: string(mock.GetKind()), Timestamp: mock.Spec.ReqTimestampMock.Unix()})
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
@@ -322,17 +322,17 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mapping := range frames.Mappings {
-			var realMockNames []string
+			var realMockEntries []models.MockEntry
 
 			for _, tempID := range mapping.MockIDs {
 
-				var realName string
+				var realEntry models.MockEntry
 				found := false
 
 				// Simple retry loop (fast spin) to wait for the Mock Loop
 				for i := 0; i < 50; i++ { // Wait up to ~500ms
 					if val, ok := correlationMap.Load(tempID); ok {
-						realName = val.(string)
+						realEntry = val.(models.MockEntry)
 						found = true
 						break
 					}
@@ -340,7 +340,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				}
 
 				if found {
-					realMockNames = append(realMockNames, realName)
+					realMockEntries = append(realMockEntries, realEntry)
 					correlationMap.Delete(tempID)
 				} else {
 					r.logger.Warn("Failed to correlate mock mapping",
@@ -350,8 +350,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 			}
 
 			// Write to mappings.yaml
-			if len(realMockNames) > 0 {
-				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
+			if len(realMockEntries) > 0 {
+				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockEntries)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to save mapping")
 				}
