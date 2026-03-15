@@ -30,7 +30,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - id: image
         with:
@@ -48,7 +48,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout samples-typescript repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-typescript
           path: samples-typescript

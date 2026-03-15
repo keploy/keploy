@@ -25,7 +25,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - id: record
         uses: ./.github/actions/download-binary
@@ -38,7 +38,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout samples-java repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-java
           path: samples-java

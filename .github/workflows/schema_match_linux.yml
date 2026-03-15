@@ -37,7 +37,7 @@ jobs:
     name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/keploy
 
@@ -65,7 +65,7 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-python repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-python
           path: samples-python

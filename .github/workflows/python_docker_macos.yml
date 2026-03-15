@@ -50,7 +50,7 @@ jobs:
           rm -rf ~/.gitconfig
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - id: image
         uses: ./.github/actions/download-image
@@ -69,7 +69,7 @@ jobs:
           src: ${{ matrix.replay_src }}
 
       - name: Checkout the samples-python repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: keploy/samples-python
           path: samples-python
