@@ -740,7 +740,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
-	var expectedTestMockMappings map[string][]string
+	var expectedTestMockMappings map[string][]models.MockEntry
 	var useMappingBased bool
 	var isMappingEnabled bool
 	isMappingEnabled = !r.config.DisableMapping
@@ -840,7 +840,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Populate the Registry
 			for _, mocks := range expectedTestMockMappings {
 				for _, m := range mocks {
-					mocksThatHaveMappings[m] = true
+					mocksThatHaveMappings[m.Name] = true
 				}
 			}
 
@@ -848,7 +848,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for testID := range selectedTests {
 					if mocks, ok := expectedTestMockMappings[testID]; ok {
 						for _, m := range mocks {
-							mocksWeNeed[m] = true
+							mocksWeNeed[m.Name] = true
 						}
 					}
 				}
@@ -917,7 +917,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Populate the Registry
 			for _, mocks := range expectedTestMockMappings {
 				for _, m := range mocks {
-					mocksThatHaveMappings[m] = true
+					mocksThatHaveMappings[m.Name] = true
 				}
 			}
 
@@ -925,7 +925,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for testID := range selectedTests {
 					if mocks, ok := expectedTestMockMappings[testID]; ok {
 						for _, m := range mocks {
-							mocksWeNeed[m] = true
+							mocksWeNeed[m.Name] = true
 						}
 					}
 				}
@@ -1210,7 +1210,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				respTime = testCase.GrpcResp.Timestamp
 			}
 
-			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedTestMockMappings[testCase.Name], reqTime, respTime, totalConsumedMocks, useMappingBased)
+			expectedNames := make([]string, len(expectedTestMockMappings[testCase.Name]))
+			for i, m := range expectedTestMockMappings[testCase.Name] {
+				expectedNames[i] = m.Name
+			}
+			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 				break
@@ -1267,7 +1271,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 			mockSetMismatch := false
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				mockSetMismatch = !isMockSubsetWithConfig(consumedMocks, expectedMocks)
+				expectedMockNames := make([]string, len(expectedMocks))
+				for i, m := range expectedMocks {
+					expectedMockNames[i] = m.Name
+				}
+				mockSetMismatch = !isMockSubset(mockNames, expectedMockNames)
 			}
 
 			emitFailureLogs := !mockSetMismatch
@@ -1342,19 +1350,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID, emitFailureLogs)
 			}
 
-			if len(mockNames) > 0 {
+			if len(consumedMocks) > 0 {
+				var newMocks []models.MockEntry
+				for _, m := range consumedMocks {
+					newMocks = append(newMocks, models.MockEntry{
+						Name:      m.Name,
+						Kind:      string(m.Kind),
+						Timestamp: m.Timestamp,
+					})
+				}
+
 				found := false
-				for i, t := range actualTestMockMappings.Tests {
+				for i, t := range actualTestMockMappings.TestCases {
 					if t.ID == testCase.Name {
-						actualTestMockMappings.Tests[i].Mocks = models.FromSlice(mockNames)
+						actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
 						found = true
 						break
 					}
 				}
 				if !found {
-					actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+					actualTestMockMappings.TestCases = append(actualTestMockMappings.TestCases, models.MappedTestCase{
 						ID:    testCase.Name,
-						Mocks: models.FromSlice(mockNames),
+						Mocks: newMocks,
 					})
 				}
 			}
@@ -1371,15 +1388,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.logger.Debug("mock mapping mismatch ignored because testcase passed",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("expectedMocks", expectedNames),
 						zap.Strings("actualMocks", mockNames))
 				} else {
 					r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", expectedMocks),
+						zap.Strings("expectedMocks", expectedNames),
 						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, expectedMocks, mockNames)
+					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, expectedNames, mockNames)
 				}
 			}
 
@@ -1600,7 +1617,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
-				zap.Int("numTests", len(actualTestMockMappings.Tests)))
+				zap.Int("numTests", len(actualTestMockMappings.TestCases)))
 		}
 	}
 
@@ -2472,9 +2489,9 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 	}
 }
 
-func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]string) {
+func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID string, isMappingEnabled bool) (bool, map[string][]models.MockEntry) {
 	// Default to timestamp-based strategy with empty mappings.
-	defaultMappings := make(map[string][]string)
+	defaultMappings := make(map[string][]models.MockEntry)
 
 	if r.mappingDB == nil {
 		r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
@@ -2507,4 +2524,19 @@ func (r *Replayer) determineMockingStrategy(ctx context.Context, testSetID strin
 	r.logger.Debug("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
 		zap.String("testSetID", testSetID))
 	return false, defaultMappings
+}
+
+// isMockSubset checks if all expected mocks are present in the actual mocks list
+func isMockSubset(actual []string, expected []string) bool {
+	actualMap := make(map[string]bool)
+	for _, mock := range actual {
+		actualMap[mock] = true
+	}
+
+	for _, mock := range expected {
+		if !actualMap[mock] {
+			return false
+		}
+	}
+	return true
 }
