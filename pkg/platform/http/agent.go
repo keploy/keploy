@@ -413,6 +413,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	if err != nil {
 		return fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
 	}
+	defer res.Body.Close()
 
 	var mockResp models.AgentResp
 	err = json.NewDecoder(res.Body).Decode(&mockResp)
@@ -692,6 +693,7 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	if err != nil {
 		return fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
 	}
+	defer res.Body.Close()
 
 	var mockResp models.AgentResp
 	err = json.NewDecoder(res.Body).Decode(&mockResp)
