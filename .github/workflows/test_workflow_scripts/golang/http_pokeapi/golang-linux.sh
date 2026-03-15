@@ -52,8 +52,6 @@ send_request() {
     # Extract any pokemon from the response
     pokemon=$(echo "$response" | jq -r ".[$index]")
     
-    curl -s -X GET http://localhost:8080/api/pokemon/$pokemon
-
     curl -s -X GET http://localhost:8080/api/greet
 
     curl -s -X GET http://localhost:8080/api/greet?format=html
@@ -71,7 +69,7 @@ send_request() {
 for i in {1..2}; do
     app_name="http-pokeapi_${i}"
     send_request $i &
-    "$RECORD_BIN" record -c "./http-pokeapi" --generateGithubActions=false &> "${app_name}.txt"
+    "$RECORD_BIN" record -c "./http-pokeapi" --generateGithubActions=false 2>&1 | tee "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -88,7 +86,7 @@ for i in {1..2}; do
 done
 
 # Start the go-http app in test mode.
-"$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false &> test_logs.txt
+"$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs.txt
 
 
 if grep "ERROR" "test_logs.txt"; then

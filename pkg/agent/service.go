@@ -32,6 +32,10 @@ type Proxy interface {
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
 	MakeClientDeRegisterd(ctx context.Context) error
 	GetErrorChannel() <-chan error
+	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+	// When this flag is set, connection errors will be logged as debug instead of error.
+	SetGracefulShutdown(ctx context.Context) error
+	Mapping(ctx context.Context, mappingCh chan models.TestMockMapping)
 }
 
 type IncomingProxy interface {
@@ -62,6 +66,8 @@ type NetworkAddress struct {
 	Port     uint32
 }
 
+// Sessions provides a thread-safe store for Session objects, keyed by ID.
+// Used by the hooks packages (linux, windows, others) to track client sessions.
 type Sessions struct {
 	sessions sync.Map
 }
@@ -86,24 +92,6 @@ func (s *Sessions) Set(id uint64, session *Session) {
 
 func (s *Sessions) Delete(id uint64) {
 	s.sessions.Delete(id)
-}
-
-func (s *Sessions) getAll() map[uint64]*Session {
-	sessions := map[uint64]*Session{}
-	s.sessions.Range(func(k, v interface{}) bool {
-		sessions[k.(uint64)] = v.(*Session)
-		return true
-	})
-	return sessions
-}
-
-func (s *Sessions) GetAllMC() []chan<- *models.Mock {
-	sessions := s.getAll()
-	var mc []chan<- *models.Mock
-	for _, session := range sessions {
-		mc = append(mc, session.MC)
-	}
-	return mc
 }
 
 type Session struct {

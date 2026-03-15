@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -90,52 +93,165 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 		return nil, fmt.Errorf("failed to get incoming: %s", err.Error())
 	}
 
-	// Ensure response body is closed when we're done
-	go func() {
-		<-ctx.Done()
-		if res.Body != nil {
-			err = res.Body.Close()
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to close response body for incoming request")
-			}
-		}
-	}()
-
 	// Create a channel to stream TestCase data
 	tcChan := make(chan *models.TestCase)
 
-	go func() {
-		defer func() {
-			close(tcChan)
+	// Determine stream type
+	contentType := res.Header.Get("Content-Type")
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to parse content type", zap.String("content-type", contentType))
+	}
 
-			err := res.Body.Close()
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to close response body for incoming request")
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := strings.TrimSpace(params["boundary"])
+		if boundary == "" {
+			if res.Body != nil {
+				res.Body.Close()
 			}
-		}()
+			return nil, fmt.Errorf("missing multipart boundary in content-type: %s", contentType)
+		}
+		go func() {
+			defer func() {
+				close(tcChan)
+				if res.Body != nil {
+					res.Body.Close()
+				}
+			}()
 
-		decoder := json.NewDecoder(res.Body)
+			mr := multipart.NewReader(res.Body, boundary)
+			var pendingTestCase *models.TestCase
 
-		for {
-			var testCase models.TestCase
-			if err := decoder.Decode(&testCase); err != nil {
-				if utils.IsShutdownError(err) {
-					// End of the stream or connection closed during shutdown
+			for {
+				part, err := mr.NextPart()
+				if err == io.EOF {
 					break
 				}
-				utils.LogError(a.logger, err, "failed to decode test case from stream")
-				break
-			}
+				if err != nil {
+					if ctx.Err() != nil ||
+						strings.Contains(err.Error(), "closed network connection") ||
+						errors.Is(err, io.ErrUnexpectedEOF) ||
+						strings.Contains(err.Error(), "unexpected EOF") {
+						a.logger.Debug("multipart stream ended", zap.Error(err))
+						break
+					}
+					utils.LogError(a.logger, err, "error reading stream part")
+					break
+				}
 
-			select {
-			case <-ctx.Done():
-				// If the context is done, exit the loop
-				return
-			case tcChan <- &testCase:
-				// Send the decoded test case to the channel
+				if part.FormName() == "metadata" {
+					var tc models.TestCase
+					if err := json.NewDecoder(part).Decode(&tc); err != nil {
+						utils.LogError(a.logger, err, "failed to decode metadata json")
+						continue
+					}
+					a.logger.Debug("Received test case metadata", zap.Any("test_case", tc))
+
+					if tc.HasBinaryFile {
+						pendingTestCase = &tc
+					} else {
+						select {
+						case <-ctx.Done():
+							return
+						case tcChan <- &tc:
+							pendingTestCase = nil
+						}
+					}
+				} else if part.FormName() == "file" {
+					if pendingTestCase == nil {
+						utils.LogError(a.logger, nil, "Received file part without preceding metadata, skipping...")
+						continue
+					}
+					fileName := part.FileName()
+					sanitizedFileName := filepath.Base(fileName)
+					if sanitizedFileName == "." || sanitizedFileName == string(filepath.Separator) || sanitizedFileName == "" {
+						sanitizedFileName = "testcase_blob"
+					}
+					a.logger.Debug("Received binary file part", zap.String("file_name", fileName), zap.String("sanitized_name", sanitizedFileName))
+
+					savePath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy_%d_%s", time.Now().UnixNano(), sanitizedFileName))
+					outFile, err := os.Create(savePath)
+					if err != nil {
+						utils.LogError(a.logger, err, "failed to create temp file for stream")
+						continue
+					}
+
+					_, err = io.Copy(outFile, part)
+					outFile.Close()
+					if err != nil {
+						utils.LogError(a.logger, err, "failed to write file stream to disk")
+						continue
+					}
+					a.logger.Debug("Successfully wrote binary file to temp storage", zap.String("path", savePath))
+					// Link matching file path logic
+					updated := false
+					for i := range pendingTestCase.HTTPReq.Form {
+						form := &pendingTestCase.HTTPReq.Form[i]
+						for j, fname := range form.FileNames {
+							if (fname == fileName || fname == sanitizedFileName || filepath.Base(fname) == sanitizedFileName) && j < len(form.Paths) {
+								form.Paths[j] = savePath
+								updated = true
+							}
+						}
+					}
+					if !updated {
+						for i := range pendingTestCase.HTTPReq.Form {
+							form := &pendingTestCase.HTTPReq.Form[i]
+							if len(form.Paths) > 0 {
+								form.Paths[0] = savePath
+								break
+							}
+						}
+					}
+
+				} else if part.FormName() == "delimiter" {
+					if pendingTestCase == nil {
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case tcChan <- pendingTestCase:
+						pendingTestCase = nil
+					}
+				}
 			}
-		}
-	}()
+		}()
+	} else {
+		// Legacy JSON stream
+		go func() {
+			defer func() {
+				close(tcChan)
+
+				err := res.Body.Close()
+				if err != nil {
+					utils.LogError(a.logger, err, "failed to close response body for incoming request")
+				}
+			}()
+
+			decoder := json.NewDecoder(res.Body)
+
+			for {
+				var testCase models.TestCase
+				if err := decoder.Decode(&testCase); err != nil {
+					if utils.IsShutdownError(err) {
+						// End of the stream or connection closed during shutdown
+						break
+					}
+					utils.LogError(a.logger, err, "failed to decode test case from stream")
+					break
+				}
+
+				select {
+				case <-ctx.Done():
+					// If the context is done, exit the loop
+					return
+				case tcChan <- &testCase:
+					// Send the decoded test case to the channel
+				}
+			}
+		}()
+	}
 
 	a.logger.Debug("Successfully connected to incoming test cases stream.")
 	return tcChan, nil
@@ -212,6 +328,63 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 	a.logger.Debug("Successfully connected to outgoing mocks stream.")
 
 	return mockChan, nil
+}
+
+func (a *AgentClient) GetMappings(ctx context.Context, opts models.IncomingOptions) (<-chan models.TestMockMapping, error) {
+
+	a.logger.Debug("Connecting to mappings stream...")
+
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/mappings", a.conf.Agent.AgentURI), nil)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to create request for mappings")
+		return nil, fmt.Errorf("error creating request for mappings: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Make the HTTP request
+	res, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mappings response: %s", err.Error())
+	}
+
+	mappingChan := make(chan models.TestMockMapping)
+
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return nil, fmt.Errorf("failed to get errorgroup from the context")
+	}
+
+	grp.Go(func() error {
+		defer func() {
+			close(mappingChan)
+			if err := res.Body.Close(); err != nil {
+				utils.LogError(a.logger, err, "failed to close response body for getmappings")
+			}
+		}()
+
+		decoder := json.NewDecoder(res.Body)
+
+		for {
+			var mapping models.TestMockMapping
+			if err := decoder.Decode(&mapping); err != nil {
+				if utils.IsShutdownError(err) {
+					break
+				}
+				utils.LogError(a.logger, err, "failed to decode mapping from stream")
+				break
+			}
+
+			select {
+			case <-ctx.Done():
+				return nil
+			case mappingChan <- mapping:
+			}
+		}
+		return nil
+	})
+
+	a.logger.Debug("Successfully connected to mappings stream.")
+	return mappingChan, nil
 }
 
 func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
@@ -536,7 +709,6 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
 	// Create the URL with query parameters
 	url := fmt.Sprintf("%s/consumedmocks", a.conf.Agent.AgentURI)
-
 	// Create a new GET request with the query parameter
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -617,6 +789,11 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	}
 	opts.ExtraArgs = agent.StartupAgentHook.GetArgs(ctx)
 	if isDockerCmd {
+		// Helper check to ensure the binary running inside docker has the required capabilities
+		if err := utils.CheckRequiredPermissions(); err != nil {
+			a.logger.Error("Failed to start Keploy Agent", zap.Error(err))
+			return err
+		}
 		// Start the agent in Docker container using errgroup
 		grp.Go(func() error {
 			defer cancel() // Cancel agent context when Docker agent stops
@@ -679,6 +856,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
 	}
+	if a.conf.Record.EnableSampling > 0 {
+		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
+	}
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")
 	}
@@ -687,6 +867,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
+	}
+	if models.IsAnsiDisabled == true {
+		args = append(args, "--disable-ansi")
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
@@ -757,7 +940,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
 		if err := a.requestAgentStop(); err != nil {
-			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
 			// Fallback: forcefully stop the agent process
 			a.mu.Lock()
 			cmd := a.agentCmd
@@ -824,7 +1007,7 @@ func (a *AgentClient) startNativeAgentWithPTY(ctx context.Context, keployBin str
 		a.logger.Debug("Keploy agent shutdown requested", zap.Int("pid", pid))
 		a.logger.Info("Stopping keploy agent")
 		if err := a.requestAgentStop(); err != nil {
-			a.logger.Warn("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
+			a.logger.Debug("failed to request keploy agent shutdown, sending stop signal", zap.Error(err))
 			// Fallback: forcefully stop the agent process
 			a.mu.Lock()
 			ptyHandle := a.agentPTY
@@ -885,6 +1068,14 @@ func (a *AgentClient) stopAgent() {
 	if a.agentCmd != nil && a.agentCmd.Process != nil {
 		pid := a.agentCmd.Process.Pid
 		a.logger.Debug("Stopping keploy agent", zap.Int("pid", pid))
+	}
+
+	// If PTY is active, close it to unblock stdin/stdout copies
+	if a.agentPTY != nil {
+		// Use the utils function to gracefully stop PTY
+		if err := agentUtils.StopPTYCommand(a.agentPTY, a.logger); err != nil {
+			a.logger.Warn("failed to stop PTY command", zap.Error(err))
+		}
 	}
 }
 
@@ -969,6 +1160,17 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				zap.String("cmd", cmd),
 			)
 		}
+
+		// Lower perf_event_paranoid to allow eBPF programs to attach to syscall tracepoints
+		// like sys_socket via perf_event_open. Ubuntu/Debian default (4) blocks this for
+		// unprivileged users, so setting 2 relaxes the restriction and enables tracing.
+		if runtime.GOOS == "linux" {
+			cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=2")
+			if err := cmd.Run(); err != nil {
+				a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+				return err
+			}
+		}
 	}
 
 	if opts.CommandType != string(utils.DockerCompose) { // in case of docker compose, we will run the application command (our agent will run along with it)
@@ -979,7 +1181,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 		a.logger.Debug("Agent is now running, proceeding with setup")
 
-		agentCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		agentCtx, cancel := context.WithTimeout(ctx, 60*time.Second) // we will wait for 1 minute for the agent to get ready
 		defer cancel()
 
 		agentReadyCh := make(chan bool, 1)
@@ -1155,6 +1357,47 @@ func (a *AgentClient) startInDockerWithPTY(ctx context.Context, logger *zap.Logg
 // This function should be implemented such that we listen to the mock not found errors on the proxy side and send it back to the client from agent
 // Currently, we are sending the nil chan and it is handled for the nil check in the monitorProxyErrors function
 func (a *AgentClient) GetErrorChannel() <-chan error {
+	return nil
+}
+
+// NotifyGracefulShutdown sends a request to the agent to set the graceful shutdown flag.
+// This should be called before cancelling contexts during application shutdown.
+// When the flag is set, connection errors will be logged as debug instead of error.
+func (a *AgentClient) NotifyGracefulShutdown(ctx context.Context) error {
+	if a.conf.Agent.AgentURI == "" {
+		a.logger.Debug("Agent URI is empty, skipping graceful shutdown notification")
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/graceful-shutdown", a.conf.Agent.AgentURI)
+
+	// Use a short timeout since this is a best-effort notification
+	reqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", url, nil)
+	if err != nil {
+		a.logger.Debug("failed to create graceful shutdown request", zap.Error(err))
+		return err
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		// Don't log as error since this might fail during shutdown
+		a.logger.Debug("failed to notify agent of graceful shutdown", zap.Error(err))
+		return err
+	}
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		a.logger.Debug("agent returned non-200 status for graceful shutdown", zap.Int("status", resp.StatusCode))
+		return fmt.Errorf("graceful shutdown notification failed with status %d", resp.StatusCode)
+	}
+
+	a.logger.Debug("Successfully notified agent of graceful shutdown")
 	return nil
 }
 

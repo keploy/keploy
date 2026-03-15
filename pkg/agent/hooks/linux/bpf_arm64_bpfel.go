@@ -54,17 +54,16 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
-	K_bind4                       *ebpf.ProgramSpec `ebpf:"k_bind4"`
-	K_bind6                       *ebpf.ProgramSpec `ebpf:"k_bind6"`
-	K_connect4                    *ebpf.ProgramSpec `ebpf:"k_connect4"`
-	K_connect6                    *ebpf.ProgramSpec `ebpf:"k_connect6"`
-	K_getpeername4                *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
-	K_getpeername6                *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
-	SyscallProbeEntryTcpV4Connect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
-	SyscallProbeEntryTcpV6Connect *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v6_connect"`
-	SyscallProbeRetTcpV4Connect   *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v4_connect"`
-	SyscallProbeRetTcpV6Connect   *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v6_connect"`
-	SyscallProbeEntrySocket       *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
+	K_bind4                 *ebpf.ProgramSpec `ebpf:"k_bind4"`
+	K_bind6                 *ebpf.ProgramSpec `ebpf:"k_bind6"`
+	K_connect4              *ebpf.ProgramSpec `ebpf:"k_connect4"`
+	K_connect6              *ebpf.ProgramSpec `ebpf:"k_connect6"`
+	K_getpeername4          *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
+	K_getpeername6          *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
+	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
+	K_udp4Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp4_sendmsg"`
+	K_udp6Sendmsg           *ebpf.ProgramSpec `ebpf:"k_udp6_sendmsg"`
+	SyscallProbeEntrySocket *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
@@ -73,12 +72,12 @@ type bpfProgramSpecs struct {
 type bpfMapSpecs struct {
 	AppPortInfo                 *ebpf.MapSpec `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
-	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
-	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
+	ExcludedPids                *ebpf.MapSpec `ebpf:"excluded_pids"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 }
@@ -111,12 +110,12 @@ func (o *bpfObjects) Close() error {
 type bpfMaps struct {
 	AppPortInfo                 *ebpf.Map `ebpf:"app_port_info"`
 	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
-	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
-	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
+	ExcludedPids                *ebpf.Map `ebpf:"excluded_pids"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 }
@@ -125,12 +124,12 @@ func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.AppPortInfo,
 		m.BindEvents,
-		m.CurrentSockMap,
-		m.DestInfoMap,
+		m.ExcludedPids,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.OrigDstByCookie,
 		m.RedirectProxyMap,
 		m.TargetNamespacePids,
 	)
@@ -146,17 +145,16 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
-	K_bind4                       *ebpf.Program `ebpf:"k_bind4"`
-	K_bind6                       *ebpf.Program `ebpf:"k_bind6"`
-	K_connect4                    *ebpf.Program `ebpf:"k_connect4"`
-	K_connect6                    *ebpf.Program `ebpf:"k_connect6"`
-	K_getpeername4                *ebpf.Program `ebpf:"k_getpeername4"`
-	K_getpeername6                *ebpf.Program `ebpf:"k_getpeername6"`
-	SyscallProbeEntryTcpV4Connect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
-	SyscallProbeEntryTcpV6Connect *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v6_connect"`
-	SyscallProbeRetTcpV4Connect   *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v4_connect"`
-	SyscallProbeRetTcpV6Connect   *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v6_connect"`
-	SyscallProbeEntrySocket       *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
+	K_bind4                 *ebpf.Program `ebpf:"k_bind4"`
+	K_bind6                 *ebpf.Program `ebpf:"k_bind6"`
+	K_connect4              *ebpf.Program `ebpf:"k_connect4"`
+	K_connect6              *ebpf.Program `ebpf:"k_connect6"`
+	K_getpeername4          *ebpf.Program `ebpf:"k_getpeername4"`
+	K_getpeername6          *ebpf.Program `ebpf:"k_getpeername6"`
+	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
+	K_udp4Sendmsg           *ebpf.Program `ebpf:"k_udp4_sendmsg"`
+	K_udp6Sendmsg           *ebpf.Program `ebpf:"k_udp6_sendmsg"`
+	SyscallProbeEntrySocket *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
 
 func (p *bpfPrograms) Close() error {
@@ -167,10 +165,9 @@ func (p *bpfPrograms) Close() error {
 		p.K_connect6,
 		p.K_getpeername4,
 		p.K_getpeername6,
-		p.SyscallProbeEntryTcpV4Connect,
-		p.SyscallProbeEntryTcpV6Connect,
-		p.SyscallProbeRetTcpV4Connect,
-		p.SyscallProbeRetTcpV6Connect,
+		p.K_sockops,
+		p.K_udp4Sendmsg,
+		p.K_udp6Sendmsg,
 		p.SyscallProbeEntrySocket,
 	)
 }

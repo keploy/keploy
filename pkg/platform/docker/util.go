@@ -72,6 +72,10 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	return keployalias, nil
 }
 
+// getAlias constructs the docker run command.
+// Note: The container runs with --cap-add=NET_ADMIN to configure its own private network namespace.
+// Due to Docker's network isolation (namespaces), this capability is strictly confined to the container
+// and CANNOT access or modify the Host System's network interfaces or configuration.
 func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
@@ -111,14 +115,13 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	Volumes = Volumes + tlsVolumeMount
 
 	extraArgs := opts.ExtraArgs
-
 	switch osName {
 	case "linux":
 
 		alias := "sudo docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-			" --privileged " + Volumes +
+			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
 
@@ -132,6 +135,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
@@ -150,7 +156,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.Synchronous {
 			alias += " --sync"
 		}
-
+		if opts.EnableSampling > 0 {
+			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
+		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
 		}
@@ -177,7 +185,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-				" --privileged " + Volumes +
+				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -193,6 +201,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if models.IsAnsiDisabled {
+				alias += " --disable-ansi"
 			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
@@ -211,6 +222,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.Synchronous {
 				alias += " --sync"
 			}
+			if opts.EnableSampling > 0 {
+				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
+			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
 			}
@@ -222,7 +236,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-			" --privileged " + Volumes +
+			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -238,6 +252,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
@@ -255,6 +272,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --sync"
+		}
+		if opts.EnableSampling > 0 {
+			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")
@@ -282,7 +302,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 				fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 				" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-				" --privileged " + Volumes +
+				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -298,6 +318,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			if opts.BuildDelay > 0 {
 				alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+			}
+			if models.IsAnsiDisabled {
+				alias += " --disable-ansi"
 			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
@@ -316,6 +339,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.Synchronous {
 				alias += " --sync"
 			}
+			if opts.EnableSampling > 0 {
+				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
+			}
 			if len(extraArgs) > 0 {
 				alias += " " + strings.Join(extraArgs, " ")
 			}
@@ -328,7 +354,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true -p " +
 			fmt.Sprintf("%d", opts.AgentPort) + ":" + fmt.Sprintf("%d", opts.AgentPort) +
 			" -p " + fmt.Sprintf("%d", opts.ProxyPort) + ":" + fmt.Sprintf("%d", opts.ProxyPort) + appPortsStr +
-			" --privileged " + Volumes +
+			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
 			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker"
@@ -344,6 +370,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.BuildDelay > 0 {
 			alias += fmt.Sprintf(" --build-delay %d", opts.BuildDelay)
+		}
+		if models.IsAnsiDisabled {
+			alias += " --disable-ansi"
 		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
@@ -361,6 +390,9 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 		if opts.Synchronous {
 			alias += " --sync"
+		}
+		if opts.EnableSampling > 0 {
+			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
 		if len(extraArgs) > 0 {
 			alias += " " + strings.Join(extraArgs, " ")

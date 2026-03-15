@@ -184,8 +184,8 @@ send_requests() {
       "user": "postgres",
       "password": "password",
       "dbName": "postgres",
-      "seed": 12345,
-      "totalOps": 2000,
+      "seed": 42,
+      "totalOps": 3000,
       "drop_db_first": true,
       "schema": "fuzz_schema_12345"
     }'

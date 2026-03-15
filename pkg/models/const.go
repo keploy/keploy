@@ -38,6 +38,7 @@ const (
 	SQLDB               string = "SQL_DB"
 	GRPC                string = "GRPC"
 	HTTPClient          string = "HTTP_CLIENT"
+	HTTP2Client         string = "HTTP2_CLIENT"
 	TestSetPattern      string = "test-set-"
 	String              string = "string"
 	TestRunTemplateName string = "test-run-"
@@ -67,30 +68,30 @@ var IsAnsiDisabled = false
 
 var HighlightString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(orangeColorSGR...).SprintFunc()(a)
+	return color.New(orangeColorSGR...).SprintFunc()(a...)
 }
 
 var HighlightPassingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgGreen).SprintFunc()(a)
+	return color.New(color.FgGreen).SprintFunc()(a...)
 }
 
 var HighlightFailingString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgRed).SprintFunc()(a)
+	return color.New(color.FgRed).SprintFunc()(a...)
 }
 
 var HighlightGrayString = func(a ...interface{}) string {
 	if IsAnsiDisabled {
-		return fmt.Sprint(a)
+		return fmt.Sprint(a...)
 	}
-	return color.New(color.FgHiBlack).SprintFunc()(a)
+	return color.New(color.FgHiBlack).SprintFunc()(a...)
 }
 
 var defaultColorScheme = pp.ColorScheme{

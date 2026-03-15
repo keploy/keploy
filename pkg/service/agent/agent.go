@@ -98,6 +98,13 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 	return tc, nil
 }
 
+// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
+// When this flag is set, connection errors will be logged as debug instead of error.
+func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
+	a.logger.Debug("Setting graceful shutdown flag on proxy")
+	return a.Proxy.SetGracefulShutdown(ctx)
+}
+
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, 1000)
 
@@ -107,6 +114,13 @@ func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<
 	}
 
 	return m, nil
+}
+
+func (a *Agent) GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error) {
+	mappingCh := make(chan models.TestMockMapping, 100)
+	a.Proxy.Mapping(ctx, mappingCh)
+
+	return mappingCh, nil
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
@@ -232,12 +246,13 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 		zap.Bool("useMappingBased", params.UseMappingBased),
 		zap.Int("mockMappingCount", len(params.MockMapping)))
 
-	// Get stored mocks for the
+	// Get stored mocks for the client
 	storageInterface, exists := a.clientMocks.Load(uint64(0))
 	if !exists {
 		return fmt.Errorf("no mocks stored for client ID")
 	}
 	storage := storageInterface.(*ClientMockStorage)
+
 	storage.mu.RLock()
 	originalFiltered := make([]*models.Mock, len(storage.filtered))
 	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
@@ -278,7 +293,6 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.TotalConsumedMocks != nil {
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
-		unfilteredMocks = a.filterOutDeleted(unfilteredMocks, params.TotalConsumedMocks)
 	}
 
 	// Set the filtered mocks to the proxy
