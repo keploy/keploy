@@ -66,6 +66,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
           go-cache: true
+          integration-ref: alb-fix
 
 #      - name: Checkout UI
 #        uses: actions/checkout@v4

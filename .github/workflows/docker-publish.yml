@@ -40,6 +40,7 @@ jobs:
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+          integration-ref: alb-fix
 
       # Install the cosign tool except on PR
       # https://github.com/sigstore/cosign-installer
@@ -69,6 +70,11 @@ jobs:
         uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Set version
         shell: bash
