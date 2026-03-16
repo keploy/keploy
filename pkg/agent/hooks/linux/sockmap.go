@@ -13,14 +13,50 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
+
+// bpfFSPath is the standard mount point for bpffs.
+const bpfFSPath = "/sys/fs/bpf"
 
 // Pinned paths for sockmap BPF maps.
 const (
-	SockhashPinPath  = "/sys/fs/bpf/keploy_sockhash"
-	CaptureRBPinPath = "/sys/fs/bpf/keploy_capture_rb"
-	SockMetaPinPath  = "/sys/fs/bpf/keploy_sock_meta"
+	SockhashPinPath  = bpfFSPath + "/keploy_sockhash"
+	CaptureRBPinPath = bpfFSPath + "/keploy_capture_rb"
+	SockMetaPinPath  = bpfFSPath + "/keploy_sock_meta"
 )
+
+// ensureBPFFS checks that /sys/fs/bpf is a bpffs filesystem. When running
+// inside Docker, /sys/fs/bpf may be a tmpfs or a bind-mounted host bpffs
+// with restrictive permissions. In either case, mount a fresh bpffs on top.
+func ensureBPFFS(logger *zap.Logger) {
+	// Check if /sys/fs/bpf is already a bpffs (magic = 0xcafe4a11).
+	var stat unix.Statfs_t
+	if err := unix.Statfs(bpfFSPath, &stat); err == nil && stat.Type == 0xcafe4a11 {
+		// Already a bpffs — check if it's writable.
+		testPath := bpfFSPath + "/.keploy_write_test"
+		f, err := os.Create(testPath)
+		if err == nil {
+			f.Close()
+			os.Remove(testPath)
+			return // bpffs is writable
+		}
+		logger.Debug("bpffs exists but is not writable, remounting",
+			zap.String("path", bpfFSPath), zap.Error(err))
+	}
+
+	// Ensure the mount point directory exists.
+	_ = os.MkdirAll(bpfFSPath, 0755)
+
+	// Mount a fresh bpffs. This requires CAP_SYS_ADMIN + no AppArmor restriction.
+	if err := unix.Mount("bpf", bpfFSPath, "bpf", 0, ""); err != nil {
+		logger.Warn("Failed to mount bpffs — BPF map pinning will not work",
+			zap.String("path", bpfFSPath), zap.Error(err))
+		return
+	}
+
+	logger.Info("Mounted fresh bpffs for BPF map pinning", zap.String("path", bpfFSPath))
+}
 
 // sockmap holds references to the sockmap BPF objects so they can be
 // cleaned up on unload.

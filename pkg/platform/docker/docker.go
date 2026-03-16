@@ -453,38 +453,32 @@ func (idc *Impl) generateKeployVolumes() []string {
 
 	switch osName {
 	case "linux":
-		// Standard Linux volumes
+		// /sys/fs/bpf is NOT bind-mounted — the host's bpffs has mode=700,
+		// making it unwritable from inside the container. The agent mounts
+		// a fresh container-local bpffs at startup (see ensureBPFFS).
 		volumes = append(volumes,
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
-			"/sys/fs/bpf:/sys/fs/bpf",
 		)
 	case "darwin":
-		// macOS volumes
 		volumes = append(volumes,
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
-			"/sys/fs/bpf:/sys/fs/bpf",
 		)
 	case "windows":
-		// Windows volumes - check if using default context or colima
 		cmd := exec.Command("docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err == nil {
 			dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 			if dockerContext != "colima" {
-				// Default Docker context on Windows
 				volumes = append(volumes,
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
-					"/sys/fs/bpf:/sys/fs/bpf",
 				)
 			} else {
-				// Colima context
 				volumes = append(volumes,
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
-					"/sys/fs/bpf:/sys/fs/bpf",
 				)
 			}
 		}
@@ -589,12 +583,31 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				"and do NOT grant access to the host's network, interfaces, or firewall.\n" +
 				"The container runs in its own network namespace — no host access is possible."},
 			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "SYS_ADMIN", LineComment: "required for pinning BPF maps to host bpffs (/sys/fs/bpf)"},
 				{Kind: yaml.ScalarNode, Value: "BPF"},
 				{Kind: yaml.ScalarNode, Value: "PERFMON"},
 				{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
 				{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
 				{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
 				{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
+			}},
+
+			// security_opt — Docker's default seccomp profile blocks the bpf()
+			// syscall even when CAP_BPF is granted. Disable seccomp and
+			// AppArmor so that eBPF map pinning, sockmap operations, and
+			// bpffs mount inside the container work correctly.
+			{Kind: yaml.ScalarNode, Value: "security_opt"},
+			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
+				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
+			}},
+
+			// tmpfs — provide a writable mount point for bpffs. The host's
+			// /sys/fs/bpf has mode=700 and cannot be written from inside a
+			// container. The agent mounts a real bpffs on top at startup.
+			{Kind: yaml.ScalarNode, Value: "tmpfs"},
+			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "/sys/fs/bpf:exec,mode=0755"},
 			}},
 		},
 	}

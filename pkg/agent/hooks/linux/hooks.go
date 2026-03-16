@@ -112,6 +112,11 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
+	// Ensure /sys/fs/bpf is a writable bpffs. When running inside Docker,
+	// the host's bpffs may be bind-mounted with restrictive permissions
+	// (mode=700). In that case, mount a fresh container-local bpffs.
+	ensureBPFFS(h.logger)
+
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
@@ -545,18 +550,17 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 
 	var ipv6 [4]uint32
 	if opts.IsDocker {
-		ipv6, err := ToIPv4MappedIPv6(AgentIP)
+		ipv6, err = ToIPv4MappedIPv6(AgentIP)
 		if err != nil {
 			return structs.ProxyInfo{}, fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
 		}
 		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-
 	}
 
 	proxyInfo := structs.ProxyInfo{
 		IP4:  ipv4,
 		IP6:  ipv6,
-		Port: opts.ProxyPort,
+		Port: port,
 	}
 
 	return proxyInfo, nil
