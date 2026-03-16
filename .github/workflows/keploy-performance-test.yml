@@ -57,7 +57,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: keploy/go.mod
           cache: true
           cache-dependency-path: |
             keploy/go.sum
