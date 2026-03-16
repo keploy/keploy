@@ -35,7 +35,7 @@ jobs:
           path: keploy
 
       - name: Checkout Keploy to test (custom repo/branch if manually specified)
-        if: github.event.inputs.keploy_repo != '' || github.event.inputs.keploy_branch != ''
+        if: github.event_name == 'workflow_dispatch' && (github.event.inputs.keploy_repo != 'keploy/keploy' || github.event.inputs.keploy_branch != 'main')
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.keploy_repo || 'keploy/keploy' }}
@@ -55,9 +55,9 @@ jobs:
           java-version: '17'
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
           cache: true
           cache-dependency-path: |
             keploy/go.sum
@@ -122,21 +122,21 @@ jobs:
 
       - name: Make scripts executable
         working-directory: keploy
-        run: chmod +x .github/workflows/test_workflow_scripts/*.sh
+        run: chmod +x .github/workflows/test_workflow_scripts/performance/*.sh
 
       - name: Start PetClinic with Keploy recording
         working-directory: keploy
-        run: ./.github/workflows/test_workflow_scripts/start-petclinic-with-keploy.sh
+        run: ./.github/workflows/test_workflow_scripts/performance/start-petclinic-with-keploy.sh
 
       - name: Create k6 load test script
         working-directory: keploy
-        run: ./.github/workflows/test_workflow_scripts/create-k6-script.sh
+        run: ./.github/workflows/test_workflow_scripts/performance/create-k6-script.sh
 
       - name: Run k6 performance tests (3 runs with validation)
         working-directory: keploy
         run: |
-          chmod +x ./.github/workflows/test_workflow_scripts/run-perf-test-with-validation.sh
-          ./.github/workflows/test_workflow_scripts/run-perf-test-with-validation.sh
+          chmod +x ./.github/workflows/test_workflow_scripts/performance/run-perf-test-with-validation.sh
+          ./.github/workflows/test_workflow_scripts/performance/run-perf-test-with-validation.sh
         env:
           NUM_RUNS: 3
           REQUIRED_FAILURES: 2
@@ -148,7 +148,7 @@ jobs:
       - name: Stop Keploy
         if: always()
         working-directory: keploy
-        run: ./.github/workflows/test_workflow_scripts/stop-keploy.sh
+        run: ./.github/workflows/test_workflow_scripts/performance/stop-keploy.sh
 
       - name: Upload performance results
         if: always()
@@ -232,7 +232,8 @@ jobs:
               const rps = rpsMatch ? parseFloat(rpsMatch[1]).toFixed(2) : 'N/A';
               
               // Determine status by checking for "FAILED" or "PASSED" in output
-              const runNumber = idx + 1;
+              // Use the actual run number from filename, not array index
+              const runNumber = getRunNumber(file);
               const failedPattern = new RegExp(`Run ${runNumber}: FAILED`, 'i');
               const passedPattern = new RegExp(`Run ${runNumber}: PASSED`, 'i');
               
@@ -285,4 +286,4 @@ jobs:
       - name: Display Keploy test cases
         if: always()
         working-directory: keploy
-        run: ./.github/workflows/test_workflow_scripts/display-test-cases.sh
+        run: ./.github/workflows/test_workflow_scripts/performance/display-test-cases.sh

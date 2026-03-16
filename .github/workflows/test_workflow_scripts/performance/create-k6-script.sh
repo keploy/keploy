@@ -19,7 +19,7 @@ export const options = {
       maxVUs: 100,
     },
   },
-  // Track specific percentiles - P50, P90, P99 root out outliers
+  // Track specific percentiles - P50, P90, P99 to weed out outliers
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(90)', 'p(95)', 'p(99)'],  // Removed p(99.9)
   // Note: Thresholds below are lenient defaults for k6's internal validation
   // The actual validation is done by run-perf-test-with-validation.sh using stricter thresholds

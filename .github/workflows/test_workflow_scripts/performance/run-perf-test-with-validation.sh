@@ -57,8 +57,8 @@ extract_metrics() {
     local p90=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(90\)=\K[0-9.]+[µm]?s' | head -1)
     local p99=$(grep "http_req_duration" "$output_file" | grep -oP 'p\(99\)=\K[0-9.]+[µm]?s' | head -1)
     
-    # Extract RPS
-    local rps=$(grep "http_reqs" "$output_file" | grep -oP ':\s+\d+\s+\K[0-9.]+(?=/s)' | head -1)
+    # Extract RPS (use the final summary http_reqs line)
+    local rps=$(grep "http_reqs" "$output_file" | grep -oP ':\s+\d+\s+\K[0-9.]+(?=/s)' | tail -1)
     
     echo "$p50|$p90|$p99|$rps"
 }
@@ -89,10 +89,25 @@ check_thresholds() {
     
     IFS='|' read -r p50 p90 p99 rps <<< "$metrics"
     
+    # Validate that all metrics were extracted successfully
+    if [ -z "$p50" ] || [ -z "$p90" ] || [ -z "$p99" ] || [ -z "$rps" ]; then
+        echo -e "${RED}  ✗ ERROR: Failed to extract metrics from k6 output${NC}"
+        echo -e "${RED}    P50: '$p50', P90: '$p90', P99: '$p99', RPS: '$rps'${NC}"
+        echo -e "${RED}    This indicates a parsing failure or unexpected k6 output format${NC}"
+        return 1
+    fi
+    
     # Convert to milliseconds if needed
     p50=$(convert_to_ms "$p50")
     p90=$(convert_to_ms "$p90")
     p99=$(convert_to_ms "$p99")
+    
+    # Validate converted values are numeric
+    if ! [[ "$p50" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$p90" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$p99" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$rps" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        echo -e "${RED}  ✗ ERROR: Invalid numeric values after conversion${NC}"
+        echo -e "${RED}    P50: '$p50', P90: '$p90', P99: '$p99', RPS: '$rps'${NC}"
+        return 1
+    fi
     
     # Check each threshold
     local passed=true

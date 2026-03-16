@@ -8,12 +8,13 @@ echo "🚀 Starting PetClinic with Keploy recording..."
 mkdir -p keploy-tests
 
 # Get the PetClinic JAR path
-PETCLINIC_JAR=$(ls ../petclinic/target/spring-petclinic-*.jar | head -1)
-
-if [ -z "$PETCLINIC_JAR" ]; then
+shopt -s nullglob
+jars=(../petclinic/target/spring-petclinic-*.jar)
+if [ ${#jars[@]} -eq 0 ]; then
   echo "❌ ERROR: PetClinic JAR not found"
   exit 1
 fi
+PETCLINIC_JAR="${jars[0]}"
 
 echo "📦 Using JAR: $PETCLINIC_JAR"
 
