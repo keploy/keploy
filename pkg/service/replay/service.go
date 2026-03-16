@@ -121,5 +121,5 @@ type InstrumentState struct {
 
 type MappingDB interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
-	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
+	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }

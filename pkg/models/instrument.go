@@ -12,10 +12,11 @@ type BypassRule struct {
 }
 
 type Filter struct {
-	BypassRule `mapstructure:",squash"`
-	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
-	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
-	MatchType  MatchType         `json:"matchType"`
+	BypassRule   `mapstructure:",squash"`
+	URLMethods   []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
+	Headers      map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
+	MatchType    MatchType         `json:"matchType" yaml:"matchType" mapstructure:"matchType"`
+	FilterPolicy FilterPolicy      `json:"filterPolicy" yaml:"filterPolicy" mapstructure:"filterPolicy"`
 }
 
 type MatchType string
@@ -23,6 +24,13 @@ type MatchType string
 const (
 	OR  MatchType = "OR"
 	AND MatchType = "AND"
+)
+
+type FilterPolicy string
+
+const (
+	Include FilterPolicy = "include"
+	Exclude FilterPolicy = "exclude"
 )
 
 type HookOptions struct {
@@ -92,6 +100,7 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	ConfigPath        string
 	ExtraArgs         []string
+	EnableSampling    int
 }
 
 type RunOptions struct {
