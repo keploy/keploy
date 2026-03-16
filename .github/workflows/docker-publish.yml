@@ -30,11 +30,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
 
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
@@ -92,6 +87,8 @@ jobs:
           context: .
           ssh: default
           platforms: linux/amd64, linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
