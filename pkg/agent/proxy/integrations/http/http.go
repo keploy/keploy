@@ -222,13 +222,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		},
 	}
 
-	if opts.Synchronous {
-		if mgr := syncMock.Get(); mgr != nil {
-			mgr.AddMock(newMock)
-			return nil
-		}
+	if mgr := syncMock.Get(); mgr != nil {
+		mgr.AddMock(newMock)
+		return nil
 	}
-	mocks <- newMock
 	return nil
 }
 

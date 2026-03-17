@@ -110,6 +110,16 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		synchronous: cfg.Agent.Synchronous,
+		sampling:    false,
+		samplingSem: make(chan struct{}, func() int {
+			if cfg.Agent.EnableSampling > 0 {
+				return cfg.Agent.EnableSampling
+			}
+			return 5
+		}()),
+	}
+	if cfg.Agent.EnableSampling > 0 {
+		pm.sampling = true
 	}
 	return pm
 }
@@ -303,7 +313,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 			_ = tc.SetNoDelay(true)
 		}
 
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)

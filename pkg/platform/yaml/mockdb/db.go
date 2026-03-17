@@ -89,7 +89,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	}
 	var newMocks []*models.Mock
 	for _, mock := range mocks {
-		if _, ok := mockNames[mock.Name]; ok {
+		if _, ok := mockNames[mock.Name]; ok || mock.Spec.Metadata["type"] == "config" {
 			newMocks = append(newMocks, mock)
 			continue
 		}

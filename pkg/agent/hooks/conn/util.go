@@ -167,7 +167,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		testName := fmt.Sprintf("test-%d", currentID)
 		testCase.Name = testName
 		if mgr := syncMock.Get(); mgr != nil { // dumping the test case from mock manager in synchronous mode
-			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true)
+			mgr.ResolveRange(reqTimeTest, resTimeTest, testCase.Name, true, false)
 		}
 	}
 	select {
