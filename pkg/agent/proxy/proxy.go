@@ -143,6 +143,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config, registerP
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
 		dnsCache:          newDNSCache(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
 
 	return proxy
