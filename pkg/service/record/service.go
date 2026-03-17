@@ -37,7 +37,6 @@ type MockDB interface {
 	DeleteMocksForSet(ctx context.Context, testSetID string) error
 	GetCurrMockID() int64
 	ResetCounterID()
-	Close() error
 }
 
 type MappingDb interface {

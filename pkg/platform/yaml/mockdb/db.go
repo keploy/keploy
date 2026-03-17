@@ -377,6 +377,3 @@ func (ys *MockYaml) ResetCounterID() {
 	atomic.StoreInt64(&ys.idCounter, -1)
 }
 
-func (ys *MockYaml) Close() error {
-	return nil
-}

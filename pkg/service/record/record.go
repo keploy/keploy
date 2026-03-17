@@ -140,11 +140,6 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
 			s.Shutdown()
 		}
-
-		err = r.mockDB.Close()
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to close mock db. Check file permissions and ensure disk space is available")
-		}
 	}()
 
 	defer close(appErrChan)
