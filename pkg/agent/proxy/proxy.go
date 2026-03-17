@@ -327,8 +327,11 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		}
 		//closing the mock channel (if any in record mode)
 		p.sessionMu.RLock()
-		if p.session != nil && p.session.MC != nil {
-			close(p.session.MC)
+		if p.session != nil {
+			if p.session.MC != nil {
+				close(p.session.MC)
+			}
+			resetDNSRecordingSession(p.session)
 		}
 		p.sessionMu.RUnlock()
 
@@ -950,6 +953,8 @@ func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models
 func (p *Proxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new mocking session.
 	p.isGracefulShutdown.Store(false)
+	// Reset DNS mock deduplication tracker for fresh mocking (and to free memory from prev recording)
+	p.ResetRecordedDNSMocks()
 	p.setSession(&agent.Session{
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
