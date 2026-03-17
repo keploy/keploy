@@ -43,6 +43,7 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker
 		Hooks:         hook,
 		Proxy:         proxy,
 		IncomingProxy: ip,
+		dockerClient:  client,
 		config:        config,
 	}
 	if ProxyHook != nil && proxy != nil {

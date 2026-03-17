@@ -59,8 +59,9 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// The parser must drain the ring buffer for the forwarder to continue,
 		// so blocking here creates back-pressure to the network forwarding path.
 		// Goroutine overhead (~2-3μs) is negligible compared to 40ms ACK delay.
+		out := m.outChan
 		m.mu.Unlock()
-		go func() { m.outChan <- mock }()
+		go func() { out <- mock }()
 		return
 	}
 	m.buffer = append(m.buffer, mock)
