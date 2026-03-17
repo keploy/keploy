@@ -11,6 +11,8 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+
+	"github.com/emirpasic/gods/trees/redblacktree"
 )
 
 // ---------------- MockManager (kind-aware) ----------------
@@ -177,15 +179,23 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.filtered.deleteAll()
+	// 1. Prepare global structures
+	globalRBT := redblacktree.NewWith(customComparator)
+	globalIDIndex := make(map[int]models.TestModeInfo)
 
-	// rebuild per-kind filtered maps from scratch to avoid stale entries
-	newFilteredByKind := make(map[models.Kind]*TreeDb, len(m.filteredByKind))
+	// 2. Prepare kind-based structures
+	type kindData struct {
+		rbt     *redblacktree.Tree
+		idIndex map[int]models.TestModeInfo
+	}
+	kindTreeData := make(map[models.Kind]*kindData)
 	touched := map[models.Kind]struct{}{}
 
 	var maxSortOrder int64
 	for index, mock := range mocks {
+		if mock == nil {
+			continue
+		}
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
@@ -193,15 +203,23 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
-		m.filtered.insert(mock.TestModeInfo, mock)
 
+		// Fill global
+		globalRBT.Put(mock.TestModeInfo, mock)
+		globalIDIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
+
+		// Fill per-kind
 		k := mock.Kind
-		td := newFilteredByKind[k]
-		if td == nil {
-			td = NewTreeDb(customComparator)
-			newFilteredByKind[k] = td
+		kd := kindTreeData[k]
+		if kd == nil {
+			kd = &kindData{
+				rbt:     redblacktree.NewWith(customComparator),
+				idIndex: make(map[int]models.TestModeInfo),
+			}
+			kindTreeData[k] = kd
 		}
-		td.insert(mock.TestModeInfo, mock)
+		kd.rbt.Put(mock.TestModeInfo, mock)
+		kd.idIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
 		touched[k] = struct{}{}
 	}
 
@@ -209,7 +227,18 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 
-	// atomically swap the per-kind map
+	// 3. Atomically update global tree
+	m.filtered.reset(globalRBT, globalIDIndex)
+
+	// 4. Atomically update per-kind trees
+	newFilteredByKind := make(map[models.Kind]*TreeDb, len(kindTreeData))
+	for k, kd := range kindTreeData {
+		td := NewTreeDb(customComparator)
+		td.rbt = kd.rbt
+		td.idIndex = kd.idIndex
+		newFilteredByKind[k] = td
+	}
+
 	m.treesMu.Lock()
 	m.filteredByKind = newFilteredByKind
 	m.treesMu.Unlock()
@@ -221,15 +250,23 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.unfiltered.deleteAll()
+	// 1. Prepare global structures
+	globalRBT := redblacktree.NewWith(customComparator)
+	globalIDIndex := make(map[int]models.TestModeInfo)
 
-	// rebuild per-kind unfiltered maps from scratch to avoid stale entries
-	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(m.unfilteredByKind))
+	// 2. Prepare kind-based structures
+	type kindData struct {
+		rbt     *redblacktree.Tree
+		idIndex map[int]models.TestModeInfo
+	}
+	kindTreeData := make(map[models.Kind]*kindData)
 	touched := map[models.Kind]struct{}{}
 
 	var maxSortOrder int64
 	for index, mock := range mocks {
+		if mock == nil {
+			continue
+		}
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
@@ -237,15 +274,23 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
 		mock.TestModeInfo.ID = index
-		m.unfiltered.insert(mock.TestModeInfo, mock)
 
+		// Fill global
+		globalRBT.Put(mock.TestModeInfo, mock)
+		globalIDIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
+
+		// Fill per-kind
 		k := mock.Kind
-		td := newUnfilteredByKind[k]
-		if td == nil {
-			td = NewTreeDb(customComparator)
-			newUnfilteredByKind[k] = td
+		kd := kindTreeData[k]
+		if kd == nil {
+			kd = &kindData{
+				rbt:     redblacktree.NewWith(customComparator),
+				idIndex: make(map[int]models.TestModeInfo),
+			}
+			kindTreeData[k] = kd
 		}
-		td.insert(mock.TestModeInfo, mock)
+		kd.rbt.Put(mock.TestModeInfo, mock)
+		kd.idIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
 		touched[k] = struct{}{}
 	}
 
@@ -253,7 +298,18 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 
-	// atomically swap the per-kind map
+	// 3. Atomically update global tree
+	m.unfiltered.reset(globalRBT, globalIDIndex)
+
+	// 4. Atomically update per-kind trees
+	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(kindTreeData))
+	for k, kd := range kindTreeData {
+		td := NewTreeDb(customComparator)
+		td.rbt = kd.rbt
+		td.idIndex = kd.idIndex
+		newUnfilteredByKind[k] = td
+	}
+
 	m.treesMu.Lock()
 	m.unfilteredByKind = newUnfilteredByKind
 	m.treesMu.Unlock()

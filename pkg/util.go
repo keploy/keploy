@@ -1122,71 +1122,88 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	}
 
 	isNonKeploy := false
+	deepCopyCount := 0
 
 	for _, mock := range m {
-		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
-		// field in this for loop, and write in mockmanager functions.
-		p := mock.DeepCopy()
-		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+		if mock == nil {
+			continue
+		}
+		
+		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+
+		// determine if it should be filtered first
+		shouldBeFiltered := false
+		if mock.Spec.ReqTimestampMock.Equal(time.Time{}) || mock.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
-			p.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, p)
-			continue
+			shouldBeFiltered = true
+		} else if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
+			shouldBeFiltered = true
 		}
 
-		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+		// doing shallow copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
+		p := mock.ShallowCopy()
+		deepCopyCount++
+
+		if shouldBeFiltered {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
-			continue
+		} else {
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
 		}
-		p.TestModeInfo.IsFiltered = false
-		unfilteredMocks = append(unfilteredMocks, p)
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
+	logger.Info("filterByTimeStamp stats", zap.Int("inputMocks", len(m)), zap.Int("deepCopyCount", deepCopyCount))
 	return filteredMocks, unfilteredMocks
 }
 
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
-	filteredMocks := make([]*models.Mock, 0)
-	unfilteredMocks := make([]*models.Mock, 0)
+	filteredMocks := make([]*models.Mock, 0, len(m))
+	unfilteredMocks := make([]*models.Mock, 0, len(m))
+
+	mappingMap := make(map[string]struct{}, len(mocksPresentInMapping))
+	for _, name := range mocksPresentInMapping {
+		mappingMap[name] = struct{}{}
+	}
 
 	isNonKeploy := false
+	deepCopyCount := 0
 
 	for _, mock := range m {
-
-		p := mock.DeepCopy()
-
-		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
-			isNonKeploy = true
-		}
-
-		matched := false
-		for _, name := range mocksPresentInMapping {
-			if p.Name == name {
-				p.TestModeInfo.IsFiltered = true
-				filteredMocks = append(filteredMocks, p)
-				matched = true
-				break
-			}
-		}
-
-		if matched {
+		if mock == nil {
 			continue
 		}
 
-		p.TestModeInfo.IsFiltered = false
-		unfilteredMocks = append(unfilteredMocks, p)
+		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+
+		_, matched := mappingMap[mock.Name]
+		
+		// If we need to return the mock, we must copy it because we are going to modify p.TestModeInfo.IsFiltered 
+		// and the original mock is shared across multiple test cases.
+		// using shallow copy as we only modify TestModeInfo.IsFiltered
+		p := mock.ShallowCopy()
+		deepCopyCount++
+		
+		if matched {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+		} else {
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+		}
 	}
 
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
-		return filteredMocks, unfilteredMocks
 	}
+	logger.Info("filterByMapping stats", zap.Int("inputMocks", len(m)), zap.Int("mappingSize", len(mocksPresentInMapping)), zap.Int("deepCopyCount", deepCopyCount))
 
 	return filteredMocks, unfilteredMocks
 }

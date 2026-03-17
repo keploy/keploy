@@ -114,6 +114,15 @@ func (db *TreeDb) deleteAll() {
 	db.mu.Unlock()
 }
 
+// reset replaces the internal tree and index with new ones.
+// It is used for atomic updates of the entire mock set.
+func (db *TreeDb) reset(rbt *redblacktree.Tree, idIndex map[int]models.TestModeInfo) {
+	db.mu.Lock()
+	db.rbt = rbt
+	db.idIndex = idIndex
+	db.mu.Unlock()
+}
+
 // rangeValues iterates without allocating a []interface{} snapshot.
 func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
 	db.mu.RLock()

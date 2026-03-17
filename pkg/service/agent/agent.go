@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -239,8 +240,8 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 
 // UpdateMockParams applies filtering parameters and updates the agent's mock manager
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
-
-	a.logger.Debug("UpdateMockParams called",
+	overallStart := time.Now()
+	a.logger.Info("UpdateMockParams called",
 		zap.Time("afterTime", params.AfterTime),
 		zap.Time("beforeTime", params.BeforeTime),
 		zap.Bool("useMappingBased", params.UseMappingBased),
@@ -254,26 +255,24 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	storage := storageInterface.(*ClientMockStorage)
 
 	storage.mu.RLock()
-	originalFiltered := make([]*models.Mock, len(storage.filtered))
-	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
-	copy(originalFiltered, storage.filtered)
-	copy(originalUnfiltered, storage.unfiltered)
-	storage.mu.RUnlock()
-
-	a.logger.Debug("Original mocks before filtering",
-		zap.Int("originalFiltered", len(originalFiltered)),
-		zap.Int("originalUnfiltered", len(originalUnfiltered)))
+	originalFilteredCount := len(storage.filtered)
+	originalUnfilteredCount := len(storage.unfiltered)
+	a.logger.Info("Original mocks before filtering",
+		zap.Int("originalFilteredCount", originalFilteredCount),
+		zap.Int("originalUnfilteredCount", originalUnfilteredCount))
 
 	var filteredMocks, unfilteredMocks []*models.Mock
-
+	filterStart := time.Now()
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
-		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
-		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
+		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, storage.filtered, params.MockMapping)
+		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, storage.unfiltered, params.MockMapping)
 	} else {
-		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime)
-		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
+		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, storage.filtered, params.AfterTime, params.BeforeTime)
+		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, storage.unfiltered, params.AfterTime, params.BeforeTime)
 	}
+	storage.mu.RUnlock()
+	a.logger.Info("Time taken for filtering mocks", zap.Duration("duration", time.Since(filterStart)))
 
 	// Count IsFiltered distribution for debugging
 	var filteredCount, unfilteredCount int
@@ -292,16 +291,21 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 
 	// Filter out deleted mocks if totalConsumedMocks is provided
 	if params.TotalConsumedMocks != nil {
+		deletedFilterStart := time.Now()
 		filteredMocks = a.filterOutDeleted(filteredMocks, params.TotalConsumedMocks)
+		a.logger.Info("Time taken to filter out deleted mocks", zap.Duration("duration", time.Since(deletedFilterStart)), zap.Int("totalConsumedMocks", len(params.TotalConsumedMocks)))
 	}
 
 	// Set the filtered mocks to the proxy
+	setMocksStart := time.Now()
 	err := a.Proxy.SetMocks(ctx, filteredMocks, unfilteredMocks)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to set mocks on proxy")
 		return err
 	}
+	a.logger.Info("Time taken to set mocks on proxy", zap.Duration("duration", time.Since(setMocksStart)))
 
+	a.logger.Info("Total time taken in UpdateMockParams", zap.Duration("duration", time.Since(overallStart)))
 	return nil
 }
 

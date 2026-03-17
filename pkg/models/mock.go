@@ -232,6 +232,15 @@ func (m *Mock) DeepCopy() *Mock {
 	return &c
 }
 
+func (m *Mock) ShallowCopy() *Mock {
+	if m == nil {
+		return nil
+	}
+	// Copy top-level fields explicitly to avoid copying embedded lock fields.
+	c := *m
+	return &c
+}
+
 type ReRecordCfg struct {
 	Rerecord bool
 	TestSet  string
