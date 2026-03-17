@@ -164,10 +164,11 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			if ctx.Err() != nil {
+			select {
+			case bufferChannel <- data:
+			case <-ctx.Done():
 				return
 			}
-			bufferChannel <- data
 		}
 
 		if err != nil {

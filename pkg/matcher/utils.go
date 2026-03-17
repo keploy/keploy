@@ -34,6 +34,10 @@ var (
 	regexCache   = make(map[string]*regexp.Regexp)
 )
 
+// Normalizes only the volatile local UDP source port in network error strings,
+// e.g. "write udp6 [::]:57553->[2001:4860:4860::8888]:53: sendto: errno 524".
+var udpSourcePortPattern = regexp.MustCompile(`(?i)\b((?:read|write)\s+udp6?\s+(?:\[[^\]]+\]|[^:\s]+):)\d+(->(?:\[[^\]]+\]|[^:\s]+):\d+)`)
+
 // getCompiled returns a cached compiled regexp for pattern.
 // It never panics: on invalid patterns, it returns a "never matches" regex (?!) and caches it.
 func getCompiled(pattern string) *regexp.Regexp {
@@ -697,6 +701,8 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 			return validatedJSON, err
 		}
 	}
+	expected = normalizeVolatileNetworkStrings(expected)
+	actual = normalizeVolatileNetworkStrings(actual)
 	validatedJSON.expected = expected
 	validatedJSON.actual = actual
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
@@ -715,6 +721,25 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 	*act = string(cleanAct)
 	validatedJSON.isIdentical = true
 	return validatedJSON, nil
+}
+
+func normalizeVolatileNetworkStrings(v interface{}) interface{} {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		for k, val := range x {
+			x[k] = normalizeVolatileNetworkStrings(val)
+		}
+		return x
+	case []interface{}:
+		for i, val := range x {
+			x[i] = normalizeVolatileNetworkStrings(val)
+		}
+		return x
+	case string:
+		return udpSourcePortPattern.ReplaceAllString(x, "${1}<ephemeral-port>${2}")
+	default:
+		return v
+	}
 }
 
 // UnmarshallJSON returns unmarshalled JSON object.
