@@ -32,8 +32,9 @@ type IngressProxyManager struct {
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
 	synchronous  bool
-
-	// Rust proxy integration: if sendIngressCmd is non-nil, use Rust for forwarding
+	sampling     bool
+	samplingSem  chan struct{}
+	
 	sendIngressCmd func(origPort, newPort uint16) error
 
 	// Ingress connections forwarded by Rust proxy, keyed by conn_id

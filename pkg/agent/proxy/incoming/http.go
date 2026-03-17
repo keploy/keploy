@@ -2,18 +2,18 @@ package proxy
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
-	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -130,18 +130,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if err != nil {
 			logger.Error("Failed to dump request for capturing", zap.Error(err))
 			req.Body.Close()
-			if err != nil {
-				logger.Error("Failed to read request body. Check if the client connection is still active or verify the request body format", zap.Error(err))
-				return
-			}
+			return
+		}
+
+		if err := req.Write(upConn); err != nil {
+			logger.Error("Failed to forward request to upstream", zap.Error(err))
+			req.Body.Close()
+			return
 		}
 		req.Body.Close()
 
-		// Read response from upstream's TeeForwardConn buffer.
-		// The response has ALREADY been forwarded to the client at wire speed.
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			logger.Error("Failed to read upstream response. Check if the upstream server is running or verify network connectivity to the upstream", zap.Error(err))
+			logger.Error("Failed to read upstream response", zap.Error(err))
 			return
 		}
 
@@ -159,12 +160,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		respTimestamp := time.Now()
+		respData, err := httputil.DumpResponse(resp, true)
+		if err != nil {
+			logger.Error("Failed to dump response for capturing", zap.Error(err))
+			resp.Body.Close()
+			return
+		}
 
-		// Read response body from TeeForwardConn buffer.
-		// Already forwarded to client — just reading for capture.
-		var respBodyBytes []byte
-		if resp.Body != nil {
-			respBodyBytes, err = io.ReadAll(resp.Body)
+		if err := resp.Write(clientConn); err != nil {
+			logger.Error("Failed to forward response to client", zap.Error(err))
 			resp.Body.Close()
 			return
 		}

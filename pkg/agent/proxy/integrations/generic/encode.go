@@ -92,10 +92,13 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						Metadata:         metadata,
 					},
 				}
-				if mgr := syncMock.Get(); mgr != nil {
-					mgr.AddMock(mock)
-					return ctx.Err()
+				if opts.Synchronous {
+					if mgr := syncMock.Get(); mgr != nil {
+						mgr.AddMock(mock)
+						return ctx.Err()
+					}
 				}
+				mocks <- mock
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
@@ -126,8 +129,12 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 							Metadata:         metadata,
 						},
 					}
-					if mgr := syncMock.Get(); mgr != nil {
-						mgr.AddMock(mock)
+					if opts.Synchronous {
+						if mgr := syncMock.Get(); mgr != nil {
+							mgr.AddMock(mock)
+						}
+					} else {
+						mocks <- mock
 					}
 
 				}(genericRequestsCopy, genericResponseCopy, reqTS, resTS)

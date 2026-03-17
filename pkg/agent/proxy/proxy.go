@@ -84,6 +84,11 @@ type Proxy struct {
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
+	// recordedDNSMocks tracks DNS queries that have already been recorded
+	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass:rcode:answerSummary"
+	// Uses bounded LRU with TTL to prevent unbounded memory growth.
+	recordedDNSMocks *expirable.LRU[string, bool]
+
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
