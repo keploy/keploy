@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
@@ -76,23 +75,14 @@ const (
 	// dnsCacheMaxSize is the maximum number of entries in the DNS cache.
 	dnsCacheMaxSize = 256
 	// dnsCacheTTL is the default time-to-live for cached DNS entries.
+	// Entries expire automatically after this duration.
 	dnsCacheTTL = 30 * time.Second
-)
 
-type dnsDedupeStrategy string
-
-const (
-	// Exact question + normalized negative response (ignore TTL / SOA serial churn).
-	dnsDedupeNXDOMAIN dnsDedupeStrategy = "rcode_nxdomain"
-
-	// Exact question + normalized stable success sections.
-	dnsDedupeStableSuccess dnsDedupeStrategy = "rcode_success_stable"
-
-	// Exact question + answer-set-preserving success sections for rotating public answers.
-	dnsDedupeRotatingSuccess dnsDedupeStrategy = "rcode_success_rotating"
-
-	// Catch-all for other rcodes.
-	dnsDedupeOther dnsDedupeStrategy = "rcode_other"
+	// recordedDNSMocksMaxSize is the maximum number of entries in the DNS deduplication tracker.
+	recordedDNSMocksMaxSize = 1024
+	// recordedDNSMocksTTL is the TTL for recorded DNS mock entries.
+	// Recording sessions typically don't last longer than this.
+	recordedDNSMocksTTL = 30 * time.Minute
 )
 
 // newDNSCache creates a new thread-safe, size-bounded, TTL-expiring DNS cache.
@@ -100,116 +90,13 @@ func newDNSCache() *expirable.LRU[string, dnsCacheEntry] {
 	return expirable.NewLRU[string, dnsCacheEntry](dnsCacheMaxSize, nil, dnsCacheTTL)
 }
 
-// ----------------------------------------------------------------------------
-// Session-safe DNS dedupe for recording mode
-// ----------------------------------------------------------------------------
-
-// dnsRecordedSet keeps every semantic DNS response seen during a recording session.
-// No TTL or LRU eviction is used, so dedupe remains correct even for very long
-// sessions like 24-hour recordings.
-type dnsRecordedSet struct {
-	mu   sync.RWMutex
-	seen map[string]struct{}
+// newRecordedDNSMocksCache creates a bounded, TTL-expiring cache for DNS mock deduplication.
+func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
+	return expirable.NewLRU[string, bool](recordedDNSMocksMaxSize, nil, recordedDNSMocksTTL)
 }
 
-func newDNSRecordedSet() *dnsRecordedSet {
-	return &dnsRecordedSet{
-		seen: make(map[string]struct{}),
-	}
-}
-
-func (s *dnsRecordedSet) Has(key string) bool {
-	s.mu.RLock()
-	_, ok := s.seen[key]
-	s.mu.RUnlock()
-	return ok
-}
-
-func (s *dnsRecordedSet) Add(key string) {
-	s.mu.Lock()
-	s.seen[key] = struct{}{}
-	s.mu.Unlock()
-}
-
-func (s *dnsRecordedSet) Reset() {
-	s.mu.Lock()
-	s.seen = make(map[string]struct{})
-	s.mu.Unlock()
-}
-
-// dnsSessionDedupeRegistry keeps one exact dedupe set per recording session.
-// This avoids cross-session contamination while keeping dedupe exact for the
-// whole duration of each session.
-type dnsSessionDedupeRegistry struct {
-	mu        sync.Mutex
-	bySession map[*agent.Session]*dnsRecordedSet
-}
-
-func newDNSSessionDedupeRegistry() *dnsSessionDedupeRegistry {
-	return &dnsSessionDedupeRegistry{
-		bySession: make(map[*agent.Session]*dnsRecordedSet),
-	}
-}
-
-func (r *dnsSessionDedupeRegistry) Get(session *agent.Session) *dnsRecordedSet {
-	if session == nil {
-		return nil
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if s, ok := r.bySession[session]; ok {
-		return s
-	}
-
-	s := newDNSRecordedSet()
-	r.bySession[session] = s
-	return s
-}
-
-func (r *dnsSessionDedupeRegistry) Reset(session *agent.Session) {
-	if session == nil {
-		return
-	}
-
-	r.mu.Lock()
-	delete(r.bySession, session)
-	r.mu.Unlock()
-}
-
-// Package-level registry so this file works without requiring Proxy/session field changes.
-// Recommended: call resetDNSRecordingSession(session) when the recording session ends.
-var dnsRecordedMocksBySession = newDNSSessionDedupeRegistry()
-
-func resetDNSRecordingSession(session *agent.Session) {
-	dnsRecordedMocksBySession.Reset(session)
-}
-
-// ResetRecordedDNSMocks clears the session-scoped DNS deduplication records.
-func (p *Proxy) ResetRecordedDNSMocks() {
-	p.sessionMu.RLock()
-	defer p.sessionMu.RUnlock()
-	if p.session != nil {
-		resetDNSRecordingSession(p.session)
-	}
-}
-
-// ----------------------------------------------------------------------------
-
-func canonicalDNSName(name string) string {
-	return strings.ToLower(dns.Fqdn(name))
-}
-
-func generateCacheKey(name string, qtype, qclass uint16) string {
-	return fmt.Sprintf("%s-%d-%d", canonicalDNSName(name), qtype, qclass)
-}
-
-func qtypeToString(qtype uint16) string {
-	if s, ok := dns.TypeToString[qtype]; ok && s != "" {
-		return s
-	}
-	return fmt.Sprintf("TYPE%d", qtype)
+func generateCacheKey(name string, qtype uint16) string {
+	return fmt.Sprintf("%s-%s", dns.Fqdn(name), dns.TypeToString[qtype])
 }
 
 func mergeRcode(cur, next int) int {
@@ -255,7 +142,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	for _, question := range r.Question {
 		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
 
-		key := generateCacheKey(question.Name, question.Qtype, question.Qclass)
+		key := generateCacheKey(question.Name, question.Qtype)
 		reqTimestamp := time.Now().UTC()
 
 		resp, found := p.dnsCache.Get(key)
@@ -311,7 +198,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		if err != nil {
 			utils.LogError(p.logger, err, "DNS resolution failed in record mode",
 				zap.String("query", question.Name),
-				zap.String("qtype", qtypeToString(question.Qtype)),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
 			)
 			return dnsCacheEntry{
 				Msg: &dns.Msg{
@@ -404,8 +291,9 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 		return dnsCacheEntry{}, false
 	}
 
-	const maxRetries = 3
+	const maxRetries = 3 // Reduced from 5 since we return result anyway after exhausting retries
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Add small backoff between retries to reduce contention
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt*5) * time.Millisecond)
 		}
@@ -524,7 +412,7 @@ func dnsRequestMatches(recorded *models.DNSReq, question dns.Question) bool {
 	if recorded.Qclass != 0 && recorded.Qclass != question.Qclass {
 		return false
 	}
-	return canonicalDNSName(recorded.Name) == canonicalDNSName(question.Name)
+	return strings.EqualFold(dns.Fqdn(recorded.Name), dns.Fqdn(question.Name))
 }
 
 func decodeDNSRRs(logger *zap.Logger, rrs []string) []dns.RR {
@@ -563,10 +451,10 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 	if mgr == nil || matchedMock == nil {
 		return false
 	}
-
 	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
 	id, isFiltered, sortOrder := matchedMock.TestModeInfo.ID, matchedMock.TestModeInfo.IsFiltered, matchedMock.TestModeInfo.SortOrder
 
+	// Log the update attempt for debugging
 	p.logger.Debug("Attempting DNS mock update",
 		zap.String("mockName", matchedMock.Name),
 		zap.Int("id", id),
@@ -608,179 +496,49 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 	return result
 }
 
-func classifyDNSDedupeStrategy(question dns.Question, resp *dns.Msg) dnsDedupeStrategy {
-	if resp == nil {
-		return dnsDedupeOther
-	}
-
-	switch resp.Rcode {
-	case dns.RcodeNameError:
-		return dnsDedupeNXDOMAIN
-	case dns.RcodeSuccess:
-		if isLikelyRotatingPublicAnswer(question, resp) {
-			return dnsDedupeRotatingSuccess
-		}
-		return dnsDedupeStableSuccess
-	default:
-		return dnsDedupeOther
-	}
-}
-
-func isLikelyRotatingPublicAnswer(question dns.Question, resp *dns.Msg) bool {
-	if resp == nil {
-		return false
-	}
-	if question.Qtype != dns.TypeA {
-		return false
-	}
-	if len(resp.Answer) == 0 {
-		return false
-	}
-	if isLikelyInternalDNSName(question.Name) {
-		return false
-	}
-
-	addressAnswers := 0
+// generateDNSDedupeKey creates a unique key for DNS mock deduplication.
+// The key is based on the DNS question (name + type + class) and response (rcode + answer data).
+// TTL values are excluded to avoid treating responses with different TTLs as different.
+// This ensures identical DNS queries with identical responses are recorded only once.
+func generateDNSDedupeKey(question dns.Question, resp *dns.Msg) string {
+	// Build answer summary: extract answer data without TTL for stable deduplication
+	// DNS RR string format: "name TTL class type data"
+	// We want to capture: name, type, and data - but ignore TTL which changes over time
+	var answerParts []string
 	for _, rr := range resp.Answer {
-		switch rr.(type) {
-		case *dns.A, *dns.AAAA:
-			addressAnswers++
-		}
+		// Extract the header and data separately to exclude TTL
+		hdr := rr.Header()
+		// Create a stable representation: name:type:data
+		// The RR's actual data (IP address, etc.) is obtained by removing the header
+		rrStr := rr.String()
+		// RR format: "name TTL class type data..."
+		// We'll just use the type and the data portion
+		answerParts = append(answerParts, fmt.Sprintf("%d:%s", hdr.Rrtype, extractRRData(rrStr)))
 	}
 
-	return addressAnswers > 0
+	// Sort answer parts to handle answer reordering (e.g., round-robin DNS)
+	sort.Strings(answerParts)
+	answerSummary := strings.Join(answerParts, "|")
+
+	return fmt.Sprintf("%s:%d:%d:%d:%s",
+		dns.Fqdn(question.Name),
+		question.Qtype,
+		question.Qclass,
+		resp.Rcode,
+		answerSummary,
+	)
 }
 
-func isLikelyInternalDNSName(name string) bool {
-	n := canonicalDNSName(name)
-	return strings.HasSuffix(n, ".svc.cluster.local.") ||
-		strings.HasSuffix(n, ".cluster.local.") ||
-		strings.HasSuffix(n, ".local.")
-}
-
-func generateDNSDedupeKey(question dns.Question, resp *dns.Msg) (string, dnsDedupeStrategy) {
-	strategy := classifyDNSDedupeStrategy(question, resp)
-
-	base := []string{
-		"v3",
-		string(strategy),
-		canonicalDNSName(question.Name),
-		fmt.Sprintf("%d", question.Qtype),
-		fmt.Sprintf("%d", question.Qclass),
-		fmt.Sprintf("%d", resp.Rcode),
-		fmt.Sprintf("aa=%t", resp.Authoritative),
-		fmt.Sprintf("ra=%t", resp.RecursionAvailable),
-		fmt.Sprintf("tc=%t", resp.Truncated),
-		"ans=" + normalizeRRSetForDedupe(resp.Answer, false),
-		"ns=" + normalizeRRSetForDedupe(resp.Ns, false),
-		"extra=" + normalizeRRSetForDedupe(resp.Extra, false),
+// extractRRData extracts the data portion of a DNS RR string, excluding name, TTL, class, and type.
+// Input format: "example.com. 300 IN A 104.18.27.120"
+// Output: "104.18.27.120"
+func extractRRData(rrStr string) string {
+	// Split by whitespace and skip: name, TTL, class, type (first 4 fields)
+	parts := strings.Fields(rrStr)
+	if len(parts) > 4 {
+		return strings.Join(parts[4:], " ")
 	}
-
-	return strings.Join(base, "|"), strategy
-}
-
-func normalizeRRSetForDedupe(rrs []dns.RR, includeOPT bool) string {
-	if len(rrs) == 0 {
-		return ""
-	}
-
-	out := make([]string, 0, len(rrs))
-	for _, rr := range rrs {
-		if rr == nil {
-			continue
-		}
-		s := normalizeRRForDedupe(rr, includeOPT)
-		if s == "" {
-			continue
-		}
-		out = append(out, s)
-	}
-
-	if len(out) == 0 {
-		return ""
-	}
-
-	sort.Strings(out)
-	return strings.Join(out, "|")
-}
-
-func normalizeRRForDedupe(rr dns.RR, includeOPT bool) string {
-	switch r := rr.(type) {
-	case *dns.A:
-		return fmt.Sprintf("%s|A|%s", canonicalDNSName(r.Hdr.Name), r.A.String())
-
-	case *dns.AAAA:
-		return fmt.Sprintf("%s|AAAA|%s", canonicalDNSName(r.Hdr.Name), r.AAAA.String())
-
-	case *dns.CNAME:
-		return fmt.Sprintf("%s|CNAME|%s", canonicalDNSName(r.Hdr.Name), canonicalDNSName(r.Target))
-
-	case *dns.NS:
-		return fmt.Sprintf("%s|NS|%s", canonicalDNSName(r.Hdr.Name), canonicalDNSName(r.Ns))
-
-	case *dns.PTR:
-		return fmt.Sprintf("%s|PTR|%s", canonicalDNSName(r.Hdr.Name), canonicalDNSName(r.Ptr))
-
-	case *dns.MX:
-		return fmt.Sprintf("%s|MX|%d|%s", canonicalDNSName(r.Hdr.Name), r.Preference, canonicalDNSName(r.Mx))
-
-	case *dns.SRV:
-		return fmt.Sprintf("%s|SRV|%d|%d|%d|%s",
-			canonicalDNSName(r.Hdr.Name),
-			r.Priority,
-			r.Weight,
-			r.Port,
-			canonicalDNSName(r.Target),
-		)
-
-	case *dns.TXT:
-		txt := append([]string(nil), r.Txt...)
-		sort.Strings(txt)
-		return fmt.Sprintf("%s|TXT|%s", canonicalDNSName(r.Hdr.Name), strings.Join(txt, "\x1f"))
-
-	case *dns.SOA:
-		// Ignore SOA serial because that is the main negative-response churn source.
-		return fmt.Sprintf("%s|SOA|%s|%s|%d|%d|%d|%d",
-			canonicalDNSName(r.Hdr.Name),
-			canonicalDNSName(r.Ns),
-			canonicalDNSName(r.Mbox),
-			r.Refresh,
-			r.Retry,
-			r.Expire,
-			r.Minttl,
-		)
-
-	case *dns.OPT:
-		// EDNS OPT often carries transport/request noise and should not create mock duplication.
-		if !includeOPT {
-			return ""
-		}
-		optCodes := make([]string, 0, len(r.Option))
-		for _, opt := range r.Option {
-			if opt == nil {
-				continue
-			}
-			optCodes = append(optCodes, fmt.Sprintf("%d", opt.Option()))
-		}
-		sort.Strings(optCodes)
-		return fmt.Sprintf("%s|OPT|udp=%d|do=%t|opts=%s",
-			canonicalDNSName(r.Hdr.Name),
-			r.UDPSize(),
-			r.Do(),
-			strings.Join(optCodes, ","),
-		)
-
-	default:
-		// Generic fallback: strip TTL/class header noise as much as possible.
-		parts := strings.Fields(rr.String())
-		if len(parts) <= 4 {
-			return rr.String()
-		}
-		name := canonicalDNSName(parts[0])
-		rrType := parts[3]
-		data := strings.Join(parts[4:], " ")
-		return fmt.Sprintf("%s|%s|%s", name, rrType, data)
-	}
+	return rrStr
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
@@ -851,23 +609,31 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		return resp, nil
 	}
 
-	// Session-scoped exact dedupe. No TTL/LRU eviction.
-	dedupeSet := dnsRecordedMocksBySession.Get(session)
-	if dedupeSet == nil {
-		return resp, nil
-	}
-
-	dedupeKey, strategy := generateDNSDedupeKey(question, in)
-	if dedupeSet.Has(dedupeKey) {
-		p.logger.Debug("Skipping duplicate DNS mock",
-			zap.String("query", canonicalDNSName(question.Name)),
-			zap.String("qtype", qtypeToString(question.Qtype)),
+	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
+	// These are often noise from search domain expansion or external transient issues.
+	if in.Rcode != dns.RcodeSuccess {
+		p.logger.Debug("Skipping DNS mock recording due to non-zero rcode",
+			zap.String("query", question.Name),
+			zap.String("qtype", dns.TypeToString[question.Qtype]),
 			zap.Int("rcode", in.Rcode),
-			zap.String("strategy", string(strategy)),
 		)
 		return resp, nil
 	}
-	dedupeSet.Add(dedupeKey)
+
+	// ========== DNS MOCK DEDUPLICATION ==========
+	// Generate a unique key based on the DNS query and response.
+	// If we've already recorded this exact query+response combination, skip recording.
+	dedupeKey := generateDNSDedupeKey(question, in)
+	if _, alreadyRecorded := p.recordedDNSMocks.Get(dedupeKey); alreadyRecorded {
+		p.logger.Debug("Skipping duplicate DNS mock",
+			zap.String("query", question.Name),
+			zap.String("qtype", dns.TypeToString[question.Qtype]),
+		)
+		return resp, nil
+	}
+	// Mark as recorded
+	p.recordedDNSMocks.Add(dedupeKey, true)
+	// ============================================
 
 	resTime := time.Now().UTC()
 	mock := &models.Mock{
@@ -876,17 +642,12 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		Kind:    models.DNS,
 		Spec: models.MockSpec{
 			Metadata: map[string]string{
-				"name":                 "DNS",
-				"qtype":                qtypeToString(question.Qtype),
-				"type":                 "config",
-				"dns_dedupe_strategy":  string(strategy),
-				"dns_recorded_rcode":   fmt.Sprintf("%d", in.Rcode),
-				"dns_recorded_qname":   canonicalDNSName(question.Name),
-				"dns_recorded_qclass":  fmt.Sprintf("%d", question.Qclass),
-				"dns_recorded_qtypeid": fmt.Sprintf("%d", question.Qtype),
+				"name":  "DNS",
+				"qtype": dns.TypeToString[question.Qtype],
+				"type":  "config",
 			},
 			DNSReq: &models.DNSReq{
-				Name:   canonicalDNSName(question.Name),
+				Name:   dns.Fqdn(question.Name),
 				Qtype:  question.Qtype,
 				Qclass: question.Qclass,
 			},
@@ -905,10 +666,9 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 	}
 
 	p.logger.Debug("Recording new DNS mock",
-		zap.String("query", canonicalDNSName(question.Name)),
-		zap.String("qtype", qtypeToString(question.Qtype)),
+		zap.String("query", question.Name),
+		zap.String("qtype", dns.TypeToString[question.Qtype]),
 		zap.Int("rcode", in.Rcode),
-		zap.String("strategy", string(strategy)),
 	)
 
 	if session.Synchronous {
