@@ -279,42 +279,12 @@ const (
 // forwards to dest, and buffers the data for the caller to read. The forwarding
 // goroutine starts immediately.
 func NewTeeForwardConn(ctx context.Context, logger *zap.Logger, src, dest net.Conn) *TeeForwardConn {
-	setTCPNoDelay(dest)
-	setTCPNoDelay(src)
-	setTCPQuickACK(src)
-	setTCPQuickACK(dest)
 	ctx, cancel := context.WithCancel(ctx)
 	ring := newRingBuf(defaultRingSize)
 	t := &TeeForwardConn{
 		src:     src,
 		dest:    dest,
 		reader:  src,
-		ring:    ring,
-		bufRing: bufio.NewReaderSize(ring, bufRingReaderSize),
-		ctx:     ctx,
-		cancel:  cancel,
-		logger:  logger,
-		srcFD:   extractTCPfd(src),
-		destFD:  extractTCPfd(dest),
-	}
-	t.startForwarding()
-	return t
-}
-
-// NewTeeForwardConnWithReader creates a TeeForwardConn with a custom reader
-// for the forwarding goroutine. This is useful when initial data has been
-// pre-read from src and needs to be prepended (e.g., using io.MultiReader).
-// The forwarding goroutine reads from the provided reader instead of src directly.
-func NewTeeForwardConnWithReader(ctx context.Context, logger *zap.Logger, src, dest net.Conn, reader io.Reader) *TeeForwardConn {
-	setTCPNoDelay(dest)
-	setTCPQuickACK(src)
-	setTCPQuickACK(dest)
-	ctx, cancel := context.WithCancel(ctx)
-	ring := newRingBuf(defaultRingSize)
-	t := &TeeForwardConn{
-		src:     src,
-		dest:    dest,
-		reader:  reader,
 		ring:    ring,
 		bufRing: bufio.NewReaderSize(ring, bufRingReaderSize),
 		ctx:     ctx,
@@ -419,22 +389,6 @@ func (t *TeeForwardConn) getErr() error {
 	defer t.errMu.Unlock()
 	return t.err
 }
-
-// SetTCPNoDelay enables TCP_NODELAY on the connection if it is a TCP connection.
-// This eliminates Nagle's algorithm delay (~40ms) on small writes, which is
-// critical for forwarding performance.
-// Handles TLS-wrapped connections by unwrapping to the underlying *net.TCPConn.
-func SetTCPNoDelay(conn net.Conn) {
-	if tc := unwrapTCPConn(conn); tc != nil {
-		_ = tc.SetNoDelay(true)
-	}
-}
-
-// setTCPNoDelay is the package-internal alias (used by constructors).
-func setTCPNoDelay(conn net.Conn) { SetTCPNoDelay(conn) }
-
-// setTCPQuickACK is the package-internal alias (used by constructors).
-func setTCPQuickACK(conn net.Conn) { SetTCPQuickACK(conn) }
 
 // netConner is satisfied by *tls.Conn (and any other wrapper that exposes
 // the underlying net.Conn via NetConn()). Using an interface avoids importing

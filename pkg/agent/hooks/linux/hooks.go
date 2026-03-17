@@ -81,6 +81,9 @@ type Hooks struct {
 
 	// sockmap BPF objects for low-latency mode (nil when not enabled)
 	sm *sockmap
+
+	// mapPinCleanup is set by the EbpfMapPinHook to unpin maps on shutdown.
+	mapPinCleanup func()
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -182,24 +185,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
 
-	// Pin redirect_proxy_map to bpffs so enterprise proxy can open it directly.
-	const mapPinPath = "/sys/fs/bpf/keploy_redirect_proxy_map"
-	_ = os.Remove(mapPinPath) // clean stale pin
-	if err := objs.RedirectProxyMap.Pin(mapPinPath); err != nil {
-		h.logger.Warn("Failed to pin redirect_proxy_map", zap.Error(err))
-	} else {
-		h.logger.Info("Pinned redirect_proxy_map to bpffs", zap.String("path", mapPinPath))
-	}
-
-	// In low-latency mode, also pin target_namespace_pids so enterprise
-	// can iterate it to discover target PIDs for TLS uprobe attachment.
-	if opts.LowLatency {
-		const targetPidsPin = "/sys/fs/bpf/keploy_target_namespace_pids"
-		_ = os.Remove(targetPidsPin)
-		if err := objs.TargetNamespacePids.Pin(targetPidsPin); err != nil {
-			h.logger.Warn("Failed to pin target_namespace_pids", zap.Error(err))
+	// If enterprise registered a map-pin hook, expose maps for pinning.
+	if agentSvc.MapPinHook != nil {
+		pinnableMaps := map[string]agentSvc.Pinnable{
+			"redirect_proxy_map":    objs.RedirectProxyMap,
+			"target_namespace_pids": objs.TargetNamespacePids,
+		}
+		cleanup, pinErr := agentSvc.MapPinHook(pinnableMaps)
+		if pinErr != nil {
+			h.logger.Warn("EbpfMapPinHook failed", zap.Error(pinErr))
 		} else {
-			h.logger.Info("Pinned target_namespace_pids for TLS uprobe PID discovery")
+			h.mapPinCleanup = cleanup
 		}
 	}
 
@@ -467,9 +463,11 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	}
 	h.logger.Debug("eBPF resources released successfully...")
 
-	// Clean up pinned eBPF maps
-	_ = os.Remove("/sys/fs/bpf/keploy_redirect_proxy_map")
-	_ = os.Remove("/sys/fs/bpf/keploy_target_namespace_pids")
+	// Clean up pinned eBPF maps (if enterprise pinned any)
+	if h.mapPinCleanup != nil {
+		h.mapPinCleanup()
+		h.mapPinCleanup = nil
+	}
 
 	// Clean up sockmap BPF resources
 	if h.sm != nil {

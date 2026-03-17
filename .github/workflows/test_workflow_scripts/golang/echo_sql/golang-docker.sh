@@ -85,15 +85,24 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false &> "${test_container}.txt"
+set +e
+$REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 15 --generate-github-actions=false --debug&> "${test_container}.txt"
+replay_exit_code=$?
+set -e
 
-if grep "ERROR" "${test_container}.txt"; then
+echo "Replay command exit code: ${replay_exit_code}"
+if [ "${replay_exit_code}" -ne 0 ]; then
+    echo "Replay command failed; dumping replay logs for diagnosis..."
+    cat "${test_container}.txt"
+fi
+
+if grep -q "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
     exit 1
 fi
 
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+if grep -q "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "${test_container}.txt"
     exit 1
@@ -106,8 +115,14 @@ do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
+    if [ ! -f "$report_file" ]; then
+        all_passed=false
+        echo "Missing report file: $report_file"
+        break
+    fi
+
     # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+    test_status=$(awk '/status:/{print $2; exit}' "$report_file")
 
     # Print the status for debugging
     echo "Test status for test-set-$i: $test_status"

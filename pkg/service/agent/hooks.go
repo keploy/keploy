@@ -79,6 +79,23 @@ func RegisterProxyHook(h agent.AuxiliaryProxyHook) {
 	ProxyHook = h
 }
 
+// Pinnable is implemented by eBPF maps that support pinning to bpffs.
+type Pinnable interface {
+	Pin(fileName string) error
+}
+
+// EbpfMapPinHook is called after eBPF objects are loaded to allow enterprise
+// to pin specific maps to bpffs for cross-process access (e.g. sockmap proxy).
+// It receives a map of name → Pinnable and returns a cleanup function to unpin
+// on shutdown.
+type EbpfMapPinHook func(maps map[string]Pinnable) (cleanup func(), err error)
+
+var MapPinHook EbpfMapPinHook
+
+func RegisterMapPinHook(h EbpfMapPinHook) {
+	MapPinHook = h
+}
+
 // EbpfProxyPortOverride is set by the enterprise proxy startup to tell
 // eBPF to redirect outgoing connections to the proxy port instead of the
 // Go proxy port. When zero (default), the normal config ProxyPort is used.
