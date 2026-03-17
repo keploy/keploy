@@ -318,7 +318,7 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 		}()
 
 		// Write initial content to the test file
-		_, err = file.WriteString(fmt.Sprintf("// Unit test for %s\n", filepath.Base(sourceFilePath)))
+		_, err = fmt.Fprintf(file, "// Unit test for %s\n", filepath.Base(sourceFilePath))
 		if err != nil {
 			return false, err
 		}
