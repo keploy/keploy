@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
+
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -141,19 +143,22 @@ func getFailedTCs(results []models.TestResult) []string {
 	return ids
 }
 
-func isMockSubset(subset, superset []string) bool {
-	supersetCounts := make(map[string]int)
-	for _, mock := range superset {
-		supersetCounts[mock]++
+func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
+	expectedMap := make(map[string]bool)
+	for _, name := range expectedMocks {
+		expectedMap[name] = true
 	}
 
-	for _, mock := range subset {
-		if supersetCounts[mock] == 0 {
-			return false
+	for _, m := range consumedMocks {
+		if !expectedMap[m.Name] {
+			// Found an extra mock in the actual run
+			if m.Type != "config" {
+				// This is NOT a config mock, so it IS a mismatch
+				return false
+			}
+			// If Type is "config", we ignore it as an extra mock
 		}
-		supersetCounts[mock]--
 	}
-
 	return true
 }
 
@@ -287,22 +292,22 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 
 	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
-	table.SetBorder(true)
-	table.SetRowLine(true)
-	table.SetCenterSeparator("|")
-	table.SetColumnSeparator("|")
-	table.SetRowSeparator("-")
-	table.SetAutoWrapText(true)
-	table.SetReflowDuringAutoWrap(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetColWidth(120)
-	table.SetTablePadding(" ")
-	table.SetColMinWidth(0, 15) // TEST SET column min width
-	table.SetColMinWidth(1, 12) // TEST ID column min width
-	table.SetColMinWidth(2, 50) // MOCK DIFFERENCES column min width
+	colWidths := tw.NewMapper[int, int]().Set(0, 15).Set(1, 12).Set(2, 50)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRendition(tw.Rendition{
+			Settings: tw.Settings{
+				Separators: tw.Separators{
+					BetweenRows: tw.On,
+				},
+			},
+		}),
+		tablewriter.WithRowAutoWrap(1),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAlignment(tw.AlignCenter),
+		tablewriter.WithMaxWidth(120),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
 
 	// Group failures by test set for better presentation
 	testSetGroups := make(map[string][]TestFailure)
