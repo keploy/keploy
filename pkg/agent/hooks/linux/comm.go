@@ -80,17 +80,17 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
-// RegisterProxyPID stores the Rust proxy's kernel PID in keploy_agent_kernel_pid_map
+// RegisterProxyPID stores the given PID in keploy_agent_kernel_pid_map
 // at key=1 so that eBPF's pid_filter excludes it from traffic interception.
 func (h *Hooks) RegisterProxyPID(pid uint32) error {
 	h.m.Lock()
 	defer h.m.Unlock()
 	key := uint32(1)
 	if err := h.agentKernelPidMap.Update(key, pid, ebpf.UpdateAny); err != nil {
-		utils.LogError(h.logger, err, "failed to register Rust proxy PID in eBPF", zap.Uint32("pid", pid))
+		utils.LogError(h.logger, err, "failed to register proxy PID in eBPF", zap.Uint32("pid", pid))
 		return err
 	}
-	h.logger.Info("Registered Rust proxy PID in eBPF exclusion map", zap.Uint32("pid", pid))
+	h.logger.Info("Registered proxy PID in eBPF exclusion map", zap.Uint32("pid", pid))
 	return nil
 }
 
