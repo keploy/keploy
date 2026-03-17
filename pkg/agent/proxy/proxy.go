@@ -491,7 +491,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		parserCtxCancel()
 
 		if srcConn != nil {
-			err := srcConn.Close()
+			err := util.SafeCloseConn(srcConn)
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
 					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
@@ -500,7 +500,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		if dstConn != nil {
-			err = dstConn.Close()
+			err = util.SafeCloseConn(dstConn)
 			if err != nil {
 				// Use string matching as a last resort to check for the specific error
 				if !strings.Contains(err.Error(), "use of closed network connection") {
@@ -763,16 +763,37 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = tls.Dial("tcp", addr, cfg)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
+			logger.Info("dialing upstream TLS destination",
+				zap.String("dest_ip_port", dstAddr),
+				zap.String("upstream_addr", addr),
+				zap.String("dst_url_from_client_sni", dstURL),
+				zap.String("tls_config_server_name", cfg.ServerName),
+				zap.Strings("tls_config_next_protos", cfg.NextProtos),
+				zap.Bool("is_http1_initial_buf", isHTTP),
+				zap.Bool("is_connect", isCONNECT),
+				zap.Int("initial_buf_len", len(initialBuf)),
+			)
+
+			tlsDstConn, dialErr := tls.Dial("tcp", addr, cfg)
+			if dialErr != nil {
+				utils.LogError(logger, dialErr, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				return dialErr
 			}
 
-			conn := dstConn.(*tls.Conn)
-			state := conn.ConnectionState()
+			dstConn = tlsDstConn
+			state := tlsDstConn.ConnectionState()
+			peerLeafSubjectCN, peerLeafDNSNames := peerLeafSummary(state.PeerCertificates)
 
-			p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
+			logger.Info("upstream TLS connection established",
+				zap.String("upstream_addr", addr),
+				zap.String("tls_config_server_name", cfg.ServerName),
+				zap.String("tls_state_server_name", state.ServerName),
+				zap.String("negotiated_alpn", state.NegotiatedProtocol),
+				zap.String("tls_version", tlsVersionString(state.Version)),
+				zap.String("cipher_suite", tls.CipherSuiteName(state.CipherSuite)),
+				zap.String("peer_leaf_subject_cn", peerLeafSubjectCN),
+				zap.Strings("peer_leaf_dns_names", peerLeafDNSNames),
+			)
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -1057,4 +1078,27 @@ func isShutdownError(err error) bool {
 		return true
 	}
 	return false
+}
+
+func tlsVersionString(v uint16) string {
+	switch v {
+	case tls.VersionTLS10:
+		return "1.0"
+	case tls.VersionTLS11:
+		return "1.1"
+	case tls.VersionTLS12:
+		return "1.2"
+	case tls.VersionTLS13:
+		return "1.3"
+	default:
+		return fmt.Sprintf("unknown(%d)", v)
+	}
+}
+
+func peerLeafSummary(peerCerts []*x509.Certificate) (string, []string) {
+	if len(peerCerts) == 0 || peerCerts[0] == nil {
+		return "", nil
+	}
+
+	return peerCerts[0].Subject.CommonName, peerCerts[0].DNSNames
 }
