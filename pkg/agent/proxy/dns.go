@@ -96,7 +96,7 @@ func newRecordedDNSMocksCache() *expirable.LRU[string, bool] {
 }
 
 func generateCacheKey(name string, qtype uint16) string {
-	return fmt.Sprintf("%s-%s", dns.Fqdn(name), dns.TypeToString[qtype])
+	return fmt.Sprintf("%s-%s", normalizeDomain(name), dns.TypeToString[qtype])
 }
 
 func mergeRcode(cur, next int) int {
@@ -499,6 +499,7 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 // generateDNSDedupeKey creates a unique key for DNS mock deduplication.
 // The key is based on the DNS question (name + type + class) and response (rcode + answer data).
 // TTL values are excluded to avoid treating responses with different TTLs as different.
+// Domain names are lowercased and normalized to ensure case-insensitive deduplication (RFC 4343).
 // This ensures identical DNS queries with identical responses are recorded only once.
 func generateDNSDedupeKey(question dns.Question, resp *dns.Msg) string {
 	// Build answer summary: extract answer data without TTL for stable deduplication
@@ -511,20 +512,30 @@ func generateDNSDedupeKey(question dns.Question, resp *dns.Msg) string {
 		// Create a stable representation: name:type:data
 		// The RR's actual data (IP address, etc.) is obtained by removing the header
 		rrStr := rr.String()
-		// RR format: "name TTL class type data..."
-		// We'll just use the type and the data portion
-		answerParts = append(answerParts, fmt.Sprintf("%d:%s", hdr.Rrtype, extractRRData(rrStr)))
+
+		// Normalize the RR name for consistent deduplication (casing/trailing dots)
+		normalizedRRName := normalizeDomain(hdr.Name)
+
+		// We'll include the normalized name, type and the data portion for robustness (e.g. CNAME chains)
+		answerParts = append(answerParts, fmt.Sprintf("%s:%d:%s", normalizedRRName, hdr.Rrtype, extractRRData(rrStr)))
 	}
 
 	// Sort answer parts to handle answer reordering (e.g., round-robin DNS)
 	sort.Strings(answerParts)
 	answerSummary := strings.Join(answerParts, "|")
 
-	return fmt.Sprintf("%s:%d:%d:%d:%s",
-		dns.Fqdn(question.Name),
+	// Lowercase and normalize the domain name for case-insensitive deduplication.
+	// DNS names are case-insensitive per RFC 4343. Without this, queries for
+	// "Google.com" and "google.com" would bypass dedup and produce duplicate mocks.
+	// This is consistent with dnsRequestMatches() which uses strings.EqualFold.
+	normalizedName := normalizeDomain(question.Name)
+
+	return fmt.Sprintf("%s:%d:%d:%d:%d:%s",
+		normalizedName,
 		question.Qtype,
 		question.Qclass,
 		resp.Rcode,
+		len(resp.Answer),
 		answerSummary,
 	)
 }
@@ -539,6 +550,26 @@ func extractRRData(rrStr string) string {
 		return strings.Join(parts[4:], " ")
 	}
 	return rrStr
+}
+
+func normalizeDomain(name string) string {
+	name = strings.ToLower(strings.TrimSuffix(dns.Fqdn(name), "."))
+
+	// remove repeated cluster.local
+	for strings.Contains(name, "cluster.local.cluster.local") {
+		name = strings.ReplaceAll(name, "cluster.local.cluster.local", "cluster.local")
+	}
+
+	return name
+}
+
+func isSearchDomainNoise(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(dns.Fqdn(name), "."))
+
+	// detect repeated suffix patterns (aggressive Kubernetes expansion noise)
+	// Example: foo.svc.cluster.local.svc.cluster.local or foo.cluster.local.cluster.local
+	return strings.Contains(name, "cluster.local.cluster.local") ||
+		strings.Contains(name, "svc.cluster.local.svc.cluster.local")
 }
 
 func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
@@ -609,6 +640,60 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		return resp, nil
 	}
 
+	// 1. Skip AAAA queries.
+	if question.Qtype == dns.TypeAAAA && len(in.Answer) == 0 {
+		p.logger.Debug("Skipping AAAA DNS query (noise)",
+			zap.String("query", question.Name),
+		)
+		return resp, nil
+	}
+
+	// 2. Skip search-domain expansion garbage.
+	if isSearchDomainNoise(question.Name) {
+		p.logger.Debug("Skipping DNS search-domain expansion noise",
+			zap.String("query", question.Name),
+		)
+		return resp, nil
+	}
+
+	// 3. Skip Azure infra fallback noise only if empty.
+	if strings.Contains(question.Name, "internal.cloudapp.net") && len(in.Answer) == 0 {
+		p.logger.Debug("Skipping empty Azure infra DNS fallback noise",
+			zap.String("query", question.Name),
+		)
+		return resp, nil
+	}
+
+	// 4. Skip DNS error responses (SERVFAIL, NXDOMAIN, REFUSED).
+	if in.Rcode != dns.RcodeSuccess {
+		p.logger.Debug("Skipping DNS error response (likely search-domain noise)",
+			zap.String("query", question.Name),
+			zap.String("qtype", dns.TypeToString[question.Qtype]),
+			zap.Int("rcode", in.Rcode),
+		)
+		return resp, nil
+	}
+
+	// 5. Skip empty success responses.
+	// We skip if both Answer and Extra are empty. Sometimes CNAMEs or useful info
+	// might be in the Extra section depending on the resolver.
+	if len(in.Answer) == 0 && len(in.Extra) == 0 {
+		p.logger.Debug("Skipping empty DNS success response (no Answer/Extra)",
+			zap.String("query", question.Name),
+		)
+		return resp, nil
+	}
+
+	// 6. Skip NS-only responses.
+	if len(in.Answer) == 0 && len(in.Ns) > 0 {
+		// NS-only response -> not useful for app resolution.
+		p.logger.Debug("Skipping NS-only DNS response",
+			zap.String("query", question.Name),
+		)
+		return resp, nil
+	}
+	// ==============================================
+
 	// ========== DNS MOCK DEDUPLICATION ==========
 	// Generate a unique key based on the DNS query and response.
 	// If we've already recorded this exact query+response combination, skip recording.
@@ -636,7 +721,10 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 				"type":  "config",
 			},
 			DNSReq: &models.DNSReq{
-				Name:   dns.Fqdn(question.Name),
+				// Lowercase and normalize the name for consistent matching during test mode.
+				// dnsRequestMatches uses strings.EqualFold, but storing mixed-case
+				// names makes mock files harder to read and debug.
+				Name:   normalizeDomain(question.Name),
 				Qtype:  question.Qtype,
 				Qclass: question.Qclass,
 			},
