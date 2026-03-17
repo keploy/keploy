@@ -18,9 +18,9 @@ runs:
   using: composite
   steps:
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: ">=1.24"
+        go-version-file: go.mod
         cache: ${{ inputs.go-cache }}
 
     # --- Linux/macOS: Add Known Hosts ---
@@ -45,7 +45,7 @@ runs:
 
     # --- SSH Agent (Common) ---
     - name: Load Private SSH Key
-      uses: webfactory/ssh-agent@v0.9.0
+      uses: webfactory/ssh-agent@v0.10.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
 

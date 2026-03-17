@@ -32,75 +32,8 @@ type IngressProxyManager struct {
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
 	synchronous  bool
-
-	// Rust proxy integration: if sendIngressCmd is non-nil, use Rust for forwarding
-	sendIngressCmd func(origPort, newPort uint16) error
-
-	// Ingress connections forwarded by Rust proxy, keyed by conn_id
-	ingressConns sync.Map // map[string]*IngressConnState
-}
-
-// IngressConnState tracks HTTP parsing state for a single ingress connection forwarded by Rust.
-type IngressConnState struct {
-	ClientConn *IngressSimConn // request data (external client → app)
-	ServerConn *IngressSimConn // response data (app → external client)
-	OrigPort   uint16
-}
-
-// IngressSimConn is a simple buffered reader that receives data pushed from IPC.
-type IngressSimConn struct {
-	readCh     chan []byte
-	currentBuf []byte
-	closed     bool
-	mu         sync.Mutex
-}
-
-func NewIngressSimConn() *IngressSimConn {
-	return &IngressSimConn{
-		readCh: make(chan []byte, 1000),
-	}
-}
-
-func (c *IngressSimConn) Push(b []byte) {
-	if len(b) == 0 {
-		return
-	}
-	buf := make([]byte, len(b))
-	copy(buf, b)
-	c.readCh <- buf
-}
-
-func (c *IngressSimConn) Read(b []byte) (n int, err error) {
-	c.mu.Lock()
-	if len(c.currentBuf) > 0 {
-		n = copy(b, c.currentBuf)
-		c.currentBuf = c.currentBuf[n:]
-		c.mu.Unlock()
-		return n, nil
-	}
-	c.mu.Unlock()
-
-	buf, ok := <-c.readCh
-	if !ok {
-		return 0, io.EOF
-	}
-	n = copy(b, buf)
-	c.mu.Lock()
-	if n < len(buf) {
-		c.currentBuf = buf[n:]
-	}
-	c.mu.Unlock()
-	return n, nil
-}
-
-func (c *IngressSimConn) Close() error {
-	c.mu.Lock()
-	if !c.closed {
-		c.closed = true
-		close(c.readCh)
-	}
-	c.mu.Unlock()
-	return nil
+	sampling     bool
+	samplingSem  chan struct{}
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
@@ -110,6 +43,16 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		synchronous: cfg.Agent.Synchronous,
+		sampling:    false,
+		samplingSem: make(chan struct{}, func() int {
+			if cfg.Agent.EnableSampling > 0 {
+				return cfg.Agent.EnableSampling
+			}
+			return 5
+		}()),
+	}
+	if cfg.Agent.EnableSampling > 0 {
+		pm.sampling = true
 	}
 	return pm
 }
@@ -303,7 +246,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 			_ = tc.SetNoDelay(true)
 		}
 
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)

@@ -20,27 +20,51 @@ import (
 )
 
 func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
+	var acquiredLock bool
+
+	// 1. Non-Blocking Concurrency Control
 	if pm.synchronous {
+		// Sync mode (Concurrency 1): Blocks until the slot is free
 		select {
 		case sem <- struct{}{}:
+			acquiredLock = true
 		case <-ctx.Done():
 			return
+		}
+	} else if pm.sampling && pm.samplingSem != nil {
+		// Sampling mode (Concurrency 5): Non-blocking lock attempt
+		select {
+		case pm.samplingSem <- struct{}{}:
+			acquiredLock = true
+			logger.Debug("Acquired 1 of 5 sampling slots for capture")
+		case <-ctx.Done():
+			return
+		default:
+			// Non-blocking bypass: The 5 slots are FULL.
+			// We do not block. We set acquiredLock to false.
+			// This connection will be proxied normally and marked closed, but WILL NOT be captured.
+			acquiredLock = false
+			logger.Debug("Sampling limit reached (5/5). Ignoring request for capture.")
 		}
 	}
 
 	var releaseOnce sync.Once
 	releaseLock := func() {
-		if pm.synchronous {
+		if acquiredLock {
 			releaseOnce.Do(func() {
-				<-sem
-				logger.Debug("Lock released early for concurrent streaming")
+				if pm.synchronous {
+					<-sem
+				} else if pm.sampling && pm.samplingSem != nil {
+					<-pm.samplingSem
+				}
+				logger.Debug("Lock released")
 			})
 		}
 	}
 	// Ensure lock is released eventually if we exit early or finish normally
 	defer releaseLock()
 
-	// Get the actual destination address (handles Windows vs others platform logic)
+	// Get the actual destination address
 	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
 	// Determine the correct port for the test case:
@@ -55,31 +79,22 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		actualPort = extractPortFromAddr(finalAppAddr, appPort)
 	}
 
-	// 1. Dial Upstream
+	// Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	if err != nil {
 		logger.Warn("Failed to dial upstream app port", zap.String("Final_App_Port", finalAppAddr), zap.Error(err))
 		return
 	}
-	// Disable Nagle's algorithm for low-latency forwarding
-	if tc, ok := upConn.(*net.TCPConn); ok {
-		_ = tc.SetNoDelay(true)
-	}
-	// This closes the upstream connection when this function returns
 	defer upConn.Close()
 
-	// Create bidirectional TeeForwardConns for zero-latency forwarding.
-	// Forwarding goroutines start immediately — data flows at wire speed
-	// between client↔upstream. The parser reads from internal buffers
-	// containing already-forwarded data, adding zero latency to the request path.
-	clientTee := orchestrator.NewTeeForwardConn(ctx, logger, clientConn, upConn)
-	upstreamTee := orchestrator.NewTeeForwardConn(ctx, logger, upConn, clientConn)
+	clientReader := bufio.NewReader(clientConn)
+	upstreamReader := bufio.NewReader(upConn)
 
-	clientReader := bufio.NewReader(clientTee)
-	upstreamReader := bufio.NewReader(upstreamTee)
+	// forceCloseMode is true if we are running in Sync or Sampling mode.
+	// In these modes, we strictly disable Keep-Alive and drop the loop after one request.
+	forceCloseMode := pm.synchronous || pm.sampling
 
 	for {
-
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -90,38 +105,37 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		reqTimestamp := time.Now()
-
 		var chunked bool = false
 
-		// SYNCHRONOUS : Disable Keep-Alive for the Upstream
-		if pm.synchronous && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
-			logger.Debug("Detected chunked request. Releasing lock.")
-			releaseLock()
-			chunked = true
-
-		} else if pm.synchronous {
-
-			mgr := syncMock.Get()
-			if !mgr.GetFirstReqSeen() {
-				mgr.SetFirstRequestSignaled()
+		// Request modifications for Sync/Sampling modes
+		if forceCloseMode {
+			if req.ContentLength == -1 || isChunked(req.TransferEncoding) {
+				logger.Debug("Detected chunked request. Releasing lock early.")
+				releaseLock()
+				chunked = true
+			} else if pm.synchronous && acquiredLock {
+				mgr := syncMock.Get()
+				if !mgr.GetFirstReqSeen() {
+					mgr.SetFirstRequestSignaled()
+				}
 			}
-			// Note: Connection headers are not modified because raw bytes
-			// are already forwarded by TeeForwardConn at wire speed.
-			// The connection will be closed when this function returns.
+
+			// Requirement: "mark the connection as closed for keep alive"
+			// This applies to ALL requests in these modes, even chunked or ignored (6th+) requests.
+			req.Close = true
+			req.Header.Set("Connection", "close")
 		}
 
-		// Read request body from TeeForwardConn buffer.
-		// The data has ALREADY been forwarded to upstream by the forwarding goroutine.
-		// We're just reading the buffered copy for test case capture.
-		var reqBodyBytes []byte
-		if req.Body != nil {
-			reqBodyBytes, err = io.ReadAll(req.Body)
+		reqData, err := httputil.DumpRequest(req, true)
+		if err != nil {
+			logger.Error("Failed to dump request for capturing", zap.Error(err))
 			req.Body.Close()
 			if err != nil {
 				logger.Error("Failed to read request body. Check if the client connection is still active or verify the request body format", zap.Error(err))
 				return
 			}
 		}
+		req.Body.Close()
 
 		// Read response from upstream's TeeForwardConn buffer.
 		// The response has ALREADY been forwarded to the client at wire speed.
@@ -131,11 +145,17 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 
-		// SYNCHRONOUS : Disable Keep-Alive for the Client
-		if pm.synchronous && (resp.ContentLength == -1 || isChunked(resp.TransferEncoding)) {
-			logger.Debug("Detected chunked response. Releasing lock.")
-			releaseLock()
-			chunked = true
+		// Response modifications for Sync/Sampling modes
+		if forceCloseMode {
+			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
+				logger.Debug("Detected chunked response. Releasing lock early.")
+				releaseLock()
+				chunked = true
+			}
+
+			// Close the connection on the response side as well
+			resp.Close = true
+			resp.Header.Set("Connection", "close")
 		}
 
 		respTimestamp := time.Now()
@@ -146,37 +166,37 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if resp.Body != nil {
 			respBodyBytes, err = io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if err != nil {
-				logger.Error("Failed to read response body. Check if the response was truncated or verify the upstream server response format", zap.Error(err))
-				return
+			return
+		}
+		resp.Body.Close()
+
+		// Capture Evaluation
+		shouldCapture := true
+		if forceCloseMode {
+			if chunked {
+				shouldCapture = false
+			} else if pm.sampling && !acquiredLock {
+				shouldCapture = false
 			}
 		}
 
-		if chunked && pm.synchronous {
-			// Capture test case before returning for chunked+synchronous
-			req.Header.Set("Host", req.Host)
-			req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
-			resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
-			go func() {
-				defer req.Body.Close()
-				defer resp.Body.Close()
-				hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
-			}()
-			return
+		// Only parse and invoke the hook if it's eligible for capture
+		if shouldCapture {
+			parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
+			if err == nil {
+				parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
+				if err == nil {
+					go func() {
+						defer parsedHTTPReq.Body.Close()
+						defer parsedHTTPRes.Body.Close()
+						hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+					}()
+				}
+			}
 		}
 
-		// Async capture — data already forwarded, just constructing test case
-		req.Header.Set("Host", req.Host)
-		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
-		resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
-
-		go func() {
-			defer req.Body.Close()
-			defer resp.Body.Close()
-			hooksUtils.CaptureHook(ctx, logger, t, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
-		}()
-
-		if pm.synchronous {
+		// Break the keep-alive loop and exit if we are in sync/sampling mode
+		if forceCloseMode {
 			return
 		}
 	}

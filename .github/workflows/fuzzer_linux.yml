@@ -68,9 +68,9 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: ">=1.23"
+          go-version-file: go.mod
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -139,9 +139,9 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: ">=1.23"
+          go-version-file: go.mod
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -207,9 +207,9 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: ">=1.23"
+          go-version-file: go.mod
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -285,9 +285,9 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: ">=1.23"
+          go-version-file: go.mod
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -356,9 +356,9 @@ jobs:
           src: ${{ matrix.config.replay_src }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: ">=1.23"
+          go-version-file: go.mod
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4

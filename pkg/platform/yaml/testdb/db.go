@@ -67,8 +67,19 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 	}
 
 	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
+	reportNames, err := yaml.ReadSessionIndices(ctx, runReportPath, ts.logger, yaml.ModeFile)
+	if err != nil {
+		return nil, err
+	}
 
-	return yaml.ReadSessionIndices(ctx, runReportPath, ts.logger, yaml.ModeFile)
+	testSetReports := make([]string, 0, len(reportNames))
+	for _, name := range reportNames {
+		if strings.HasSuffix(name, "-report") {
+			testSetReports = append(testSetReports, name)
+		}
+	}
+
+	return testSetReports, nil
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
