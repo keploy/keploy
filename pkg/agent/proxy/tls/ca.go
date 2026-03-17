@@ -392,6 +392,12 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	sourcePort := remoteAddr.Port
 
 	SrcPortToDstURL.Store(sourcePort, dstURL)
+	logger.Info("stored upstream TLS SNI mapping",
+		zap.Int("source_port", sourcePort),
+		zap.String("requested_sni", clientHello.ServerName),
+		zap.String("client_remote", remoteAddr.String()),
+		zap.String("stored_dst_url", dstURL),
+	)
 
 	serverReq := &csr.CertificateRequest{
 		//Make the name accordng to the ip of the request

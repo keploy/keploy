@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"time"
 
@@ -54,6 +55,16 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 				logger.Debug("Client requires H2 (likely gRPC), offering H2", zap.Strings("clientProtos", hello.SupportedProtos))
 			}
 
+			logger.Info("received inbound TLS ClientHello",
+				zap.String("client_remote", addrString(hello.Conn.RemoteAddr())),
+				zap.Int("source_port", sourcePort(hello.Conn.RemoteAddr())),
+				zap.String("requested_sni", hello.ServerName),
+				zap.Strings("client_supported_alpn", hello.SupportedProtos),
+				zap.Strings("client_supported_versions", tlsVersionsToStrings(hello.SupportedVersions)),
+				zap.Strings("selected_proxy_next_protos", nextProtos),
+				zap.Bool("client_supports_http1", clientSupportsHTTP1),
+			)
+
 			return &tls.Config{
 				NextProtos: nextProtos,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -89,5 +100,56 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 		logger.Debug("Standard TLS Handshake Success (No Client Cert Provided)")
 	}
 
+	logger.Info("completed inbound TLS handshake",
+		zap.String("client_remote", addrString(tlsConn.RemoteAddr())),
+		zap.String("tls_state_server_name", state.ServerName),
+		zap.String("negotiated_alpn", state.NegotiatedProtocol),
+		zap.String("tls_version", tlsVersionString(state.Version)),
+		zap.String("cipher_suite", tls.CipherSuiteName(state.CipherSuite)),
+		zap.Bool("is_mtls", isMTLS),
+	)
+
 	return tlsConn, isMTLS, nil
+}
+
+func tlsVersionString(v uint16) string {
+	switch v {
+	case tls.VersionTLS10:
+		return "1.0"
+	case tls.VersionTLS11:
+		return "1.1"
+	case tls.VersionTLS12:
+		return "1.2"
+	case tls.VersionTLS13:
+		return "1.3"
+	default:
+		return fmt.Sprintf("unknown(%d)", v)
+	}
+}
+
+func tlsVersionsToStrings(versions []uint16) []string {
+	if len(versions) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(versions))
+	for _, version := range versions {
+		out = append(out, tlsVersionString(version))
+	}
+	return out
+}
+
+func addrString(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
+func sourcePort(addr net.Addr) int {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok || tcpAddr == nil {
+		return 0
+	}
+	return tcpAddr.Port
 }

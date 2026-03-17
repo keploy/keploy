@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,24 @@ var idCounter int64 = -1
 
 func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
+}
+
+// SafeCloseConn closes a network connection while tolerating nil interfaces and
+// typed-nil implementations such as a net.Conn backed by (*tls.Conn)(nil).
+func SafeCloseConn(conn net.Conn) error {
+	if conn == nil {
+		return nil
+	}
+
+	value := reflect.ValueOf(conn)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil
+		}
+	}
+
+	return conn.Close()
 }
 
 // Conn is helpful for multiple reads from the same connection
@@ -688,7 +707,7 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 	if r := recover(); r != nil {
 		logger.Error("Recovered from panic in parser, closing active connections")
 		if client != nil {
-			err := client.Close()
+			err := SafeCloseConn(client)
 			if err != nil {
 				// Use string matching as a last resort to check for the specific error
 				if !strings.Contains(err.Error(), "use of closed network connection") {
@@ -699,7 +718,7 @@ func Recover(logger *zap.Logger, client, dest net.Conn) {
 		}
 
 		if dest != nil {
-			err := dest.Close()
+			err := SafeCloseConn(dest)
 			if err != nil {
 				// Use string matching as a last resort to check for the specific error
 				if !strings.Contains(err.Error(), "use of closed network connection") {
