@@ -38,17 +38,6 @@ type NetworkTrafficDoc struct {
 	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
 }
 
-// NetworkTrafficDocWrite is the write-path variant used with goccy/go-yaml.
-// goccy can't marshal yaml.v3's Node type, so Spec is interface{} here.
-type NetworkTrafficDocWrite struct {
-	Version      models.Version `json:"version" yaml:"version"`
-	Kind         models.Kind    `json:"kind" yaml:"kind"`
-	Name         string         `json:"name" yaml:"name"`
-	Spec         interface{}    `json:"spec" yaml:"spec"`
-	Curl         string         `json:"curl" yaml:"curl,omitempty"`
-	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
-}
-
 // ctxReader wraps an io.Reader with a context for cancellation support
 type ctxReader struct {
 	ctx context.Context

@@ -2,14 +2,12 @@
 package mockdb
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,14 +20,10 @@ import (
 )
 
 type MockYaml struct {
-	MockPath       string
-	MockName       string
-	Logger         *zap.Logger
-	idCounter      int64
-	mu             sync.Mutex    // Protects file access
-	file           *os.File      // Active file handle
-	writer         *bufio.Writer // Buffered writer
-	currentTestSet string        // Track current test set to detect switches
+	MockPath  string
+	MockName  string
+	Logger    *zap.Logger
+	idCounter int64
 }
 
 func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
@@ -123,105 +117,36 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 	return nil
 }
 
-// Close flushes any buffered data and closes the active file handle.
-func (ys *MockYaml) Close() error {
-	ys.mu.Lock()
-	defer ys.mu.Unlock()
-
-	if ys.writer != nil {
-		if err := ys.writer.Flush(); err != nil {
-			utils.LogError(ys.Logger, err, "failed to flush mock file buffer. Check disk space and file permissions, then retry recording")
-		}
-		ys.writer = nil
-	}
-	if ys.file != nil {
-		if err := ys.file.Close(); err != nil {
-			utils.LogError(ys.Logger, err, "failed to close mock file. This may indicate a file system issue - verify the mock file was written correctly")
-		}
-		ys.file = nil
-	}
-	ys.currentTestSet = ""
-	return nil
-}
-
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
 	}
-
+	mockPath := filepath.Join(ys.MockPath, testSetID)
 	mockFileName := ys.MockName
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-
 	data, err := yamlLib.Marshal(&mockYaml)
 	if err != nil {
 		return err
 	}
 
-	ys.mu.Lock()
-	defer ys.mu.Unlock()
-
-	// Check if we need to switch files (different test set or file closed)
-	if ys.file == nil || ys.currentTestSet != testSetID {
-		// Close previous file if any
-		if ys.writer != nil {
-			ys.writer.Flush()
-			ys.writer = nil
-		}
-		if ys.file != nil {
-			ys.file.Close()
-			ys.file = nil
-		}
-
-		mockPath := filepath.Join(ys.MockPath, testSetID)
-		yamlPath := filepath.Join(mockPath, mockFileName+".yaml")
-
-		// Create directory if needed (only on file switch)
-		if err := os.MkdirAll(mockPath, 0777); err != nil {
-			return fmt.Errorf("failed to create directory: %w", err)
-		}
-
-		// Check if file exists - if not, we need to add version header
-		// O_APPEND matches existing content or creates new
-		flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND
-		file, err := os.OpenFile(yamlPath, flags, 0666)
-		if err != nil {
-			return fmt.Errorf("failed to open mock file: %w", err)
-		}
-
-		// Check if new file is empty to add header
-		stat, err := file.Stat()
-		if err != nil {
-			file.Close()
-			return err
-		}
-
-		if stat.Size() == 0 {
-			if _, err := file.Write([]byte(utils.GetVersionAsComment())); err != nil {
-				file.Close()
-				return err
-			}
-		}
-
-		ys.file = file
-		ys.writer = bufio.NewWriter(ys.file) // Default 4KB buffer
-		ys.currentTestSet = testSetID
-	}
-
-	// Write to buffer
-	if _, err := ys.writer.Write([]byte("---\n")); err != nil {
-		return err
-	}
-	if _, err := ys.writer.Write(data); err != nil {
+	exists, err := yaml.FileExists(ctx, ys.Logger, mockPath, mockFileName)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to find yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
 		return err
 	}
 
-	// Flush periodically or on significant boundaries?
-	// For now, let bufio handle it (flushes at 4KB).
-	// We rely on Close() being called at end of recording to flush remainder.
+	if !exists {
+		data = append([]byte(utils.GetVersionAsComment()), data...)
+	}
+
+	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -450,4 +375,8 @@ func (ys *MockYaml) GetCurrMockID() int64 {
 
 func (ys *MockYaml) ResetCounterID() {
 	atomic.StoreInt64(&ys.idCounter, -1)
+}
+
+func (ys *MockYaml) Close() error {
+	return nil
 }
