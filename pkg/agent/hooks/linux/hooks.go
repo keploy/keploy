@@ -79,11 +79,11 @@ type Hooks struct {
 	BindEvents *ebpf.Map
 	sockops    link.Link
 
-	// sockmap BPF objects for low-latency mode (nil when not enabled)
-	sm *sockmap
-
 	// mapPinCleanup is set by the EbpfMapPinHook to unpin maps on shutdown.
 	mapPinCleanup func()
+
+	// sockmapCleanup is set by the enterprise SockmapLoadHook to unload sockmap BPF on shutdown.
+	sockmapCleanup func()
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -372,21 +372,16 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
-	// Load sockmap BPF programs for low-latency mode if requested.
-	// This loads sk_skb stream_parser + stream_verdict and pins the sockhash,
-	// capture ringbuf, and sock_meta maps to bpffs.
-	if opts.LowLatency {
-		sm, err := h.loadSockmap(h.logger)
-		if err != nil {
-			h.logger.Warn("Failed to load sockmap BPF programs (low-latency mode unavailable)", zap.Error(err))
-			// Non-fatal: the proxy will fall back to userspace relay
+	// If enterprise registered a sockmap load hook, invoke it to load
+	// sk_skb BPF programs for low-latency mode.
+	if agentSvc.SockmapHook != nil {
+		cleanup, smErr := agentSvc.SockmapHook(h.logger)
+		if smErr != nil {
+			h.logger.Warn("SockmapLoadHook failed (low-latency mode unavailable)", zap.Error(smErr))
 		} else {
-			h.sm = sm
-			h.logger.Info("Sockmap BPF programs loaded and pinned for low-latency mode")
+			h.sockmapCleanup = cleanup
+			h.logger.Info("Sockmap BPF programs loaded via enterprise hook")
 		}
-
-		// NOTE: SSL/GoTLS uprobe BPF programs are loaded by enterprise's
-		// TLSUprobeLoader (not here in OSS). Enterprise owns all TLS capture.
 	}
 
 	return nil
@@ -469,10 +464,10 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 		h.mapPinCleanup = nil
 	}
 
-	// Clean up sockmap BPF resources
-	if h.sm != nil {
-		h.sm.unload()
-		h.sm = nil
+	// Clean up sockmap BPF resources (loaded by enterprise hook)
+	if h.sockmapCleanup != nil {
+		h.sockmapCleanup()
+		h.sockmapCleanup = nil
 	}
 }
 
@@ -493,10 +488,10 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 
 	ports := agent.GetPortToSendToKernel(ctx, rules)
 
-	// In low-latency mode, add the JSSE capture listener port to pass-through
-	// so the Java agent's TCP connection to it is not intercepted by eBPF.
-	if agentSvc.LowLatencyMode {
-		ports = append(ports, uint(agentSvc.JSSECapturePort))
+	// Allow enterprise to add extra pass-through ports (e.g. JSSE capture port
+	// for low-latency mode).
+	if agentSvc.ExtraPassThroughPortsHook != nil {
+		ports = append(ports, agentSvc.ExtraPassThroughPortsHook()...)
 	}
 
 	for i := 0; i < 10; i++ {
@@ -615,4 +610,38 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 	}
 
 	return result, nil
+}
+
+// ensureBPFFS checks that /sys/fs/bpf is a bpffs filesystem. When running
+// inside Docker, /sys/fs/bpf may be a tmpfs or a bind-mounted host bpffs
+// with restrictive permissions. In either case, mount a fresh bpffs on top.
+func ensureBPFFS(logger *zap.Logger) {
+	const bpfFSPath = "/sys/fs/bpf"
+
+	// Check if /sys/fs/bpf is already a bpffs (magic = 0xcafe4a11).
+	var stat unix.Statfs_t
+	if err := unix.Statfs(bpfFSPath, &stat); err == nil && stat.Type == 0xcafe4a11 {
+		// Already a bpffs — check if it's writable.
+		testPath := bpfFSPath + "/.keploy_write_test"
+		f, err := os.Create(testPath)
+		if err == nil {
+			f.Close()
+			os.Remove(testPath)
+			return // bpffs is writable
+		}
+		logger.Debug("bpffs exists but is not writable, remounting",
+			zap.String("path", bpfFSPath), zap.Error(err))
+	}
+
+	// Ensure the mount point directory exists.
+	_ = os.MkdirAll(bpfFSPath, 0755)
+
+	// Mount a fresh bpffs. This requires CAP_SYS_ADMIN + no AppArmor restriction.
+	if err := unix.Mount("bpf", bpfFSPath, "bpf", 0, ""); err != nil {
+		logger.Warn("Failed to mount bpffs — BPF map pinning will not work",
+			zap.String("path", bpfFSPath), zap.Error(err))
+		return
+	}
+
+	logger.Info("Mounted fresh bpffs for BPF map pinning", zap.String("path", bpfFSPath))
 }

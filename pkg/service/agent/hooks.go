@@ -6,6 +6,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 type AgentHooks interface {
@@ -101,20 +102,29 @@ func RegisterMapPinHook(h EbpfMapPinHook) {
 // Go proxy port. When zero (default), the normal config ProxyPort is used.
 var EbpfProxyPortOverride uint32
 
-// LowLatencyMode is set when --low-latency flag is present.
-// When true, the hooks will load sockmap BPF programs for zero-copy forwarding.
-// TLS capture BPF programs are loaded by enterprise's TLSUprobeLoader.
-var LowLatencyMode bool
-
 var ActiveIncomingProxy agent.IncomingProxy
 
 func RegisterIncomingProxy(ip agent.IncomingProxy) {
 	ActiveIncomingProxy = ip
 }
 
-// JSSECapturePort is the fixed port on which the JSSE capture listener
-// accepts connections from Java agents. Using a fixed port allows eBPF
-// to add it to the pass-through list at registration time, preventing
-// the Java agent's connection from being intercepted and redirected
-// through the sockmap proxy.
-const JSSECapturePort uint16 = 42507
+// SockmapLoadHookFn is called during eBPF hooks load to allow enterprise
+// to load sockmap BPF programs for low-latency mode. It returns a cleanup
+// function that will be called on unload to release sockmap resources.
+type SockmapLoadHookFn func(logger *zap.Logger) (cleanup func(), err error)
+
+var SockmapHook SockmapLoadHookFn
+
+func RegisterSockmapLoadHook(h SockmapLoadHookFn) {
+	SockmapHook = h
+}
+
+// ExtraPassThroughPortsFn returns additional ports to add to the eBPF
+// pass-through list (e.g. JSSE capture port for low-latency mode).
+type ExtraPassThroughPortsFn func() []uint
+
+var ExtraPassThroughPortsHook ExtraPassThroughPortsFn
+
+func RegisterExtraPassThroughPortsHook(h ExtraPassThroughPortsFn) {
+	ExtraPassThroughPortsHook = h
+}

@@ -185,7 +185,6 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		IsDocker:   opts.IsDocker,
 		Mode:       opts.Mode,
 		Rules:      opts.Rules,
-		LowLatency: LowLatencyMode,
 	}
 	// When the low-latency proxy is enabled, the Go proxy port is set to 0 (random).
 	// Override the eBPF proxy port so that outgoing connections are redirected
