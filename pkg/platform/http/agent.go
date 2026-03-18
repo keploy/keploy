@@ -1243,9 +1243,7 @@ func (a *AgentClient) getApp() (*app.App, error) {
 }
 
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
-	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
-		InstallationID: a.conf.InstallationID,
-	}, opts)
+	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, a.dockerAgentConfig(), opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
 		return err
@@ -1310,6 +1308,17 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	}
 
 	return nil
+}
+
+func (a *AgentClient) dockerAgentConfig() *config.Config {
+	if a.conf == nil {
+		return &config.Config{}
+	}
+
+	return &config.Config{
+		InstallationID: a.conf.InstallationID,
+		Debug:          a.conf.Debug,
+	}
 }
 
 // startInDockerWithPTY starts the docker agent with PTY support for interactive input (e.g., sudo password)
