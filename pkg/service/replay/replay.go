@@ -1612,7 +1612,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if added > 0 {
 				r.logger.Debug("preserved mocks used by noisy testcases from pruning",
 					zap.String("testSetID", testSetID),
-					zap.Int("noisyTestCases", len(noisyTestCases)),
+					zap.Int("noisyTestCaseCount", len(noisyTestCases)),
 					zap.Int("additionalMocksKept", added))
 			}
 		}

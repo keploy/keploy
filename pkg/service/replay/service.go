@@ -102,7 +102,7 @@ type Telemetry interface {
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error)
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
-	// GetNoisyTestCaseNames returns testcase IDs that were reclassified as noisy
+	// GetNoisyTestCaseNames returns test case names that were reclassified as noisy
 	// for the provided test set during BeforeTestResult processing.
 	GetNoisyTestCaseNames(testSetID string) []string
 	BeforeTestRun(ctx context.Context, testRunID string) error

@@ -295,6 +295,9 @@ func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 	return consumedMocks, nil
 }
 
+// GetNoisyTestCaseNames is a no-op in the default Hooks implementation.
+// Callers that embed custom TestHooks should override this to return the
+// noisy test case names collected during BeforeTestResult processing.
 func (h *Hooks) GetNoisyTestCaseNames(testSetID string) []string {
 	return nil
 }
