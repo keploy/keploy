@@ -77,3 +77,118 @@ func TestIsMockSubsetWithConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestRetainNoisyTestCaseMocks(t *testing.T) {
+	tests := []struct {
+		name      string
+		noisy     []string
+		mapping   *models.Mapping
+		consumed  map[string]models.MockState
+		wantAdded int
+		wantKeys  []string // expected keys in consumed after call
+	}{
+		{
+			name:      "nil inputs",
+			noisy:     nil,
+			mapping:   nil,
+			consumed:  nil,
+			wantAdded: 0,
+		},
+		{
+			name:      "empty noisy list",
+			noisy:     []string{},
+			mapping:   &models.Mapping{TestCases: []models.MappedTestCase{{ID: "tc-1"}}},
+			consumed:  map[string]models.MockState{},
+			wantAdded: 0,
+		},
+		{
+			name:  "noisy test case not in mapping",
+			noisy: []string{"tc-missing"},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{
+					{ID: "tc-1", Mocks: []models.MockEntry{{Name: "mock-1", Kind: "HTTP"}}},
+				},
+			},
+			consumed:  map[string]models.MockState{},
+			wantAdded: 0,
+		},
+		{
+			name:  "noisy test case present adds mocks",
+			noisy: []string{"tc-1"},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{
+					{ID: "tc-1", Mocks: []models.MockEntry{
+						{Name: "mock-1", Kind: "HTTP", Timestamp: 100},
+						{Name: "mock-2", Kind: "SQL", Timestamp: 200},
+					}},
+					{ID: "tc-2", Mocks: []models.MockEntry{
+						{Name: "mock-3", Kind: "HTTP"},
+					}},
+				},
+			},
+			consumed:  map[string]models.MockState{},
+			wantAdded: 2,
+			wantKeys:  []string{"mock-1", "mock-2"},
+		},
+		{
+			name:  "already consumed mocks not double counted",
+			noisy: []string{"tc-1"},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{
+					{ID: "tc-1", Mocks: []models.MockEntry{
+						{Name: "mock-1", Kind: "HTTP"},
+						{Name: "mock-2", Kind: "SQL"},
+					}},
+				},
+			},
+			consumed: map[string]models.MockState{
+				"mock-1": {Name: "mock-1"},
+			},
+			wantAdded: 1,
+			wantKeys:  []string{"mock-1", "mock-2"},
+		},
+		{
+			name:  "empty mock name is skipped",
+			noisy: []string{"tc-1"},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{
+					{ID: "tc-1", Mocks: []models.MockEntry{
+						{Name: "", Kind: "HTTP"},
+						{Name: "mock-1", Kind: "SQL"},
+					}},
+				},
+			},
+			consumed:  map[string]models.MockState{},
+			wantAdded: 1,
+			wantKeys:  []string{"mock-1"},
+		},
+		{
+			name:  "empty string in noisy list is ignored",
+			noisy: []string{"", "tc-1"},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{
+					{ID: "tc-1", Mocks: []models.MockEntry{
+						{Name: "mock-1", Kind: "HTTP"},
+					}},
+				},
+			},
+			consumed:  map[string]models.MockState{},
+			wantAdded: 1,
+			wantKeys:  []string{"mock-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := retainNoisyTestCaseMocks(tt.noisy, tt.mapping, tt.consumed)
+			if got != tt.wantAdded {
+				t.Errorf("retainNoisyTestCaseMocks() = %d, want %d", got, tt.wantAdded)
+			}
+			for _, key := range tt.wantKeys {
+				if _, ok := tt.consumed[key]; !ok {
+					t.Errorf("expected key %q in consumed map, but not found", key)
+				}
+			}
+		})
+	}
+}
