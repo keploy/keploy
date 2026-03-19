@@ -36,7 +36,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	})
 
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
-
+	rootCmd.PersistentFlags().Bool("verbose", false, "Enable verbose debug logging")
 	rootCmd.SetHelpTemplate(provider.RootCustomHelpTemplate)
 
 	rootCmd.SetVersionTemplate(provider.VersionTemplate)
