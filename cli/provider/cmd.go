@@ -80,7 +80,7 @@ Docker
 	Test:
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 10 --buildDelay 60
 
-Note: Keploy will automatically prompt for sudo password when elevated privileges are required for eBPF operations.
+Note: On Linux, Keploy may prompt for sudo password when elevated privileges are required for eBPF operations.
 `
 
 var ExampleOneClickInstall = `
