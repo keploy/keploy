@@ -110,10 +110,12 @@ type Payload struct {
 
 type MockState struct {
 	Name       string    `json:"name"`
+	Kind       Kind      `json:"kind"`
 	Usage      MockUsage `json:"usage"`
 	IsFiltered bool      `json:"isFiltered"`
 	SortOrder  int64     `json:"sortOrder"`
 	Type       string    `json:"type"`
+	Timestamp  int64     `json:"timestamp"`
 }
 
 func (m *Mock) DeepCopy() *Mock {

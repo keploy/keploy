@@ -7,6 +7,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"go.keploy.io/server/v3/config"
 	schemaMatcher "go.keploy.io/server/v3/pkg/matcher/schema"
 	"go.keploy.io/server/v3/pkg/models"
@@ -241,12 +242,13 @@ func generateSummaryTable(summary models.Summary) {
 	serviceColor := color.New(color.FgHiBlue).SprintFunc()
 
 	// Create a new tablewriter to format the output as a table
-	table := tablewriter.NewWriter(os.Stdout)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRowAlignment(tw.AlignCenter),
+		tablewriter.WithRowConfig(tw.CellConfig{Formatting: tw.CellFormatting{MergeMode: tw.MergeVertical}}),
+	)
 
 	// Set table headers
-	table.SetHeader([]string{"Consumer Service", "Consumer Service Test-set", "Mock-name", "Failed", "Passed", "Missed"})
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetAutoMergeCells(true)
+	table.Header([]string{"Consumer Service", "Consumer Service Test-set", "Mock-name", "Failed", "Passed", "Missed"})
 	// Loop through each service summary to populate the table
 	for idx, serviceSummary := range summary.ServicesSummary {
 		failedCount := serviceSummary.FailedCount

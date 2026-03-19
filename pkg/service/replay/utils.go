@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
+
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -290,22 +292,22 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 
 	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
-	table.SetBorder(true)
-	table.SetRowLine(true)
-	table.SetCenterSeparator("|")
-	table.SetColumnSeparator("|")
-	table.SetRowSeparator("-")
-	table.SetAutoWrapText(true)
-	table.SetReflowDuringAutoWrap(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetColWidth(120)
-	table.SetTablePadding(" ")
-	table.SetColMinWidth(0, 15) // TEST SET column min width
-	table.SetColMinWidth(1, 12) // TEST ID column min width
-	table.SetColMinWidth(2, 50) // MOCK DIFFERENCES column min width
+	colWidths := tw.NewMapper[int, int]().Set(0, 15).Set(1, 12).Set(2, 50)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRendition(tw.Rendition{
+			Settings: tw.Settings{
+				Separators: tw.Separators{
+					BetweenRows: tw.On,
+				},
+			},
+		}),
+		tablewriter.WithRowAutoWrap(1),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAlignment(tw.AlignCenter),
+		tablewriter.WithMaxWidth(120),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
 
 	// Group failures by test set for better presentation
 	testSetGroups := make(map[string][]TestFailure)
