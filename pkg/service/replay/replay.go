@@ -1243,7 +1243,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
 					break
 				}
-				continue
+			continue
 			}
 
 			if r.instrument {
