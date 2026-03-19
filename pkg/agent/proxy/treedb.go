@@ -114,19 +114,14 @@ func (db *TreeDb) deleteAll() {
 	db.mu.Unlock()
 }
 
-// rangeValuesNoLock iterates without taking the lock (caller must hold it).
-func (db *TreeDb) rangeValuesNoLock(fn func(v interface{}) bool) {
+// rangeValues iterates without allocating a []interface{} snapshot.
+func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
+	db.mu.RLock()
 	it := db.rbt.Iterator()
 	for it.Next() {
 		if !fn(it.Value()) {
 			break
 		}
 	}
-}
-
-// rangeValues iterates with a read lock.
-func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
-	db.mu.RLock()
-	db.rangeValuesNoLock(fn)
 	db.mu.RUnlock()
 }
