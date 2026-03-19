@@ -161,7 +161,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			var responseString string
 
 			// Fetching the response headers
-			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+			header := pkg.ToHTTPHeaderWithExact(stub.Spec.HTTPResp.Header, stub.Spec.HTTPResp.HeaderValues)
 
 			//Check if the content encoding is present in the header
 			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {

@@ -14,17 +14,18 @@ type BodyRef struct {
 }
 
 type HTTPReq struct {
-	Method     Method            `json:"method" yaml:"method"`
-	ProtoMajor int               `json:"proto_major" yaml:"proto_major"` // e.g. 1
-	ProtoMinor int               `json:"proto_minor" yaml:"proto_minor"` // e.g. 0
-	URL        string            `json:"url" yaml:"url"`
-	URLParams  map[string]string `json:"url_params" yaml:"url_params,omitempty"`
-	Header     map[string]string `json:"header" yaml:"header"`
-	Body       string            `json:"body" yaml:"body"`
-	BodyRef    BodyRef           `json:"body_ref,omitempty" yaml:"body_ref,omitempty"` // set when body is offloaded to assets (>1MB)
-	Binary     string            `json:"binary" yaml:"binary,omitempty"`
-	Form       []FormData        `json:"form" yaml:"form,omitempty"`
-	Timestamp  time.Time         `json:"timestamp" yaml:"timestamp"`
+	Method       Method              `json:"method" yaml:"method"`
+	ProtoMajor   int                 `json:"proto_major" yaml:"proto_major"` // e.g. 1
+	ProtoMinor   int                 `json:"proto_minor" yaml:"proto_minor"` // e.g. 0
+	URL          string              `json:"url" yaml:"url"`
+	URLParams    map[string]string   `json:"url_params" yaml:"url_params,omitempty"`
+	Header       map[string]string   `json:"header" yaml:"header"`
+	HeaderValues map[string][]string `json:"header_values,omitempty" yaml:"header_values,omitempty"`
+	Body         string              `json:"body" yaml:"body"`
+	BodyRef      BodyRef             `json:"body_ref,omitempty" yaml:"body_ref,omitempty"` // set when body is offloaded to assets (>1MB)
+	Binary       string              `json:"binary" yaml:"binary,omitempty"`
+	Form         []FormData          `json:"form" yaml:"form,omitempty"`
+	Timestamp    time.Time           `json:"timestamp" yaml:"timestamp"`
 }
 
 type HTTPSchema struct {
@@ -47,14 +48,15 @@ type FormData struct {
 }
 
 type HTTPResp struct {
-	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
-	Header        map[string]string `json:"header" yaml:"header"`
-	Body          string            `json:"body" yaml:"body"`
-	BodySkipped   bool              `json:"body_skipped,omitempty" yaml:"body_skipped,omitempty"` // true when body was >1MB and not saved
-	BodySize      int64             `json:"body_size,omitempty" yaml:"body_size,omitempty"`       // original body size in bytes when BodySkipped is true
-	StatusMessage string            `json:"status_message" yaml:"status_message"`
-	ProtoMajor    int               `json:"proto_major" yaml:"proto_major"`
-	ProtoMinor    int               `json:"proto_minor" yaml:"proto_minor"`
-	Binary        string            `json:"binary" yaml:"binary,omitempty"`
-	Timestamp     time.Time         `json:"timestamp" yaml:"timestamp"`
+	StatusCode    int                 `json:"status_code" yaml:"status_code"` // e.g. 200
+	Header        map[string]string   `json:"header" yaml:"header"`
+	HeaderValues  map[string][]string `json:"header_values,omitempty" yaml:"header_values,omitempty"`
+	Body          string              `json:"body" yaml:"body"`
+	BodySkipped   bool                `json:"body_skipped,omitempty" yaml:"body_skipped,omitempty"` // true when body was >1MB and not saved
+	BodySize      int64               `json:"body_size,omitempty" yaml:"body_size,omitempty"`       // original body size in bytes when BodySkipped is true
+	StatusMessage string              `json:"status_message" yaml:"status_message"`
+	ProtoMajor    int                 `json:"proto_major" yaml:"proto_major"`
+	ProtoMinor    int                 `json:"proto_minor" yaml:"proto_minor"`
+	Binary        string              `json:"binary" yaml:"binary,omitempty"`
+	Timestamp     time.Time           `json:"timestamp" yaml:"timestamp"`
 }
