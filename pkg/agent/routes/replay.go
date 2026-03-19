@@ -116,7 +116,7 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.logger.Info("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
+	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
 
 	render.JSON(w, r, updateParamsRes)
 	render.Status(r, http.StatusOK)
