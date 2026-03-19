@@ -884,6 +884,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
 	}
+	if a.conf.Record.EnableSampling > 0 {
+		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
+	}
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")
 	}

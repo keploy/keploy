@@ -538,6 +538,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
+	if idc.conf.Record.EnableSampling > 0 {
+		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
+	}
 	if opts.EnableTesting {
 		command = append(command, "--enable-testing")
 	}

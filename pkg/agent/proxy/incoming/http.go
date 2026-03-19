@@ -19,27 +19,51 @@ import (
 )
 
 func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
+	var acquiredLock bool
+
+	// 1. Non-Blocking Concurrency Control
 	if pm.synchronous {
+		// Sync mode (Concurrency 1): Blocks until the slot is free
 		select {
 		case sem <- struct{}{}:
+			acquiredLock = true
 		case <-ctx.Done():
 			return
+		}
+	} else if pm.sampling && pm.samplingSem != nil {
+		// Sampling mode (Concurrency 5): Non-blocking lock attempt
+		select {
+		case pm.samplingSem <- struct{}{}:
+			acquiredLock = true
+			logger.Debug("Acquired 1 of 5 sampling slots for capture")
+		case <-ctx.Done():
+			return
+		default:
+			// Non-blocking bypass: The 5 slots are FULL.
+			// We do not block. We set acquiredLock to false.
+			// This connection will be proxied normally and marked closed, but WILL NOT be captured.
+			acquiredLock = false
+			logger.Debug("Sampling limit reached (5/5). Ignoring request for capture.")
 		}
 	}
 
 	var releaseOnce sync.Once
 	releaseLock := func() {
-		if pm.synchronous {
+		if acquiredLock {
 			releaseOnce.Do(func() {
-				<-sem
-				logger.Debug("Lock released early for concurrent streaming")
+				if pm.synchronous {
+					<-sem
+				} else if pm.sampling && pm.samplingSem != nil {
+					<-pm.samplingSem
+				}
+				logger.Debug("Lock released")
 			})
 		}
 	}
 	// Ensure lock is released eventually if we exit early or finish normally
 	defer releaseLock()
 
-	// Get the actual destination address (handles Windows vs others platform logic)
+	// Get the actual destination address
 	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
 	// Determine the correct port for the test case:
@@ -68,17 +92,20 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		)
 	}()
 
-	// 1. Dial Upstream
+	// Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	if err != nil {
 		logger.Warn("Failed to dial upstream app port", zap.String("Final_App_Port", finalAppAddr), zap.Error(err))
 		return
 	}
-	// This closes the upstream connection when this function returns
 	defer upConn.Close()
 
 	clientReader := bufio.NewReader(clientConn)
 	upstreamReader := bufio.NewReader(upConn)
+
+	// forceCloseMode is true if we are running in sync or sampling mode.
+	// In these modes, disable keep-alive and drop the loop after one request.
+	forceCloseMode := pm.synchronous || pm.sampling
 
 	for {
 		requestSeq++
@@ -112,24 +139,27 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		var chunked bool = false
 
-		// SYNCHRONOUS : Disable Keep-Alive for the Upstream
-		if pm.synchronous && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
-			exchangeLogger.Debug("Detected request body that may stream in synchronous mode. Releasing lock.",
-				zap.Int64("content_length", req.ContentLength),
-				zap.Strings("transfer_encoding", req.TransferEncoding),
-			)
-			releaseLock()
-			chunked = true
-
-		} else if pm.synchronous {
-
-			mgr := syncMock.Get()
-			if !mgr.GetFirstReqSeen() {
-				mgr.SetFirstRequestSignaled()
+		// Request modifications for sync/sampling modes.
+		if forceCloseMode {
+			if req.ContentLength == -1 || isChunked(req.TransferEncoding) {
+				exchangeLogger.Debug("Detected request body that may stream in force-close mode. Releasing lock.",
+					zap.Bool("synchronous_mode", pm.synchronous),
+					zap.Bool("sampling_mode", pm.sampling),
+					zap.Bool("acquired_lock", acquiredLock),
+					zap.Int64("content_length", req.ContentLength),
+					zap.Strings("transfer_encoding", req.TransferEncoding),
+				)
+				releaseLock()
+				chunked = true
+			} else if pm.synchronous && acquiredLock {
+				mgr := syncMock.Get()
+				if !mgr.GetFirstReqSeen() {
+					mgr.SetFirstRequestSignaled()
+				}
 			}
 
-			// we will close connection in case of keep alive (to allow multiple clients to make connections)
-			// if we don't close a connection in pm.synchronous mode, the next request from other client will be blocked
+			// Mark the connection closed for keep-alive in these modes even if
+			// we are only proxying and not capturing.
 			req.Close = true
 			req.Header.Set("Connection", "close")
 		}
@@ -149,7 +179,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Body.Close()
 			return
 		}
-		req.Body.Close() // Close explicitly to avoid defer leak in loop
+		req.Body.Close() // Close explicitly to avoid defer leak in loop.
 		exchangeLogger.Debug("Forwarded request upstream",
 			zap.Duration("forward_request_duration", time.Since(requestForwardStart)),
 			zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -181,16 +211,21 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			zap.Duration("upstream_header_latency", respHeaderReadAt.Sub(reqTimestamp)),
 		)
 
-		// SYNCHRONOUS : Disable Keep-Alive for the Client
-		if pm.synchronous && (resp.ContentLength == -1 || isChunked(resp.TransferEncoding)) {
-			exchangeLogger.Debug("Detected response body that may stream in synchronous mode. Releasing lock.",
-				zap.Int64("content_length", resp.ContentLength),
-				zap.Strings("transfer_encoding", resp.TransferEncoding),
-				zap.String("content_type", resp.Header.Get("Content-Type")),
-			)
-			releaseLock()
-			chunked = true
-		} else if pm.synchronous {
+		// Response modifications for sync/sampling modes.
+		if forceCloseMode {
+			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
+				exchangeLogger.Debug("Detected response body that may stream in force-close mode. Releasing lock.",
+					zap.Bool("synchronous_mode", pm.synchronous),
+					zap.Bool("sampling_mode", pm.sampling),
+					zap.Bool("acquired_lock", acquiredLock),
+					zap.Int64("content_length", resp.ContentLength),
+					zap.Strings("transfer_encoding", resp.TransferEncoding),
+					zap.String("content_type", resp.Header.Get("Content-Type")),
+				)
+				releaseLock()
+				chunked = true
+			}
+
 			resp.Close = true
 			resp.Header.Set("Connection", "close")
 		}
@@ -213,7 +248,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Body.Close()
 			return
 		}
-		resp.Body.Close() // Close explicitly
+		resp.Body.Close() // Close explicitly.
 		exchangeLogger.Debug("Forwarded response to client",
 			zap.Int("status_code", resp.StatusCode),
 			zap.Duration("response_forward_duration", time.Since(responseForwardStart)),
@@ -222,12 +257,23 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			zap.Bool("response_capture_truncated", respCapture.Truncated()),
 		)
 
-		if chunked && pm.synchronous { // for chunked requests/responses, we will not capture test cases in case of pm.synchronous mode
-			exchangeLogger.Debug("Skipping testcase capture for synchronous streaming exchange",
-				zap.Int64("request_bytes_seen", reqCapture.Total()),
-				zap.Int64("response_bytes_seen", respCapture.Total()),
-			)
-			return
+		shouldCapture := true
+		if forceCloseMode {
+			if chunked {
+				shouldCapture = false
+				exchangeLogger.Debug("Skipping testcase capture for force-close streaming exchange",
+					zap.Bool("synchronous_mode", pm.synchronous),
+					zap.Bool("sampling_mode", pm.sampling),
+					zap.Int64("request_bytes_seen", reqCapture.Total()),
+					zap.Int64("response_bytes_seen", respCapture.Total()),
+				)
+			} else if pm.sampling && !acquiredLock {
+				shouldCapture = false
+				exchangeLogger.Debug("Skipping testcase capture because no sampling slot was acquired",
+					zap.Int64("request_bytes_seen", reqCapture.Total()),
+					zap.Int64("response_bytes_seen", respCapture.Total()),
+				)
+			}
 		}
 
 		if reqCapture.Truncated() || respCapture.Truncated() {
@@ -240,7 +286,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int("status_code", resp.StatusCode),
 				zap.String("response_content_type", resp.Header.Get("Content-Type")),
 			)
-			if pm.synchronous {
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+
+		if !shouldCapture {
+			if forceCloseMode {
 				return
 			}
 			continue
@@ -301,7 +354,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			hooksUtils.CaptureHook(ctx, exchangeLogger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
 		}()
 
-		if pm.synchronous {
+		if forceCloseMode {
 			return
 		}
 	}

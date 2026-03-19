@@ -30,6 +30,8 @@ type IngressProxyManager struct {
 	tcChan       chan *models.TestCase
 	incomingOpts models.IncomingOptions
 	synchronous  bool
+	sampling     bool
+	samplingSem  chan struct{}
 }
 
 var ingressConnectionSeq uint64
@@ -41,6 +43,16 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 		tcChan:      make(chan *models.TestCase, 100),
 		active:      make(map[uint16]proxyStop),
 		synchronous: cfg.Agent.Synchronous,
+		sampling:    false,
+		samplingSem: make(chan struct{}, func() int {
+			if cfg.Agent.EnableSampling > 0 {
+				return cfg.Agent.EnableSampling
+			}
+			return 5
+		}()),
+	}
+	if cfg.Agent.EnableSampling > 0 {
+		pm.sampling = true
 	}
 	return pm
 }
