@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
+
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -214,24 +216,32 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 
 // upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
 // consumed during the replay of a specific test case.
-func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, mockNames []string) {
-	if actualTestMockMappings == nil || testCaseID == "" || len(mockNames) == 0 {
+func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, consumedMocks []models.MockState) {
+	if actualTestMockMappings == nil || testCaseID == "" || len(consumedMocks) == 0 {
 		return
 	}
 
-	// If the test case already has an entry, append the new mock names to it.
-	for i := range actualTestMockMappings.Tests {
-		if actualTestMockMappings.Tests[i].ID == testCaseID {
-			existing := actualTestMockMappings.Tests[i].Mocks.ToSlice()
-			actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(existing, mockNames...))
+	newMocks := make([]models.MockEntry, 0, len(consumedMocks))
+	for _, m := range consumedMocks {
+		newMocks = append(newMocks, models.MockEntry{
+			Name:      m.Name,
+			Kind:      string(m.Kind),
+			Timestamp: m.Timestamp,
+		})
+	}
+
+	// If the test case already has an entry, append the new mocks to it.
+	for i := range actualTestMockMappings.TestCases {
+		if actualTestMockMappings.TestCases[i].ID == testCaseID {
+			actualTestMockMappings.TestCases[i].Mocks = append(actualTestMockMappings.TestCases[i].Mocks, newMocks...)
 			return
 		}
 	}
 
 	// No existing entry — create a new one.
-	actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+	actualTestMockMappings.TestCases = append(actualTestMockMappings.TestCases, models.MappedTestCase{
 		ID:    testCaseID,
-		Mocks: models.FromSlice(mockNames),
+		Mocks: newMocks,
 	})
 }
 
@@ -365,22 +375,22 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 
 	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
-	table.SetBorder(true)
-	table.SetRowLine(true)
-	table.SetCenterSeparator("|")
-	table.SetColumnSeparator("|")
-	table.SetRowSeparator("-")
-	table.SetAutoWrapText(true)
-	table.SetReflowDuringAutoWrap(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetColWidth(120)
-	table.SetTablePadding(" ")
-	table.SetColMinWidth(0, 15) // TEST SET column min width
-	table.SetColMinWidth(1, 12) // TEST ID column min width
-	table.SetColMinWidth(2, 50) // MOCK DIFFERENCES column min width
+	colWidths := tw.NewMapper[int, int]().Set(0, 15).Set(1, 12).Set(2, 50)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRendition(tw.Rendition{
+			Settings: tw.Settings{
+				Separators: tw.Separators{
+					BetweenRows: tw.On,
+				},
+			},
+		}),
+		tablewriter.WithRowAutoWrap(1),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAlignment(tw.AlignCenter),
+		tablewriter.WithMaxWidth(120),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
 
 	// Group failures by test set for better presentation
 	testSetGroups := make(map[string][]TestFailure)
