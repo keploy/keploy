@@ -23,8 +23,12 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
 
-	// NOTE: Initial reqBuf is already forwarded to dest in RecordOutgoing
-	// before wrapping connections with TeeForwardConn.
+	//Writing the request to the server.
+	_, err := destConn.Write(reqBuf)
+	if err != nil {
+		h.Logger.Error("failed to write request message to the destination server", zap.Error(err))
+		return err
+	}
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -65,7 +69,16 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					return nil
 				}
 
-				// Response is automatically forwarded to client by TeeForwardConn.
+				// write the response message to the client
+				_, err = clientConn.Write(resp)
+				if err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					utils.LogError(h.Logger, err, "failed to write response message to the user client")
+					errCh <- err
+					return nil
+				}
 
 				h.Logger.Debug("This is the response from the server after the expect header" + string(resp))
 
@@ -81,7 +94,16 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- err
 					return nil
 				}
-				// Request data is automatically forwarded to dest by TeeForwardConn.
+				// write the request message to the actual destination server
+				_, err = destConn.Write(reqBuf)
+				if err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					utils.LogError(h.Logger, err, "failed to write request message to the destination server")
+					errCh <- err
+					return nil
+				}
 				finalReq = append(finalReq, reqBuf...)
 			}
 
@@ -105,7 +127,16 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					if len(resp) != 0 {
 						// Capturing the response timestamp
 						resTimestampMock := time.Now()
-						// Response is automatically forwarded to client by TeeForwardConn.
+						// write the response message to the user client
+						_, err = clientConn.Write(resp)
+						if err != nil {
+							if ctx.Err() != nil {
+								return ctx.Err()
+							}
+							utils.LogError(h.Logger, err, "failed to write response message to the user client")
+							errCh <- err
+							return nil
+						}
 
 						// saving last request/response on this conn.
 						m := &FinalHTTP{
@@ -123,13 +154,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					}
 					break
 				}
-				// During graceful shutdown, connections are closed before in-flight
-				// responses finish reading. This is expected and not a real error.
-				if ctx.Err() != nil || isConnClosedErr(err) {
-					h.Logger.Debug("failed to read the response message from the destination server", zap.Error(err))
-				} else {
-					utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
-				}
+				utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
 				errCh <- err
 				return nil
 			}
@@ -137,7 +162,16 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			// Capturing the response timestamp
 			resTimestampMock := time.Now()
 
-			// Response is automatically forwarded to client by TeeForwardConn.
+			// write the response message to the user client
+			_, err = clientConn.Write(resp)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				utils.LogError(h.Logger, err, "failed to write response message to the user client")
+				errCh <- err
+				return nil
+			}
 			var finalResp []byte
 			finalResp = append(finalResp, resp...)
 			h.Logger.Debug("This is the initial response: " + string(resp))
@@ -161,13 +195,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					errCh <- nil
 					return nil
 				}
-				// During graceful shutdown, connections are closed before in-flight
-				// chunked responses finish reading. This is expected.
-				if ctx.Err() != nil || isConnClosedErr(err) {
-					h.Logger.Debug("failed to handle chunk response", zap.Error(err))
-				} else {
-					utils.LogError(h.Logger, err, "failed to handle chunk response")
-				}
+				utils.LogError(h.Logger, err, "failed to handle chunk response")
 				errCh <- err
 				return nil
 			}
@@ -206,7 +234,16 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				errCh <- err
 				return nil
 			}
-			// Request data is automatically forwarded to dest by TeeForwardConn.
+			// write the request message to the actual destination server
+			_, err = destConn.Write(finalReq)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				utils.LogError(h.Logger, err, "failed to write request message to the destination server")
+				errCh <- err
+				return nil
+			}
 		}
 		return nil
 	})

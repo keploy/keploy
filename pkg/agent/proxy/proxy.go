@@ -23,7 +23,6 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
-	"go.keploy.io/server/v3/pkg/agent/proxy/orchestrator"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -35,17 +34,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// outgoingTLSSessionCache is shared across all outgoing TLS connections.
-// Without this, every proxy→destination dial does a full TLS handshake (~10-30 ms).
-// With it, repeat connections to the same host resume (~1-3 ms).
-var outgoingTLSSessionCache = tls.NewLRUClientSessionCache(256)
-
 type ParserPriority struct {
 	Priority   int
 	ParserType integrations.IntegrationType
 }
-
-// AuxiliaryProxyHook is now defined in pkg/agent to avoid circular dependency
 
 type Proxy struct {
 	logger *zap.Logger
@@ -94,17 +86,6 @@ type Proxy struct {
 	isGracefulShutdown atomic.Bool
 
 	auxiliaryHook agent.AuxiliaryProxyHook
-}
-
-// tuneTCPConn applies low-latency TCP tuning to a connection:
-// - TCP_NODELAY: disable Nagle's algorithm
-// - TCP_QUICKACK: disable delayed ACKs
-// - Enlarged socket buffers: reduce TCP back-pressure on bursty traffic
-func tuneTCPConn(tc *net.TCPConn) {
-	_ = tc.SetNoDelay(true)
-	orchestrator.SetTCPQuickACK(tc)
-	_ = tc.SetReadBuffer(2 * 1024 * 1024)  // 2 MB receive buffer
-	_ = tc.SetWriteBuffer(2 * 1024 * 1024) // 2 MB send buffer
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -382,10 +363,6 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			utils.LogError(p.logger, err, "failed to accept connection to the proxy")
 			return err
 		}
-		// Disable Nagle's algorithm and enable quick ACKs for low-latency forwarding
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			tuneTCPConn(tc)
-		}
 		clientConnErrGrp.Go(func() error {
 			defer util.Recover(p.logger, clientConn, nil)
 			err := p.handleConnection(clientConnCtx, clientConn)
@@ -528,9 +505,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
 		}
-		if tc, ok := dstConn.(*net.TCPConn); ok {
-			tuneTCPConn(tc)
-		}
 
 		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
 		if err != nil {
@@ -551,10 +525,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
 			}
-			if tc, ok := dstConn.(*net.TCPConn); ok {
-				tuneTCPConn(tc)
-			}
-
 			dstCfg := &models.ConditionalDstCfg{
 				Port: uint(destInfo.Port),
 			}
@@ -738,9 +708,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			utils.LogError(logger, err, "failed to dial PostgreSQL server for SSL negotiation. Verify the server is running and accessible at the configured address")
 			return err
 		}
-		if tc, ok := dstConn.(*net.TCPConn); ok {
-			tuneTCPConn(tc)
-		}
 
 		// Extract the underlying connection from the util.Conn wrapper
 		underlyingConn := srcConn
@@ -839,7 +806,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
 			NextProtos:         nextProtos,
-			ClientSessionCache: outgoingTLSSessionCache, // reuse TLS sessions with destination
 		}
 
 		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
@@ -876,9 +842,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
-			}
-			if tc, ok := dstConn.(*net.TCPConn); ok {
-				tuneTCPConn(tc)
 			}
 		}
 		dstCfg.Addr = dstAddr

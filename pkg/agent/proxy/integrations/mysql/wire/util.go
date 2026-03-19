@@ -30,12 +30,6 @@ type DecodeContext struct {
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
-
-	// ── Per-connection fast fields (no map/mutex overhead) ───────────
-	// These are used on the hot path to avoid map lookups with RWMutex.
-	// Since DecodeContext is created per-connection, direct fields are safe.
-	LastOpValue    byte                      // last MySQL operation for this connection
-	ServerGreeting *mysql.HandshakeV10Packet // server greeting for this connection
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
@@ -111,17 +105,6 @@ func setPacketInfo(_ context.Context, parsedPacket *mysql.PacketBundle, pkt inte
 	parsedPacket.Header.Type = pktType
 	parsedPacket.Message = pkt
 	decodeCtx.LastOp.Store(clientConn, lastOp)
-	// Also update the fast-path field.
-	decodeCtx.LastOpValue = lastOp
-}
-
-// setPacketInfoFast updates packet info using only the direct DecodeContext
-// fields — no map lookup, no mutex.  Use this on the hot path where
-// DecodeContext is known to be per-connection.
-func SetPacketInfoFast(_ context.Context, parsedPacket *mysql.PacketBundle, pkt interface{}, pktType string, lastOp byte, decodeCtx *DecodeContext) {
-	parsedPacket.Header.Type = pktType
-	parsedPacket.Message = pkt
-	decodeCtx.LastOpValue = lastOp
 }
 
 func GetPluginName(buf interface{}) (string, error) {

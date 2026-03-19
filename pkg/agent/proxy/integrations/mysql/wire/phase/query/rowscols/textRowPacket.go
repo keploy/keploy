@@ -19,7 +19,6 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 			PayloadLength: utils.ReadUint24(data[offset : offset+3]),
 			SequenceID:    data[offset+3],
 		},
-		Values: make([]mysql.ColumnEntry, 0, len(columns)),
 	}
 
 	offset += 4

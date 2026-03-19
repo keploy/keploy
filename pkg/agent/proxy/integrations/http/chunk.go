@@ -28,8 +28,17 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 			utils.LogError(h.Logger, nil, "failed to read the request message from the client")
 			return err
 		}
-		// Data is automatically forwarded to dest by ForwardingReadOnlyConn.Read()
-		// In replayer mode (destConn is nil), no forwarding is needed.
+		// destConn is nil in case of test mode
+		if destConn != nil {
+			_, err = destConn.Write(reqHeader)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				utils.LogError(h.Logger, nil, "failed to write request message to the destination server")
+				return err
+			}
+		}
 
 		*finalReq = append(*finalReq, reqHeader...)
 	}
@@ -122,8 +131,17 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 
 			h.Logger.Debug("Read chunk", zap.Int("chunkSize", n), zap.Int("remaining", contentLength))
 
-			// Data is automatically forwarded to dest by ForwardingReadOnlyConn.Read()
-			// In replayer mode (destConn is nil), no forwarding is needed.
+			// Write to destination
+			if destConn != nil {
+				_, wErr := destConn.Write(chunk)
+				if wErr != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					utils.LogError(h.Logger, wErr, "failed to write request message to the destination server")
+					return wErr
+				}
+			}
 		}
 
 		if err != nil {
@@ -142,13 +160,6 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 			// Check for Context Cancel (if Read failed due to context closure wrapped in net error)
 			if ctx.Err() != nil {
 				return ctx.Err()
-			}
-
-			// During graceful shutdown, connections are closed before in-flight
-			// responses finish reading. This is expected and not a real error.
-			if isConnClosedErr(err) {
-				h.Logger.Debug("failed to read the response message from the destination server", zap.Error(err))
-				return err
 			}
 
 			utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
@@ -178,19 +189,22 @@ func (h *HTTP) chunkedRequest(ctx context.Context, finalReq *[]byte, clientConn,
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					break
 				}
-				// During graceful shutdown, connections are closed before in-flight
-				// requests finish reading. This is expected and not a real error.
-				if ctx.Err() != nil || isConnClosedErr(err) {
-					h.Logger.Debug("failed to read chunked request from client", zap.Error(err))
-					return err
-				}
-				utils.LogError(h.Logger, err, "failed to read chunked request from client")
+				utils.LogError(h.Logger, nil, "failed to read the response message from the destination server")
 				return err
 			}
 
 			*finalReq = append(*finalReq, requestChunked...)
-			// Data is automatically forwarded to dest by ForwardingReadOnlyConn.Read()
-			// In replayer mode (destConn is nil), no forwarding is needed.
+			// destConn is nil in case of test mode.
+			if destConn != nil {
+				_, err = destConn.Write(requestChunked)
+				if err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					utils.LogError(h.Logger, nil, "failed to write request message to the destination server")
+					return err
+				}
+			}
 
 			//check if the initial request is completed
 			if strings.HasSuffix(string(requestChunked), "0\r\n\r\n") {
@@ -214,21 +228,31 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 				h.Logger.Debug("received EOF from the server")
 				// if there is any buffer left before EOF, we must send it to the client and save this as mock
 				if len(respHeader) != 0 {
-					// Response is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+					// write the response message to the user client
+					_, err = clientConn.Write(resp)
+					if err != nil {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						utils.LogError(h.Logger, nil, "failed to write response message to the user client")
+						return err
+					}
 					*finalResp = append(*finalResp, respHeader...)
 				}
 				return err
 			}
-			// During graceful shutdown, connections are closed before in-flight
-			// responses finish reading. This is expected and not a real error.
-			if ctx.Err() != nil || isConnClosedErr(err) {
-				h.Logger.Debug("failed to read the response message from the destination server", zap.Error(err))
-				return err
-			}
-			utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
+			utils.LogError(h.Logger, nil, "failed to read the response message from the destination server")
 			return err
 		}
-		// Response is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+		// write the response message to the user client
+		_, err = clientConn.Write(respHeader)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			utils.LogError(h.Logger, nil, "failed to write response message to the user client")
+			return err
+		}
 
 		*finalResp = append(*finalResp, respHeader...)
 		resp = append(resp, respHeader...)
@@ -299,12 +323,6 @@ ReadLoop:
 			resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 			if err != nil {
 				if err != io.EOF {
-					// During graceful shutdown, connections are closed before in-flight
-					// responses finish reading. This is expected and not a real error.
-					if ctx.Err() != nil || isConnClosedErr(err) {
-						h.Logger.Debug("failed to read the response message from the destination server", zap.Error(err))
-						return err
-					}
 					utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
 					return err
 				}
@@ -317,7 +335,15 @@ ReadLoop:
 			}
 
 			*finalResp = append(*finalResp, resp...)
-			// Response is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+			// write the response message to the user client
+			_, err = clientConn.Write(resp)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				utils.LogError(h.Logger, nil, "failed to write response message to the user client")
+				return err
+			}
 
 			//In some cases need to write the response to the client
 			// where there is some response before getting the true EOF
@@ -348,13 +374,8 @@ func (h *HTTP) contentLengthResponse(ctx context.Context, finalResp *[]byte, cli
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				h.Logger.Info("Stopped getting data from the conn", zap.Error(err))
 				break
-			} else if ctx.Err() != nil || isConnClosedErr(err) {
-				// During graceful shutdown, connections are closed before in-flight
-				// responses finish reading. This is expected and not a real error.
-				h.Logger.Debug("failed to read the response message from the destination server", zap.Error(err))
-				return err
 			} else {
-				utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
+				utils.LogError(h.Logger, nil, "failed to read the response message from the destination server")
 				return err
 			}
 		}
@@ -363,7 +384,15 @@ func (h *HTTP) contentLengthResponse(ctx context.Context, finalResp *[]byte, cli
 		*finalResp = append(*finalResp, resp...)
 		contentLength -= len(resp)
 
-		// Response is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+		// write the response message to the user client
+		_, err = clientConn.Write(resp)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			utils.LogError(h.Logger, nil, "failed to write response message to the user client")
+			return err
+		}
 
 		if isEOF {
 			break

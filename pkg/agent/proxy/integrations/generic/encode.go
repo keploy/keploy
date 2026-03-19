@@ -14,6 +14,7 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -39,8 +40,11 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			},
 		})
 	}
-	// NOTE: Initial reqBuf is already forwarded to dest in RecordOutgoing
-	// before creating TeeForwardConn wrappers.
+	_, err := destConn.Write(reqBuf)
+	if err != nil {
+		utils.LogError(logger, err, "failed to write request message to the destination server")
+		return err
+	}
 	var genericResponses []models.Payload
 
 	clientBuffChan := make(chan []byte)
@@ -50,7 +54,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	//close(errChan)
 
 	// read requests from client
-	err := pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
+	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
 	if err != nil {
 		return fmt.Errorf("error reading from client:%v", err)
 	}
@@ -92,17 +96,19 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						Metadata:         metadata,
 					},
 				}
-				if opts.Synchronous {
-					if mgr := syncMock.Get(); mgr != nil {
-						mgr.AddMock(mock)
-						return ctx.Err()
-					}
+				if mgr := syncMock.Get(); mgr != nil {
+					mgr.AddMock(mock)
+					return ctx.Err()
 				}
-				mocks <- mock
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:
-			// Data is automatically forwarded to dest by TeeForwardConn's forwarding goroutine.
+			// Write the request message to the destination
+			_, err := destConn.Write(buffer)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write request message to the destination server")
+				return err
+			}
 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
@@ -129,12 +135,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 							Metadata:         metadata,
 						},
 					}
-					if opts.Synchronous {
-						if mgr := syncMock.Get(); mgr != nil {
-							mgr.AddMock(mock)
-						}
-					} else {
-						mocks <- mock
+					if mgr := syncMock.Get(); mgr != nil {
+						mgr.AddMock(mock)
 					}
 
 				}(genericRequestsCopy, genericResponseCopy, reqTS, resTS)
@@ -167,7 +169,12 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// store the request timestamp
 				reqTimestampMock = time.Now()
 			}
-			// Data is automatically forwarded to client by ForwardingReadOnlyConn.Read()
+			// Write the response message to the client
+			_, err := clientConn.Write(buffer)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write response message to the client")
+				return err
+			}
 
 			bufStr := string(buffer)
 			buffDataType := models.String
