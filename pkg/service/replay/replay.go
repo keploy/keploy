@@ -1354,9 +1354,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				var newMocks []models.MockEntry
 				for _, m := range consumedMocks {
 					newMocks = append(newMocks, models.MockEntry{
-						Name:      m.Name,
-						Kind:      string(m.Kind),
-						Timestamp: m.Timestamp,
+						Name:             m.Name,
+						Kind:             string(m.Kind),
+						Timestamp:        m.Timestamp,
+						ReqTimestampMock: m.ReqTimestampMock,
+						ResTimestampMock: m.ResTimestampMock,
 					})
 				}
 
