@@ -209,5 +209,3 @@ require (
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 )
-
-// replace github.com/keploy/integrations => ../integrations
