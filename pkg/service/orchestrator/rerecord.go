@@ -549,9 +549,11 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			mappings[tc.Name] = make([]models.MockEntry, 0)
 			for _, mock := range finalMocks {
 				mappings[tc.Name] = append(mappings[tc.Name], models.MockEntry{
-					Name:      mock.Name,
-					Kind:      string(mock.Kind),
-					Timestamp: mock.Spec.ReqTimestampMock.Unix(),
+					Name:             mock.Name,
+					Kind:             string(mock.Kind),
+					Timestamp:        mock.Spec.ReqTimestampMock.Unix(),
+					ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+					ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 				})
 			}
 		}
