@@ -143,6 +143,50 @@ func getFailedTCs(results []models.TestResult) []string {
 	return ids
 }
 
+// retainNoisyTestCaseMocks injects mocks used by noisy test cases into the
+// consumed-mocks set used for pruning so those mocks are not deleted.
+func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mapping, consumed map[string]models.MockState) int {
+	if len(noisyTestCaseNames) == 0 || mapping == nil || len(mapping.TestCases) == 0 || consumed == nil {
+		return 0
+	}
+
+	noisySet := make(map[string]struct{}, len(noisyTestCaseNames))
+	for _, testCaseName := range noisyTestCaseNames {
+		if testCaseName == "" {
+			continue
+		}
+		noisySet[testCaseName] = struct{}{}
+	}
+	if len(noisySet) == 0 {
+		return 0
+	}
+
+	added := 0
+	for _, mappedTestCase := range mapping.TestCases {
+		if _, ok := noisySet[mappedTestCase.ID]; !ok {
+			continue
+		}
+
+		for _, mock := range mappedTestCase.Mocks {
+			if mock.Name == "" {
+				continue
+			}
+			if _, exists := consumed[mock.Name]; exists {
+				continue
+			}
+
+			consumed[mock.Name] = models.MockState{
+				Name:      mock.Name,
+				Kind:      models.Kind(mock.Kind),
+				Timestamp: mock.Timestamp,
+			}
+			added++
+		}
+	}
+
+	return added
+}
+
 func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
 	expectedMap := make(map[string]bool)
 	for _, name := range expectedMocks {
