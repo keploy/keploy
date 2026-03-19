@@ -2,10 +2,11 @@
 package mockdb
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,7 +29,9 @@ type MockYaml struct {
 	idCounter int64
 }
 
-var mockFileLocks sync.Map // map[string]*sync.RWMutex
+const mockFileLockStripeCount = 256
+
+var mockFileLockStripes [mockFileLockStripeCount]sync.RWMutex
 
 func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 	return &MockYaml{
@@ -48,12 +51,9 @@ func mockFileLockKey(path, fileName string) string {
 }
 
 func getMockFileLock(lockKey string) *sync.RWMutex {
-	if lock, ok := mockFileLocks.Load(lockKey); ok {
-		return lock.(*sync.RWMutex)
-	}
-	newLock := &sync.RWMutex{}
-	actual, _ := mockFileLocks.LoadOrStore(lockKey, newLock)
-	return actual.(*sync.RWMutex)
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(lockKey))
+	return &mockFileLockStripes[hasher.Sum32()%mockFileLockStripeCount]
 }
 
 func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.Mock) error {
@@ -81,14 +81,20 @@ func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.
 		}
 	}()
 
-	var buf bytes.Buffer
+	writer := bufio.NewWriter(tmpFile)
 	if version := utils.GetVersionAsComment(); version != "" {
-		buf.WriteString(version)
+		if _, err := writer.WriteString(version); err != nil {
+			_ = tmpFile.Close()
+			return err
+		}
 	}
 
 	for i, mock := range mocks {
 		if i > 0 {
-			buf.WriteString("---\n")
+			if _, err := writer.WriteString("---\n"); err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
 		}
 		mockYaml, err := EncodeMock(mock, ys.Logger)
 		if err != nil {
@@ -100,13 +106,13 @@ func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.
 			_ = tmpFile.Close()
 			return err
 		}
-		if _, err := buf.Write(data); err != nil {
+		if _, err := writer.Write(data); err != nil {
 			_ = tmpFile.Close()
 			return err
 		}
 	}
 
-	if _, err := tmpFile.Write(buf.Bytes()); err != nil {
+	if err := writer.Flush(); err != nil {
 		_ = tmpFile.Close()
 		return err
 	}
@@ -118,10 +124,52 @@ func (ys *MockYaml) writeMocksAtomically(path, fileName string, mocks []*models.
 		return err
 	}
 
-	if err := os.Rename(tmpPath, targetPath); err != nil {
+	fileMode, err := resolveMockFileMode(targetPath)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, fileMode); err != nil {
+		return err
+	}
+
+	if err := replaceFile(tmpPath, targetPath); err != nil {
 		return err
 	}
 	cleanup = false
+	return nil
+}
+
+func resolveMockFileMode(targetPath string) (os.FileMode, error) {
+	info, err := os.Stat(targetPath)
+	if err == nil {
+		return info.Mode().Perm(), nil
+	}
+	if os.IsNotExist(err) {
+		return 0o777, nil
+	}
+	return 0, err
+}
+
+func replaceFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	} else {
+		renameErr := err
+		if _, statErr := os.Stat(dst); statErr != nil {
+			if os.IsNotExist(statErr) {
+				return renameErr
+			}
+			return fmt.Errorf("failed to stat target after rename error: %v; initial rename error: %w", statErr, renameErr)
+		}
+
+		if removeErr := os.Remove(dst); removeErr != nil {
+			return fmt.Errorf("failed to remove target for replace: %v; initial rename error: %w", removeErr, renameErr)
+		}
+
+		if retryErr := os.Rename(src, dst); retryErr != nil {
+			return fmt.Errorf("failed to replace file after removing existing target: %v; initial rename error: %w", retryErr, renameErr)
+		}
+	}
 	return nil
 }
 
