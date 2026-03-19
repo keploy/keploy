@@ -190,6 +190,17 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			if resp, mocked := p.getMockedDNSResponse(question); mocked {
 				return resp
 			}
+			// Send mock not found error if we couldn't match any DNS mock.
+			// This helps the user identify why some resolutions fall back to local proxy IPs.
+			p.logger.Debug("DNS mock not found in test mode, using synthetic default",
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+			)
+			proxyErr := models.ParserError{
+				ParserErrorType: models.ErrMockNotFound,
+				Err:             fmt.Errorf("DNS mock not found for query: %s (%s). Note: non-successful DNS responses (NXDOMAIN, SERVFAIL, etc.) are not recorded to reduce noise", question.Name, dns.TypeToString[question.Qtype]),
+			}
+			p.SendError(proxyErr)
 		}
 		return p.defaultDNSResponse(question)
 
@@ -589,6 +600,17 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 
 	// If no session, we still return resolved response but skip recording.
 	if session == nil || session.MC == nil {
+		return resp, nil
+	}
+
+	// Do not record failed DNS responses (e.g., NXDOMAIN, SERVFAIL, REFUSED) in mocks.yaml.
+	// These are often noise from search domain expansion or external transient issues.
+	if in.Rcode != dns.RcodeSuccess {
+		p.logger.Debug("Skipping DNS mock recording due to non-zero rcode",
+			zap.String("query", question.Name),
+			zap.String("qtype", dns.TypeToString[question.Qtype]),
+			zap.Int("rcode", in.Rcode),
+		)
 		return resp, nil
 	}
 
