@@ -1142,8 +1142,7 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 			shouldBeFiltered = true
 		}
 
-		// doing shallow copy to prevent data race, which was happening due to the write to isFiltered
-		// field in this for loop, and write in mockmanager functions.
+		// doing shallow copy to prevent data race
 		p := mock.ShallowCopy()
 		deepCopyCount++
 
@@ -1185,8 +1184,6 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 
 		_, matched := mappingMap[mock.Name]
 		
-		// If we need to return the mock, we must copy it because we are going to modify p.TestModeInfo.IsFiltered 
-		// and the original mock is shared across multiple test cases.
 		// using shallow copy as we only modify TestModeInfo.IsFiltered
 		p := mock.ShallowCopy()
 		deepCopyCount++

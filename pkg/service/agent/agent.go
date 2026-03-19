@@ -255,23 +255,26 @@ func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterPa
 	storage := storageInterface.(*ClientMockStorage)
 
 	storage.mu.RLock()
-	originalFilteredCount := len(storage.filtered)
-	originalUnfilteredCount := len(storage.unfiltered)
+	originalFiltered := make([]*models.Mock, len(storage.filtered))
+	originalUnfiltered := make([]*models.Mock, len(storage.unfiltered))
+	copy(originalFiltered, storage.filtered)
+	copy(originalUnfiltered, storage.unfiltered)
+	storage.mu.RUnlock()
+
 	a.logger.Info("Original mocks before filtering",
-		zap.Int("originalFilteredCount", originalFilteredCount),
-		zap.Int("originalUnfilteredCount", originalUnfilteredCount))
+		zap.Int("originalFilteredCount", len(originalFiltered)),
+		zap.Int("originalUnfilteredCount", len(originalUnfiltered)))
 
 	var filteredMocks, unfilteredMocks []*models.Mock
 	filterStart := time.Now()
 	// Apply filtering based on parameters
 	if params.UseMappingBased && len(params.MockMapping) > 0 {
-		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, storage.filtered, params.MockMapping)
-		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, storage.unfiltered, params.MockMapping)
+		filteredMocks = pkg.FilterTcsMocksMapping(ctx, a.logger, originalFiltered, params.MockMapping)
+		unfilteredMocks = pkg.FilterConfigMocksMapping(ctx, a.logger, originalUnfiltered, params.MockMapping)
 	} else {
-		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, storage.filtered, params.AfterTime, params.BeforeTime)
-		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, storage.unfiltered, params.AfterTime, params.BeforeTime)
+		filteredMocks = pkg.FilterTcsMocks(ctx, a.logger, originalFiltered, params.AfterTime, params.BeforeTime)
+		unfilteredMocks = pkg.FilterConfigMocks(ctx, a.logger, originalUnfiltered, params.AfterTime, params.BeforeTime)
 	}
-	storage.mu.RUnlock()
 	a.logger.Info("Time taken for filtering mocks", zap.Duration("duration", time.Since(filterStart)))
 
 	// Count IsFiltered distribution for debugging

@@ -179,144 +179,102 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	// 1. Prepare global structures
+	// Build global and kind-based structures in local maps (HashMap Batching)
 	globalRBT := redblacktree.NewWith(customComparator)
-	globalIDIndex := make(map[int]models.TestModeInfo)
-
-	// 2. Prepare kind-based structures
+	globalIdx := make(map[int]models.TestModeInfo)
+	
 	type kindData struct {
-		rbt     *redblacktree.Tree
-		idIndex map[int]models.TestModeInfo
+		rbt *redblacktree.Tree
+		idx map[int]models.TestModeInfo
 	}
-	kindTreeData := make(map[models.Kind]*kindData)
+	kinds := make(map[models.Kind]*kindData)
 	touched := map[models.Kind]struct{}{}
 
-	var maxSortOrder int64
-	for index, mock := range mocks {
-		if mock == nil {
-			continue
-		}
-		if mock.TestModeInfo.SortOrder == 0 {
-			mock.TestModeInfo.SortOrder = int64(index) + 1
-		}
-		if mock.TestModeInfo.SortOrder > maxSortOrder {
-			maxSortOrder = mock.TestModeInfo.SortOrder
-		}
-		mock.TestModeInfo.ID = index
+	var maxSort int64
+	for i, mk := range mocks {
+		if mk == nil { continue }
+		if mk.TestModeInfo.SortOrder == 0 { mk.TestModeInfo.SortOrder = int64(i) + 1 }
+		if mk.TestModeInfo.SortOrder > maxSort { maxSort = mk.TestModeInfo.SortOrder }
+		mk.TestModeInfo.ID = i
 
-		// Fill global
-		globalRBT.Put(mock.TestModeInfo, mock)
-		globalIDIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
+		globalRBT.Put(mk.TestModeInfo, mk)
+		globalIdx[mk.TestModeInfo.ID] = mk.TestModeInfo
 
-		// Fill per-kind
-		k := mock.Kind
-		kd := kindTreeData[k]
+		kd := kinds[mk.Kind]
 		if kd == nil {
-			kd = &kindData{
-				rbt:     redblacktree.NewWith(customComparator),
-				idIndex: make(map[int]models.TestModeInfo),
-			}
-			kindTreeData[k] = kd
+			kd = &kindData{rbt: redblacktree.NewWith(customComparator), idx: make(map[int]models.TestModeInfo)}
+			kinds[mk.Kind] = kd
 		}
-		kd.rbt.Put(mock.TestModeInfo, mock)
-		kd.idIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
-		touched[k] = struct{}{}
+		kd.rbt.Put(mk.TestModeInfo, mk)
+		kd.idx[mk.TestModeInfo.ID] = mk.TestModeInfo
+		touched[mk.Kind] = struct{}{}
 	}
 
-	if maxSortOrder > 0 {
-		pkg.UpdateSortCounterIfHigher(maxSortOrder)
-	}
+	if maxSort > 0 { pkg.UpdateSortCounterIfHigher(maxSort) }
 
-	// 3. Atomically update global tree
-	m.filtered.reset(globalRBT, globalIDIndex)
-
-	// 4. Atomically update per-kind trees
-	newFilteredByKind := make(map[models.Kind]*TreeDb, len(kindTreeData))
-	for k, kd := range kindTreeData {
+	// Atomic Swap (Fast Switch)
+	m.filtered.reset(globalRBT, globalIdx)
+	newKinds := make(map[models.Kind]*TreeDb, len(kinds))
+	for k, kd := range kinds {
 		td := NewTreeDb(customComparator)
-		td.rbt = kd.rbt
-		td.idIndex = kd.idIndex
-		newFilteredByKind[k] = td
+		td.rbt, td.idIndex = kd.rbt, kd.idx
+		newKinds[k] = td
 	}
-
 	m.treesMu.Lock()
-	m.filteredByKind = newFilteredByKind
+	m.filteredByKind = newKinds
 	m.treesMu.Unlock()
 
-	for k := range touched {
-		m.bumpRevisionKind(k)
-	}
+	for k := range touched { m.bumpRevisionKind(k) }
 	m.bumpRevisionAll()
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	// 1. Prepare global structures
+	// Build global and kind-based structures in local maps (HashMap Batching)
 	globalRBT := redblacktree.NewWith(customComparator)
-	globalIDIndex := make(map[int]models.TestModeInfo)
-
-	// 2. Prepare kind-based structures
+	globalIdx := make(map[int]models.TestModeInfo)
+	
 	type kindData struct {
-		rbt     *redblacktree.Tree
-		idIndex map[int]models.TestModeInfo
+		rbt *redblacktree.Tree
+		idx map[int]models.TestModeInfo
 	}
-	kindTreeData := make(map[models.Kind]*kindData)
+	kinds := make(map[models.Kind]*kindData)
 	touched := map[models.Kind]struct{}{}
 
-	var maxSortOrder int64
-	for index, mock := range mocks {
-		if mock == nil {
-			continue
-		}
-		if mock.TestModeInfo.SortOrder == 0 {
-			mock.TestModeInfo.SortOrder = int64(index) + 1
-		}
-		if mock.TestModeInfo.SortOrder > maxSortOrder {
-			maxSortOrder = mock.TestModeInfo.SortOrder
-		}
-		mock.TestModeInfo.ID = index
+	var maxSort int64
+	for i, mk := range mocks {
+		if mk == nil { continue }
+		if mk.TestModeInfo.SortOrder == 0 { mk.TestModeInfo.SortOrder = int64(i) + 1 }
+		if mk.TestModeInfo.SortOrder > maxSort { maxSort = mk.TestModeInfo.SortOrder }
+		mk.TestModeInfo.ID = i
 
-		// Fill global
-		globalRBT.Put(mock.TestModeInfo, mock)
-		globalIDIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
+		globalRBT.Put(mk.TestModeInfo, mk)
+		globalIdx[mk.TestModeInfo.ID] = mk.TestModeInfo
 
-		// Fill per-kind
-		k := mock.Kind
-		kd := kindTreeData[k]
+		kd := kinds[mk.Kind]
 		if kd == nil {
-			kd = &kindData{
-				rbt:     redblacktree.NewWith(customComparator),
-				idIndex: make(map[int]models.TestModeInfo),
-			}
-			kindTreeData[k] = kd
+			kd = &kindData{rbt: redblacktree.NewWith(customComparator), idx: make(map[int]models.TestModeInfo)}
+			kinds[mk.Kind] = kd
 		}
-		kd.rbt.Put(mock.TestModeInfo, mock)
-		kd.idIndex[mock.TestModeInfo.ID] = mock.TestModeInfo
-		touched[k] = struct{}{}
+		kd.rbt.Put(mk.TestModeInfo, mk)
+		kd.idx[mk.TestModeInfo.ID] = mk.TestModeInfo
+		touched[mk.Kind] = struct{}{}
 	}
 
-	if maxSortOrder > 0 {
-		pkg.UpdateSortCounterIfHigher(maxSortOrder)
-	}
+	if maxSort > 0 { pkg.UpdateSortCounterIfHigher(maxSort) }
 
-	// 3. Atomically update global tree
-	m.unfiltered.reset(globalRBT, globalIDIndex)
-
-	// 4. Atomically update per-kind trees
-	newUnfilteredByKind := make(map[models.Kind]*TreeDb, len(kindTreeData))
-	for k, kd := range kindTreeData {
+	// Atomic Swap (Fast Switch)
+	m.unfiltered.reset(globalRBT, globalIdx)
+	newKinds := make(map[models.Kind]*TreeDb, len(kinds))
+	for k, kd := range kinds {
 		td := NewTreeDb(customComparator)
-		td.rbt = kd.rbt
-		td.idIndex = kd.idIndex
-		newUnfilteredByKind[k] = td
+		td.rbt, td.idIndex = kd.rbt, kd.idx
+		newKinds[k] = td
 	}
-
 	m.treesMu.Lock()
-	m.unfilteredByKind = newUnfilteredByKind
+	m.unfilteredByKind = newKinds
 	m.treesMu.Unlock()
 
-	for k := range touched {
-		m.bumpRevisionKind(k)
-	}
+	for k := range touched { m.bumpRevisionKind(k) }
 	m.bumpRevisionAll()
 }
 
