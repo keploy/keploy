@@ -530,6 +530,7 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 		logger.Debug("no templatized values present, nothing to update")
 		return false
 	}
+
 	// Capture entire inner expression (supports: {{string .token}}, {{ .id }}, {{token}}, {{ float .price | printf "%f" }})
 	placeholderRe := regexp.MustCompile(`{{\s*([^{}]+?)\s*}}`)
 	changed := false
@@ -1061,34 +1062,93 @@ func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client
 
 func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
 	filteredMocks, _ := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
-	sortMocks(filteredMocks)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
 	return filteredMocks
 }
 
 func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
 	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
-	sortMocks(unfilteredMocks)
-	sortMocks(filteredMocks)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
+		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
 	return append(filteredMocks, unfilteredMocks...)
 }
 
 func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
 	filteredMocks, _ := filterByMapping(ctx, logger, m, mocksPresentInMapping)
-	sortMocks(filteredMocks)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
 	return filteredMocks
 }
 
 func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
 	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
-	sortMocks(unfilteredMocks)
-	sortMocks(filteredMocks)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
+		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
 	return append(filteredMocks, unfilteredMocks...)
 }
 
-func sortMocks(mocks []*models.Mock) {
-	sort.SliceStable(mocks, func(i, j int) bool {
-		return mocks[i].Spec.ReqTimestampMock.Before(mocks[j].Spec.ReqTimestampMock)
-	})
+func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
+
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
+
+	if beforeTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
+
+	isNonKeploy := false
+
+	for _, mock := range m {
+		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+			logger.Debug("request or response timestamp of mock is missing")
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+	return filteredMocks, unfilteredMocks
 }
 
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
@@ -1099,7 +1159,7 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 	var filtered, unfiltered []*models.Mock
 	isNonKeploy := false
 	for _, mock := range m {
-		p := *mock // shallow copy
+		p := *mock // shallow copy for performance
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
@@ -1117,33 +1177,6 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 	return filtered, unfiltered
 }
 
-func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
-	var filtered, unfiltered []*models.Mock
-	isNonKeploy := false
-	for _, mock := range m {
-		p := *mock // shallow copy
-		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
-			isNonKeploy = true
-		}
-		isTSMissing := p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{})
-		if isTSMissing || (p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime)) {
-			if isTSMissing {
-				isNonKeploy = true
-			}
-			p.TestModeInfo.IsFiltered = true
-			filtered = append(filtered, &p)
-		} else {
-			p.TestModeInfo.IsFiltered = false
-			unfiltered = append(unfiltered, &p)
-		}
-	}
-	if isNonKeploy {
-		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
-	}
-	return filtered, unfiltered
-}
-
-// GuessContentType guesses the content-type of the given buffer.
 func GuessContentType(data []byte) models.BodyType {
 	// Use net/http library's DetectContentType for basic MIME type detection
 	mimeType := http.DetectContentType(data)

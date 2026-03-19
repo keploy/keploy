@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,28 +14,49 @@ import (
 	"go.uber.org/zap"
 )
 
+// ---------------- MockManager (kind-aware) ----------------
+
 type MockManager struct {
-	filtered, unfiltered *TreeDb
-	rev                  uint64
-	revMu                sync.RWMutex
-	revByKind            map[models.Kind]*uint64
-	treesMu              sync.RWMutex
-	filteredByKind       map[models.Kind]*TreeDb
-	unfilteredByKind     map[models.Kind]*TreeDb
-	lookupFiltered       map[models.Kind]map[string][]*models.Mock
-	lookupUnfiltered     map[models.Kind]map[string][]*models.Mock
-	logger               *zap.Logger
-	consumedMocks        sync.Map
+	// legacy "all" trees (kept for compatibility with existing callers)
+	filtered   *TreeDb
+	unfiltered *TreeDb
+
+	// global revision (legacy)
+	rev uint64
+
+	// NEW: per-kind revisions
+	revMu     sync.RWMutex
+	revByKind map[models.Kind]*uint64
+
+	// NEW: per-kind trees (guarded by treesMu)
+	treesMu          sync.RWMutex
+	filteredByKind   map[models.Kind]*TreeDb
+	unfilteredByKind map[models.Kind]*TreeDb
+
+	logger        *zap.Logger
+	consumedMocks sync.Map
+
+	// Optimized lookup maps
+	lookupFiltered   map[models.Kind]map[string][]*models.Mock
+	lookupUnfiltered map[models.Kind]map[string][]*models.Mock
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
-	if filtered == nil { filtered = NewTreeDb(customComparator) }
-	if unfiltered == nil { unfiltered = NewTreeDb(customComparator) }
+	if filtered == nil {
+		filtered = NewTreeDb(customComparator)
+	}
+	if unfiltered == nil {
+		unfiltered = NewTreeDb(customComparator)
+	}
 	return &MockManager{
-		filtered: filtered, unfiltered: unfiltered,
-		filteredByKind: make(map[models.Kind]*TreeDb), unfilteredByKind: make(map[models.Kind]*TreeDb),
-		lookupFiltered: make(map[models.Kind]map[string][]*models.Mock), lookupUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
-		revByKind: make(map[models.Kind]*uint64), logger: logger,
+		filtered:         filtered,
+		unfiltered:       unfiltered,
+		filteredByKind:   make(map[models.Kind]*TreeDb),
+		unfilteredByKind: make(map[models.Kind]*TreeDb),
+		lookupFiltered:   make(map[models.Kind]map[string][]*models.Mock),
+		lookupUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
+		revByKind:        make(map[models.Kind]*uint64),
+		logger:           logger,
 	}
 }
 
@@ -58,19 +80,149 @@ func (m *MockManager) GetMocks(kind models.Kind, key string) (filtered, unfilter
 	return
 }
 
-func (m *MockManager) GetDNSMocks(name string) (filtered, unfiltered []*models.Mock) { return m.GetMocks(models.DNS, name) }
+func (m *MockManager) GetDNSMocks(name string) (filtered, unfiltered []*models.Mock) {
+	return m.GetMocks(models.DNS, name)
+}
+
+// ---------- revision helpers ----------
+
+func (m *MockManager) Revision() uint64 {
+	return atomic.LoadUint64(&m.rev)
+}
+
+func (m *MockManager) bumpRevisionAll() {
+	atomic.AddUint64(&m.rev, 1)
+}
+
+func (m *MockManager) RevisionByKind(kind models.Kind) uint64 {
+	m.revMu.RLock()
+	ptr := m.revByKind[kind]
+	m.revMu.RUnlock()
+	if ptr == nil {
+		return 0
+	}
+	return atomic.LoadUint64(ptr)
+}
+
+func (m *MockManager) bumpRevisionKind(kind models.Kind) {
+	m.revMu.Lock()
+	ptr := m.revByKind[kind]
+	if ptr == nil {
+		var v uint64
+		// Store pointer in map; safe to use after unlocking as we mutate via atomics.
+		ptr = &v
+		m.revByKind[kind] = ptr
+	}
+	m.revMu.Unlock()
+	atomic.AddUint64(ptr, 1)
+}
+
+// ensureKindTrees returns per-kind trees, creating them if missing.
+// It is safe for concurrent use.
+func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
+	// Fast path: read lock
+	m.treesMu.RLock()
+	f = m.filteredByKind[kind]
+	u = m.unfilteredByKind[kind]
+	m.treesMu.RUnlock()
+	if f != nil && u != nil {
+		return f, u
+	}
+
+	// Slow path: upgrade to write lock and double-check
+	m.treesMu.Lock()
+	if f = m.filteredByKind[kind]; f == nil {
+		f = NewTreeDb(customComparator)
+		m.filteredByKind[kind] = f
+	}
+	if u = m.unfilteredByKind[kind]; u == nil {
+		u = NewTreeDb(customComparator)
+		m.unfilteredByKind[kind] = u
+	}
+	m.treesMu.Unlock()
+	return f, u
+}
+
+// ---------- getters ----------
+
+func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	results := make([]*models.Mock, 0, 64)
+	m.filtered.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	results := make([]*models.Mock, 0, 128)
+	m.unfiltered.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+// NEW: kind-scoped getters used by Redis matcher
+func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	// Fetch pointer safely; the tree itself is responsible for its own safety.
+	m.treesMu.RLock()
+	flt := m.filteredByKind[kind]
+	m.treesMu.RUnlock()
+	if flt == nil {
+		flt, _ = m.ensureKindTrees(kind)
+	}
+
+	results := make([]*models.Mock, 0, 64)
+	flt.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	unf := m.unfilteredByKind[kind]
+	m.treesMu.RUnlock()
+	if unf == nil {
+		_, unf = m.ensureKindTrees(kind)
+	}
+
+	results := make([]*models.Mock, 0, 128)
+	unf.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+// ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	newAll, newByKind, newLookup := NewTreeDb(customComparator), make(map[models.Kind]*TreeDb), make(map[models.Kind]map[string][]*models.Mock)
+	newAll := NewTreeDb(customComparator)
+	newByKind := make(map[models.Kind]*TreeDb)
+	newLookup := make(map[models.Kind]map[string][]*models.Mock)
+	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
 	for i, mock := range mocks {
-		if mock.TestModeInfo.SortOrder == 0 { mock.TestModeInfo.SortOrder = int64(i) + 1}
+		if mock.TestModeInfo.SortOrder == 0 { mock.TestModeInfo.SortOrder = int64(i) + 1 }
 		if mock.TestModeInfo.SortOrder > maxSortOrder { maxSortOrder = mock.TestModeInfo.SortOrder }
 		mock.TestModeInfo.ID = i
 		newAll.insert(mock.TestModeInfo, mock)
 		k := mock.Kind
-		if newByKind[k] == nil { newByKind[k] = NewTreeDb(customComparator) }
-		newByKind[k].insert(mock.TestModeInfo, mock)
+		td := newByKind[k]
+		if td == nil { td = NewTreeDb(customComparator); newByKind[k] = td }
+		td.insert(mock.TestModeInfo, mock)
+		touched[k] = struct{}{}
 		if newLookup[k] == nil { newLookup[k] = make(map[string][]*models.Mock) }
 		key := getLookupKey(mock)
 		newLookup[k][key] = append(newLookup[k][key], mock)
@@ -80,20 +232,26 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.treesMu.Lock()
 	m.filtered, m.filteredByKind, m.lookupFiltered = newAll, newByKind, newLookup
 	m.treesMu.Unlock()
+	for k := range touched { m.bumpRevisionKind(k) }
 	m.bumpRevisionAll()
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	newAll, newByKind, newLookup := NewTreeDb(customComparator), make(map[models.Kind]*TreeDb), make(map[models.Kind]map[string][]*models.Mock)
+	newAll := NewTreeDb(customComparator)
+	newByKind := make(map[models.Kind]*TreeDb)
+	newLookup := make(map[models.Kind]map[string][]*models.Mock)
+	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
 	for i, mock := range mocks {
-		if mock.TestModeInfo.SortOrder == 0 { mock.TestModeInfo.SortOrder = int64(i) + 1}
+		if mock.TestModeInfo.SortOrder == 0 { mock.TestModeInfo.SortOrder = int64(i) + 1 }
 		if mock.TestModeInfo.SortOrder > maxSortOrder { maxSortOrder = mock.TestModeInfo.SortOrder }
 		mock.TestModeInfo.ID = i
 		newAll.insert(mock.TestModeInfo, mock)
 		k := mock.Kind
-		if newByKind[k] == nil { newByKind[k] = NewTreeDb(customComparator) }
-		newByKind[k].insert(mock.TestModeInfo, mock)
+		td := newByKind[k]
+		if td == nil { td = NewTreeDb(customComparator); newByKind[k] = td }
+		td.insert(mock.TestModeInfo, mock)
+		touched[k] = struct{}{}
 		if newLookup[k] == nil { newLookup[k] = make(map[string][]*models.Mock) }
 		key := getLookupKey(mock)
 		newLookup[k][key] = append(newLookup[k][key], mock)
@@ -103,31 +261,8 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.treesMu.Lock()
 	m.unfiltered, m.unfilteredByKind, m.lookupUnfiltered = newAll, newByKind, newLookup
 	m.treesMu.Unlock()
+	for k := range touched { m.bumpRevisionKind(k) }
 	m.bumpRevisionAll()
-}
-
-func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
-	m.treesMu.Lock()
-	defer m.treesMu.Unlock()
-	if !m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new) { return false }
-	if td, ok := m.unfilteredByKind[new.Kind]; ok { td.update(old.TestModeInfo, new.TestModeInfo, new) }
-	m.syncLookup(old, false, true); m.syncLookup(new, false, false); return true
-}
-
-func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	m.treesMu.Lock()
-	defer m.treesMu.Unlock()
-	if !m.filtered.delete(mock.TestModeInfo) { return false }
-	if td, ok := m.filteredByKind[mock.Kind]; ok { td.delete(mock.TestModeInfo) }
-	m.syncLookup(&mock, true, true); return true
-}
-
-func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	m.treesMu.Lock()
-	defer m.treesMu.Unlock()
-	if !m.unfiltered.delete(mock.TestModeInfo) { return false }
-	if td, ok := m.unfilteredByKind[mock.Kind]; ok { td.delete(mock.TestModeInfo) }
-	m.syncLookup(&mock, false, true); return true
 }
 
 func (m *MockManager) syncLookup(mock *models.Mock, isFiltered, remove bool) {
@@ -152,70 +287,299 @@ func sortDNSList(list []*models.Mock) {
 	})
 }
 
-func (m *MockManager) Revision() uint64 { return atomic.LoadUint64(&m.rev) }
-func (m *MockManager) bumpRevisionAll() { atomic.AddUint64(&m.rev, 1) }
-func (m *MockManager) RevisionByKind(kind models.Kind) uint64 {
-	m.revMu.RLock(); ptr := m.revByKind[kind]; m.revMu.RUnlock()
-	if ptr == nil { return 0 }; return atomic.LoadUint64(ptr)
-}
-func (m *MockManager) bumpRevisionKind(kind models.Kind) {
-	m.revMu.Lock(); ptr := m.revByKind[kind]; if ptr == nil { var v uint64; ptr = &v; m.revByKind[kind] = ptr }
-	m.revMu.Unlock(); atomic.AddUint64(ptr, 1)
+// ---------- point updates / deletes (keep per-kind in sync) ----------
+
+func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
+	// Update legacy/global tree first
+	updatedGlobal := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
+
+	oldK, newK := old.Kind, new.Kind
+	var updatedOldKind, updatedNewKind bool
+
+	if oldK == newK {
+		// Same kind: update the per-kind tree under lock
+		_, unf := m.ensureKindTrees(newK)
+		m.treesMu.Lock()
+		updatedNewKind = unf.update(old.TestModeInfo, new.TestModeInfo, new)
+
+		// Self-heal if global updated but per-kind missed (e.g., not present yet)
+		if updatedGlobal && !updatedNewKind {
+			if m.logger != nil {
+				m.logger.Warn("self-healing per-kind tree: global update succeeded but per-kind missed",
+					zap.String("kind", string(newK)),
+					zap.String("mockName", new.Name),
+					zap.Any("testModeInfo", new.TestModeInfo),
+				)
+			}
+			unf.insert(new.TestModeInfo, new)
+			updatedNewKind = true
+		}
+		m.treesMu.Unlock()
+	} else {
+		// Kind changed: remove from old kind tree, insert/update in new kind tree under one lock
+		_, oldUnf := m.ensureKindTrees(oldK)
+		_, newUnf := m.ensureKindTrees(newK)
+		m.treesMu.Lock()
+		updatedOldKind = oldUnf.delete(old.TestModeInfo)
+		updatedNewKind = newUnf.update(old.TestModeInfo, new.TestModeInfo, new)
+		if !updatedNewKind {
+			newUnf.insert(new.TestModeInfo, new)
+			updatedNewKind = true
+		}
+		m.treesMu.Unlock()
+		if m.logger != nil {
+			m.logger.Info("moved mock across kinds",
+				zap.String("mockName", new.Name),
+				zap.String("fromKind", string(oldK)),
+				zap.String("toKind", string(newK)),
+			)
+		}
+	}
+
+	// Mark usage if global changed (legacy behavior)
+	if updatedGlobal {
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       new.Name,
+			Kind:       new.Kind,
+			Usage:      models.Updated,
+			IsFiltered: new.TestModeInfo.IsFiltered,
+			SortOrder:  new.TestModeInfo.SortOrder,
+			Type:       new.Spec.Metadata["type"],
+			Timestamp:  new.Spec.ReqTimestampMock.Unix(),
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+	}
+
+	// Bump revisions accurately:
+	// - global only if the global tree changed
+	// - per-kind only for kinds whose per-kind tree changed
+	if oldK != newK {
+		if updatedOldKind {
+			m.bumpRevisionKind(oldK)
+		}
+		if updatedNewKind {
+			m.bumpRevisionKind(newK)
+		}
+	} else if updatedNewKind {
+		m.bumpRevisionKind(newK)
+	}
+	if updatedGlobal {
+		m.bumpRevisionAll()
+	}
+	m.syncLookup(old, false, true); m.syncLookup(new, false, false)
+	return updatedGlobal
 }
 
-func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
-	m.treesMu.RLock(); f, u = m.filteredByKind[kind], m.unfilteredByKind[kind]; m.treesMu.RUnlock()
-	if f != nil && u != nil { return f, u }
-	m.treesMu.Lock(); defer m.treesMu.Unlock()
-	if f = m.filteredByKind[kind]; f == nil { f = NewTreeDb(customComparator); m.filteredByKind[kind] = f }
-	if u = m.unfilteredByKind[kind]; u == nil { u = NewTreeDb(customComparator); m.unfilteredByKind[kind] = u }
-	return f, u
+func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+	deletedGlobal := m.filtered.delete(mock.TestModeInfo)
+
+	// per-kind
+	k := mock.Kind
+	flt, _ := m.ensureKindTrees(k)
+	m.treesMu.Lock()
+	deletedKind := flt.delete(mock.TestModeInfo)
+	m.treesMu.Unlock()
+	if deletedGlobal { m.syncLookup(&mock, true, true) }
+
+	if deletedGlobal {
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Kind:       mock.Kind,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+			Type:       mock.Spec.Metadata["type"],
+			Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+	}
+
+	// Bump per-kind only if that tree changed; global only if global changed
+	if deletedKind {
+		m.bumpRevisionKind(k)
+	}
+	if deletedGlobal {
+		m.bumpRevisionAll()
+	}
+	return deletedGlobal
 }
 
-func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
-	m.treesMu.RLock(); defer m.treesMu.RUnlock(); results := make([]*models.Mock, 0, 64)
-	m.filtered.rangeValuesNoLock(func(v interface{}) bool { if mock, ok := v.(*models.Mock); ok && mock != nil { results = append(results, mock) }; return true })
-	return results, nil
-}
-func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
-	m.treesMu.RLock(); defer m.treesMu.RUnlock(); results := make([]*models.Mock, 0, 128)
-	m.unfiltered.rangeValuesNoLock(func(v interface{}) bool { if mock, ok := v.(*models.Mock); ok && mock != nil { results = append(results, mock) }; return true })
-	return results, nil
-}
-func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	m.treesMu.RLock(); flt := m.filteredByKind[kind]; m.treesMu.RUnlock()
-	if flt == nil { flt, _ = m.ensureKindTrees(kind) }
-	results := make([]*models.Mock, 0, 64)
-	flt.rangeValues(func(v interface{}) bool { if mock, ok := v.(*models.Mock); ok && mock != nil { results = append(results, mock) }; return true })
-	return results, nil
-}
-func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
-	m.treesMu.RLock(); unf := m.unfilteredByKind[kind]; m.treesMu.RUnlock()
-	if unf == nil { _, unf = m.ensureKindTrees(kind) }
-	results := make([]*models.Mock, 0, 128)
-	unf.rangeValues(func(v interface{}) bool { if mock, ok := v.(*models.Mock); ok && mock != nil { results = append(results, mock) }; return true })
-	return results, nil
+func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+	deletedGlobal := m.unfiltered.delete(mock.TestModeInfo)
+
+	// per-kind
+	k := mock.Kind
+	_, unf := m.ensureKindTrees(k)
+	m.treesMu.Lock()
+	deletedKind := unf.delete(mock.TestModeInfo)
+	m.treesMu.Unlock()
+	if deletedGlobal { m.syncLookup(&mock, false, true) }
+
+	if deletedGlobal {
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Kind:       mock.Kind,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+			Type:       mock.Spec.Metadata["type"],
+			Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+	}
+
+	// Bump per-kind only if that tree changed; global only if global changed
+	if deletedKind {
+		m.bumpRevisionKind(k)
+	}
+	if deletedGlobal {
+		m.bumpRevisionAll()
+	}
+	return deletedGlobal
 }
 
+// MarkMockAsUsed marks the given mock as used (consumed) without modifying
+// its sort order or removing it from any tree. This is intended for parsers
+// (e.g. mongo v2) that need to record mock usage without changing mock ordering.
 func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
-	m.flagMockAsUsed(models.MockState{Name: mock.Name, Kind: mock.Kind, Usage: models.Updated, IsFiltered: mock.TestModeInfo.IsFiltered, SortOrder: mock.TestModeInfo.SortOrder, Type: mock.Spec.Metadata["type"], Timestamp: mock.Spec.ReqTimestampMock.Unix()})
+	if mock.Name == "" {
+		return false
+	}
+	if err := m.flagMockAsUsed(models.MockState{
+		Name:       mock.Name,
+		Kind:       mock.Kind,
+		Usage:      models.Updated,
+		IsFiltered: mock.TestModeInfo.IsFiltered,
+		SortOrder:  mock.TestModeInfo.SortOrder,
+		Type:       mock.Spec.Metadata["type"],
+		Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
+	}); err != nil {
+		if m.logger != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+		return false
+	}
 	return true
 }
+
+// ---------- bookkeeping ----------
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
-	if mock.Name == "" { return fmt.Errorf("mock is empty") }
-	m.consumedMocks.Store(mock.Name, mock); return nil
+	if mock.Name == "" {
+		return fmt.Errorf("mock is empty")
+	}
+	m.consumedMocks.Store(mock.Name, mock)
+	return nil
 }
+
 func (m *MockManager) GetConsumedMocks() []models.MockState {
 	var out []models.MockState
-	m.consumedMocks.Range(func(key, val interface{}) bool { if st, ok := val.(models.MockState); ok { out = append(out, st) }; return true })
-	for _, st := range out { m.consumedMocks.Delete(st.Name) }
+
+	// Snapshot & collect first (no deletes during Range). We intentionally drain only what existed at snapshot time.
+	m.consumedMocks.Range(func(key, val interface{}) bool {
+		k, ok := key.(string)
+		if !ok {
+			if m.logger != nil {
+				m.logger.Warn("unexpected key type in consumedMocks; skipping",
+					zap.Any("keyType", fmt.Sprintf("%T", key)))
+			}
+			return true // skip this entry
+		}
+		if st, ok := val.(models.MockState); ok {
+			out = append(out, st)
+		} else if m.logger != nil {
+			m.logger.Warn("unexpected value type in consumedMocks; skipping",
+				zap.String("key", k),
+				zap.Any("valueType", fmt.Sprintf("%T", val)))
+		}
+		return true
+	})
+
+	// Sort: prefer numeric suffix after the last '-' (e.g., name-123); else lexicographic
+	type withSuffix struct {
+		st   models.MockState
+		name string
+		num  int
+		has  bool
+	}
+	numericSuffix := func(name string) (int, bool) {
+		i := strings.LastIndexByte(name, '-')
+		if i < 0 || i+1 >= len(name) {
+			return 0, false
+		}
+		n, err := strconv.Atoi(name[i+1:])
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+
+	ws := make([]withSuffix, len(out))
+	for i, st := range out {
+		n, ok := numericSuffix(st.Name)
+		ws[i] = withSuffix{st: st, name: st.Name, num: n, has: ok}
+	}
+	sort.SliceStable(ws, func(i, j int) bool {
+		a, b := ws[i], ws[j]
+		if a.has && b.has {
+			if a.num != b.num {
+				return a.num < b.num
+			}
+			// tie-break numerics by name for determinism
+			return a.name < b.name
+		}
+		return a.name < b.name
+	})
+	for i := range out {
+		out[i] = ws[i].st
+	}
+
+	// Now clear those entries from the map we just drained
+	for _, st := range out {
+		m.consumedMocks.Delete(st.Name)
+	}
 	return out
 }
 
+// GetMySQLCounts computes counts of MySQL mocks.
+// Uses the per-kind unfiltered tree if available, otherwise falls back
+// to scanning the legacy unfiltered tree.
 func (m *MockManager) GetMySQLCounts() (total, config, data int) {
-	m.treesMu.RLock(); defer m.treesMu.RUnlock(); m.unfiltered.rangeValuesNoLock(func(v interface{}) bool {
-		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == models.MySQL {
-			total++; if mock.Spec.Metadata["type"] == "config" { config++ } else { data++ }
+	// Fast path: snapshot the per-kind tree pointer under lock
+	m.treesMu.RLock()
+	tree := m.unfilteredByKind[models.MySQL]
+	m.treesMu.RUnlock()
+
+	if tree != nil {
+		tree.rangeValues(func(v interface{}) bool {
+			mock, ok := v.(*models.Mock)
+			if !ok || mock == nil {
+				return true
+			}
+			total++
+			if mock.Spec.Metadata["type"] == "config" {
+				config++
+			} else {
+				data++
+			}
+			return true
+		})
+		return
+	}
+
+	// Fallback: legacy scan of the combined tree
+	m.unfiltered.rangeValues(func(v interface{}) bool {
+		mock, ok := v.(*models.Mock)
+		if !ok || mock == nil || mock.Kind != models.MySQL {
+			return true
+		}
+		total++
+		if mock.Spec.Metadata["type"] == "config" {
+			config++
+		} else {
+			data++
 		}
 		return true
 	})
