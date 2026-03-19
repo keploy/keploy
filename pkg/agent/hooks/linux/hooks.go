@@ -168,8 +168,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.M_1773921025001
-	h.agentRegistartionMap = objs.M_1773921025002
+	h.clientRegistrationMap = objs.M_1773922309001
+	h.agentRegistartionMap = objs.M_1773922309002
 	h.agentKernelPidMap = objs.KeployAgentKernelPidMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
