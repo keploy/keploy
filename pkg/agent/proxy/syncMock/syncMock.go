@@ -52,20 +52,14 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	// storing startup mocks until first request is seen
 	if !m.firstReqSeen && m.outChan != nil {
-		// Don't block on channel send - dispatch async to prevent parser blocking.
-		// The parser must drain the ring buffer for the forwarder to continue,
-		// so blocking here creates back-pressure to the network forwarding path.
-		// Goroutine overhead (~2-3μs) is negligible compared to 40ms ACK delay.
-		out := m.outChan
-		m.mu.Unlock()
-		go func() { out <- mock }()
+		m.outChan <- mock
 		return
 	}
 	m.buffer = append(m.buffer, mock)
-	m.mu.Unlock()
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
@@ -81,13 +75,11 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 }
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
 	cutoffTime := time.Now().Add(-7 * time.Second)
 	var associatedMockIDs []string
-	// Collect mocks to send outside the lock to avoid blocking the parser
-	// goroutine (which must drain the ring buffer for forwarding to continue).
-	var mocksToSend []*models.Mock
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
@@ -106,7 +98,7 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 			if keep {
 				mock.Name = "mock-" + generateRandomString(8)
 				associatedMockIDs = append(associatedMockIDs, mock.Name)
-				mocksToSend = append(mocksToSend, mock)
+				m.outChan <- mock
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -125,11 +117,11 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	}
 
 	if len(associatedMockIDs) > 0 && m.mappingChan != nil && mapping {
-		mapping := models.TestMockMapping{
+		mappingEntry := models.TestMockMapping{
 			TestName: testName,
 			MockIDs:  associatedMockIDs,
 		}
-		m.mappingChan <- mapping
+		m.mappingChan <- mappingEntry
 	}
 
 	// Reslice the buffer
