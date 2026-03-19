@@ -232,14 +232,6 @@ func (m *Mock) DeepCopy() *Mock {
 	return &c
 }
 
-func (m *Mock) ShallowCopy() *Mock {
-	if m == nil {
-		return nil
-	}
-	c := *m
-	return &c
-}
-
 type ReRecordCfg struct {
 	Rerecord bool
 	TestSet  string

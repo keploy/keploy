@@ -114,22 +114,19 @@ func (db *TreeDb) deleteAll() {
 	db.mu.Unlock()
 }
 
-// reset replaces the internal tree and index with new ones.
-func (db *TreeDb) reset(rbt *redblacktree.Tree, idIndex map[int]models.TestModeInfo) {
-	db.mu.Lock()
-	db.rbt = rbt
-	db.idIndex = idIndex
-	db.mu.Unlock()
-}
-
-// rangeValues iterates without allocating a []interface{} snapshot.
-func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
-	db.mu.RLock()
+// rangeValuesNoLock iterates without taking the lock (caller must hold it).
+func (db *TreeDb) rangeValuesNoLock(fn func(v interface{}) bool) {
 	it := db.rbt.Iterator()
 	for it.Next() {
 		if !fn(it.Value()) {
 			break
 		}
 	}
+}
+
+// rangeValues iterates with a read lock.
+func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
+	db.mu.RLock()
+	db.rangeValuesNoLock(fn)
 	db.mu.RUnlock()
 }

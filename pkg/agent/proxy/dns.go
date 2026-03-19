@@ -291,33 +291,16 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 		return dnsCacheEntry{}, false
 	}
 
-	const maxRetries = 3 // Reduced from 5 since we return result anyway after exhausting retries
+	const maxRetries = 3
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Add small backoff between retries to reduce contention
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt*5) * time.Millisecond)
 		}
-		mocks, err := mgr.GetUnFilteredMocksByKind(models.DNS)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to get dns mocks")
-			return dnsCacheEntry{}, false
-		}
-		if len(mocks) == 0 {
-			return dnsCacheEntry{}, false
-		}
 
-		var filteredMocks []*models.Mock
-		var unfilteredMocks []*models.Mock
-
-		for _, mock := range mocks {
-			if mock == nil {
-				continue
-			}
-			if mock.TestModeInfo.IsFiltered {
-				filteredMocks = append(filteredMocks, mock)
-			} else {
-				unfilteredMocks = append(unfilteredMocks, mock)
-			}
+		filteredMocks, unfilteredMocks := mgr.GetDNSMocks(question.Name)
+		if len(filteredMocks) == 0 && len(unfilteredMocks) == 0 {
+			return dnsCacheEntry{}, false
 		}
 
 		if matchedMock, resp := findDNSMock(filteredMocks, question, p.logger); matchedMock != nil {

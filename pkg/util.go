@@ -530,7 +530,6 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 		logger.Debug("no templatized values present, nothing to update")
 		return false
 	}
-
 	// Capture entire inner expression (supports: {{string .token}}, {{ .id }}, {{token}}, {{ float .price | printf "%f" }})
 	placeholderRe := regexp.MustCompile(`{{\s*([^{}]+?)\s*}}`)
 	changed := false
@@ -1073,19 +1072,41 @@ func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, a
 func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
 	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
 
-	sort.SliceStable(filteredMocks, func(i, j int) bool {
-		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
-	})
-
 	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
 		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
 	})
 
 	return append(filteredMocks, unfilteredMocks...)
 }
 
 func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
-	filteredMocks, _ := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+	mappingMap := make(map[string]bool)
+	for _, name := range mocksPresentInMapping {
+		mappingMap[name] = true
+	}
+
+	var filteredMocks []*models.Mock
+	var isNonKeploy bool
+
+	for _, mock := range m {
+		p := *mock
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+
+		if mappingMap[p.Name] {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, &p)
+		}
+	}
+
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
 
 	sort.SliceStable(filteredMocks, func(i, j int) bool {
 		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
@@ -1095,116 +1116,78 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 }
 
 func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) []*models.Mock {
-	filteredMocks, unfilteredMocks := filterByMapping(ctx, logger, m, mocksPresentInMapping)
+	mappingMap := make(map[string]bool)
+	for _, name := range mocksPresentInMapping {
+		mappingMap[name] = true
+	}
 
-	sort.SliceStable(filteredMocks, func(i, j int) bool {
-		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
-	})
+	var filteredMocks []*models.Mock
+	var unfilteredMocks []*models.Mock
+	var isNonKeploy bool
+
+	for _, mock := range m {
+		p := *mock
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+
+		if mappingMap[p.Name] {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, &p)
+		} else {
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, &p)
+		}
+	}
 
 	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
 		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
 	})
 
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+
 	return append(filteredMocks, unfilteredMocks...)
 }
 
 func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
-
-	filteredMocks := make([]*models.Mock, 0)
-	unfilteredMocks := make([]*models.Mock, 0)
-
-	if afterTime.Equal(time.Time{}) {
-		return m, unfilteredMocks
-	}
-
-	if beforeTime.Equal(time.Time{}) {
-		return m, unfilteredMocks
-	}
-
+	var filteredMocks []*models.Mock
+	var unfilteredMocks []*models.Mock
 	isNonKeploy := false
-	deepCopyCount := 0
 
 	for _, mock := range m {
-		if mock == nil {
-			continue
-		}
-		
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
-			isNonKeploy = true
-		}
-
-		// determine if it should be filtered first
-		shouldBeFiltered := false
-		if mock.Spec.ReqTimestampMock.Equal(time.Time{}) || mock.Spec.ResTimestampMock.Equal(time.Time{}) {
-			logger.Debug("request or response timestamp of mock is missing")
-			shouldBeFiltered = true
-		} else if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
-			shouldBeFiltered = true
-		}
-
 		// doing shallow copy to prevent data race
-		p := mock.ShallowCopy()
-		deepCopyCount++
-
-		if shouldBeFiltered {
-			p.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, p)
-		} else {
-			p.TestModeInfo.IsFiltered = false
-			unfilteredMocks = append(unfilteredMocks, p)
+		p := *mock
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
 		}
-	}
-	if isNonKeploy {
-		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
-	}
-	logger.Info("filterByTimeStamp stats", zap.Int("inputMocks", len(m)), zap.Int("deepCopyCount", deepCopyCount))
-	return filteredMocks, unfilteredMocks
-}
-
-func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
-	filteredMocks := make([]*models.Mock, 0, len(m))
-	unfilteredMocks := make([]*models.Mock, 0, len(m))
-
-	mappingMap := make(map[string]struct{}, len(mocksPresentInMapping))
-	for _, name := range mocksPresentInMapping {
-		mappingMap[name] = struct{}{}
-	}
-
-	isNonKeploy := false
-	deepCopyCount := 0
-
-	for _, mock := range m {
-		if mock == nil {
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+			isNonKeploy = true
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, &p)
 			continue
 		}
 
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
-			isNonKeploy = true
-		}
-
-		_, matched := mappingMap[mock.Name]
-		
-		// using shallow copy as we only modify TestModeInfo.IsFiltered
-		p := mock.ShallowCopy()
-		deepCopyCount++
-		
-		if matched {
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
 			p.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, p)
-		} else {
-			p.TestModeInfo.IsFiltered = false
-			unfilteredMocks = append(unfilteredMocks, p)
+			filteredMocks = append(filteredMocks, &p)
+			continue
 		}
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, &p)
 	}
-
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
-	logger.Info("filterByMapping stats", zap.Int("inputMocks", len(m)), zap.Int("mappingSize", len(mocksPresentInMapping)), zap.Int("deepCopyCount", deepCopyCount))
-
 	return filteredMocks, unfilteredMocks
 }
 
+// GuessContentType guesses the content-type of the given buffer.
 func GuessContentType(data []byte) models.BodyType {
 	// Use net/http library's DetectContentType for basic MIME type detection
 	mimeType := http.DetectContentType(data)
