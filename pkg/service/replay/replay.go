@@ -69,7 +69,6 @@ type Replayer struct {
 	totalTestTimeTaken   time.Duration
 	failedTCsBySetID     map[string][]string
 	mockMismatchFailures *TestFailureStore
-	replayStartTime      time.Time
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -120,7 +119,6 @@ func (r *Replayer) GetTestHooks() TestHooks {
 func (r *Replayer) Start(ctx context.Context) error {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
-	r.replayStartTime = time.Now().UTC()
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
@@ -617,6 +615,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
 	startTime := time.Now()
+	pruneBefore := startTime.UTC()
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
@@ -1607,7 +1606,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && r.instrument {
-		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, r.replayStartTime)
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
