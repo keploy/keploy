@@ -1,13 +1,11 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -16,7 +14,6 @@ import (
 	"go.keploy.io/server/v3/utils"
 
 	"go.keploy.io/server/v3/pkg/agent"
-	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -24,6 +21,16 @@ import (
 )
 
 type proxyStop func() error
+
+// IngressHook allows an external component (e.g. enterprise sockmap proxy)
+// to handle ingress forwarding instead of the default Go TCP forwarder.
+type IngressHook interface {
+	// StartIngress delegates ingress forwarding for the given port pair.
+	// Returns nil on success; if it returns an error the caller falls back
+	// to the Go TCP forwarder.
+	StartIngress(origPort, newPort uint16) error
+}
+
 type IngressProxyManager struct {
 	mu           sync.Mutex
 	active       map[uint16]proxyStop
@@ -34,74 +41,8 @@ type IngressProxyManager struct {
 	synchronous  bool
 	sampling     bool
 	samplingSem  chan struct{}
-	
-	sendIngressCmd func(origPort, newPort uint16) error
 
-	// Ingress connections forwarded by Rust proxy, keyed by conn_id
-	ingressConns sync.Map // map[string]*IngressConnState
-}
-
-// IngressConnState tracks HTTP parsing state for a single ingress connection forwarded by Rust.
-type IngressConnState struct {
-	ClientConn *IngressSimConn // request data (external client → app)
-	ServerConn *IngressSimConn // response data (app → external client)
-	OrigPort   uint16
-}
-
-// IngressSimConn is a simple buffered reader that receives data pushed from IPC.
-type IngressSimConn struct {
-	readCh     chan []byte
-	currentBuf []byte
-	closed     bool
-	mu         sync.Mutex
-}
-
-func NewIngressSimConn() *IngressSimConn {
-	return &IngressSimConn{
-		readCh: make(chan []byte, 1000),
-	}
-}
-
-func (c *IngressSimConn) Push(b []byte) {
-	if len(b) == 0 {
-		return
-	}
-	buf := make([]byte, len(b))
-	copy(buf, b)
-	c.readCh <- buf
-}
-
-func (c *IngressSimConn) Read(b []byte) (n int, err error) {
-	c.mu.Lock()
-	if len(c.currentBuf) > 0 {
-		n = copy(b, c.currentBuf)
-		c.currentBuf = c.currentBuf[n:]
-		c.mu.Unlock()
-		return n, nil
-	}
-	c.mu.Unlock()
-
-	buf, ok := <-c.readCh
-	if !ok {
-		return 0, io.EOF
-	}
-	n = copy(b, buf)
-	c.mu.Lock()
-	if n < len(buf) {
-		c.currentBuf = buf[n:]
-	}
-	c.mu.Unlock()
-	return n, nil
-}
-
-func (c *IngressSimConn) Close() error {
-	c.mu.Lock()
-	if !c.closed {
-		c.closed = true
-		close(c.readCh)
-	}
-	c.mu.Unlock()
-	return nil
+	ingressHook IngressHook
 }
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
@@ -125,9 +66,10 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 	return pm
 }
 
-// SetSendIngressCmd registers the Rust proxy's StartIngress command sender.
-func (pm *IngressProxyManager) SetSendIngressCmd(fn func(origPort, newPort uint16) error) {
-	pm.sendIngressCmd = fn
+// SetIngressHook registers an external ingress handler (e.g. enterprise sockmap proxy).
+// When set, StartIngressProxy delegates to this hook instead of the Go TCP forwarder.
+func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
+	pm.ingressHook = h
 }
 
 func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOptions) chan *models.TestCase {
@@ -149,15 +91,16 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 		return
 	}
 
-	// If an external proxy (like Rust or sockmap) is wired up, delegate forwarding to it
-	if pm.sendIngressCmd != nil {
-		if err := pm.sendIngressCmd(origAppPort, newAppPort); err != nil {
-			pm.logger.Error("Failed to send StartIngress command to external proxy, falling back to Go",
+	// If an external ingress hook (e.g. sockmap proxy) is wired up, delegate forwarding to it
+	if pm.ingressHook != nil {
+		fmt.Println("BROROROR")
+		if err := pm.ingressHook.StartIngress(origAppPort, newAppPort); err != nil {
+			pm.logger.Error("Failed to delegate ingress to external hook, falling back to Go TCP forwarder",
 				zap.Uint16("orig_port", origAppPort), zap.Error(err))
 		} else {
-			pm.logger.Info("Delegated ingress forwarding to external proxy",
+			pm.logger.Info("Delegated ingress forwarding to external hook",
 				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
-			// Mark as active with a no-op stop (Rust manages the listener lifetime)
+			// Mark as active with a no-op stop (hook manages the listener lifetime)
 			pm.mu.Lock()
 			pm.active[origAppPort] = func() error { return nil }
 			pm.mu.Unlock()
@@ -356,100 +299,3 @@ func extractPortFromAddr(addr string, fallback uint16) uint16 {
 	return uint16(port64)
 }
 
-// ---------- Rust proxy ingress IPC handlers ----------
-
-// HandleIngressData is called by the IPC server when ingress data arrives from Rust.
-// It creates connection state on first data and pushes bytes to the appropriate reader.
-func (pm *IngressProxyManager) HandleIngressData(connID string, direction byte, origPort uint16, data []byte) {
-	v, loaded := pm.ingressConns.LoadOrStore(connID, &IngressConnState{
-		ClientConn: NewIngressSimConn(),
-		ServerConn: NewIngressSimConn(),
-		OrigPort:   origPort,
-	})
-	state := v.(*IngressConnState)
-
-	if !loaded {
-		// First data for this connection — start the HTTP parser goroutine
-		pm.logger.Info("New ingress connection forwarded by Rust proxy",
-			zap.String("conn_id", connID), zap.Uint16("orig_port", origPort))
-		go pm.parseIngressHTTP(connID, state)
-	}
-
-	if direction == 0 { // request (external client → app)
-		state.ClientConn.Push(data)
-	} else { // response (app → external client)
-		state.ServerConn.Push(data)
-	}
-}
-
-// HandleIngressClose is called by the IPC server when an ingress connection closes.
-func (pm *IngressProxyManager) HandleIngressClose(connID string) {
-	if v, ok := pm.ingressConns.Load(connID); ok {
-		state := v.(*IngressConnState)
-		state.ClientConn.Close()
-		state.ServerConn.Close()
-		pm.ingressConns.Delete(connID)
-		pm.logger.Debug("Ingress connection closed from Rust proxy", zap.String("conn_id", connID))
-	}
-}
-
-// parseIngressHTTP reads HTTP/1.x request/response pairs from the teed ingress data.
-// It runs in a goroutine per connection, consuming data from IngressSimConns.
-func (pm *IngressProxyManager) parseIngressHTTP(connID string, state *IngressConnState) {
-	logger := pm.logger.With(zap.String("ingress_conn", connID))
-	clientReader := bufio.NewReader(state.ClientConn)
-	serverReader := bufio.NewReader(state.ServerConn)
-
-	for {
-		req, err := http.ReadRequest(clientReader)
-		if err != nil {
-			if err != io.EOF {
-				logger.Debug("Ingress HTTP request read finished", zap.Error(err))
-			}
-			return
-		}
-		reqTimestamp := time.Now()
-
-		// Read request body
-		var reqBodyBytes []byte
-		if req.Body != nil {
-			reqBodyBytes, err = io.ReadAll(req.Body)
-			req.Body.Close()
-			if err != nil {
-				logger.Error("Failed to read ingress request body", zap.Error(err))
-				return
-			}
-		}
-
-		// Read response
-		resp, err := http.ReadResponse(serverReader, req)
-		if err != nil {
-			logger.Error("Failed to read ingress response", zap.Error(err))
-			return
-		}
-		respTimestamp := time.Now()
-
-		// Read response body
-		var respBodyBytes []byte
-		if resp.Body != nil {
-			respBodyBytes, err = io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				logger.Error("Failed to read ingress response body", zap.Error(err))
-				return
-			}
-		}
-
-		// Capture test case
-		req.Header.Set("Host", req.Host)
-		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
-		resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
-
-		actualPort := state.OrigPort
-		go func() {
-			defer req.Body.Close()
-			defer resp.Body.Close()
-			hooksUtils.CaptureHook(context.Background(), logger, pm.tcChan, req, resp, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
-		}()
-	}
-}
