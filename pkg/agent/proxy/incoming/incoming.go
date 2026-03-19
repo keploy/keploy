@@ -93,7 +93,6 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 
 	// If an external ingress hook (e.g. sockmap proxy) is wired up, delegate forwarding to it
 	if pm.ingressHook != nil {
-		fmt.Println("BROROROR")
 		if err := pm.ingressHook.StartIngress(origAppPort, newAppPort); err != nil {
 			pm.logger.Error("Failed to delegate ingress to external hook, falling back to Go TCP forwarder",
 				zap.Uint16("orig_port", origAppPort), zap.Error(err))
