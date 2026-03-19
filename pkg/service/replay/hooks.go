@@ -295,6 +295,10 @@ func (h *Hooks) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 	return consumedMocks, nil
 }
 
+func (h *Hooks) GetNoisyTestCaseNames(testSetID string) []string {
+	return nil
+}
+
 // Function to parse and extract claims from a JWT token without verification
 func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error) {
 	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})

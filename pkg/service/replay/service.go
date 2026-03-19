@@ -74,7 +74,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
-	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time) error
 }
 
 type ReportDB interface {
@@ -102,6 +102,9 @@ type Telemetry interface {
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error)
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	// GetNoisyTestCaseNames returns testcase IDs that were reclassified as noisy
+	// for the provided test set during BeforeTestResult processing.
+	GetNoisyTestCaseNames(testSetID string) []string
 	BeforeTestRun(ctx context.Context, testRunID string) error
 	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error

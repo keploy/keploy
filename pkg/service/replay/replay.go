@@ -637,6 +637,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
 
+	pruneBefore := time.Now()
+
 	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
 	if r.runDomainSet != nil {
 		for _, tc := range testCases {
@@ -1605,7 +1607,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && r.instrument {
-		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks)
+		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
+		if len(noisyTestCases) > 0 {
+			added := retainNoisyTestCaseMocks(noisyTestCases, actualTestMockMappings, passingTotalConsumedMocks)
+			if added > 0 {
+				r.logger.Debug("preserved mocks used by noisy testcases from pruning",
+					zap.String("testSetID", testSetID),
+					zap.Int("noisyTestCases", len(noisyTestCases)),
+					zap.Int("additionalMocksKept", added))
+			}
+		}
+
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
