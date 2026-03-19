@@ -437,9 +437,10 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		// Detect noise fields introduced by templating and mark them on the testcase
 		if len(utils.TemplatizedValues) > 0 {
 			detected := pkg.DetectNoiseFieldsInResp(&models.HTTPResp{
-				StatusCode: renderedTC.HTTPResp.StatusCode,
-				Body:       renderedTC.HTTPResp.Body,
-				Header:     renderedTC.HTTPResp.Header,
+				StatusCode:   renderedTC.HTTPResp.StatusCode,
+				Body:         renderedTC.HTTPResp.Body,
+				Header:       renderedTC.HTTPResp.Header,
+				HeaderValues: renderedTC.HTTPResp.HeaderValues,
 			})
 			o.logger.Debug("Detected noise fields", zap.Any("fields", detected))
 			// merge detected into originalTestCase.Noise
