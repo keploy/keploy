@@ -615,6 +615,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
 	startTime := time.Now()
+	pruneBefore := startTime.UTC()
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
@@ -636,8 +637,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
-
-	pruneBefore := time.Now()
 
 	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
 	if r.runDomainSet != nil {
