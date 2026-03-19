@@ -1604,6 +1604,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to create .gitignore file")
 	}
 
+	// Preserve mocks and mappings for tests that were expected but not executed in this run
+	if len(expectedTestMockMappings) > 0 {
+		for expectedTestCaseID, expectedMocks := range expectedTestMockMappings {
+			testExecuted := false
+			for _, tc := range activeTestCases {
+				if tc.Name == expectedTestCaseID {
+					testExecuted = true
+					break
+				}
+			}
+
+			if !testExecuted {
+				// Preserve its expected mocks so they aren't deleted by UpdateMocks
+				for _, m := range expectedMocks {
+					if _, exists := passingTotalConsumedMocks[m.Name]; !exists {
+						passingTotalConsumedMocks[m.Name] = models.MockState{
+							Name: m.Name,
+							Kind: models.Kind(m.Kind),
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && r.instrument {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
