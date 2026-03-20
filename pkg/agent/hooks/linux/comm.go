@@ -80,7 +80,6 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
-
 func (h *Hooks) WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error) {
 	// Acquire read lock to safely access h.BindEvents while it might be closed by unLoad()
 	h.objectsMutex.RLock()

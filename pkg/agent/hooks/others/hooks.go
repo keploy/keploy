@@ -73,4 +73,3 @@ func (h *Hooks) Delete(ctx context.Context, srcPort uint16) error {
 	h.logger.Error("Network address deletion is not supported on this platform")
 	return errors.New("network address deletion is not supported on non-Linux platforms")
 }
-
