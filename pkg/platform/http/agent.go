@@ -1150,7 +1150,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		zap.Uint32("dns-port", dnsPort))
 
 	if isDockerCmd {
-
+		fmt.Println("getting here is case of compose")
 		var origCmd = cmd
 		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
 
@@ -1172,15 +1172,48 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				zap.String("cmd", cmd),
 			)
 		}
-
 		// Lower perf_event_paranoid to allow eBPF programs to attach to syscall tracepoints
 		// like sys_socket via perf_event_open. Ubuntu/Debian default (4) blocks this for
 		// unprivileged users, so setting 2 relaxes the restriction and enables tracing.
+		// if runtime.GOOS == "linux" {
+		// 	fmt.Println("getting here is case of compose 3")
+		// 	cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=2")
+		// 	if err := cmd.Run(); err != nil {
+		// 		a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
+		// 		return err
+		// 	}
+		// }
 		if runtime.GOOS == "linux" {
-			cmd := exec.Command("sysctl", "-w", "kernel.perf_event_paranoid=2")
-			if err := cmd.Run(); err != nil {
-				a.logger.Error("Failed to relax host perf_event_paranoid. Tracepoints may fail.", zap.Error(err))
-				return err
+			fmt.Println("checking for perf_event_paranoid value and updating if required")
+			paranoidPath := "/proc/sys/kernel/perf_event_paranoid"
+
+			// Step 1: Read the current value
+			currentValue, err := os.ReadFile(paranoidPath)
+			alreadySet := false
+			if err == nil {
+				// Convert the byte slice to a string and trim whitespace
+				val := strings.TrimSpace(string(currentValue))
+				// If it's already 2, 1, 0, or -1, we don't need to do anything
+				if val == "2" || val == "1" || val == "0" || val == "-1" {
+					a.logger.Debug("perf_event_paranoid is already relaxed", zap.String("value", val))
+					// return nil // Exit the block successfully
+					alreadySet = true
+				}
+			}
+			fmt.Println("current perf_event_paranoid value:", string(currentValue))
+			// Step 2: If it's higher than 2 (like the default 4), attempt to write
+			if !alreadySet {
+				fmt.Println("going to set the pref_event paranoid value")
+				err = os.WriteFile(paranoidPath, []byte("2\n"), 0644)
+				if err != nil {
+					a.logger.Error(
+						"Failed to relax host perf_event_paranoid. Tracepoints may fail.",
+						zap.Error(err),
+						zap.String("hint", "If running natively, check Secure Boot, AppArmor, or SELinux policies."),
+					)
+					return err
+				}
+				a.logger.Info("Successfully set kernel.perf_event_paranoid to 2")
 			}
 		}
 	}
