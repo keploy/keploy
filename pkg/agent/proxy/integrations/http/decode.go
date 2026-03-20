@@ -133,15 +133,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				if !utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
-					h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
-				}
+				h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
 				// No mock matched — send a 502 so the application gets a
 				// proper HTTP error instead of a silent connection close
-				// (EOF / connection reset). PassThrough is intentionally
-				// not attempted here; proxy-level passthrough rules
-				// already handle configured bypass cases before the
-				// parser is invoked.
+				// (EOF / connection reset). Proxy-level passthrough rules
+				// handle configured bypass cases before the parser is
+				// invoked, so no passthrough is attempted here.
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)

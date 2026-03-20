@@ -240,25 +240,26 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// Content type check — compare only the media type (ignoring
 		// parameters like charset) so that trivial differences such as
 		// "application/json" vs "application/json;charset=UTF-8" don't
-		// prevent a match. If exactly one side has a Content-Type the
-		// match is skipped.
-		inputCT := input.header.Get("Content-Type")
+		// prevent a match. Mock headers may be comma-joined (via
+		// ToYamlHTTPHeader), and request headers may have multiple
+		// values, so both sides are normalised before comparison.
+		inputCTValues := input.header.Values("Content-Type")
 		mockCT := mock.Spec.HTTPReq.Header["Content-Type"]
-		if inputCT == "" && mockCT != "" {
+		if len(inputCTValues) == 0 && mockCT != "" {
 			h.Logger.Debug("mock expects Content-Type but request has none", zap.String("mock name", mock.Name))
 			continue
 		}
-		if inputCT != "" && mockCT == "" {
+		if len(inputCTValues) > 0 && mockCT == "" {
 			h.Logger.Debug("mock has no Content-Type but request does", zap.String("mock name", mock.Name))
 			continue
 		}
-		if inputCT != "" && mockCT != "" {
-			mockMediaType, _, errM := mime.ParseMediaType(mockCT)
-			inputMediaType, _, errI := mime.ParseMediaType(inputCT)
-			if errM != nil || errI != nil || !strings.EqualFold(mockMediaType, inputMediaType) {
+		if len(inputCTValues) > 0 && mockCT != "" {
+			mockMediaTypes := parseMediaTypes(mockCT)
+			inputMediaTypes := parseMediaTypes(strings.Join(inputCTValues, ","))
+			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
 				h.Logger.Debug("The content type of mock and request aren't the same",
 					zap.String("mock name", mock.Name),
-					zap.Any("input header", input.header.Values("Content-Type")),
+					zap.Any("input header", inputCTValues),
 					zap.Any("mock header content-type", mockCT))
 				continue
 			}
@@ -452,6 +453,38 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 		return true, tcsMocks[idx]
 	}
 	return false, nil
+}
+
+// parseMediaTypes splits a (possibly comma-joined) Content-Type header
+// value into individual media types using mime.ParseMediaType. Malformed
+// entries cause the entire result to be nil (treated as mismatch).
+func parseMediaTypes(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		ct := strings.TrimSpace(part)
+		if ct == "" {
+			continue
+		}
+		mt, _, err := mime.ParseMediaType(ct)
+		if err != nil {
+			return nil
+		}
+		out = append(out, mt)
+	}
+	return out
+}
+
+// mediaTypesOverlap returns true if any media type in a matches any in b
+// (case-insensitive).
+func mediaTypesOverlap(a, b []string) bool {
+	for _, ma := range a {
+		for _, mb := range b {
+			if strings.EqualFold(ma, mb) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Update the matched mock (delete or update)
