@@ -199,8 +199,8 @@ jobs:
             
             let comment = '## 🚀 Keploy Performance Test Results\n\n';
             comment += '**Multi-Run Validation:** Tests run 3 times, pipeline fails only if 2+ runs show regression.\n\n';
-            comment += '| Run | P50 | P90 | P99 | RPS | Status |\n';
-            comment += '|-----|-----|-----|-----|-----|--------|\n';
+            comment += '| Run | P50 | P90 | P99 | RPS | Error Rate | Status |\n';
+            comment += '|-----|-----|-----|-----|-----|------------|--------|\n';
             
             let passCount = 0;
             let failCount = 0;
@@ -259,10 +259,10 @@ jobs:
                 }
               }
               
-              comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${rps} | ${status} |\n`;
+              comment += `| ${idx + 1} | ${p50} | ${p90} | ${p99} | ${rps} | ${errorRate} | ${status} |\n`;
             });
             
-            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 70ms, RPS >= 100 (±1% tolerance)\n\n';
+            comment += '\n**Thresholds:** P50 < 5ms, P90 < 15ms, P99 < 70ms, RPS >= 100 (±1% tolerance), Error Rate < 1%\n\n';
             
             if (failCount >= 2) {
               comment += '❌ **Result:** FAILED - ' + failCount + ' out of 3 runs showed regression\n';

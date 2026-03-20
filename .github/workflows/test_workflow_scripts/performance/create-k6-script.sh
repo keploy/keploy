@@ -46,10 +46,6 @@ export default function () {
   const endpoint = endpoints[Math.floor(Math.random() * endpoints.length)];
   const res = http.get(`http://localhost:8080${endpoint}`);
   
-  if (res.status >= 400) {
-    console.warn(`Request to ${endpoint} failed with status ${res.status}`);
-  }
-
   check(res, {
     'status is 2xx or 3xx': (r) => r.status >= 200 && r.status < 400,
   });
