@@ -20,12 +20,17 @@ type TLSHandshakeEntry struct {
 type TLSHandshakeStore struct {
 	mu   sync.Mutex
 	cond *sync.Cond
-	m    map[uint16][]TLSHandshakeEntry
+	m    map[uint16][]timedTLSHandshakeEntry
+}
+
+type timedTLSHandshakeEntry struct {
+	entry    TLSHandshakeEntry
+	pushedAt time.Time
 }
 
 // NewTLSHandshakeStore creates a new store.
 func NewTLSHandshakeStore() *TLSHandshakeStore {
-	s := &TLSHandshakeStore{m: make(map[uint16][]TLSHandshakeEntry)}
+	s := &TLSHandshakeStore{m: make(map[uint16][]timedTLSHandshakeEntry)}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -33,9 +38,12 @@ func NewTLSHandshakeStore() *TLSHandshakeStore {
 // Push adds a handshake entry to the FIFO queue for the given port.
 func (s *TLSHandshakeStore) Push(port uint16, entry TLSHandshakeEntry) {
 	s.mu.Lock()
-	s.m[port] = append(s.m[port], entry)
-	s.mu.Unlock()
+	s.m[port] = append(s.m[port], timedTLSHandshakeEntry{
+		entry:    entry,
+		pushedAt: time.Now(),
+	})
 	s.cond.Broadcast()
+	s.mu.Unlock()
 }
 
 // PopWait pops the oldest handshake entry for the given port, waiting up
@@ -46,7 +54,7 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 
 	// Fast path: already available.
 	if q := s.m[port]; len(q) > 0 {
-		entry := q[0]
+		entry := q[0].entry
 		s.m[port] = q[1:]
 		return entry, true
 	}
@@ -55,26 +63,29 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 		return TLSHandshakeEntry{}, false
 	}
 
-	// Wait with timeout using a timer that wakes the cond.
-	done := make(chan struct{})
+	deadline := time.Now().Add(timeout)
+	timedOut := false
 	timer := time.AfterFunc(timeout, func() {
+		s.mu.Lock()
+		timedOut = true
 		s.cond.Broadcast()
-		close(done)
+		s.mu.Unlock()
 	})
 	defer timer.Stop()
 
 	for {
 		s.cond.Wait()
 		if q := s.m[port]; len(q) > 0 {
-			entry := q[0]
+			// Keep timeout contract strict: only return entries that arrived before the deadline.
+			if q[0].pushedAt.After(deadline) {
+				return TLSHandshakeEntry{}, false
+			}
+			entry := q[0].entry
 			s.m[port] = q[1:]
 			return entry, true
 		}
-		// Check if timer fired.
-		select {
-		case <-done:
+		if timedOut {
 			return TLSHandshakeEntry{}, false
-		default:
 		}
 	}
 }

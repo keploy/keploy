@@ -34,7 +34,10 @@ var (
 	randRead = rand.Read
 )
 
-func getSharedTicketKey() ([32]byte, bool) {
+func getSharedTicketKey(logger *zap.Logger) ([32]byte, bool) {
+	if logger == nil {
+		logger = zap.L()
+	}
 	sharedTicketKeyOnce.Do(func() {
 		n, err := randRead(sharedTicketKey[:])
 		if err != nil || n != len(sharedTicketKey) {
@@ -42,7 +45,7 @@ func getSharedTicketKey() ([32]byte, bool) {
 				err = errors.New("short read from crypto/rand while generating TLS session ticket key")
 			}
 			utils.LogError(
-				zap.L(),
+				logger,
 				err,
 				"failed to generate shared TLS session ticket key; disabling TLS session tickets",
 				zap.Int("bytesRead", n),
@@ -65,7 +68,7 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 		return nil, false, err
 	}
 
-	ticketKey, sessionTicketsEnabled := getSharedTicketKey()
+	ticketKey, sessionTicketsEnabled := getSharedTicketKey(logger)
 
 	config := &tls.Config{
 		SessionTicketKey:       ticketKey,

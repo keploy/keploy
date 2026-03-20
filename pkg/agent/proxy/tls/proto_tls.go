@@ -22,7 +22,11 @@ import (
 // to exist when it encounters SSLRequest during replay. Without it, mocks
 // recorded on branches with proxy-level SSL handling break when replayed on
 // main/latest.
-func NewPostgresSSLConfigMock(connID string) *models.Mock {
+func NewPostgresSSLConfigMock(connID string, sslResponse byte) *models.Mock {
+	if sslResponse != 'S' && sslResponse != 'N' {
+		sslResponse = 'N'
+	}
+
 	reqTimestamp := time.Now()
 	sslReqPacket := postgres.Packet{
 		Header: &postgres.PacketInfo{
@@ -40,7 +44,7 @@ func NewPostgresSSLConfigMock(connID string) *models.Mock {
 			},
 			Type: "SSLResponse",
 		},
-		Message: map[string]interface{}{"response": "S"},
+		Message: map[string]interface{}{"response": string(sslResponse)},
 	}
 	return &models.Mock{
 		Version: models.GetVersion(),
@@ -90,7 +94,8 @@ func IsPostgresSSLRequest(buf []byte) bool {
 // 3. Forward the response to the client
 // 4. If 'S', upgrade both connections to TLS
 //
-// Returns the upgraded (or original) client and server connections.
+// Returns the upgraded (or original) client and server connections and the
+// server SSL response byte ('S' or 'N').
 func HandlePostgresSSL(
 	ctx context.Context,
 	logger *zap.Logger,
@@ -99,7 +104,7 @@ func HandlePostgresSSL(
 	sslRequestBuf []byte,
 	sourcePort int,
 	backdate time.Time,
-) (upgradedClient net.Conn, upgradedServer net.Conn, err error) {
+) (upgradedClient net.Conn, upgradedServer net.Conn, sslResponse byte, err error) {
 	// Default to original connections
 	upgradedClient = clientConn
 	upgradedServer = serverConn
@@ -107,26 +112,27 @@ func HandlePostgresSSL(
 	// Forward SSLRequest to server
 	_, err = serverConn.Write(sslRequestBuf)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to forward SSLRequest to PostgreSQL server: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to forward SSLRequest to PostgreSQL server: %w", err)
 	}
 
 	// Read server's 1-byte response ('S' or 'N')
 	responseBuf := make([]byte, 1)
 	_, err = io.ReadFull(serverConn, responseBuf)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read PostgreSQL SSL response: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to read PostgreSQL SSL response: %w", err)
 	}
+	sslResponse = responseBuf[0]
 
 	// Forward response to client
 	_, err = clientConn.Write(responseBuf)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to forward SSL response to client: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to forward SSL response to client: %w", err)
 	}
 
 	// If server declined SSL, return original connections
 	if responseBuf[0] != 'S' {
 		logger.Debug("PostgreSQL server declined SSL, continuing with plain connection")
-		return upgradedClient, upgradedServer, nil
+		return upgradedClient, upgradedServer, sslResponse, nil
 	}
 
 	logger.Debug("PostgreSQL server accepted SSL, upgrading connections")
@@ -134,17 +140,17 @@ func HandlePostgresSSL(
 	// Upgrade client connection (act as TLS server to the app)
 	upgradedClient, _, err = HandleTLSConnection(ctx, logger, clientConn, backdate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to upgrade client connection to TLS: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to upgrade client connection to TLS: %w", err)
 	}
 
 	// Get destination URL from source port mapping
 	urlValue, ok := SrcPortToDstURL.Load(sourcePort)
 	if !ok {
-		return nil, nil, fmt.Errorf("failed to find destination URL for source port %d", sourcePort)
+		return nil, nil, 0, fmt.Errorf("failed to find destination URL for source port %d", sourcePort)
 	}
 	dstURL, ok := urlValue.(string)
 	if !ok {
-		return nil, nil, fmt.Errorf("destination URL for port %d is not a string", sourcePort)
+		return nil, nil, 0, fmt.Errorf("destination URL for port %d is not a string", sourcePort)
 	}
 
 	// Upgrade server connection (act as TLS client to the real server)
@@ -157,7 +163,7 @@ func HandlePostgresSSL(
 	}
 	tlsServerConn := tls.Client(serverConn, tlsConfig)
 	if err := tlsServerConn.Handshake(); err != nil {
-		return nil, nil, fmt.Errorf("failed to upgrade server connection to TLS: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to upgrade server connection to TLS: %w", err)
 	}
 	upgradedServer = tlsServerConn
 
@@ -165,7 +171,7 @@ func HandlePostgresSSL(
 		zap.String("serverName", dstURL),
 		zap.Int("sourcePort", sourcePort))
 
-	return upgradedClient, upgradedServer, nil
+	return upgradedClient, upgradedServer, sslResponse, nil
 }
 
 // UpgradeMySQLServerToTLS upgrades only the server connection to TLS for MySQL.

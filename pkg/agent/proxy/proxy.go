@@ -721,7 +721,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// 2. Get server response ('S' or 'N')
 		// 3. Forward response to client
 		// 4. If 'S', upgrade both connections to TLS
-		srcConn, dstConn, err = pTls.HandlePostgresSSL(
+		var sslResponse byte
+		srcConn, dstConn, sslResponse, err = pTls.HandlePostgresSSL(
 			ctx, logger, underlyingConn, dstConn,
 			initialBuf, sourcePort, rule.Backdate,
 		)
@@ -737,8 +738,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if v, ok := parserCtx.Value(models.ClientConnectionIDKey).(string); ok {
 			connID = v
 		}
-		rule.MC <- pTls.NewPostgresSSLConfigMock(connID)
-		logger.Debug("Injected synthetic SSLRequest/SSLResponse config mock for backward compatibility")
+		rule.MC <- pTls.NewPostgresSSLConfigMock(connID, sslResponse)
+		logger.Debug("Injected synthetic SSLRequest/SSLResponse config mock for backward compatibility", zap.String("sslResponse", string(sslResponse)))
 
 		// After SSL negotiation, we need to read the next packet (StartupMessage)
 		// and wrap it in the srcConn so parsers see it

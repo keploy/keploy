@@ -193,7 +193,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 		cleanup, pinErr := agentSvc.MapPinHook(pinnableMaps)
 		if pinErr != nil {
-			h.logger.Warn("EbpfMapPinHook failed", zap.Error(pinErr))
+			h.logger.Error(
+				"EbpfMapPinHook failed; cross-process eBPF map access will be disabled. Ensure the container has CAP_SYS_ADMIN or is run with --enable-docker-unconfined, and verify that bpffs is mounted and writable.",
+				zap.Error(pinErr),
+			)
 		} else {
 			h.mapPinCleanup = cleanup
 		}
@@ -638,7 +641,7 @@ func ensureBPFFS(logger *zap.Logger) {
 
 	// Mount a fresh bpffs. This requires CAP_SYS_ADMIN + no AppArmor restriction.
 	if err := unix.Mount("bpf", bpfFSPath, "bpf", 0, ""); err != nil {
-		logger.Warn("Failed to mount bpffs — BPF map pinning will not work",
+		logger.Error("Failed to mount bpffs — BPF map pinning will not work. If running inside a container, ensure it has CAP_SYS_ADMIN, an unconfined seccomp/AppArmor profile, or run with relaxed container security settings (for example, --cap-add=SYS_ADMIN or a project-specific option like --enable-docker-unconfined).",
 			zap.String("path", bpfFSPath), zap.Error(err))
 		return
 	}

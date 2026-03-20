@@ -40,13 +40,21 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				return nil
 			}
 
+			shutdownComplete := make(chan struct{})
+			defer close(shutdownComplete)
+
 			// Force-exit safety net: if the agent doesn't shut down cleanly
 			// within 10 seconds of context cancellation, force exit.
+			const forceExitTimeout = 10 * time.Second
 			go func() {
 				<-ctx.Done()
-				time.Sleep(6 * time.Second)
-				logger.Error("Agent shutdown timed out after 6s, forcing exit; check for long-running requests or stuck goroutines")
-				os.Exit(1)
+				select {
+				case <-shutdownComplete:
+					return
+				case <-time.After(forceExitTimeout):
+					logger.Error("Agent shutdown timed out, forcing exit; check for long-running requests or stuck goroutines", zap.Duration("timeout", forceExitTimeout))
+					os.Exit(1)
+				}
 			}()
 
 			startAgentCh := make(chan int)
