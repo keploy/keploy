@@ -3,6 +3,7 @@ package generic
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"time"
@@ -60,30 +61,18 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			if !matched {
-				err := clientConn.SetReadDeadline(time.Time{})
-				if err != nil {
-					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
-					return
+				preview := genericRequests[0]
+				if len(preview) > 64 {
+					preview = preview[:64]
 				}
-
-				logger.Debug("the genericRequests before pass through are", zap.Int("length", len(genericRequests)))
-				for _, genReq := range genericRequests {
-					logger.Debug("the genericRequests are:", zap.String("h", string(genReq)))
-				}
-
-				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
-				if err != nil {
-					utils.LogError(logger, err, "failed to passthrough the generic request")
-					return
-				}
-
-				genericRequests = [][]byte{}
-				logger.Debug("the request buffer after pass through in generic", zap.String("buffer", string(reqBuffer)))
-				if len(reqBuffer) > 0 {
-					genericRequests = [][]byte{reqBuffer}
-				}
-				logger.Debug("the length of genericRequests after passThrough ", zap.Int("length", len(genericRequests)))
-				continue
+				logger.Debug("mock miss",
+					zap.String("protocol", "Generic"),
+					zap.Int("requestCount", len(genericRequests)),
+					zap.Int("firstRequestBytes", len(genericRequests[0])),
+					zap.String("hint", "Re-record mocks if the wire protocol data has changed"),
+					zap.ByteString("preview", preview))
+				errCh <- fmt.Errorf("no matching generic mock found")
+				return
 			}
 			for _, genericResponse := range genericResponses {
 				encoded := []byte(genericResponse.Message[0].Data)

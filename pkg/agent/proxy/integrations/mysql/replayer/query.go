@@ -111,8 +111,21 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				logger.Error("Connection closing due to no matching mock found",
 					zap.Int("commands_processed", commandCount),
 					zap.String("request_type", req.Header.Type))
-				utils.LogError(logger, nil, "No matching mock found for the command", zap.Any("command", command))
-				return fmt.Errorf("error while simulating the command phase due to no matching mock found")
+
+				// Build mismatch report for propagation
+				actualQuery := ""
+				if qp, qok := req.Message.(*mysql.QueryPacket); qok {
+					actualQuery = qp.Query
+				} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
+					actualQuery = sp.Query
+				}
+				report := &models.MockMismatchReport{
+					Protocol:      "MySQL",
+					ActualSummary: fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 120)),
+					NextSteps:     "Re-record mocks if the SQL query has changed.",
+				}
+				baseErr := fmt.Errorf("error while simulating the command phase due to no matching mock found")
+				return models.NewMockMismatchError(baseErr, report)
 			}
 
 			logger.Debug("Matched the command with the mock", zap.Any("mock", resp))

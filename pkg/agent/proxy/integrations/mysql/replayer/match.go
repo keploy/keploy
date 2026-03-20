@@ -28,6 +28,14 @@ type prepEntry struct { // minimal, enough for lookup
 	mockName    string // for debugging purpose
 }
 
+// truncate returns s trimmed to at most maxLen characters, with "..." appended if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // case-insensitive prefix check without allocation
 func hasPrefixFold(s, p string) bool {
 	if len(s) < len(p) {
@@ -216,11 +224,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	var (
-		maxMatchedCount int
-		matchedResp     *mysql.Response
-		matchedMock     *models.Mock
-		queryMatched    bool
-		stmtMatched     bool
+		maxMatchedCount  int
+		matchedResp      *mysql.Response
+		matchedMock      *models.Mock
+		queryMatched     bool
+		stmtMatched      bool
+		bestPartialMock  *models.Mock  // closest non-exact match for diff reporting
+		bestPartialQuery string        // query of the closest partial match
 	)
 
 	// Single pass: filter & match on the fly.
@@ -257,6 +267,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					bestPartialMock = mock
+					if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
+						bestPartialQuery = qp.Query
+					}
 				}
 
 			case sCOM_STMT_PREP:
@@ -264,6 +278,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					bestPartialMock = mock
+					if sp, spOk := mockReq.PacketBundle.Message.(*mysql.StmtPreparePacket); spOk {
+						bestPartialQuery = sp.Query
+					}
 				}
 
 			case sCOM_STMT_EXEC:
@@ -377,6 +395,27 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 			}
 		}
+
+		actualQuery := ""
+		if qp, qok := req.Message.(*mysql.QueryPacket); qok {
+			actualQuery = qp.Query
+		} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
+			actualQuery = sp.Query
+		}
+		if bestPartialMock != nil {
+			logger.Debug("mock miss",
+				zap.String("protocol", "MySQL"),
+				zap.String("type", req.Header.Type),
+				zap.String("actual_query", truncate(actualQuery, 200)),
+				zap.String("closest_mock", bestPartialMock.Name),
+				zap.String("closest_query", truncate(bestPartialQuery, 200)))
+		} else if actualQuery != "" {
+			logger.Debug("mock miss",
+				zap.String("protocol", "MySQL"),
+				zap.String("type", req.Header.Type),
+				zap.String("actual_query", truncate(actualQuery, 200)))
+		}
+
 		return nil, false, nil
 	}
 

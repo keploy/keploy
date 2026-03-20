@@ -190,14 +190,20 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				return resp
 			}
 			// Send mock not found error if we couldn't match any DNS mock.
-			// This helps the user identify why some resolutions fall back to local proxy IPs.
-			p.logger.Debug("DNS mock not found in test mode, using synthetic default",
+			p.logger.Warn("mock miss",
+				zap.String("protocol", "DNS"),
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.String("hint", "DNS mocks may be missing. Re-record to capture DNS queries."),
 			)
 			proxyErr := models.ParserError{
 				ParserErrorType: models.ErrMockNotFound,
-				Err:             fmt.Errorf("DNS mock not found for query: %s (%s). Note: non-successful DNS responses (NXDOMAIN, SERVFAIL, etc.) are not recorded to reduce noise", question.Name, dns.TypeToString[question.Qtype]),
+				Err:             fmt.Errorf("DNS mock not found for query: %s (%s)", question.Name, dns.TypeToString[question.Qtype]),
+				MismatchReport: &models.MockMismatchReport{
+					Protocol:      "DNS",
+					ActualSummary: fmt.Sprintf("%s %s", dns.TypeToString[question.Qtype], question.Name),
+					NextSteps:     "DNS mocks may be missing. Re-record to capture DNS queries.",
+				},
 			}
 			p.SendError(proxyErr)
 		}
