@@ -61,3 +61,48 @@ jobs:
         run: |
           cd samples-java/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/${{ matrix.app.script_dir }}/java-linux.sh
+
+  mysql_dual_conn:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: mysql-dual-conn (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout samples-java repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-java
+          path: samples-java
+
+      - name: Run mysql-dual-conn app
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-java/mysql-dual-conn
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/mysql_dual_conn/java-linux.sh
