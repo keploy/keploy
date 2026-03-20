@@ -251,7 +251,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
 				h.Logger.Debug("The content type of mock and request aren't the same",
 					zap.String("mock name", mock.Name),
-					zap.Int("input media type count", len(inputMediaTypes)),
+					zap.Strings("input media types", inputMediaTypes),
 					zap.Strings("mock media types", mockMediaTypes))
 				continue
 			}
