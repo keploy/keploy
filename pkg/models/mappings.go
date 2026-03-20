@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -12,9 +13,21 @@ const MappingKind = "TestMocksMapping"
 
 // MockEntry represents a single mock entry with its name and kind.
 type MockEntry struct {
-	Name      string `json:"name" yaml:"name" bson:"name"`
-	Kind      string `json:"kind" yaml:"kind" bson:"kind"`
-	Timestamp int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty" bson:"timestamp,omitempty"`
+	Name             string `json:"name" yaml:"name" bson:"name"`
+	Kind             string `json:"kind" yaml:"kind" bson:"kind"`
+	Timestamp        int64  `json:"timestamp,omitempty" yaml:"timestamp,omitempty" bson:"timestamp,omitempty"`
+	ReqTimestampMock string `json:"reqTimestampMock,omitempty" yaml:"reqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
+	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
+}
+
+// FormatMockTimestamp stores mock timings as stable RFC3339 strings so
+// mappings.yaml remains portable across YAML/JSON/BSON encoders while still
+// omitting zero values.
+func FormatMockTimestamp(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.Format(time.RFC3339Nano)
 }
 
 type Mapping struct {
