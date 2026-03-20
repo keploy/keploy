@@ -449,7 +449,9 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 
 // parseMediaTypes splits a (possibly comma-joined) Content-Type header
 // value into individual media types using mime.ParseMediaType. Malformed
-// entries cause the entire result to be nil (treated as mismatch).
+// entries are skipped so that a single non-conformant value (e.g. a
+// trailing semicolon or vendor quirk) does not prevent matching on the
+// remaining valid types.
 func parseMediaTypes(raw string) []string {
 	var out []string
 	for _, part := range strings.Split(raw, ",") {
@@ -458,8 +460,8 @@ func parseMediaTypes(raw string) []string {
 			continue
 		}
 		mt, _, err := mime.ParseMediaType(ct)
-		if err != nil {
-			return nil
+		if err != nil || mt == "" {
+			continue
 		}
 		out = append(out, mt)
 	}

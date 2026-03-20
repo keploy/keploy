@@ -50,3 +50,13 @@ func TestGenerateDNSDedupeKey_NormalizesName(t *testing.T) {
 		t.Error("FQDN normalization should make these keys equal")
 	}
 }
+
+func TestGenerateDNSDedupeKey_CaseInsensitive(t *testing.T) {
+	// DNS names are case-insensitive per RFC 4343.
+	q1 := dns.Question{Name: "Example.COM.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q2 := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+
+	if generateDNSDedupeKey(q1) != generateDNSDedupeKey(q2) {
+		t.Error("DNS dedup key must be case-insensitive")
+	}
+}

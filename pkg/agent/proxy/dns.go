@@ -514,7 +514,7 @@ func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
 // For test replay, a single recorded response is sufficient.
 func generateDNSDedupeKey(question dns.Question) string {
 	return fmt.Sprintf("%s:%d:%d",
-		dns.Fqdn(question.Name),
+		strings.ToLower(dns.Fqdn(question.Name)),
 		question.Qtype,
 		question.Qclass,
 	)

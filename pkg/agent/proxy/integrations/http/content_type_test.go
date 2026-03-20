@@ -14,8 +14,9 @@ func TestParseMediaTypes(t *testing.T) {
 		{"comma joined", "text/html, application/json", []string{"text/html", "application/json"}},
 		{"comma joined with params", "text/html;charset=utf-8, application/json;charset=UTF-8", []string{"text/html", "application/json"}},
 		{"empty", "", nil},
-		{"malformed", "not a valid / media type ;;;", nil},
-		{"one valid one malformed", "application/json, ;;;invalid", nil},
+		{"all malformed", "not a valid / media type ;;;", nil},
+		{"one valid one malformed", "application/json, ;;;invalid", []string{"application/json"}},
+		{"trailing semicolon", "application/json;", []string{"application/json"}},
 	}
 
 	for _, tt := range tests {
