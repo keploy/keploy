@@ -77,7 +77,7 @@ type Proxy struct {
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
 
 	// recordedDNSMocks tracks DNS queries that have already been recorded
-	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass:rcode:answerSummary"
+	// to avoid recording duplicate mocks. Key format: "name:qtype:qclass"
 	// Uses bounded LRU with TTL to prevent unbounded memory growth.
 	recordedDNSMocks *expirable.LRU[string, bool]
 
