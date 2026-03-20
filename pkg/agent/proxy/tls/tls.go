@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -27,13 +28,33 @@ func IsTLSHandshake(data []byte) bool {
 var (
 	sharedTicketKeyOnce sync.Once
 	sharedTicketKey     [32]byte
+	// If key generation fails, we fail closed by disabling tickets.
+	sessionTicketsReady bool
+	// randRead is a variable for deterministic tests.
+	randRead = rand.Read
 )
 
-func getSharedTicketKey() [32]byte {
+func getSharedTicketKey() ([32]byte, bool) {
 	sharedTicketKeyOnce.Do(func() {
-		_, _ = rand.Read(sharedTicketKey[:])
+		n, err := randRead(sharedTicketKey[:])
+		if err != nil || n != len(sharedTicketKey) {
+			if err == nil {
+				err = errors.New("short read from crypto/rand while generating TLS session ticket key")
+			}
+			utils.LogError(
+				zap.L(),
+				err,
+				"failed to generate shared TLS session ticket key; disabling TLS session tickets",
+				zap.Int("bytesRead", n),
+				zap.Int("bytesExpected", len(sharedTicketKey)),
+			)
+			sessionTicketsReady = false
+			sharedTicketKey = [32]byte{}
+			return
+		}
+		sessionTicketsReady = true
 	})
-	return sharedTicketKey
+	return sharedTicketKey, sessionTicketsReady
 }
 
 func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
@@ -44,10 +65,11 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 		return nil, false, err
 	}
 
-	ticketKey := getSharedTicketKey()
+	ticketKey, sessionTicketsEnabled := getSharedTicketKey()
 
 	config := &tls.Config{
-		SessionTicketKey: ticketKey,
+		SessionTicketKey:       ticketKey,
+		SessionTicketsDisabled: !sessionTicketsEnabled,
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			// Check what protocols client supports
 			clientSupportsHTTP1 := false
@@ -74,8 +96,9 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 			}
 
 			return &tls.Config{
-				NextProtos:       nextProtos,
-				SessionTicketKey: ticketKey, // SAME key so session tickets work across connections
+				NextProtos:             nextProtos,
+				SessionTicketKey:       ticketKey, // SAME key so session tickets work across connections
+				SessionTicketsDisabled: !sessionTicketsEnabled,
 				GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 					return CertForClient(logger, clientHello, caPrivKey, caCertParsed, backdate)
 				},
