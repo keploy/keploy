@@ -440,8 +440,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// TODO: to remove this sessions concept because it was meant for multiple clients-apps.
 	rule, ok := p.sessions.Get(uint64(0))
 	if !ok {
-		utils.LogError(p.logger, nil, "failed to fetch the session rule")
-		return err
+		sessionErr := fmt.Errorf("failed to fetch the session rule for source port %d", sourcePort)
+		utils.LogError(p.logger, sessionErr, "failed to fetch the session rule", zap.Int("Source port", sourcePort))
+		return sessionErr
 	}
 
 	// Create a local copy of OutgoingOptions to avoid data race when multiple
