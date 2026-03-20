@@ -17,7 +17,7 @@ die() {
   rc=$?
   echo "::error::Pipeline failed (exit=$rc). Dumping context…"
   echo "== docker ps =="; docker ps || true
-  echo "== mysql logs (last 200 lines) =="; docker logs --tail 200 mysql-dual-conn || true
+  echo "== mysql logs (last 200 lines) =="; docker compose logs --tail 200 mysql || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
   echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort | head -n 20 || true; echo "... (truncated)"
   echo "== *.txt logs (last 100 lines) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 100 "$f"; }; done
@@ -28,7 +28,7 @@ trap die ERR
 wait_for_mysql() {
   section "Wait for MySQL readiness"
   for i in {1..120}; do
-    if docker exec mysql-dual-conn mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
+    if docker compose exec -T mysql mysql -uroot -prootpass -e "SELECT 1" >/dev/null 2>&1; then
       echo "MySQL is ready."
       endsec; return 0
     fi

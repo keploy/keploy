@@ -32,7 +32,7 @@ check_test_report() {
     fi
 
     local latest_report_dir
-    latest_report_dir=$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1)
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1 || true)
     if [ -z "$latest_report_dir" ]; then
         echo "No test run directory found in ./keploy/reports/"
         return 1

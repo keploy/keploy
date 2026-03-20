@@ -99,10 +99,6 @@ jobs:
           repository: keploy/samples-java
           path: samples-java
 
-      - name: Set up Java 17
-        run: |
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/update-java.sh
-
       - name: Run mysql-dual-conn app
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
