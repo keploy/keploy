@@ -71,7 +71,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 						utils.LogError(logger, err, "failed to execute pre-server startup hooks")
 						return
 					}
-					routes.StartAgentServer(ctx, logger, p, router)
+					routes.StartAgentServer(logger, p, router)
 				}
 			}()
 

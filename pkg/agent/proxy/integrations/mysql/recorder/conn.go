@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -30,6 +31,7 @@ type handshakeRes struct {
 	resTimestamp      time.Time
 	tlsClientConn     net.Conn
 	tlsDestConn       net.Conn
+	skipConfigMock    bool
 }
 
 func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
@@ -119,6 +121,31 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 	// handle the SSL request
 	if decodeCtx.UseSSL {
+
+		// In sockmap/low-latency mode the proxy does NOT MITM the TLS session.
+		// The pre-TLS config mock (server greeting + SSL request) has been captured;
+		// post-TLS command phase data is provided by SSL/GoTLS uprobes separately.
+		// Push the raw server greeting to TLSHandshakeStore so the post-TLS
+		// uprobe path can reconstruct the decode context for command-phase recording.
+		if opts.SkipTLSMITM {
+			logger.Debug("SkipTLSMITM set — pushing handshake data to TLSHandshakeStore for post-TLS path to combine")
+			if hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore); ok && hsStore != nil {
+				port := uint16(0)
+				if opts.DstCfg != nil {
+					port = uint16(opts.DstCfg.Port)
+				}
+				hsStore.Push(port, models.TLSHandshakeEntry{
+					RespPackets:  [][]byte{handshake},
+					ReqPackets:   [][]byte{handshakeResponse},
+					ReqTimestamp: res.reqTimestamp,
+				})
+				logger.Debug("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore", zap.Uint16("port", port))
+			}
+			// Signal that the pre-TLS config mock should NOT be recorded here;
+			// the post-TLS path will produce a single combined config mock.
+			res.skipConfigMock = true
+			return res, nil
+		}
 
 		reader := bufio.NewReader(clientConn)
 		initialData := make([]byte, 5)
@@ -728,4 +755,313 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	logger.Debug("full auth (plain password) is handled successfully")
 	return res, nil
+}
+
+// handlePostTLSRecord handles MySQL recording for the post-TLS uprobe path.
+// In this mode, the SSL/GoTLS uprobes provide decrypted plaintext starting
+// from HandshakeResponse41 (the full auth after TLS handshake). The server
+// greeting was captured by the ringbuf path and stored in TLSHandshakeStore.
+func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+	// 1. Pop the server greeting from TLSHandshakeStore.
+	port := uint16(0)
+	if opts.DstCfg != nil {
+		port = uint16(opts.DstCfg.Port)
+	}
+	hsStore, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+	if hsStore == nil {
+		return fmt.Errorf("TLSHandshakeStore not available in context for post-TLS MySQL recording")
+	}
+	entry, ok := hsStore.PopWait(port, 5*time.Second)
+	var serverGreetingBuf []byte
+	if ok && len(entry.RespPackets) > 0 {
+		serverGreetingBuf = entry.RespPackets[0]
+	} else {
+		// Fallback: the pre-TLS handshake was not captured (e.g. the MySQL
+		// connection was established before the proxy started intercepting).
+		// Connect to the MySQL server directly to fetch the server greeting.
+		logger.Debug("TLSHandshakeStore empty — fetching server greeting directly",
+			zap.Uint16("port", port))
+		var err error
+		serverGreetingBuf, err = fetchServerGreeting(opts)
+		if err != nil {
+			return fmt.Errorf("no server greeting in TLSHandshakeStore for port %d and direct fetch failed: %w", port, err)
+		}
+	}
+
+	// 2. Decode the server greeting to initialize decode context.
+	greetingPkt, err := wire.DecodePayload(ctx, logger, serverGreetingBuf, clientConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to decode stored server greeting for post-TLS: %w", err)
+	}
+	pluginName, err := wire.GetPluginName(greetingPkt.Message)
+	if err != nil {
+		return fmt.Errorf("failed to get plugin name from stored server greeting: %w", err)
+	}
+	decodeCtx.PluginName = pluginName
+	decodeCtx.UseSSL = true
+
+	// Store the server greeting for the clientConn (needed by DecodePayload for command phase).
+	sg, ok := greetingPkt.Message.(*mysql.HandshakeV10Packet)
+	if !ok {
+		return fmt.Errorf("stored server greeting is not HandshakeV10Packet")
+	}
+	decodeCtx.ServerGreetings.Store(clientConn, sg)
+	decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
+
+	logger.Debug("Post-TLS MySQL: restored server greeting",
+		zap.Uint16("port", port),
+		zap.String("pluginName", pluginName))
+
+	// 3. Read the first packet from the client to determine if this is
+	//    a fresh connection (HandshakeResponse41) or an existing connection
+	//    already in command phase (COM_QUERY, COM_STMT_*, etc.).
+	//
+	//    Distinction: HandshakeResponse41 has sequence number >= 1 (follows
+	//    server greeting at seq 0). Command phase packets have seq 0
+	//    (each command starts a new sequence).
+	firstPkt, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+	if err != nil {
+		return fmt.Errorf("failed to read first post-TLS client packet: %w", err)
+	}
+
+	if len(firstPkt) < 5 {
+		return fmt.Errorf("first post-TLS packet too short (%d bytes)", len(firstPkt))
+	}
+
+	seqNum := firstPkt[3] // 4th byte of MySQL packet header is the sequence number
+
+	if seqNum == 0 {
+		// Sequence 0 = command phase packet. The connection was already
+		// authenticated before interception started. Skip auth exchange
+		// and go directly to command phase recording.
+		logger.Debug("Post-TLS MySQL: existing connection detected (seq=0), skipping auth — entering command phase directly")
+
+		// Produce a synthetic config mock from pre-TLS data so test mode
+		// can match the SSLRequest + HandshakeResponse41 during replay.
+		if ok && len(entry.ReqPackets) > 0 {
+			if err := recordSyntheticConfigMock(ctx, logger, clientConn, mocks, decodeCtx, greetingPkt, entry, opts); err != nil {
+				logger.Warn("failed to record synthetic config mock for seq=0 path", zap.Error(err))
+			}
+		}
+
+		// Feed the first packet back to the parser by wrapping clientConn.
+		wrappedClient := &pUtils.Conn{
+			Conn:   clientConn,
+			Reader: io.MultiReader(bytes.NewReader(firstPkt), clientConn),
+			Logger: logger,
+		}
+
+		// Re-key decode context maps: handleClientQueries will use wrappedClient
+		// (a different net.Conn pointer) for map lookups in DecodePayload.
+		decodeCtx.ServerGreetings.Store(wrappedClient, sg)
+		decodeCtx.LastOp.Store(wrappedClient, wire.RESET)
+
+		return handleClientQueries(ctx, logger, wrappedClient, destConn, mocks, decodeCtx, opts)
+	}
+
+	var requests []mysql.Request
+	var responses []mysql.Response
+
+	// Prepend the pre-TLS SSLRequest and server greeting from TLSHandshakeStore
+	// so we produce a single combined config mock matching the hosted format:
+	//   requests:  [SSLRequest, HandshakeResponse41, ...]
+	//   responses: [HandshakeV10, ..., OK]
+	// Note: SSLRequest MUST be decoded FIRST before HandshakeResponse41 so that decodeCtx.LastOp is still HandshakeV10
+	if ok && len(entry.ReqPackets) > 0 {
+		sslReqPkt, sslErr := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientConn, decodeCtx)
+		if sslErr != nil {
+			logger.Warn("failed to decode stored SSLRequest for combined config mock", zap.Error(sslErr))
+		} else {
+			requests = append(requests, mysql.Request{PacketBundle: *sslReqPkt})
+		}
+	}
+
+	// Sequence >= 1 = HandshakeResponse41 (auth exchange in progress).
+	// Decoding this will update LastOp to HandshakeResponse41.
+	handshakeResponsePkt, err := wire.DecodePayload(ctx, logger, firstPkt, clientConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to decode post-TLS HandshakeResponse41: %w", err)
+	}
+
+	requests = append(requests, mysql.Request{PacketBundle: *handshakeResponsePkt})
+
+	// Prepend server greeting to responses.
+	responses = append(responses, mysql.Response{PacketBundle: *greetingPkt})
+
+	// 4. Handle the auth exchange (same flow as the normal handshake after TLS).
+	//    Read auth response from server (OK/AuthSwitch/AuthMoreData).
+	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+	if err != nil {
+		return fmt.Errorf("failed to read post-TLS auth response: %w", err)
+	}
+	authDecider, err := wire.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to decode post-TLS auth response: %w", err)
+	}
+
+	// Handle AuthSwitchRequest if needed.
+	if _, isSwitch := authDecider.Message.(*mysql.AuthSwitchRequestPacket); isSwitch {
+		responses = append(responses, mysql.Response{PacketBundle: *authDecider})
+		pkt := authDecider.Message.(*mysql.AuthSwitchRequestPacket)
+		decodeCtx.PluginName = pkt.PluginName
+
+		switchResp, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+		if err != nil {
+			return fmt.Errorf("failed to read post-TLS auth switch response: %w", err)
+		}
+		switchPkt, err := mysqlUtils.BytesToMySQLPacket(switchResp)
+		if err != nil {
+			return fmt.Errorf("failed to parse post-TLS auth switch response: %w", err)
+		}
+		requests = append(requests, mysql.Request{
+			PacketBundle: mysql.PacketBundle{
+				Header: &mysql.PacketInfo{Header: &switchPkt.Header, Type: mysql.AuthSwithResponse},
+				Message: intgUtils.EncodeBase64(switchPkt.Payload),
+			},
+		})
+
+		// Read next auth response after switch.
+		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		if err != nil {
+			return fmt.Errorf("failed to read post-TLS auth data after switch: %w", err)
+		}
+		authDecider, err = wire.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
+		if err != nil {
+			return fmt.Errorf("failed to decode post-TLS auth data after switch: %w", err)
+		}
+	}
+
+	// Handle AuthMoreData or OK.
+	authRes, err := handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to handle post-TLS auth: %w", err)
+	}
+	requests = append(requests, authRes.req...)
+	responses = append(responses, authRes.resp...)
+
+	// Record the combined config mock (SSLRequest + HandshakeResponse41 + auth).
+	reqOp := handshakeResponsePkt.Header.Type
+	if len(requests) > 0 && requests[0].Header != nil {
+		reqOp = requests[0].Header.Type // Use SSLRequest type if present
+	}
+	recordMock(ctx, requests, responses, "config",
+		reqOp, authRes.responseOperation,
+		mocks, entry.ReqTimestamp, time.Now(), opts)
+
+	logger.Debug("Post-TLS MySQL: auth exchange recorded, proceeding to command phase")
+
+	// 5. Handle command phase.
+	return handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
+}
+
+// recordSyntheticConfigMock produces a complete config mock from pre-TLS
+// handshake data when the post-TLS uprobe only sees command-phase packets
+// (seq=0). It synthesizes a HandshakeResponse41 from the SSLRequest fields
+// and fabricates fast-auth success responses so that test mode can replay
+// the initial handshake.
+func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, greetingPkt *mysql.PacketBundle, entry models.TLSHandshakeEntry, opts models.OutgoingOptions) error {
+	// Decode the stored SSLRequest.
+	sslReqPkt, err := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientConn, decodeCtx)
+	if err != nil {
+		return fmt.Errorf("failed to decode stored SSLRequest: %w", err)
+	}
+	sslReq, ok := sslReqPkt.Message.(*mysql.SSLRequestPacket)
+	if !ok {
+		return fmt.Errorf("stored packet is not SSLRequest, got %T", sslReqPkt.Message)
+	}
+
+	// Synthesize a HandshakeResponse41 from the SSLRequest fields.
+	// The test-mode matcher only checks MaxPacketSize, CharacterSet, and Filler,
+	// all of which are identical between SSLRequest and HandshakeResponse41.
+	syntheticHR41 := &mysql.HandshakeResponse41Packet{
+		CapabilityFlags: sslReq.CapabilityFlags,
+		MaxPacketSize:   sslReq.MaxPacketSize,
+		CharacterSet:    sslReq.CharacterSet,
+		Filler:          sslReq.Filler,
+		AuthPluginName:  decodeCtx.PluginName,
+	}
+	hr41Bundle := mysql.PacketBundle{
+		Header: &mysql.PacketInfo{
+			Header: &mysql.Header{PayloadLength: 187, SequenceID: 2},
+			Type:   mysql.HandshakeResponse41,
+		},
+		Message: syntheticHR41,
+	}
+
+	// Synthesize auth responses: AuthMoreData(FastAuthSuccess) + OK.
+	authMoreBundle := mysql.PacketBundle{
+		Header: &mysql.PacketInfo{
+			Header: &mysql.Header{PayloadLength: 2, SequenceID: 3},
+			Type:   mysql.AuthStatusToString(mysql.AuthMoreData),
+		},
+		Message: &mysql.AuthMoreDataPacket{
+			StatusTag: mysql.AuthMoreData,
+			Data:      "FastAuthSuccess",
+		},
+	}
+	okBundle := mysql.PacketBundle{
+		Header: &mysql.PacketInfo{
+			Header: &mysql.Header{PayloadLength: 7, SequenceID: 4},
+			Type:   mysql.StatusToString(mysql.OK),
+		},
+		Message: &mysql.OKPacket{
+			Header:      mysql.OK,
+			StatusFlags: 2,
+		},
+	}
+
+	requests := []mysql.Request{
+		{PacketBundle: *sslReqPkt},
+		{PacketBundle: hr41Bundle},
+	}
+	responses := []mysql.Response{
+		{PacketBundle: *greetingPkt},
+		{PacketBundle: authMoreBundle},
+		{PacketBundle: okBundle},
+	}
+
+	recordMock(ctx, requests, responses, "config",
+		sslReqPkt.Header.Type, mysql.StatusToString(mysql.OK),
+		mocks, entry.ReqTimestamp, time.Now(), opts)
+
+	logger.Debug("Post-TLS MySQL: recorded synthetic config mock for seq=0 path")
+	return nil
+}
+
+// fetchServerGreeting connects to the MySQL server directly and reads the
+// initial HandshakeV10 greeting packet. This is used as a fallback when the
+// pre-TLS handshake was not captured by the proxy (e.g. the connection was
+// established before interception started).
+func fetchServerGreeting(opts models.OutgoingOptions) ([]byte, error) {
+	addr := ""
+	if opts.DstCfg != nil {
+		addr = opts.DstCfg.Addr
+	}
+	if addr == "" {
+		return nil, fmt.Errorf("no destination address available to fetch server greeting")
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	// MySQL server sends greeting immediately upon connection.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	// Read the 4-byte MySQL packet header first.
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, fmt.Errorf("read greeting header: %w", err)
+	}
+	payloadLen := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
+	payload := make([]byte, payloadLen)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		return nil, fmt.Errorf("read greeting payload: %w", err)
+	}
+
+	buf := make([]byte, 4+payloadLen)
+	copy(buf, header)
+	copy(buf[4:], payload)
+	return buf, nil
 }
