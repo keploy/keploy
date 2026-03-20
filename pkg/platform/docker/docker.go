@@ -569,6 +569,24 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	idc.logger.Debug("Generating agent service with command", zap.Strings("command", command))
 
+	capAdd := []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "BPF"},
+		{Kind: yaml.ScalarNode, Value: "PERFMON"},
+		{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
+		{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
+		{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
+		{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
+	}
+
+	if opts.EnableDockerUnconfined {
+		capAdd = append(capAdd, &yaml.Node{
+			Kind:        yaml.ScalarNode,
+			Value:       "SYS_ADMIN",
+			LineComment: "opt-in: required for bpffs mount/map pinning in advanced eBPF mode",
+		})
+		idc.logger.Warn("Enabling high-privilege docker-compose settings for keploy-agent (--enable-docker-unconfined)")
+	}
+
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
 		Kind: yaml.MappingNode,
@@ -581,38 +599,36 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "container_name"},
 			{Kind: yaml.ScalarNode, Value: opts.KeployContainer},
 
-			// cap_add — with security explanation comments in the generated YAML
-			{Kind: yaml.ScalarNode, Value: "cap_add", HeadComment: "These capabilities are scoped to the container's own isolated network namespace\n" +
-				"and do NOT grant access to the host's network, interfaces, or firewall.\n" +
-				"The container runs in its own network namespace — no host access is possible."},
-			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "SYS_ADMIN", LineComment: "required for pinning BPF maps to host bpffs (/sys/fs/bpf)"},
-				{Kind: yaml.ScalarNode, Value: "BPF"},
-				{Kind: yaml.ScalarNode, Value: "PERFMON"},
-				{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
-				{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
-				{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
-				{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
-			}},
+			// cap_add — these privileges are required for eBPF interception.
+			{Kind: yaml.ScalarNode, Value: "cap_add", HeadComment: "Capabilities required by keploy-agent for eBPF interception.\n" +
+				"Review and allow only what your security policy permits."},
+			{Kind: yaml.SequenceNode, Content: capAdd},
+		},
+	}
 
-			// security_opt — Docker's default seccomp profile blocks the bpf()
-			// syscall even when CAP_BPF is granted. Disable seccomp and
-			// AppArmor so that eBPF map pinning, sockmap operations, and
-			// bpffs mount inside the container work correctly.
-			{Kind: yaml.ScalarNode, Value: "security_opt"},
-			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+	if opts.EnableDockerUnconfined {
+		// security_opt — Docker's default seccomp profile can block bpf()
+		// syscall and AppArmor can block bpffs mount. This is an explicit
+		// opt-in because it reduces container sandboxing.
+		serviceNode.Content = append(serviceNode.Content,
+			&yaml.Node{
+				Kind:        yaml.ScalarNode,
+				Value:       "security_opt",
+				HeadComment: "Enabled via --enable-docker-unconfined (high privilege).",
+			},
+			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
 				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
 			}},
-
-			// tmpfs — provide a writable mount point for bpffs. The host's
-			// /sys/fs/bpf has mode=700 and cannot be written from inside a
-			// container. The agent mounts a real bpffs on top at startup.
-			{Kind: yaml.ScalarNode, Value: "tmpfs"},
-			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+			&yaml.Node{
+				Kind:        yaml.ScalarNode,
+				Value:       "tmpfs",
+				HeadComment: "Provides writable /sys/fs/bpf for bpffs mount in advanced mode.",
+			},
+			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "/sys/fs/bpf:exec,mode=0755"},
 			}},
-		},
+		)
 	}
 
 	// Add environment variables

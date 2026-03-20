@@ -261,6 +261,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().Bool("enable-docker-unconfined", c.cfg.Agent.EnableDockerUnconfined, "Enable high-privilege docker-compose settings (SYS_ADMIN, seccomp/apparmor unconfined) for advanced eBPF map pinning/sockmap")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
@@ -313,6 +314,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().Bool("enable-docker-unconfined", c.cfg.Agent.EnableDockerUnconfined, "Enable high-privilege docker-compose settings (SYS_ADMIN, seccomp/apparmor unconfined) for advanced eBPF map pinning/sockmap")
 
 	default:
 		return errors.New("unknown command name")
@@ -375,69 +377,70 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 
 func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
-		"testsets":              "test-sets",
-		"fullBody":              "full",
-		"reportPath":            "report-path",
-		"tc":                    "test-case",
-		"delay":                 "delay",
-		"apiTimeout":            "api-timeout",
-		"mongoPassword":         "mongo-password",
-		"tlsPrivateKeyPath":     "tls-private-key-path",
-		"coverageReportPath":    "coverage-report-path",
-		"language":              "language",
-		"ignoreOrdering":        "ignore-ordering",
-		"coverage":              "coverage",
-		"removeUnusedMocks":     "remove-unused-mocks",
-		"goCoverage":            "go-coverage",
-		"fallBackOnMiss":        "fallBack-on-miss",
-		"basePath":              "base-path",
-		"updateTemplate":        "update-template",
-		"mocking":               "mocking",
-		"sourceFilePath":        "source-file-path",
-		"testFilePath":          "test-file-path",
-		"testCommand":           "test-command",
-		"coverageFormat":        "coverage-format",
-		"expectedCoverage":      "expected-coverage",
-		"maxIterations":         "max-iterations",
-		"testDir":               "test-dir",
-		"llmBaseUrl":            "llm-base-url",
-		"model":                 "model",
-		"llmApiVersion":         "llm-api-version",
-		"configPath":            "config-path",
-		"path":                  "path",
-		"port":                  "port",
-		"grpcPort":              "grpc-port",
-		"proxyPort":             "proxy-port",
-		"incomingProxyPort":     "incoming-proxy-port",
-		"dnsPort":               "dns-port",
-		"command":               "command",
-		"cmdType":               "cmd-type",
-		"buildDelay":            "build-delay",
-		"containerName":         "container-name",
-		"networkName":           "network-name",
-		"passThroughPorts":      "pass-through-ports",
-		"appId":                 "app-id",
-		"appName":               "app-name",
-		"generateGithubActions": "generate-github-actions",
-		"disableTele":           "disable-tele",
-		"disableANSI":           "disable-ansi",
-		"selectedTests":         "selected-tests",
-		"testReport":            "test-report",
-		"enableTesting":         "enable-testing",
-		"inDocker":              "in-docker",
-		"keployContainer":       "keploy-container",
-		"keployNetwork":         "keploy-network",
-		"recordTimer":           "record-timer",
-		"urlMethods":            "url-methods",
-		"inCi":                  "in-ci",
-		"protoFile":             "proto-file",
-		"protoDir":              "proto-dir",
-		"protoInclude":          "proto-include",
-		"allowHighRisk":         "allow-high-risk",
-		"disableMapping":        "disable-mapping",
-		"compareAll":            "compare-all",
-		"schemaMatch":           "schema-match",
-		"updateTestMapping":     "update-test-mapping",
+		"testsets":               "test-sets",
+		"fullBody":               "full",
+		"reportPath":             "report-path",
+		"tc":                     "test-case",
+		"delay":                  "delay",
+		"apiTimeout":             "api-timeout",
+		"mongoPassword":          "mongo-password",
+		"tlsPrivateKeyPath":      "tls-private-key-path",
+		"coverageReportPath":     "coverage-report-path",
+		"language":               "language",
+		"ignoreOrdering":         "ignore-ordering",
+		"coverage":               "coverage",
+		"removeUnusedMocks":      "remove-unused-mocks",
+		"goCoverage":             "go-coverage",
+		"fallBackOnMiss":         "fallBack-on-miss",
+		"basePath":               "base-path",
+		"updateTemplate":         "update-template",
+		"mocking":                "mocking",
+		"sourceFilePath":         "source-file-path",
+		"testFilePath":           "test-file-path",
+		"testCommand":            "test-command",
+		"coverageFormat":         "coverage-format",
+		"expectedCoverage":       "expected-coverage",
+		"maxIterations":          "max-iterations",
+		"testDir":                "test-dir",
+		"llmBaseUrl":             "llm-base-url",
+		"model":                  "model",
+		"llmApiVersion":          "llm-api-version",
+		"configPath":             "config-path",
+		"path":                   "path",
+		"port":                   "port",
+		"grpcPort":               "grpc-port",
+		"proxyPort":              "proxy-port",
+		"incomingProxyPort":      "incoming-proxy-port",
+		"dnsPort":                "dns-port",
+		"command":                "command",
+		"cmdType":                "cmd-type",
+		"buildDelay":             "build-delay",
+		"containerName":          "container-name",
+		"networkName":            "network-name",
+		"passThroughPorts":       "pass-through-ports",
+		"enableDockerUnconfined": "enable-docker-unconfined",
+		"appId":                  "app-id",
+		"appName":                "app-name",
+		"generateGithubActions":  "generate-github-actions",
+		"disableTele":            "disable-tele",
+		"disableANSI":            "disable-ansi",
+		"selectedTests":          "selected-tests",
+		"testReport":             "test-report",
+		"enableTesting":          "enable-testing",
+		"inDocker":               "in-docker",
+		"keployContainer":        "keploy-container",
+		"keployNetwork":          "keploy-network",
+		"recordTimer":            "record-timer",
+		"urlMethods":             "url-methods",
+		"inCi":                   "in-ci",
+		"protoFile":              "proto-file",
+		"protoDir":               "proto-dir",
+		"protoInclude":           "proto-include",
+		"allowHighRisk":          "allow-high-risk",
+		"disableMapping":         "disable-mapping",
+		"compareAll":             "compare-all",
+		"schemaMatch":            "schema-match",
+		"updateTestMapping":      "update-test-mapping",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -1203,6 +1206,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
+		enableDockerUnconfined, err := cmd.Flags().GetBool("enable-docker-unconfined")
+		if err != nil {
+			errMsg := "failed to read the enable-docker-unconfined flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Agent.EnableDockerUnconfined = enableDockerUnconfined
+
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
@@ -1336,6 +1347,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil // Or return an error
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
+		enableDockerUnconfined, err := cmd.Flags().GetBool("enable-docker-unconfined")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get enable-docker-unconfined flag")
+			return nil
+		}
+		c.cfg.Agent.EnableDockerUnconfined = enableDockerUnconfined
 	}
 
 	return nil

@@ -350,16 +350,16 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 	return nil
 }
 
-// PassThrough passes network traffic bidirectionally between clientConn and the
-// destination using io.Copy. On Linux with *net.TCPConn pairs this can use
-
+// PassThrough function is used to pass the network traffic to the destination connection.
+// It also closes the destination connection if the function returns an error.
 func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
 	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-
+	// making destConn
 	var destConn net.Conn
 	var err error
 	if dstCfg.TLSCfg != nil {
 		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+
 		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr))
@@ -376,11 +376,6 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		logger.Debug("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	}
 
-	// Enable TCP_NODELAY on the destination if it's a plain TCP conn
-	if tc, ok := destConn.(*net.TCPConn); ok {
-		_ = tc.SetNoDelay(true)
-	}
-
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	for _, v := range requestBuffer {
 		_, err := destConn.Write(v)
@@ -390,46 +385,62 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		}
 	}
 
-	// Use io.Copy for bidirectional forwarding.
-	// On Linux with *net.TCPConn, Go's io.Copy internally uses splice(2) for
-	// zero-copy forwarding, eliminating userspace buffer copies entirely.
-	passthroughCtx, cancel := context.WithCancel(ctx)
+	destBufferChannel := make(chan []byte)
+	clientBufferChannel := make(chan []byte)
+	errChannel := make(chan error, 2)
+	passthroughContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, 2)
-
-	// dest → client
 	go func() {
 		defer Recover(logger, clientConn, nil)
-		defer func() {
-			if err := destConn.Close(); err != nil {
+		defer close(destBufferChannel)
+		defer func(destConn net.Conn) {
+			err := destConn.Close()
+			if err != nil {
 				utils.LogError(logger, err, "failed to close the destination connection")
 			}
-		}()
-		_, err := io.Copy(clientConn, destConn)
-		errCh <- err
+		}(destConn)
+
+		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
 	}()
 
-	// client → dest
 	go func() {
 		defer Recover(logger, clientConn, nil)
-		_, err := io.Copy(destConn, clientConn)
-		errCh <- err
+		defer close(clientBufferChannel)
+		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
 	}()
 
-	// Wait for either direction to finish or context cancellation
-	select {
-	case <-passthroughCtx.Done():
-		return nil, passthroughCtx.Err()
-	case err := <-errCh:
-		cancel() // Signal the other goroutine to stop
-		if err != nil && err != io.EOF {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				return nil, nil
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+
+		case buffer := <-clientBufferChannel:
+			_, err := destConn.Write(buffer)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write subsequent request to destination")
+				return nil, err
 			}
-			return nil, err
+
+		case buffer := <-destBufferChannel:
+			_, err := clientConn.Write(buffer)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				utils.LogError(logger, err, "failed to write response to the client")
+				return nil, err
+			}
+
+		case err := <-errChannel:
+			// nolint:staticcheck
+			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+				if err == io.EOF {
+					return nil, nil
+				}
+				return nil, err
+			}
 		}
-		return nil, nil
 	}
 }
 

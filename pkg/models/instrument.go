@@ -84,24 +84,25 @@ type SetupOptions struct {
 	DockerDelay     uint64
 	Synchronous     bool
 	// Cmd               string
-	AgentURI          string
-	IsDocker          bool
-	CommandType       string
-	EnableTesting     bool
-	ProxyPort         uint32
-	IncomingProxyPort uint16
-	DnsPort           uint32
-	Mode              Mode
-	GlobalPassthrough bool
-	AgentPort         uint32
-	AppPorts          []string
-	AppNetworks       []string
-	NetworkAliases    map[string][]string
-	BuildDelay        uint64
-	PassThroughPorts  []uint
-	ConfigPath        string
-	ExtraArgs         []string
-	EnableSampling    int
+	AgentURI               string
+	IsDocker               bool
+	CommandType            string
+	EnableTesting          bool
+	ProxyPort              uint32
+	IncomingProxyPort      uint16
+	DnsPort                uint32
+	Mode                   Mode
+	GlobalPassthrough      bool
+	AgentPort              uint32
+	AppPorts               []string
+	AppNetworks            []string
+	NetworkAliases         map[string][]string
+	BuildDelay             uint64
+	PassThroughPorts       []uint
+	EnableDockerUnconfined bool
+	ConfigPath             string
+	ExtraArgs              []string
+	EnableSampling         int
 }
 
 type RunOptions struct {

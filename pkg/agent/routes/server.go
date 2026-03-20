@@ -3,8 +3,10 @@ package routes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -21,13 +23,17 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, router 
 	go func() {
 		<-ctx.Done()
 		logger.Info("Shutting down agent HTTP server")
-		if err := srv.Close(); err != nil {
-			logger.Error("failed to close HTTP server", zap.Error(err))
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("HTTP server shutdown did not complete; check for long-running handlers or increase shutdown timeout", zap.Error(err))
 		}
 	}()
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("failed to start HTTP server", zap.Error(err))
+		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.Error(err))
 		return
 	}
 	logger.Info("HTTP server stopped")
