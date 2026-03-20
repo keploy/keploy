@@ -7,7 +7,7 @@
 # Without dedup, 30+ lookups to the same domain would create 30+ DNS mocks
 # instead of a single deduplicated one.
 
-set -Eeuxo pipefail
+set -Eeuo pipefail
 
 # --- Helpers ---
 section() { echo "::group::$*"; }
@@ -67,8 +67,8 @@ check_dns_dedup() {
     echo "Checking DNS mock deduplication..."
     local mocks_dir="./keploy/test-set-0"
     if [ ! -f "$mocks_dir/mocks.yaml" ]; then
-        echo "::warning::No mocks.yaml found — cannot verify DNS dedup"
-        return 0
+        echo "::error::No mocks.yaml found — DNS deduplication cannot be verified. Ensure recording produced mocks."
+        return 1
     fi
 
     # Count DNS mock entries. With dedup, a domain resolved 30+ times

@@ -68,16 +68,17 @@ send_request() {
   echo "=== Query both again (second round) ==="
   curl -sS http://localhost:8080/api/query-both || true
 
-  # Let keploy persist, then stop it
+  # Let keploy persist, then gracefully stop it
   sleep 10
   echo "$kp_pid Keploy PID"
-  echo "Killing keploy"
-  sudo kill "$kp_pid" 2>/dev/null || true
+  echo "Sending SIGINT to keploy for graceful shutdown"
+  sudo kill -INT "$kp_pid" 2>/dev/null || true
+  wait "$kp_pid" 2>/dev/null || true
 }
 
 # --- Main ---
 
-source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
+source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh"
 
 # Clean slate
 sudo rm -rf keploy/ keploy.yml
@@ -88,7 +89,7 @@ wait_for_mysql
 endsec
 
 section "Build"
-source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
+source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/update-java.sh"
 mvn clean package -Dmaven.test.skip=true -q | tee mvn_build.log
 endsec
 
