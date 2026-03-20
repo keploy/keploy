@@ -527,6 +527,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 			dstCfg := &models.ConditionalDstCfg{
+				Addr: dstAddr,
 				Port: uint(destInfo.Port),
 			}
 			outgoingOpts.DstCfg = dstCfg
