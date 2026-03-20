@@ -20,6 +20,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// ErrMockNotMatched is returned by decodeHTTP when no recorded mock
+// matches the outgoing HTTP request. Callers can check for this with
+// errors.Is to distinguish a mock-miss from a real proxy error.
+var ErrMockNotMatched = errors.New("no matching mock found")
+
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
@@ -145,7 +150,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
 					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				errCh <- fmt.Errorf("no matching mock found for %s %s", request.Method, request.URL.Path)
+				errCh <- fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
 				return
 			}
 

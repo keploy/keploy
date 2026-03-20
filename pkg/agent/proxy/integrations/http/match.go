@@ -237,22 +237,14 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			return nil, ctx.Err()
 		}
 
-		// Content type check — compare only the media type (ignoring
-		// parameters like charset) so that trivial differences such as
-		// "application/json" vs "application/json;charset=UTF-8" don't
-		// prevent a match. Mock headers may be comma-joined (via
-		// ToYamlHTTPHeader), and request headers may have multiple
-		// values, so both sides are normalised before comparison.
+		// Content type check — only enforced when both the request and
+		// the mock specify a Content-Type. Compares only the media type
+		// (ignoring parameters like charset) so that trivial differences
+		// such as "application/json" vs "application/json;charset=UTF-8"
+		// don't prevent a match. If either side omits Content-Type,
+		// matching falls through to the other criteria.
 		inputCTValues := input.header.Values("Content-Type")
 		mockCT := mock.Spec.HTTPReq.Header["Content-Type"]
-		if len(inputCTValues) == 0 && mockCT != "" {
-			h.Logger.Debug("mock expects Content-Type but request has none", zap.String("mock name", mock.Name))
-			continue
-		}
-		if len(inputCTValues) > 0 && mockCT == "" {
-			h.Logger.Debug("mock has no Content-Type but request does", zap.String("mock name", mock.Name))
-			continue
-		}
 		if len(inputCTValues) > 0 && mockCT != "" {
 			mockMediaTypes := parseMediaTypes(mockCT)
 			inputMediaTypes := parseMediaTypes(strings.Join(inputCTValues, ","))
