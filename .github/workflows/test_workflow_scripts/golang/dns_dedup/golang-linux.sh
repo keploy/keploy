@@ -74,7 +74,8 @@ check_dns_dedup() {
     # Count DNS mock entries. With dedup, a domain resolved 30+ times
     # should produce only a handful of mocks, not 30+.
     local dns_mock_count
-    dns_mock_count=$(grep -c 'kind: DNS' "$mocks_dir/mocks.yaml" 2>/dev/null || echo "0")
+    dns_mock_count=$(grep -c 'kind: DNS' "$mocks_dir/mocks.yaml" 2>/dev/null || true)
+    : "${dns_mock_count:=0}"
     echo "DNS mock count: $dns_mock_count"
 
     # We send ~40 DNS lookups total (30 for default domain + 10 for google.com).
