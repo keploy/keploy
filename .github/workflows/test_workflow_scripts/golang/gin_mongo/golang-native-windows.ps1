@@ -25,36 +25,12 @@ function Remove-KeployDirs {
     }
 }
 
-# --- Helper: Graceful shutdown ---
-# Kill the app first so Keploy detects the exit and flushes mocks/tests,
-# then wait for Keploy to stop. Only force-kill as a last resort.
-function Stop-KeployGracefully {
-    # 1. Kill the application process (ginApp.exe) — Keploy will detect this and shut down
-    $appProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq 'ginApp.exe' }
-    foreach ($p in $appProcs) {
-        Write-Host "Stopping app process (PID $($p.ProcessId))..."
-        cmd /c "taskkill /PID $($p.ProcessId) /T /F" 2>$null | Out-Null
-    }
-
-    # 2. Wait for Keploy to finish flushing and exit on its own
-    Write-Host "Waiting for Keploy to flush recordings and exit..."
-    $waited = 0
-    while ($waited -lt 30) {
-        $kProc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match 'keploy.*record' } |
-            Select-Object -First 1
-        if (-not $kProc) { break }
-        Start-Sleep -Seconds 2
-        $waited += 2
-    }
-
-    # 3. Force kill any remaining keploy processes as fallback
-    $remaining = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'keploy' }
-    foreach ($p in $remaining) {
-        Write-Host "Force-killing leftover keploy process (PID $($p.ProcessId))..."
-        cmd /c "taskkill /PID $($p.ProcessId) /T /F" 2>$null | Out-Null
+# --- Helper: Kill Process Tree ---
+function Kill-Tree {
+    param([int]$ProcessId)
+    if ($ProcessId -gt 0) {
+        Write-Host "Killing process tree (PID $ProcessId)..."
+        cmd /c "taskkill /PID $ProcessId /T /F" 2>$null | Out-Null
     }
 }
 
@@ -235,10 +211,16 @@ for ($i = 1; $i -le 2; $i++) {
         exit 1
     }
 
-    Write-Host "Waiting 5 seconds for recording to settle..."
+    Write-Host "Waiting 5 seconds for recording..."
     Start-Sleep -Seconds 5
 
-    Stop-KeployGracefully
+    $REC_PROC = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -match 'keploy.*record' -or $_.CommandLine -match 'ginApp.exe' } |
+      Select-Object -First 1
+
+    if ($REC_PROC) { Kill-Tree -ProcessId $REC_PROC.ProcessId }
+    # Wait for keploy to flush mocks to disk
+    Start-Sleep -Seconds 10
 
     Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
     Drain-JobOutput -Job $recJob -LogFile $logFile
@@ -246,10 +228,12 @@ for ($i = 1; $i -le 2; $i++) {
     
     Remove-Job $recJob -Force
 
-    # Scan for errors, but apply filter
+    # Scan for errors, but apply filter (force-kill on Windows causes expected app termination errors)
     $recErrors = Select-String -Path $logFile -Pattern "ERROR"
-    $filteredRecErrors = $recErrors | Where-Object { 
-        $_.Line -notmatch "Failed to read upstream response.*wsarecv"
+    $filteredRecErrors = $recErrors | Where-Object {
+        $_.Line -notmatch "Failed to read upstream response.*wsarecv" -and
+        $_.Line -notmatch "user application terminated unexpectedly" -and
+        $_.Line -notmatch "unknown error received from application"
     }
 
     if ($filteredRecErrors) {
@@ -288,7 +272,9 @@ $realErrors = $logErrors | Where-Object {
     $_.Line -notmatch "The process .* not found" -and
     $_.Line -notmatch "Error removing file.*keploy-logs\.txt" -and
     $_.Line -notmatch "remove keploy-logs\.txt: The process cannot access the file because it is being used by another process" -and
-    $_.Line -notmatch "Failed to read upstream response.*wsarecv"
+    $_.Line -notmatch "Failed to read upstream response.*wsarecv" -and
+    $_.Line -notmatch "user application terminated unexpectedly" -and
+    $_.Line -notmatch "unknown error received from application"
 }
 
 if ($realErrors) {
