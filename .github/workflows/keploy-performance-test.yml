@@ -35,7 +35,7 @@ jobs:
           path: keploy
 
       - name: Checkout Keploy to test (custom repo/branch if manually specified)
-        if: github.event_name == 'workflow_dispatch' && (github.event.inputs.keploy_repo != 'keploy/keploy' || github.event.inputs.keploy_branch != 'main')
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.keploy_repo || 'keploy/keploy' }}
