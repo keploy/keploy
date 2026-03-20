@@ -18,6 +18,8 @@ P90_THRESHOLD=${P90_THRESHOLD:-15}     # Default: 15ms (workflow can override)
 P99_THRESHOLD=${P99_THRESHOLD:-70}     # Default: 70ms (workflow can override)
 RPS_THRESHOLD=${RPS_THRESHOLD:-100}
 ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-1.0}
+CHECK_KEPLOY=${CHECK_KEPLOY:-true}
+KEPLOY_PID_FILE="keploy.pid"
 
 # Colors for output
 RED='\033[0;31m'
@@ -201,6 +203,25 @@ for i in $(seq 1 $NUM_RUNS); do
     echo "Run $i of $NUM_RUNS" >> "$output_file"
     echo "=========================================" >> "$output_file"
     
+    # Check if Keploy is still alive before starting the test
+    if [ "$CHECK_KEPLOY" = true ]; then
+        if [ -f "$KEPLOY_PID_FILE" ]; then
+            kp_pid=$(cat "$KEPLOY_PID_FILE")
+            if ! ps -p "$kp_pid" > /dev/null; then
+                # Check one more time with a small wait in case it just started
+                sleep 2
+                if ! ps -p "$kp_pid" > /dev/null; then
+                    echo -e "${RED}❌ ERROR: Keploy process (PID: $kp_pid) is NOT running!${NC}" | tee -a "$output_file"
+                    run_results[$i]="FAIL"
+                    ((failed_runs++))
+                    continue
+                fi
+            fi
+        else
+            echo -e "${YELLOW}⚠️ WARNING: Keploy PID file not found, skipping process check${NC}"
+        fi
+    fi
+    
     # Run k6 test (capture exit code to ensure thresholds/errors aren't ignored)
     k6 run load-test.js 2>&1 | tee -a "$output_file"
     k6_status=${PIPESTATUS[0]}
@@ -291,6 +312,31 @@ echo "========================================="
 echo "Failed runs: $failed_runs / $NUM_RUNS"
 echo "Required failures to fail pipeline: $REQUIRED_FAILURES"
 echo ""
+
+# Verify that test cases were recorded (if checking Keploy)
+if [ "$CHECK_KEPLOY" = true ] && [ "$failed_runs" -lt "$REQUIRED_FAILURES" ]; then
+    echo "========================================="
+    echo "VERIFYING RECORDED DATA"
+    echo "========================================="
+    
+    # Use -d to check if directory exists first
+    if [ ! -d "keploy-tests" ]; then
+        echo -e "${RED}❌ ERROR: 'keploy-tests' directory not found!${NC}"
+        echo "No test cases were recorded."
+        exit 1
+    fi
+    
+    NUM_TESTS=$(find keploy-tests -name "*.yaml" | wc -l)
+    if [ "$NUM_TESTS" -eq 0 ]; then
+        echo -e "${RED}❌ ERROR: No test cases recorded in 'keploy-tests' directory!${NC}"
+        echo "The performance numbers might be invalid (plain app instead of Keploy recording path)."
+        exit 1
+    else
+        echo -e "${GREEN}✅ Verified: $NUM_TESTS test cases recorded in 'keploy-tests'${NC}"
+    fi
+    echo "========================================="
+    echo ""
+fi
 
 if [ $failed_runs -ge $REQUIRED_FAILURES ]; then
     echo -e "${RED}❌ PIPELINE FAILED${NC}"

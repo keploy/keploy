@@ -31,10 +31,21 @@ echo "📝 Keploy PID: $(cat keploy.pid)"
 echo "⏳ Waiting for PetClinic to be ready..."
 for i in {1..30}; do
   if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
+    # Verify Keploy process is still alive
+    KEPLOY_PID=$(cat keploy.pid)
+    if ! ps -p $KEPLOY_PID > /dev/null; then
+      echo "❌ ERROR: PetClinic is healthy but Keploy process (PID: $KEPLOY_PID) has died!"
+      exit 1
+    fi
     echo "✅ PetClinic with Keploy is ready"
     exit 0
   fi
   echo "Waiting for PetClinic with Keploy... ($i/30)"
+  # Also check if Keploy died during the wait
+  if ! ps -p $(cat keploy.pid) > /dev/null; then
+    echo "❌ ERROR: Keploy process died during startup"
+    exit 1
+  fi
   sleep 2
 done
 
