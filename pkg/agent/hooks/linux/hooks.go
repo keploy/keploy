@@ -641,7 +641,7 @@ func ensureBPFFS(logger *zap.Logger) {
 
 	// Mount a fresh bpffs. This requires CAP_SYS_ADMIN + no AppArmor restriction.
 	if err := unix.Mount("bpf", bpfFSPath, "bpf", 0, ""); err != nil {
-		logger.Error("Failed to mount bpffs — BPF map pinning will not work. If running inside a container, ensure it has CAP_SYS_ADMIN, an unconfined seccomp/AppArmor profile, or run with relaxed container security settings (for example, --cap-add=SYS_ADMIN or a project-specific option like --enable-docker-unconfined).",
+		logger.Warn("Failed to mount bpffs — BPF map pinning will not work",
 			zap.String("path", bpfFSPath), zap.Error(err))
 		return
 	}
