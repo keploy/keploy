@@ -186,11 +186,7 @@ func (i *Injector) updateJavaScriptImports(importedContent string, newImports []
 
 	originalLines := strings.Split(importedContent, "\n")
 	updatedLines := strings.Split(updatedContent, "\n")
-	importLength := len(updatedLines) - len(originalLines)
-
-	if importLength < 0 {
-		importLength = 0
-	}
+	importLength := max(len(updatedLines)-len(originalLines), 0)
 
 	return updatedContent, importLength, nil
 }
@@ -523,11 +519,7 @@ func (i *Injector) updateTypeScriptImports(importedContent string, newImports []
 
 	originalLines := strings.Split(importedContent, "\n")
 	updatedLines := strings.Split(updatedContent, "\n")
-	importLength := len(updatedLines) - len(originalLines)
-
-	if importLength < 0 {
-		importLength = 0
-	}
+	importLength := max(len(updatedLines)-len(originalLines), 0)
 	return updatedContent, importLength, nil
 }
 
