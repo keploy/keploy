@@ -72,13 +72,28 @@ send_request(){
       --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
       --header 'Accept: application/json'
 
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    # Wait for keploy to record the tcs and mocks.
     sleep 10
+
+    # Kill the app first so Keploy detects the exit and flushes mocks
+    APP_PID="$(pgrep -n -f './ginApp' || true)"
+    if [ -n "$APP_PID" ]; then
+        echo "Stopping app (PID $APP_PID) to trigger Keploy flush..."
+        sudo kill "$APP_PID" 2>/dev/null || true
+        sleep 5
+    fi
+
+    # Then send SIGINT to Keploy and wait for it to exit
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
-    echo "Killing keploy"
     if [ -n "$REC_PID" ]; then
+        echo "Sending SIGINT to keploy for graceful shutdown"
         sudo kill -INT "$REC_PID" 2>/dev/null || true
+        # Wait for keploy to exit (up to 15s)
+        for i in {1..15}; do
+            kill -0 "$REC_PID" 2>/dev/null || break
+            sleep 1
+        done
     else
         echo "No keploy process found to kill."
     fi

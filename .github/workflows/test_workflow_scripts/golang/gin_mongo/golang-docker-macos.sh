@@ -34,11 +34,23 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
+    # Stop the app container first so Keploy detects the exit and flushes mocks
+    docker stop "$container_name" 2>/dev/null || true
+
+    # Wait for Keploy to finish flushing
+    sleep 10
+
+    # Then send SIGINT to Keploy if still running
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     if [ -n "$REC_PID" ]; then
-        echo "Killing keploy"
+        echo "Sending SIGINT to keploy for graceful shutdown"
         sudo kill -INT "$REC_PID" 2>/dev/null || true
+        # Wait for keploy to exit
+        for i in {1..15}; do
+            kill -0 "$REC_PID" 2>/dev/null || break
+            sleep 1
+        done
     fi
 }
 
