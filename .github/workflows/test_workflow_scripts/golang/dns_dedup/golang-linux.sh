@@ -117,6 +117,15 @@ go mod tidy
 go build -o dns-dedup
 endsec
 
+# Generate keploy config with noise for DNS-dependent fields.
+# The resolve-many response contains per-iteration "new" flags and "unique_ip_sets"
+# counts that depend on which IPs the DNS returns — these differ between
+# live recording and mocked replay.
+section "Generate Config"
+sudo -E env PATH=$PATH "$RECORD_BIN" config --generate
+sed -i 's/global: {}/global: {"body": {"unique_ip_sets":[],"results":[]}}/' ./keploy.yml
+endsec
+
 # Record
 section "Start Recording"
 echo "Starting Recording..."
