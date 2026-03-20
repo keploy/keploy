@@ -20,6 +20,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// ErrMockNotMatched is returned by decodeHTTP when no recorded mock
+// matches the outgoing HTTP request. Callers can check for this with
+// errors.Is to distinguish a mock-miss from a real proxy error.
+var ErrMockNotMatched = errors.New("no matching mock found")
+
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
@@ -133,18 +138,19 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				if !utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
-					utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", utils.GetReqMeta(request)))
+				h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
+				// No mock matched — send a 502 so the application gets a
+				// proper HTTP error instead of a silent connection close
+				// (EOF / connection reset). Proxy-level passthrough rules
+				// handle configured bypass cases before the parser is
+				// invoked, so no passthrough is attempted here.
+				noMockBody := "keploy: no matching mock found for this HTTP request\n"
+				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
+				if _, err := clientConn.Write([]byte(noMock)); err != nil {
+					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				if opts.FallBackOnMiss {
-					_, err = pUtil.PassThrough(ctx, h.Logger, clientConn, dstCfg, [][]byte{reqBuf})
-					if err != nil {
-						utils.LogError(h.Logger, err, "failed to passThrough http request", zap.Any("metadata", utils.GetReqMeta(request)))
-						errCh <- err
-						return
-					}
-				}
-				errCh <- nil
+				errCh <- fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
 				return
 			}
 
