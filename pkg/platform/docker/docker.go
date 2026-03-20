@@ -570,6 +570,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	idc.logger.Debug("Generating agent service with command", zap.Strings("command", command))
 
 	capAdd := []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "SYS_ADMIN", LineComment: "required for bpffs mount and BPF map pinning"},
 		{Kind: yaml.ScalarNode, Value: "BPF"},
 		{Kind: yaml.ScalarNode, Value: "PERFMON"},
 		{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
@@ -579,11 +580,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 
 	if opts.EnableDockerUnconfined {
-		capAdd = append(capAdd, &yaml.Node{
-			Kind:        yaml.ScalarNode,
-			Value:       "SYS_ADMIN",
-			LineComment: "opt-in: required for bpffs mount/map pinning in advanced eBPF mode",
-		})
 		idc.logger.Warn("Enabling high-privilege docker-compose settings for keploy-agent (--enable-docker-unconfined)")
 	}
 
@@ -606,6 +602,19 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		},
 	}
 
+	// tmpfs — provide a writable mount point for bpffs so the agent can
+	// pin BPF maps. This is required for basic eBPF operation.
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{
+			Kind:        yaml.ScalarNode,
+			Value:       "tmpfs",
+			HeadComment: "Writable /sys/fs/bpf is required for BPF map pinning.",
+		},
+		&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "/sys/fs/bpf:exec,mode=0755"},
+		}},
+	)
+
 	if opts.EnableDockerUnconfined {
 		// security_opt — Docker's default seccomp profile can block bpf()
 		// syscall and AppArmor can block bpffs mount. This is an explicit
@@ -619,14 +628,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
 				{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
 				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
-			}},
-			&yaml.Node{
-				Kind:        yaml.ScalarNode,
-				Value:       "tmpfs",
-				HeadComment: "Provides writable /sys/fs/bpf for bpffs mount in advanced mode.",
-			},
-			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "/sys/fs/bpf:exec,mode=0755"},
 			}},
 		)
 	}
