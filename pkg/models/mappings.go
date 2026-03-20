@@ -20,6 +20,9 @@ type MockEntry struct {
 	ResTimestampMock string `json:"resTimestampMock,omitempty" yaml:"resTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }
 
+// FormatMockTimestamp stores mock timings as stable RFC3339 strings so
+// mappings.yaml remains portable across YAML/JSON/BSON encoders while still
+// omitting zero values.
 func FormatMockTimestamp(ts time.Time) string {
 	if ts.IsZero() {
 		return ""

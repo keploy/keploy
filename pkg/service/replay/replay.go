@@ -1354,10 +1354,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if len(consumedMocks) > 0 {
 				var newMocks []models.MockEntry
 				for _, m := range consumedMocks {
+					timestamp := m.Timestamp
+					if m.ReqTimestampMock != "" {
+						if parsedReqTime, err := time.Parse(time.RFC3339Nano, m.ReqTimestampMock); err == nil {
+							timestamp = parsedReqTime.Unix()
+						}
+					}
+
 					newMocks = append(newMocks, models.MockEntry{
 						Name:             m.Name,
 						Kind:             string(m.Kind),
-						Timestamp:        m.Timestamp,
+						Timestamp:        timestamp,
 						ReqTimestampMock: m.ReqTimestampMock,
 						ResTimestampMock: m.ResTimestampMock,
 					})
