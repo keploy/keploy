@@ -20,7 +20,7 @@ echo "📦 Using JAR: $PETCLINIC_JAR"
 
 # Start Keploy wrapping PetClinic application
 sudo -E env PATH=$PATH ./keploy record \
-  -c "java -jar $PETCLINIC_JAR --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic --spring.datasource.username=root --spring.datasource.password=petclinic" \
+  -c "java -Dspring.profiles.active=mysql -jar $PETCLINIC_JAR --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic --spring.datasource.username=root --spring.datasource.password=petclinic" \
   --path=./keploy-tests \
   --config-path=/tmp/keploy-no-config &
 
