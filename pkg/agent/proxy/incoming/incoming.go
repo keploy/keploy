@@ -297,4 +297,3 @@ func extractPortFromAddr(addr string, fallback uint16) uint16 {
 	}
 	return uint16(port64)
 }
-

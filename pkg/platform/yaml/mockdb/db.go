@@ -532,4 +532,3 @@ func (ys *MockYaml) GetCurrMockID() int64 {
 func (ys *MockYaml) ResetCounterID() {
 	atomic.StoreInt64(&ys.idCounter, -1)
 }
-

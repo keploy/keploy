@@ -115,7 +115,6 @@ type Session struct {
 	models.OutgoingOptions
 }
 
-
 func (s *Sessions) getAll() map[uint64]*Session {
 	sessions := map[uint64]*Session{}
 	s.sessions.Range(func(k, v interface{}) bool {
