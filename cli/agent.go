@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"os"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
@@ -39,24 +37,6 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 				utils.LogError(logger, nil, "service doesn't satisfy agent service interface")
 				return nil
 			}
-
-			shutdownComplete := make(chan struct{})
-			defer close(shutdownComplete)
-
-			// Force-exit safety net: if the agent doesn't shut down cleanly
-			// within 10 seconds of context cancellation, force exit.
-			const forceExitTimeout = 10 * time.Second
-			go func() {
-				<-ctx.Done()
-				select {
-				case <-shutdownComplete:
-					return
-				case <-time.After(forceExitTimeout):
-					logger.Error("Agent shutdown timed out, forcing exit; check for long-running requests or stuck goroutines", zap.Duration("timeout", forceExitTimeout))
-					os.Exit(1)
-				}
-			}()
-
 			startAgentCh := make(chan int)
 			router := chi.NewRouter()
 
