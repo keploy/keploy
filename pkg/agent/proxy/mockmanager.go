@@ -84,10 +84,14 @@ func (m *MockManager) GetMocks(kind models.Kind, key string) (filtered, unfilter
 	m.treesMu.RLock()
 	defer m.treesMu.RUnlock()
 	if km, ok := m.lookupFiltered[kind]; ok {
-		filtered = km[key]
+		if list := km[key]; len(list) > 0 {
+			filtered = append([]*models.Mock(nil), list...)
+		}
 	}
 	if km, ok := m.lookupUnfiltered[kind]; ok {
-		unfiltered = km[key]
+		if list := km[key]; len(list) > 0 {
+			unfiltered = append([]*models.Mock(nil), list...)
+		}
 	}
 	return
 }
@@ -313,6 +317,9 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 
 func (m *MockManager) syncLookup(mock *models.Mock, isFiltered, remove bool) {
 	key, k := getLookupKey(mock), mock.Kind
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+
 	target := m.lookupUnfiltered
 	if isFiltered {
 		target = m.lookupFiltered
@@ -320,18 +327,24 @@ func (m *MockManager) syncLookup(mock *models.Mock, isFiltered, remove bool) {
 	if target[k] == nil {
 		target[k] = make(map[string][]*models.Mock)
 	}
+
 	list := target[k][key]
 	if remove {
 		for i, item := range list {
 			if item.Name == mock.Name && item.TestModeInfo.ID == mock.TestModeInfo.ID {
-				list = append(list[:i], list[i+1:]...)
+				newList := append([]*models.Mock(nil), list[:i]...)
+				newList = append(newList, list[i+1:]...)
+				list = newList
 				break
 			}
 		}
 	} else {
-		list = append(list, mock)
-		sortDNSList(list)
+		newList := append([]*models.Mock(nil), list...)
+		newList = append(newList, mock)
+		sortDNSList(newList)
+		list = newList
 	}
+
 	if len(list) == 0 {
 		delete(target[k], key)
 	} else {
