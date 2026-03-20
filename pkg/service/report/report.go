@@ -630,10 +630,7 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 func (r *Report) printFailedTestReports(ctx context.Context, failedTests []models.TestResult) error {
 	if r.config.Report.ShowFullBody {
 
-		workers := runtime.GOMAXPROCS(0)
-		if workers < 2 {
-			workers = 2
-		}
+		workers := max(runtime.GOMAXPROCS(0), 2)
 		sem := make(chan struct{}, workers)
 		results := make([]item, len(failedTests))
 		var wg sync.WaitGroup
@@ -677,10 +674,7 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 		return nil
 	}
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 2 {
-		workers = 2
-	}
+	workers := max(runtime.GOMAXPROCS(0), 2)
 	sem := make(chan struct{}, workers)
 	results := make([]item, len(failedTests))
 	var wg sync.WaitGroup
