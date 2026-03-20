@@ -1604,8 +1604,44 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.LogError(r.logger, err, "failed to create .gitignore file")
 	}
 
+	// Preserve mocks and mappings for tests that were expected but not executed in this run
+	if len(expectedTestMockMappings) > 0 {
+		for expectedTestCaseID, expectedMocks := range expectedTestMockMappings {
+			testExecuted := false
+			for _, tc := range activeTestCases {
+				if tc.Name == expectedTestCaseID {
+					testExecuted = true
+					break
+				}
+			}
+
+			if !testExecuted {
+				// Preserve its expected mocks so they aren't deleted by UpdateMocks
+				for _, m := range expectedMocks {
+					if _, exists := passingTotalConsumedMocks[m.Name]; !exists {
+						passingTotalConsumedMocks[m.Name] = models.MockState{
+							Name: m.Name,
+							Kind: models.Kind(m.Kind),
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && r.instrument {
+		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
+		if len(noisyTestCases) > 0 {
+			added := retainNoisyTestCaseMocks(noisyTestCases, actualTestMockMappings, passingTotalConsumedMocks)
+			if added > 0 {
+				r.logger.Debug("preserved mocks used by noisy testcases from pruning",
+					zap.String("testSetID", testSetID),
+					zap.Int("noisyTestCaseCount", len(noisyTestCases)),
+					zap.Int("additionalMocksKept", added))
+			}
+		}
+
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
