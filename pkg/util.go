@@ -1124,6 +1124,9 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	isNonKeploy := false
 
 	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
 		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
 		// field in this for loop, and write in mockmanager functions.
 		p := mock.DeepCopy()
@@ -1159,6 +1162,9 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 	var filtered, unfiltered []*models.Mock
 	isNonKeploy := false
 	for _, mock := range m {
+		if mock == nil {
+			continue
+		}
 		p := *mock // shallow copy for performance
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true

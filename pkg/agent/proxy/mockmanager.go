@@ -61,9 +61,6 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 }
 
 func getLookupKey(mock *models.Mock) string {
-	if mock == nil {
-		return ""
-	}
 	switch mock.Kind {
 	case models.DNS:
 		if mock.Spec.DNSReq != nil {
@@ -254,7 +251,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	}
 	for _, km := range newLookup {
 		for _, slice := range km {
-			sortDNSList(slice)
+			sortMocksByOrder(slice)
 		}
 	}
 	if maxSortOrder > 0 {
@@ -300,7 +297,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	}
 	for _, km := range newLookup {
 		for _, slice := range km {
-			sortDNSList(slice)
+			sortMocksByOrder(slice)
 		}
 	}
 	if maxSortOrder > 0 {
@@ -316,6 +313,9 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 }
 
 func (m *MockManager) syncLookup(mock *models.Mock, isFiltered, remove bool) {
+	if mock == nil {
+		return
+	}
 	key, k := getLookupKey(mock), mock.Kind
 	m.treesMu.Lock()
 	defer m.treesMu.Unlock()
@@ -341,7 +341,7 @@ func (m *MockManager) syncLookup(mock *models.Mock, isFiltered, remove bool) {
 	} else {
 		newList := append([]*models.Mock(nil), list...)
 		newList = append(newList, mock)
-		sortDNSList(newList)
+		sortMocksByOrder(newList)
 		list = newList
 	}
 
@@ -352,7 +352,7 @@ func (m *MockManager) syncLookup(mock *models.Mock, isFiltered, remove bool) {
 	}
 }
 
-func sortDNSList(list []*models.Mock) {
+func sortMocksByOrder(list []*models.Mock) {
 	sort.SliceStable(list, func(i, j int) bool {
 		if list[i].TestModeInfo.SortOrder != list[j].TestModeInfo.SortOrder {
 			return list[i].TestModeInfo.SortOrder < list[j].TestModeInfo.SortOrder
@@ -441,9 +441,9 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	}
 	if updatedGlobal {
 		m.bumpRevisionAll()
+		m.syncLookup(old, false, true)
+		m.syncLookup(new, false, false)
 	}
-	m.syncLookup(old, false, true)
-	m.syncLookup(new, false, false)
 	return updatedGlobal
 }
 
