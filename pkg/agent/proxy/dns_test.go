@@ -6,9 +6,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestGenerateDNSDedupeKey_SameQueryDifferentIPs(t *testing.T) {
-	// Simulate the AWS SQS scenario: same DNS query, different answer IPs.
-	// The dedup key must be identical regardless of the response IPs.
+func TestGenerateDNSDedupeKey_SameQuerySameKey(t *testing.T) {
+	// The dedup key is derived solely from the question fields, so
+	// identical questions must always produce identical keys.
 	question := dns.Question{
 		Name:   "sqs.us-east-1.amazonaws.com.",
 		Qtype:  dns.TypeA,
