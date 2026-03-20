@@ -579,10 +579,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
 	}
 
-	if opts.EnableDockerUnconfined {
-		idc.logger.Warn("Enabling high-privilege docker-compose settings for keploy-agent (--enable-docker-unconfined)")
-	}
-
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
 		Kind: yaml.MappingNode,
@@ -615,22 +611,20 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		}},
 	)
 
-	if opts.EnableDockerUnconfined {
-		// security_opt — Docker's default seccomp profile can block bpf()
-		// syscall and AppArmor can block bpffs mount. This is an explicit
-		// opt-in because it reduces container sandboxing.
-		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{
-				Kind:        yaml.ScalarNode,
-				Value:       "security_opt",
-				HeadComment: "Enabled via --enable-docker-unconfined (high privilege).",
-			},
-			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
-				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
-			}},
-		)
-	}
+	// security_opt — Docker's default seccomp profile blocks the bpf()
+	// syscall even when CAP_BPF is granted, and AppArmor can block bpffs
+	// mount. Both must be unconfined for eBPF map pinning to work.
+	serviceNode.Content = append(serviceNode.Content,
+		&yaml.Node{
+			Kind:        yaml.ScalarNode,
+			Value:       "security_opt",
+			HeadComment: "Required: Docker's default seccomp/AppArmor profiles block bpf() and bpffs mount.",
+		},
+		&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
+			{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
+		}},
+	)
 
 	// Add environment variables
 	if len(envVars) > 0 {
