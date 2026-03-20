@@ -17,6 +17,7 @@ P50_THRESHOLD=${P50_THRESHOLD:-5}      # Default: 5ms (workflow can override)
 P90_THRESHOLD=${P90_THRESHOLD:-15}     # Default: 15ms (workflow can override)
 P99_THRESHOLD=${P99_THRESHOLD:-70}     # Default: 70ms (workflow can override)
 RPS_THRESHOLD=${RPS_THRESHOLD:-100}
+ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-1.0}
 
 # Colors for output
 RED='\033[0;31m'
@@ -35,6 +36,7 @@ echo "    P50 < ${P50_THRESHOLD}ms"
 echo "    P90 < ${P90_THRESHOLD}ms"
 echo "    P99 < ${P99_THRESHOLD}ms"
 echo "    RPS >= ${RPS_THRESHOLD}"
+echo "    Error Rate < ${ERROR_RATE_THRESHOLD}%"
 echo "========================================="
 echo ""
 
@@ -47,6 +49,7 @@ declare -a p50_values
 declare -a p90_values
 declare -a p99_values
 declare -a rps_values
+declare -a error_rate_values
 
 # Function to extract metrics from k6 output
 extract_metrics() {
@@ -60,7 +63,10 @@ extract_metrics() {
     # Extract RPS (use the final summary http_reqs line)
     local rps=$(grep "http_reqs" "$output_file" | grep -oP ':\s+\d+\s+\K[0-9.]+(?=/s)' | tail -1)
     
-    echo "$p50|$p90|$p99|$rps"
+    # Extract Error Rate (http_req_failed percentage)
+    local error_rate=$(grep "http_req_failed" "$output_file" | grep -oP ':\s+\K[0-9.]+(?=%)' | head -1)
+    
+    echo "$p50|$p90|$p99|$rps|$error_rate"
 }
 
 # Function to convert time units to milliseconds
@@ -87,12 +93,12 @@ check_thresholds() {
     local metrics=$1
     local run_num=$2
     
-    IFS='|' read -r p50 p90 p99 rps <<< "$metrics"
+    IFS='|' read -r p50 p90 p99 rps error_rate <<< "$metrics"
     
     # Validate that all metrics were extracted successfully
-    if [ -z "$p50" ] || [ -z "$p90" ] || [ -z "$p99" ] || [ -z "$rps" ]; then
+    if [ -z "$p50" ] || [ -z "$p90" ] || [ -z "$p99" ] || [ -z "$rps" ] || [ -z "$error_rate" ]; then
         echo -e "${RED}  ✗ ERROR: Failed to extract metrics from k6 output${NC}"
-        echo -e "${RED}    P50: '$p50', P90: '$p90', P99: '$p99', RPS: '$rps'${NC}"
+        echo -e "${RED}    P50: '$p50', P90: '$p90', P99: '$p99', RPS: '$rps', Error Rate: '$error_rate'${NC}"
         echo -e "${RED}    This indicates a parsing failure or unexpected k6 output format${NC}"
         return 1
     fi
@@ -103,9 +109,11 @@ check_thresholds() {
     p99=$(convert_to_ms "$p99")
     
     # Validate converted values are numeric
-    if ! [[ "$p50" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$p90" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$p99" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$rps" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+    if ! [[ "$p50" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$p90" =~ ^[0-9]+\.?[0-9]*$ ]] || \
+       ! [[ "$p99" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$rps" =~ ^[0-9]+\.?[0-9]*$ ]] || \
+       ! [[ "$error_rate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
         echo -e "${RED}  ✗ ERROR: Invalid numeric values after conversion${NC}"
-        echo -e "${RED}    P50: '$p50', P90: '$p90', P99: '$p99', RPS: '$rps'${NC}"
+        echo -e "${RED}    P50: '$p50', P90: '$p90', P99: '$p99', RPS: '$rps', Error Rate: '$error_rate'${NC}"
         return 1
     fi
     
@@ -148,6 +156,13 @@ check_thresholds() {
         echo -e "${GREEN}  ✓ RPS passed: ${rps} >= ${RPS_THRESHOLD}${NC}"
     fi
     
+    if (( $(echo "$error_rate >= $ERROR_RATE_THRESHOLD" | bc -l) )); then
+        echo -e "${RED}  ✗ Error rate regression: ${error_rate}% >= ${ERROR_RATE_THRESHOLD}%${NC}"
+        passed=false
+    else
+        echo -e "${GREEN}  ✓ Error rate passed: ${error_rate}% < ${ERROR_RATE_THRESHOLD}%${NC}"
+    fi
+    
     if [ "$passed" = true ]; then
         return 0
     else
@@ -186,8 +201,9 @@ for i in $(seq 1 $NUM_RUNS); do
     echo "Run $i of $NUM_RUNS" >> "$output_file"
     echo "=========================================" >> "$output_file"
     
-    # Run k6 test (ignore exit code, we'll validate thresholds ourselves)
-    k6 run load-test.js 2>&1 | tee -a "$output_file" || true
+    # Run k6 test (capture exit code to ensure thresholds/errors aren't ignored)
+    k6 run load-test.js 2>&1 | tee -a "$output_file"
+    k6_status=${PIPESTATUS[0]}
     
     echo "" | tee -a "$output_file"
     echo "Checking thresholds for Run $i..." | tee -a "$output_file"
@@ -196,11 +212,12 @@ for i in $(seq 1 $NUM_RUNS); do
     metrics=$(extract_metrics "$output_file")
     
     # Parse and store metrics in parent shell
-    IFS='|' read -r p50_raw p90_raw p99_raw rps_raw <<< "$metrics"
+    IFS='|' read -r p50_raw p90_raw p99_raw rps_raw error_rate_raw <<< "$metrics"
     p50_values[$i]=$(convert_to_ms "$p50_raw")
     p90_values[$i]=$(convert_to_ms "$p90_raw")
     p99_values[$i]=$(convert_to_ms "$p99_raw")
     rps_values[$i]=$rps_raw
+    error_rate_values[$i]=$error_rate_raw
     
     # Check thresholds and capture output
     threshold_output=$(check_thresholds "$metrics" $i)
@@ -209,13 +226,16 @@ for i in $(seq 1 $NUM_RUNS); do
     # Display and log the output
     echo "$threshold_output" | tee -a "$output_file"
     
-    if [ $threshold_result -eq 0 ]; then
+    if [ $threshold_result -eq 0 ] && [ $k6_status -eq 0 ]; then
         echo "Run $i: PASSED" >> "$output_file"
         echo -e "${GREEN}Run $i: PASSED${NC}"
         run_results[$i]="PASS"
     else
-        echo "Run $i: FAILED (regression detected)" >> "$output_file"
-        echo -e "${RED}Run $i: FAILED (regression detected)${NC}"
+        if [ $k6_status -ne 0 ]; then
+            echo "k6 exited with non-zero status: $k6_status" | tee -a "$output_file"
+        fi
+        echo "Run $i: FAILED (regression or k6 error detected)" >> "$output_file"
+        echo -e "${RED}Run $i: FAILED (regression or k6 error detected)${NC}"
         run_results[$i]="FAIL"
         ((failed_runs++))
     fi
@@ -245,6 +265,7 @@ for i in $(seq 1 $NUM_RUNS); do
     echo "    P90: ${p90_values[$i]}ms"
     echo "    P99: ${p99_values[$i]}ms"
     echo "    RPS: ${rps_values[$i]}"
+    echo "    Error Rate: ${error_rate_values[$i]}%"
 done
 
 echo ""
@@ -255,11 +276,13 @@ avg_p50=$(printf '%s\n' "${p50_values[@]}" | awk '{sum+=$1} END {if (NR>0) print
 avg_p90=$(printf '%s\n' "${p90_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
 avg_p99=$(printf '%s\n' "${p99_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
 avg_rps=$(printf '%s\n' "${rps_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
+avg_error_rate=$(printf '%s\n' "${error_rate_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
 
 echo "  Average P50: ${avg_p50}ms"
 echo "  Average P90: ${avg_p90}ms"
 echo "  Average P99: ${avg_p99}ms"
 echo "  Average RPS: ${avg_rps}"
+echo "  Average Error Rate: ${avg_error_rate}%"
 
 echo ""
 echo "========================================="
