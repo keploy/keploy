@@ -116,7 +116,7 @@ for i in 1; do
   rc=$?
   set -e
   echo "Record exit code: $rc"
-  [[ $rc -ne 0 ]] && echo "::warning::Keploy record exited non-zero (iteration $i)"
+  [[ $rc -ne 0 ]] && echo "Keploy record exited non-zero (iteration $i), rc=$rc"
 
   echo "== keploy artifacts after record =="
   find ./keploy -maxdepth 3 -type f | wc -l || true
@@ -127,7 +127,7 @@ for i in 1; do
     exit 1
   fi
   if grep -q "ERROR" "${app_name}.txt"; then
-    echo "::warning::Errors found in ${app_name}.txt"
+    echo "Errors found in ${app_name}.txt (not fatal unless record failed)"
     cat "${app_name}.txt"
   fi
 
@@ -162,17 +162,24 @@ fi
 echo "Using reports from: $RUN_DIR"
 
 all_passed=true
+found_any=false
 for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
   [[ -f "$rpt" ]] || continue
+  found_any=true
   status=$(awk '/^status:/{print $2; exit}' "$rpt")
   echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
   [[ "$status" == "PASSED" ]] || all_passed=false
 done
 endsec
 
+if [[ "$found_any" == "false" ]]; then
+  echo "::error::No test report files found in $RUN_DIR"
+  exit 1
+fi
+
 if [[ "$all_passed" == "true" ]]; then
   if [[ $REPLAY_RC -ne 0 ]]; then
-    echo "::warning::Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
+    echo "Replay exited with code $REPLAY_RC but all tests passed. Ignoring exit code."
   fi
   echo "All tests passed"
   exit 0
