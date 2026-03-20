@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -236,10 +237,29 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			return nil, ctx.Err()
 		}
 
-		// Content type check
-		if input.header.Get("Content-Type") != "" {
-			if !pkg.CompareMultiValueHeaders(mock.Spec.HTTPReq.Header["Content-Type"], input.header.Values("Content-Type")) {
-				h.Logger.Debug("The content type of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input header", input.header.Values("Content-Type")), zap.Any("mock header content-type", mock.Spec.HTTPReq.Header["Content-Type"]))
+		// Content type check — compare only the media type (ignoring
+		// parameters like charset) so that trivial differences such as
+		// "application/json" vs "application/json;charset=UTF-8" don't
+		// prevent a match. If exactly one side has a Content-Type the
+		// match is skipped.
+		inputCT := input.header.Get("Content-Type")
+		mockCT := mock.Spec.HTTPReq.Header["Content-Type"]
+		if inputCT == "" && mockCT != "" {
+			h.Logger.Debug("mock expects Content-Type but request has none", zap.String("mock name", mock.Name))
+			continue
+		}
+		if inputCT != "" && mockCT == "" {
+			h.Logger.Debug("mock has no Content-Type but request does", zap.String("mock name", mock.Name))
+			continue
+		}
+		if inputCT != "" && mockCT != "" {
+			mockMediaType, _, errM := mime.ParseMediaType(mockCT)
+			inputMediaType, _, errI := mime.ParseMediaType(inputCT)
+			if errM != nil || errI != nil || !strings.EqualFold(mockMediaType, inputMediaType) {
+				h.Logger.Debug("The content type of mock and request aren't the same",
+					zap.String("mock name", mock.Name),
+					zap.Any("input header", input.header.Values("Content-Type")),
+					zap.Any("mock header content-type", mockCT))
 				continue
 			}
 		}

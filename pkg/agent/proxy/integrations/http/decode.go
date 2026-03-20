@@ -134,17 +134,21 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			if !ok {
 				if !utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
-					utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", utils.GetReqMeta(request)))
+					h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				if opts.FallBackOnMiss {
-					_, err = pUtil.PassThrough(ctx, h.Logger, clientConn, dstCfg, [][]byte{reqBuf})
-					if err != nil {
-						utils.LogError(h.Logger, err, "failed to passThrough http request", zap.Any("metadata", utils.GetReqMeta(request)))
-						errCh <- err
-						return
-					}
+				// No mock matched — send a 502 so the application gets a
+				// proper HTTP error instead of a silent connection close
+				// (EOF / connection reset). PassThrough is intentionally
+				// not attempted here; proxy-level passthrough rules
+				// already handle configured bypass cases before the
+				// parser is invoked.
+				noMockBody := "keploy: no matching mock found for this HTTP request\n"
+				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
+				if _, err := clientConn.Write([]byte(noMock)); err != nil {
+					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				errCh <- nil
+				errCh <- fmt.Errorf("no matching mock found for %s %s", request.Method, request.URL.Path)
 				return
 			}
 
