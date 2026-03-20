@@ -32,7 +32,7 @@ check_test_report() {
     fi
 
     local latest_report_dir
-    latest_report_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+    latest_report_dir=$(ls -td ./keploy/reports/test-run-* 2>/dev/null | head -n 1)
     if [ -z "$latest_report_dir" ]; then
         echo "No test run directory found in ./keploy/reports/"
         return 1
@@ -119,8 +119,9 @@ endsec
 # Record
 section "Start Recording"
 echo "Starting Recording..."
-sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-dedup" --generateGithubActions=false 2>&1 | tee record.txt &
+sudo -E env PATH=$PATH "$RECORD_BIN" record -c "./dns-dedup" --generateGithubActions=false >record.txt 2>&1 &
 KEPLOY_PID=$!
+echo "Keploy record started with PID: $KEPLOY_PID"
 sleep 5
 endsec
 
@@ -128,11 +129,8 @@ send_request
 
 section "Stop Recording"
 echo "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-REC_PID="$(pgrep -n -f 'keploy record' || true)"
-echo "$REC_PID Keploy PID"
-echo "Killing keploy"
-sudo kill -INT "$REC_PID" 2>/dev/null || true
-sleep 5
+sudo kill -INT "$KEPLOY_PID" 2>/dev/null || true
+wait "$KEPLOY_PID" 2>/dev/null || true
 check_for_errors "record.txt"
 echo "Recording stopped."
 endsec

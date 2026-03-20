@@ -73,7 +73,7 @@ send_request() {
   echo "$kp_pid Keploy PID"
   echo "Sending SIGINT to keploy for graceful shutdown"
   sudo kill -INT "$kp_pid" 2>/dev/null || true
-  wait "$kp_pid" 2>/dev/null || true
+  # Caller waits on the PID — don't reap here to avoid double-wait
 }
 
 # --- Main ---
