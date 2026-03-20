@@ -915,7 +915,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		}
 		requests = append(requests, mysql.Request{
 			PacketBundle: mysql.PacketBundle{
-				Header: &mysql.PacketInfo{Header: &switchPkt.Header, Type: mysql.AuthSwithResponse},
+				Header:  &mysql.PacketInfo{Header: &switchPkt.Header, Type: mysql.AuthSwithResponse},
 				Message: intgUtils.EncodeBase64(switchPkt.Payload),
 			},
 		})

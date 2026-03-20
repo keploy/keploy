@@ -43,7 +43,3 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
-
-func (h *Hooks) RegisterProxyPID(_ uint32) error {
-	return nil
-}

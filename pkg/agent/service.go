@@ -14,9 +14,6 @@ type Hooks interface {
 	DestInfo
 	Load(ctx context.Context, cfg HookCfg, setupOpts config.Agent) error
 	WatchBindEvents(ctx context.Context) (<-chan models.IngressEvent, error)
-	// RegisterProxyPID stores the given PID in the eBPF agent-kernel-pid map (key=1)
-	// so that the Rust proxy process is excluded from traffic interception.
-	RegisterProxyPID(pid uint32) error
 }
 
 type HookCfg struct {
@@ -97,6 +94,23 @@ func (s *Sessions) Get(id uint64) (*Session, bool) {
 		return nil, false
 	}
 	return v.(*Session), true
+}
+
+// GetAny returns an arbitrary active session.
+// This is useful for legacy single-session paths that do not have an app/client ID.
+func (s *Sessions) GetAny() (*Session, bool) {
+	var out *Session
+	var found bool
+	s.sessions.Range(func(_, v interface{}) bool {
+		session, ok := v.(*Session)
+		if !ok || session == nil {
+			return true
+		}
+		out = session
+		found = true
+		return false
+	})
+	return out, found
 }
 
 func (s *Sessions) Set(id uint64, session *Session) {

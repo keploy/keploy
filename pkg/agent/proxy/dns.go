@@ -128,6 +128,10 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	msg.SetReply(r)
 
 	session, hasSession := p.sessions.Get(uint64(0))
+	if !hasSession || session == nil {
+		// Fallback for cases where session ID is not 0 (multi-client paths).
+		session, hasSession = p.sessions.GetAny()
+	}
 	mode := models.GetMode()
 	mockingEnabled := true
 	if hasSession && session != nil {
@@ -297,12 +301,8 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 }
 
 func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool) {
-	mgrIface, ok := p.MockManagers.Load(uint64(0))
-	if !ok {
-		return dnsCacheEntry{}, false
-	}
-	mgr, ok := mgrIface.(*MockManager)
-	if !ok || mgr == nil {
+	mgr := p.getPrimaryMockManager()
+	if mgr == nil {
 		return dnsCacheEntry{}, false
 	}
 
@@ -379,6 +379,25 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 	}
 
 	return dnsCacheEntry{}, false
+}
+
+func (p *Proxy) getPrimaryMockManager() *MockManager {
+	if mgrIface, ok := p.MockManagers.Load(uint64(0)); ok {
+		if mgr, ok := mgrIface.(*MockManager); ok && mgr != nil {
+			return mgr
+		}
+	}
+
+	var out *MockManager
+	p.MockManagers.Range(func(_, v interface{}) bool {
+		mgr, ok := v.(*MockManager)
+		if !ok || mgr == nil {
+			return true
+		}
+		out = mgr
+		return false
+	})
+	return out
 }
 
 func findDNSMock(mocks []*models.Mock, question dns.Question, logger *zap.Logger) (*models.Mock, dnsCacheEntry) {
