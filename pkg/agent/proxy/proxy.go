@@ -105,7 +105,7 @@ func isNetworkClosedErr(err error) bool {
 		strings.Contains(errStr, "forcibly closed by the remote host")
 }
 
-func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config, registerPID ...func(uint32) error) *Proxy {
+func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,

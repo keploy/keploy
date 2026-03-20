@@ -45,8 +45,8 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			go func() {
 				<-ctx.Done()
 				time.Sleep(6 * time.Second)
-				logger.Warn("Agent shutdown timed out after 10s, forcing exit")
-				os.Exit(0)
+				logger.Error("Agent shutdown timed out after 6s, forcing exit; check for long-running requests or stuck goroutines")
+				os.Exit(1)
 			}()
 
 			startAgentCh := make(chan int)

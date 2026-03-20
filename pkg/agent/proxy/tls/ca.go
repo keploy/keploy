@@ -383,12 +383,12 @@ func GetParsedCA() (any, *x509.Certificate, error) {
 	parsedCAOnce.Do(func() {
 		parsedCAKey, parsedCAErr = helpers.ParsePrivateKeyPEM(caPKey)
 		if parsedCAErr != nil {
-			utils.LogError(nil, parsedCAErr, "Failed to parse CA private key. Ensure CA key files are present and valid")
+			parsedCAErr = fmt.Errorf("failed to parse CA private key; ensure CA key files are present and valid: %w", parsedCAErr)
 			return
 		}
 		parsedCACert, parsedCAErr = helpers.ParseCertificatePEM(caCrt)
 		if parsedCAErr != nil {
-			utils.LogError(nil, parsedCAErr, "Failed to parse CA certificate. Ensure CA certificate files are present and valid")
+			parsedCAErr = fmt.Errorf("failed to parse CA certificate; ensure CA certificate files are present and valid: %w", parsedCAErr)
 		}
 	})
 	return parsedCAKey, parsedCACert, parsedCAErr
