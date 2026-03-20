@@ -29,20 +29,20 @@ type LocalInFileRequestPacket struct {
 
 // TextResultSet is used as a response packet for COM_QUERY
 type TextResultSet struct {
-	ColumnCount        uint64                `yaml:"columnCount" json:"columnCount"`
-	Columns            []*ColumnDefinition41 `yaml:"columns" json:"columns"`
-	EOFAfterColumns    []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
-	Rows               []*TextRow            `yaml:"rows" json:"rows"`
-	FinalResponse      *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+	ColumnCount     uint64                `yaml:"columnCount" json:"columnCount"`
+	Columns         []*ColumnDefinition41 `yaml:"columns" json:"columns"`
+	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
+	Rows            []*TextRow            `yaml:"rows" json:"rows"`
+	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
 }
 
 // BinaryProtocolResultSet is used as a response packet for COM_STMT_EXECUTE
 type BinaryProtocolResultSet struct {
-	ColumnCount        uint64                `yaml:"columnCount" json:"columnCount"`
-	Columns            []*ColumnDefinition41 `yaml:"columns" json:"columns"`
-	EOFAfterColumns    []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
-	Rows               []*BinaryRow          `yaml:"rows" json:"rows"`
-	FinalResponse      *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+	ColumnCount     uint64                `yaml:"columnCount" json:"columnCount"`
+	Columns         []*ColumnDefinition41 `yaml:"columns" json:"columns"`
+	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
+	Rows            []*BinaryRow          `yaml:"rows" json:"rows"`
+	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
 }
 
 type GenericResponse struct {
