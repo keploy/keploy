@@ -29,17 +29,27 @@ type handshakeRes struct {
 	tlsClientConn net.Conn
 }
 
-// CAVEAT: We haven't handled the case where clients connect to entirely different MySQL servers.
-// However, we do handle scenarios where multiple clients connect to the same server
-// but use different databases or usernames.
-
 // Replay mode
-func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
-	// Get the mock for initial handshake
+func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions, dstCfg *models.ConditionalDstCfg) (handshakeRes, error) {
+	// Select the initial handshake mock based on destination address.
+	// When mocks contain destAddr metadata (recorded with different MySQL servers),
+	// pick the mock matching the current connection's destination so the client
+	// gets the correct server greeting (capabilities, charset, auth plugin).
 	initialHandshakeMock := mocks[0]
+	if dstCfg != nil && dstCfg.Addr != "" {
+		for _, m := range mocks {
+			if m.Spec.Metadata["destAddr"] == dstCfg.Addr {
+				initialHandshakeMock = m
+				logger.Debug("Selected initial handshake mock by destAddr",
+					zap.String("destAddr", dstCfg.Addr),
+					zap.String("conn_id", m.Spec.Metadata["connID"]))
+				break
+			}
+		}
+	}
 
 	for i, mock := range mocks {
-		if i == 0 {
+		if mock == initialHandshakeMock {
 			logger.Debug("Using initial handshake mock", zap.Int("index", i), zap.String("mock_name", mock.Name), zap.String("conn_id", mock.Spec.Metadata["connID"]))
 			continue
 		}
