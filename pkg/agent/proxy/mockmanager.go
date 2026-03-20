@@ -316,13 +316,14 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	// Mark usage if global changed (legacy behavior)
 	if updatedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
-			Name:       new.Name,
-			Kind:       new.Kind,
-			Usage:      models.Updated,
-			IsFiltered: new.TestModeInfo.IsFiltered,
-			SortOrder:  new.TestModeInfo.SortOrder,
-			Type:       new.Spec.Metadata["type"],
-			Timestamp:  new.Spec.ReqTimestampMock.Unix(),
+			Name:             new.Name,
+			Kind:             new.Kind,
+			Usage:            models.Updated,
+			IsFiltered:       new.TestModeInfo.IsFiltered,
+			SortOrder:        new.TestModeInfo.SortOrder,
+			Type:             new.Spec.Metadata["type"],
+			ReqTimestampMock: models.FormatMockTimestamp(new.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(new.Spec.ResTimestampMock),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -359,13 +360,14 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
-			Name:       mock.Name,
-			Kind:       mock.Kind,
-			Usage:      models.Deleted,
-			IsFiltered: mock.TestModeInfo.IsFiltered,
-			SortOrder:  mock.TestModeInfo.SortOrder,
-			Type:       mock.Spec.Metadata["type"],
-			Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
+			Name:             mock.Name,
+			Kind:             mock.Kind,
+			Usage:            models.Deleted,
+			IsFiltered:       mock.TestModeInfo.IsFiltered,
+			SortOrder:        mock.TestModeInfo.SortOrder,
+			Type:             mock.Spec.Metadata["type"],
+			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -393,13 +395,14 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
-			Name:       mock.Name,
-			Kind:       mock.Kind,
-			Usage:      models.Deleted,
-			IsFiltered: mock.TestModeInfo.IsFiltered,
-			SortOrder:  mock.TestModeInfo.SortOrder,
-			Type:       mock.Spec.Metadata["type"],
-			Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
+			Name:             mock.Name,
+			Kind:             mock.Kind,
+			Usage:            models.Deleted,
+			IsFiltered:       mock.TestModeInfo.IsFiltered,
+			SortOrder:        mock.TestModeInfo.SortOrder,
+			Type:             mock.Spec.Metadata["type"],
+			ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+			ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 		}); err != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
@@ -423,13 +426,14 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		return false
 	}
 	if err := m.flagMockAsUsed(models.MockState{
-		Name:       mock.Name,
-		Kind:       mock.Kind,
-		Usage:      models.Updated,
-		IsFiltered: mock.TestModeInfo.IsFiltered,
-		SortOrder:  mock.TestModeInfo.SortOrder,
-		Type:       mock.Spec.Metadata["type"],
-		Timestamp:  mock.Spec.ReqTimestampMock.Unix(),
+		Name:             mock.Name,
+		Kind:             mock.Kind,
+		Usage:            models.Updated,
+		IsFiltered:       mock.TestModeInfo.IsFiltered,
+		SortOrder:        mock.TestModeInfo.SortOrder,
+		Type:             mock.Spec.Metadata["type"],
+		ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+		ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 	}); err != nil {
 		if m.logger != nil {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
