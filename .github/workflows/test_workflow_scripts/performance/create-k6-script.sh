@@ -37,10 +37,8 @@ export const options = {
 const endpoints = [
   '/',
   '/actuator/health',
-  '/owners',
-  '/vets',
-  '/api/owners',
-  '/api/vets',
+  '/owners/find',
+  '/vets.html',
 ];
 
 export default function () {
