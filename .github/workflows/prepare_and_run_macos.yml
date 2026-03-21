@@ -124,7 +124,10 @@ jobs:
           if docker info >/dev/null 2>&1; then
             echo "Docker daemon is already running."
           else
-            echo "Docker daemon not responding. Starting Docker Desktop..."
+            echo "Docker daemon not responding. Killing and restarting Docker Desktop..."
+            pkill -9 -f "Docker Desktop" || true
+            pkill -9 -f "com.docker" || true
+            sleep 3
             open -a Docker || true
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
@@ -171,7 +174,10 @@ jobs:
           if docker info >/dev/null 2>&1; then
             echo "Docker daemon is already running."
           else
-            echo "Docker daemon not responding. Starting Docker Desktop..."
+            echo "Docker daemon not responding. Killing and restarting Docker Desktop..."
+            pkill -9 -f "Docker Desktop" || true
+            pkill -9 -f "com.docker" || true
+            sleep 3
             open -a Docker || true
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
