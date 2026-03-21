@@ -48,6 +48,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure Docker Desktop is running (macOS)
+        shell: bash
+        run: |
+          set -e
+          if docker info >/dev/null 2>&1; then
+            echo "Docker daemon is already running."
+          else
+            echo "Docker daemon not responding. Killing and restarting Docker Desktop..."
+            pkill -9 -f "Docker Desktop" || true
+            pkill -9 -f "com.docker" || true
+            sleep 5
+            open -a Docker || true
+            for i in $(seq 1 90); do
+              if docker info >/dev/null 2>&1; then
+                echo "Docker Desktop is ready (waited ~$((i*2))s)."
+                break
+              fi
+              if [ "$i" -eq 90 ]; then
+                echo "ERROR: Docker Desktop failed to start within 180s."
+                exit 1
+              fi
+              sleep 2
+            done
+          fi
+
       - id: image
         uses: ./.github/actions/download-image
         with:
@@ -69,32 +94,6 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
-        
-      - name: Ensure Docker Desktop is running (macOS)
-        shell: bash
-        run: |
-          set -e
-          if docker info >/dev/null 2>&1; then
-            echo "Docker daemon is already running."
-          else
-            echo "Docker daemon not responding. Killing and restarting Docker Desktop..."
-            pkill -9 -f "Docker Desktop" || true
-            pkill -9 -f "com.docker" || true
-            sleep 3
-            open -a Docker || true
-            # Wait up to 120s for the daemon to be ready
-            for i in $(seq 1 60); do
-              if docker info >/dev/null 2>&1; then
-                echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                break
-              fi
-              if [ "$i" -eq 60 ]; then
-                echo "ERROR: Docker Desktop failed to start within 120s."
-                exit 1
-              fi
-              sleep 2
-            done
-          fi
 
       - name: Ensure Docker Compose is available (macOS)
         shell: bash
