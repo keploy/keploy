@@ -136,41 +136,47 @@ jobs:
 
     steps:
 
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Update GitHub SSH known hosts
+        shell: pwsh
+        run: |
+          mkdir -force "$env:USERPROFILE\.ssh" | Out-Null
+          ssh-keyscan github.com 2>$null | Out-File -FilePath "$env:USERPROFILE\.ssh\known_hosts" -Encoding ascii -Append
 
-    - name: Ensure Docker is running
-      shell: powershell
-      run: |
-        $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
-        if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Wait for Docker to be ready
-      shell: powershell
-      run: |
-        $maxAttempts = 30
-        $attempt = 0
-        while ($attempt -lt $maxAttempts) {
-          $attempt++
-          try {
-            $result = docker info 2>&1
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "Docker is ready after $attempt attempts"
-              break
-            }
-          } catch {}
-          Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
-          Start-Sleep -Seconds 2
-        }
-        if ($attempt -eq $maxAttempts) {
-          Write-Error "Docker did not become ready in time"
-          exit 1
-        }
-    
-    - name: Pull Docker image
-      shell: powershell
-      run: |
-        docker pull ${{ needs.docker-image-build.outputs.image_tag }}
+      - name: Ensure Docker is running
+        shell: powershell
+        run: |
+          $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
+          if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
+
+      - name: Wait for Docker to be ready
+        shell: powershell
+        run: |
+          $maxAttempts = 30
+          $attempt = 0
+          while ($attempt -lt $maxAttempts) {
+            $attempt++
+            try {
+              $result = docker info 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Docker is ready after $attempt attempts"
+                break
+              }
+            } catch {}
+            Write-Host "Waiting for Docker... attempt $attempt/$maxAttempts"
+            Start-Sleep -Seconds 2
+          }
+          if ($attempt -eq $maxAttempts) {
+            Write-Error "Docker did not become ready in time"
+            exit 1
+          }
+
+      - name: Pull Docker image
+        shell: powershell
+        run: |
+          docker pull ${{ needs.docker-image-build.outputs.image_tag }}
 
   run_golang_docker_windows:
     needs: [build-and-upload, docker-image-build, pull-docker-image]
