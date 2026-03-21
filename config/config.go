@@ -13,6 +13,12 @@ type MockDownload struct {
 	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
 }
 
+type NetworkCapture struct {
+	Enabled bool   `json:"enabled" yaml:"enabled" mapstructure:"enabled"`     // auto-enabled when --debug is used
+	Path    string `json:"path" yaml:"path" mapstructure:"path"`              // output directory for .kpcap files (default: keploy/debug/)
+	Bundle  bool   `json:"bundle" yaml:"bundle" mapstructure:"bundle"`        // auto-create debug bundle on completion
+}
+
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
@@ -25,6 +31,7 @@ type Config struct {
 	ProxyPort             uint32              `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	IncomingProxyPort     uint16              `json:"incomingProxyPort" yaml:"incomingProxyPort" mapstructure:"incomingProxyPort"`
 	Debug                 bool                `json:"debug" yaml:"debug" mapstructure:"debug"`
+	Capture               NetworkCapture      `json:"capture" yaml:"capture" mapstructure:"capture"`
 	DisableTele           bool                `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool                `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
 	InDocker              bool                `json:"inDocker" yaml:"-" mapstructure:"inDocker"`

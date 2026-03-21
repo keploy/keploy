@@ -24,6 +24,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/capture"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -90,6 +91,10 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+
+	// captureManager handles network packet capture for debug diagnostics.
+	// When non-nil and enabled, all proxy traffic is recorded to a .kpcap file.
+	captureManager *capture.Manager
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -129,7 +134,64 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
 
+	// Initialize network capture when debug mode is enabled.
+	// The capture file is written to <path>/keploy/debug/ or the configured capture path.
+	if opts.Debug || opts.Capture.Enabled {
+		captureDir := opts.Capture.Path
+		if captureDir == "" {
+			captureDir = fmt.Sprintf("%s/keploy/debug", opts.Path)
+		}
+		mode := string(opts.Agent.Mode)
+		if mode == "" {
+			mode = "unknown"
+		}
+		cm, err := capture.NewManager(logger, captureDir, mode)
+		if err != nil {
+			logger.Warn("Failed to initialize network capture (continuing without capture)", zap.Error(err))
+		} else {
+			proxy.captureManager = cm
+			logger.Info("Network capture enabled", zap.String("output", cm.GetOutputPath()))
+		}
+	}
+
 	return proxy
+}
+
+// SetCaptureManager sets the network capture manager for this proxy.
+// When set and enabled, all proxy traffic is recorded to a .kpcap file for debug diagnostics.
+func (p *Proxy) SetCaptureManager(cm *capture.Manager) {
+	p.captureManager = cm
+}
+
+// GetCaptureManager returns the capture manager, or nil if capture is not configured.
+func (p *Proxy) GetCaptureManager() *capture.Manager {
+	return p.captureManager
+}
+
+// protocolToCapture maps integration type to capture protocol enum.
+func protocolToCapture(it integrations.IntegrationType) capture.Protocol {
+	switch it {
+	case integrations.HTTP:
+		return capture.ProtoHTTP
+	case integrations.HTTP2:
+		return capture.ProtoHTTP2
+	case integrations.GRPC:
+		return capture.ProtoGRPC
+	case integrations.MYSQL:
+		return capture.ProtoMySQL
+	case integrations.POSTGRES_V1, integrations.POSTGRES_V2:
+		return capture.ProtoPostgres
+	case integrations.MONGO_V1, integrations.MONGO_V2:
+		return capture.ProtoMongo
+	case integrations.REDIS:
+		return capture.ProtoRedis
+	case integrations.KAFKA:
+		return capture.ProtoKafka
+	case integrations.GENERIC:
+		return capture.ProtoGeneric
+	default:
+		return capture.ProtoUnknown
+	}
 }
 
 // getSession returns the current session in a thread-safe manner.
@@ -412,9 +474,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
+
+	// Network capture: record connection lifecycle events for debug diagnostics
+	captureConnID := uint64(clientConnID)
+	cm := p.captureManager
 	defer func(start time.Time) {
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
+		// Record connection close in capture
+		if cm != nil && cm.IsEnabled() {
+			cm.RecordConnectionClose(captureConnID)
+		}
 	}(start)
 
 	// dstConn stores conn with actual destination for the outgoing network call
@@ -481,6 +551,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
+	// Network capture: record connection open with source/destination info
+	if cm != nil && cm.IsEnabled() {
+		cm.RecordConnectionOpen(captureConnID, srcConn.RemoteAddr().String(), dstAddr, false)
+	}
+
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
@@ -537,6 +612,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {
+		mysqlCaptureActive := cm != nil && cm.IsEnabled()
+		if mysqlCaptureActive {
+			cm.RecordProtocolDetected(captureConnID, capture.ProtoMySQL)
+		}
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
@@ -550,10 +629,25 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 			outgoingOpts.DstCfg = dstCfg
 
-			// Record the outgoing message into a mock
+			// Wrap connections for capture
+			if mysqlCaptureActive {
+				capSrc := capture.NewCaptureConn(srcConn, srcConn, captureConnID, capture.DirClientToProxy, capture.DirProxyToClient)
+				capSrc.SetProtocol(capture.ProtoMySQL)
+				capSrc.SetWriter(cm.GetWriter())
+				srcConn = capSrc
+
+				capDst := capture.NewCaptureConn(dstConn, nil, captureConnID, capture.DirDestToProxy, capture.DirProxyToDest)
+				capDst.SetProtocol(capture.ProtoMySQL)
+				capDst.SetWriter(cm.GetWriter())
+				dstConn = capDst
+			}
+
 			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
+				if mysqlCaptureActive {
+					cm.RecordError(captureConnID, fmt.Sprintf("MySQL record failed: %s", err))
+				}
 				return err
 			}
 			return nil
@@ -565,10 +659,20 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
-		//mock the outgoing message
+		// Wrap srcConn for capture in test mode
+		if mysqlCaptureActive {
+			capSrc := capture.NewCaptureConn(srcConn, srcConn, captureConnID, capture.DirClientToProxy, capture.DirProxyToClient)
+			capSrc.SetProtocol(capture.ProtoMySQL)
+			capSrc.SetWriter(cm.GetWriter())
+			srcConn = capSrc
+		}
+
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
+			if mysqlCaptureActive {
+				cm.RecordError(captureConnID, fmt.Sprintf("MySQL mock failed: %s", err))
+			}
 			p.sendMockNotFoundError(err)
 			return err
 		}
@@ -687,6 +791,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if len(moreBuf) > 0 {
 			initialBuf = append(initialBuf, moreBuf...)
 		}
+	}
+
+	// Network capture: update TLS flag if detected
+	if cm != nil && cm.IsEnabled() && isTLS {
+		cm.RecordConnectionOpen(captureConnID, srcConn.RemoteAddr().String(), dstAddr, true)
 	}
 
 	//update the src connection to have the initial buffer
@@ -813,6 +922,39 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
+	// ── Network capture: wrap connections for full bidirectional capture ──
+	// CaptureConn wraps net.Conn to tee all Read/Write data to the capture file.
+	// srcConn reads = data from app (client→proxy), writes = data to app (proxy→client)
+	// dstConn reads = data from external service (dest→proxy), writes = data to service (proxy→dest)
+	captureActive := cm != nil && cm.IsEnabled()
+	if captureActive {
+		var detectedProto capture.Protocol
+		if !generic {
+			detectedProto = protocolToCapture(parserType)
+		} else {
+			detectedProto = capture.ProtoGeneric
+		}
+		cm.RecordProtocolDetected(captureConnID, detectedProto)
+
+		// Wrap srcConn: reads capture client→proxy, writes capture proxy→client
+		capSrc := capture.NewCaptureConn(srcConn, srcConn, captureConnID, capture.DirClientToProxy, capture.DirProxyToClient)
+		capSrc.SetProtocol(detectedProto)
+		if cm.IsEnabled() {
+			capSrc.SetWriter(cm.GetWriter())
+		}
+		srcConn = capSrc
+
+		// Wrap dstConn (only exists in record mode — in test mode it's nil)
+		if dstConn != nil {
+			capDst := capture.NewCaptureConn(dstConn, nil, captureConnID, capture.DirDestToProxy, capture.DirProxyToDest)
+			capDst.SetProtocol(detectedProto)
+			if cm.IsEnabled() {
+				capDst.SetWriter(cm.GetWriter())
+			}
+			dstConn = capDst
+		}
+	}
+
 	if !generic {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
@@ -820,13 +962,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
+				if captureActive {
+					cm.RecordError(captureConnID, fmt.Sprintf("record failed (%s): %s", parserType, err))
+				}
 				return err
 			}
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
-				// Send specific error type to error channel for external monitoring
+				if captureActive {
+					cm.RecordError(captureConnID, fmt.Sprintf("mock failed (%s): %s", parserType, err))
+				}
 				p.sendMockNotFoundError(err)
 				return err
 			}
@@ -839,13 +986,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")
+				if captureActive {
+					cm.RecordError(captureConnID, fmt.Sprintf("record failed (generic): %s", err))
+				}
 				return err
 			}
 		} else {
 			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
-				// Send specific error type to error channel for external monitoring
+				if captureActive {
+					cm.RecordError(captureConnID, fmt.Sprintf("mock failed (generic): %s", err))
+				}
 				p.sendMockNotFoundError(err)
 				return err
 			}
@@ -878,6 +1030,13 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		if err := p.stopDNSServers(ctx); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to stop DNS servers: %w", err))
 
+		}
+	}
+
+	// Close network capture manager if active
+	if p.captureManager != nil {
+		if err := p.captureManager.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close capture manager: %w", err))
 		}
 	}
 

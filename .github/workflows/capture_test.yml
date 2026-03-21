@@ -1,0 +1,134 @@
+name: Network Capture Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'pkg/capture/**'
+      - 'cli/debug.go'
+      - 'config/config.go'
+      - 'pkg/agent/proxy/proxy.go'
+      - 'test/e2e/multi-protocol/**'
+      - '.github/workflows/capture_test.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'pkg/capture/**'
+      - 'cli/debug.go'
+      - 'config/config.go'
+      - 'pkg/agent/proxy/proxy.go'
+      - 'test/e2e/multi-protocol/**'
+
+jobs:
+  unit-tests:
+    name: Unit Tests + Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run capture tests with race detector
+        run: go test ./pkg/capture/ -v -count=1 -timeout 120s -race
+
+      - name: Check coverage >= 70%
+        run: |
+          go test ./pkg/capture/ -coverprofile=coverage.out -covermode=atomic -timeout 120s
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Coverage: ${COVERAGE}%"
+          [ "$(echo "$COVERAGE >= 70" | bc)" -eq 1 ] || (echo "Below threshold" && exit 1)
+
+  build-verification:
+    name: Build + CLI Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build all packages
+        run: go build ./...
+
+      - name: Verify debug subcommands exist
+        run: |
+          go build -tags=viper_bind_struct -o keploy-bin .
+          for cmd in analyze validate replay bundle extract; do
+            ./keploy-bin debug --help | grep -q "$cmd" || (echo "Missing: debug $cmd" && exit 1)
+          done
+
+  e2e-multi-protocol:
+    name: E2E Multi-Protocol Capture (MySQL + Redis + Postgres)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build keploy
+        run: go build -tags=viper_bind_struct -o /tmp/keploy-oss .
+
+      - name: Run multi-protocol E2E test
+        run: sudo bash test/e2e/multi-protocol/run_capture_test.sh /tmp/keploy-oss
+
+  e2e-http-tls:
+    name: E2E HTTP/TLS Capture (pokeapi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build keploy
+        run: go build -tags=viper_bind_struct -o keploy-bin .
+
+      - name: Build http-pokeapi
+        run: |
+          git clone --depth 1 https://github.com/keploy/samples-go.git /tmp/samples-go
+          cd /tmp/samples-go/http-pokeapi && go build -o /tmp/pokeapi-app .
+
+      - name: Record with --debug
+        run: |
+          mkdir -p /tmp/pokeapi-test && cp /tmp/pokeapi-app /tmp/pokeapi-test/app
+          cd /tmp/pokeapi-test
+          sudo $GITHUB_WORKSPACE/keploy-bin record -c "./app" --debug --path /tmp/pokeapi-test --disable-ansi &
+          sleep 18
+          curl -s --max-time 10 http://localhost:8080/api/locations > /dev/null
+          curl -s --max-time 10 http://localhost:8080/api/pokemon/pikachu > /dev/null
+          sleep 4
+          sudo kill -INT $(pgrep -f keploy-bin | head -1) || true
+          sleep 5
+
+      - name: Validate HTTP capture (packets > 0, protocol = HTTP)
+        run: |
+          CAP=$(sudo find /keploy/debug -name "capture_record_*.kpcap" | head -1)
+          [ -n "$CAP" ] || (echo "No capture" && exit 1)
+          OUTPUT=$(./keploy-bin debug validate "$CAP" --disable-ansi 2>&1)
+          echo "$OUTPUT" | grep -v suspicious
+          echo "$OUTPUT" | grep -q "Valid:.*true"
+          PKTS=$(echo "$OUTPUT" | grep "^Packets:" | awk '{print $2}')
+          [ "$PKTS" -gt 0 ] || (echo "0 packets" && exit 1)
+
+      - name: Analyze shows HTTP protocol
+        run: |
+          CAP=$(sudo find /keploy/debug -name "capture_record_*.kpcap" | head -1)
+          ./keploy-bin debug analyze "$CAP" --disable-ansi 2>&1 | grep -q "HTTP"
+
+      - name: Test mode with --debug creates capture
+        run: |
+          sudo rm -rf /keploy/debug
+          cd /tmp/pokeapi-test
+          sudo timeout 60 $GITHUB_WORKSPACE/keploy-bin test -c "./app" --debug --path /tmp/pokeapi-test --disable-ansi 2>&1 | tail -5
+          CAP=$(sudo find /keploy/debug -name "capture_test_*.kpcap" | head -1)
+          [ -n "$CAP" ] || (echo "No test capture" && exit 1)
+
+      - name: Bundle → extract → validate roundtrip
+        run: |
+          CAP=$(sudo find /keploy/debug -name "*.kpcap" | head -1)
+          ./keploy-bin debug bundle --capture "$CAP" --output /tmp/bundle.tar.gz --notes "CI" --disable-ansi
+          ./keploy-bin debug extract /tmp/bundle.tar.gz --dir /tmp/extracted --disable-ansi
+          EXT=$(find /tmp/extracted -name "*.kpcap" | head -1)
+          ./keploy-bin debug validate "$EXT" --disable-ansi 2>&1 | grep -q "Valid:.*true"
