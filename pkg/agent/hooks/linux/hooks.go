@@ -176,7 +176,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// provide a lookup so it can access the maps it needs.
 	if agentSvc.EbpfLoadedHook != nil {
 		if err := agentSvc.EbpfLoadedHook(objs.lookupMap); err != nil {
-			utils.LogError(h.logger, err, "EbpfLoadedHook failed")
+			utils.LogError(h.logger, err, "EbpfLoadedHook failed; verify hook configuration/capabilities or disable the hook if not required")
 			return err
 		}
 	}

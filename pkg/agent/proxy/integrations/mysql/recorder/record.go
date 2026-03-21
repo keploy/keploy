@@ -64,7 +64,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			// Recover server greeting context from TLSHandshakeStore.
 			err := handlePostTLSRecord(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
 			if err != nil && err != io.EOF {
-				utils.LogError(logger, err, "failed to handle post-TLS MySQL recording")
+				utils.LogError(logger, err, "failed to handle post-TLS MySQL recording; verify PostTLSMode/TLSHandshakeStore wiring and SkipTLSMITM settings")
 				errCh <- err
 			}
 			return nil
