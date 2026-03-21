@@ -43,6 +43,7 @@ type Proxy interface {
 	Mapping(ctx context.Context, mappingCh chan models.TestMockMapping)
 	GetDestInfo() DestInfo
 	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations
+	GetSession() *Session
 	SetAuxiliaryHook(h AuxiliaryProxyHook)
 }
 
@@ -125,22 +126,4 @@ type Session struct {
 	TC   chan<- *models.TestCase
 	MC   chan<- *models.Mock
 	models.OutgoingOptions
-}
-
-func (s *Sessions) getAll() map[uint64]*Session {
-	sessions := map[uint64]*Session{}
-	s.sessions.Range(func(k, v interface{}) bool {
-		sessions[k.(uint64)] = v.(*Session)
-		return true
-	})
-	return sessions
-}
-
-func (s *Sessions) GetAllMC() []chan<- *models.Mock {
-	sessions := s.getAll()
-	var mc []chan<- *models.Mock
-	for _, session := range sessions {
-		mc = append(mc, session.MC)
-	}
-	return mc
 }
