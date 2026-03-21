@@ -8,6 +8,7 @@ WORKDIR /app
 ARG SENTRY_DSN_DOCKER
 ARG VERSION
 ARG SERVER_URL
+ARG GITTHUB_APP_CLIENT_ID
 
 # Copy the Go module files and download dependencies
 COPY go.mod go.sum /app/
