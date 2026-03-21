@@ -157,7 +157,7 @@ Network capture records raw bytes for ALL protocols supported by Keploy:
 
 ### TLS/SSL Connections
 
-TLS connections are captured **after** TLS termination at the proxy level, so the captured data contains decrypted application-layer bytes. During replay, TLS connections are currently skipped (the replay engine shows them as "skipped").
+TLS connections are captured **after** TLS termination at the proxy level, so the captured data contains decrypted application-layer bytes. The `isTLS` flag is purely informational metadata — during replay, TLS connections are replayed normally (as plaintext) just like non-TLS connections.
 
 ---
 
@@ -321,8 +321,8 @@ keploy-debug-bundle/
 - Verify the capture path in config is writable
 
 ### Replay shows all connections as "skipped"
-- TLS connections are skipped during replay
-- Ensure the capture contains non-TLS connections
+- Only connections with zero data packets are skipped
+- Check if the capture file contains actual traffic (use `keploy debug validate`)
 - Check if the proxy address is correct
 
 ### Bundle creation fails

@@ -72,17 +72,24 @@ func (cc *CaptureConn) Read(p []byte) (int, error) {
 func (cc *CaptureConn) Write(p []byte) (int, error) {
 	n, err := cc.Conn.Write(p)
 
-	if n > 0 && cc.writer != nil {
-		pkt := &Packet{
-			Timestamp:    time.Now(),
-			ConnectionID: cc.connectionID,
-			Type:         PacketTypeData,
-			Direction:    cc.writeDir,
-			Protocol:     cc.protocol,
-			Payload:      make([]byte, n),
+	if n > 0 {
+		cc.mu.Lock()
+		writer := cc.writer
+		proto := cc.protocol
+		cc.mu.Unlock()
+
+		if writer != nil {
+			pkt := &Packet{
+				Timestamp:    time.Now(),
+				ConnectionID: cc.connectionID,
+				Type:         PacketTypeData,
+				Direction:    cc.writeDir,
+				Protocol:     proto,
+				Payload:      make([]byte, n),
+			}
+			copy(pkt.Payload, p[:n])
+			_ = writer.WritePacket(pkt)
 		}
-		copy(pkt.Payload, p[:n])
-		_ = cc.writer.WritePacket(pkt)
 	}
 
 	return n, err

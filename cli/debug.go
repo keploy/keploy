@@ -156,7 +156,7 @@ The replay engine:
 				fmt.Printf("  Replayed:            %d\n", summary.ReplayedConns)
 				fmt.Printf("  Matched (exact):     %d\n", summary.MatchedConns)
 				fmt.Printf("  Mismatched:          %d\n", summary.FailedConns)
-				fmt.Printf("  Skipped (TLS/empty): %d\n", summary.SkippedConns)
+				fmt.Printf("  Skipped (empty):     %d\n", summary.SkippedConns)
 				fmt.Printf("  Duration:            %s\n", summary.TotalDuration)
 				fmt.Printf("══════════════════════════════════════════\n")
 

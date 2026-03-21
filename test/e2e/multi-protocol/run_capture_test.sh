@@ -27,7 +27,7 @@ mkdir -p "$WORKDIR"
 
 # Build app
 cd "$SCRIPT_DIR"
-go mod tidy 2>/dev/null
+go mod download 2>/dev/null
 go build -o "$WORKDIR/capture-e2e-app" . 2>&1
 if [ $? -ne 0 ]; then echo "FATAL: build failed"; exit 1; fi
 

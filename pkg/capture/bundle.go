@@ -90,28 +90,28 @@ func CreateBundle(logger *zap.Logger, opts BundleOptions) (string, error) {
 		Notes:       opts.Notes,
 	}
 
-	// Add mock directory
+	// Add mock directory (optional — log at debug level if missing/unreadable)
 	if opts.MockDir != "" {
 		if err := addDirToTar(tarWriter, opts.MockDir, filepath.Join(bundleDir, "mocks")); err != nil {
-			logger.Warn("failed to add mock directory to bundle", zap.Error(err))
+			logger.Debug("skipping mock directory in bundle", zap.Error(err))
 		} else {
 			manifest.MockDir = "mocks"
 		}
 	}
 
-	// Add test directory
+	// Add test directory (optional)
 	if opts.TestDir != "" {
 		if err := addDirToTar(tarWriter, opts.TestDir, filepath.Join(bundleDir, "tests")); err != nil {
-			logger.Warn("failed to add test directory to bundle", zap.Error(err))
+			logger.Debug("skipping test directory in bundle", zap.Error(err))
 		} else {
 			manifest.TestDir = "tests"
 		}
 	}
 
-	// Add log file
+	// Add log file (optional)
 	if opts.LogFile != "" {
 		if _, err := addFileToTar(tarWriter, opts.LogFile, filepath.Join(bundleDir, "logs", filepath.Base(opts.LogFile))); err != nil {
-			logger.Warn("failed to add log file to bundle", zap.Error(err))
+			logger.Debug("skipping log file in bundle", zap.Error(err))
 		} else {
 			manifest.LogFile = filepath.Join("logs", filepath.Base(opts.LogFile))
 		}
@@ -178,13 +178,27 @@ func ExtractBundle(bundlePath, targetDir string) (*BundleManifest, error) {
 			return nil, fmt.Errorf("failed to read tar entry: %w", err)
 		}
 
-		// Sanitize path to prevent directory traversal
+		// Sanitize path to prevent directory traversal (zip-slip).
+		// filepath.Clean alone is insufficient for absolute paths; we must also
+		// verify the resolved destination stays inside targetDir.
 		cleanName := filepath.Clean(header.Name)
-		if strings.Contains(cleanName, "..") {
-			continue
+		if filepath.IsAbs(cleanName) || strings.Contains(cleanName, "..") {
+			return nil, fmt.Errorf("unsafe tar entry path: %q", header.Name)
 		}
 
 		targetPath := filepath.Join(targetDir, cleanName)
+		// Final safeguard: ensure the path is still inside targetDir after Join.
+		absTarget, err := filepath.Abs(targetPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve path %q: %w", targetPath, err)
+		}
+		absBase, err := filepath.Abs(targetDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve base dir %q: %w", targetDir, err)
+		}
+		if !strings.HasPrefix(absTarget+string(filepath.Separator), absBase+string(filepath.Separator)) {
+			return nil, fmt.Errorf("tar entry %q would escape extraction directory", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:

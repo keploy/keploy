@@ -94,7 +94,7 @@ func (m *Manager) WrapConn(conn *CaptureConn) *CaptureConn {
 	if !m.IsEnabled() {
 		return conn
 	}
-	conn.writer = m.writer
+	conn.SetWriter(m.writer)
 	return conn
 }
 
@@ -118,7 +118,7 @@ func (m *Manager) RecordConnectionOpen(connID uint64, srcAddr, dstAddr string, i
 	}
 
 	if err := m.writer.WritePacket(pkt); err != nil {
-		m.logger.Error("failed to write connection open packet", zap.Error(err), zap.Uint64("connID", connID))
+		m.logger.Debug("failed to write connection open packet", zap.Error(err), zap.Uint64("connID", connID))
 		m.mu.Lock()
 		m.stats.DroppedPackets++
 		m.mu.Unlock()
@@ -138,7 +138,7 @@ func (m *Manager) RecordConnectionClose(connID uint64) {
 	}
 
 	if err := m.writer.WritePacket(pkt); err != nil {
-		m.logger.Error("failed to write connection close packet", zap.Error(err), zap.Uint64("connID", connID))
+		m.logger.Debug("failed to write connection close packet", zap.Error(err), zap.Uint64("connID", connID))
 	}
 }
 
@@ -163,7 +163,7 @@ func (m *Manager) RecordData(connID uint64, direction Direction, data []byte, pr
 	}
 
 	if err := m.writer.WritePacket(pkt); err != nil {
-		m.logger.Error("failed to write data packet",
+		m.logger.Debug("failed to write data packet",
 			zap.Error(err),
 			zap.Uint64("connID", connID),
 			zap.Int("dataLen", len(data)))
@@ -187,7 +187,7 @@ func (m *Manager) RecordProtocolDetected(connID uint64, protocol Protocol) {
 	}
 
 	if err := m.writer.WritePacket(pkt); err != nil {
-		m.logger.Error("failed to write protocol detection packet", zap.Error(err))
+		m.logger.Debug("failed to write protocol detection packet", zap.Error(err))
 	}
 }
 
@@ -205,7 +205,7 @@ func (m *Manager) RecordError(connID uint64, errMsg string) {
 	}
 
 	if err := m.writer.WritePacket(pkt); err != nil {
-		m.logger.Error("failed to write error packet", zap.Error(err))
+		m.logger.Debug("failed to write error packet", zap.Error(err))
 	}
 }
 

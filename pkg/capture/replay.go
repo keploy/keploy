@@ -206,19 +206,28 @@ func (r *Replayer) replayConnection(ctx context.Context, ct *ConnectionTimeline)
 			result.BytesSent += int64(n)
 
 		case DirProxyToClient:
-			// Read and compare the proxy's response
+			// Read and compare the proxy's response.
+			// TCP may deliver the response in multiple segments, so we loop
+			// until we have at least as many bytes as expected or the deadline fires.
 			if err := conn.SetReadDeadline(time.Now().Add(r.timeout)); err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("packet %d: set read deadline: %s", i, err))
 				result.Matched = false
 				continue
 			}
 
-			buf := make([]byte, len(pkt.Payload)+4096) // extra buffer for potential size differences
-			n, err := conn.Read(buf)
-			if err != nil && !errors.Is(err, io.EOF) {
-				result.Errors = append(result.Errors, fmt.Sprintf("packet %d: read failed: %s", i, err))
-				result.Matched = false
-				continue
+			want := len(pkt.Payload)
+			buf := make([]byte, want+4096) // extra headroom for size differences
+			var n int
+			for n < want {
+				nr, err := conn.Read(buf[n:])
+				n += nr
+				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						result.Errors = append(result.Errors, fmt.Sprintf("packet %d: read failed: %s", i, err))
+						result.Matched = false
+					}
+					break
+				}
 			}
 			result.PacketsRecv++
 			result.BytesRecv += int64(n)

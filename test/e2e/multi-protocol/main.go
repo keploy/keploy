@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"time"
@@ -31,10 +30,10 @@ import (
 )
 
 var (
-	mysqlDB    *sql.DB
-	pgDB       *sql.DB
-	redisAddr  string
-	echoAddr   string
+	mysqlDB   *sql.DB
+	pgDB      *sql.DB
+	redisAddr string
+	echoAddr  string
 )
 
 func main() {
@@ -369,6 +368,3 @@ func envOr(key, def string) string {
 	}
 	return def
 }
-
-// Ensure net is used (for the echo server listener)
-var _ = net.Listen

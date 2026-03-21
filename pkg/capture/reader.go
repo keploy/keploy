@@ -259,7 +259,6 @@ func Validate(path string) (*ValidationResult, error) {
 
 		packetCount++
 		byteCount += int64(len(pkt.Payload))
-		connSeen[pkt.ConnectionID] = true
 
 		// Check timestamp sanity
 		if pkt.Timestamp.IsZero() || pkt.Timestamp.Before(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) {
@@ -267,11 +266,16 @@ func Validate(path string) (*ValidationResult, error) {
 				fmt.Sprintf("packet %d: suspicious timestamp %s", packetCount, pkt.Timestamp))
 		}
 
-		// Check for connection open/close ordering
+		// Warn if data arrives before a CONN_OPEN for this connection.
+		// The check must happen before connSeen is updated below.
 		if pkt.Type == PacketTypeData && !connSeen[pkt.ConnectionID] {
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("packet %d: data for unknown connection %d", packetCount, pkt.ConnectionID))
 		}
+
+		// Track connections by their open event; set seen for all packet types
+		// so repeated data packets for the same unknown connection don't warn repeatedly.
+		connSeen[pkt.ConnectionID] = true
 	}
 
 	result.PacketCount = packetCount

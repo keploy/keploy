@@ -793,11 +793,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
-	// Network capture: update TLS flag if detected
-	if cm != nil && cm.IsEnabled() && isTLS {
-		cm.RecordConnectionOpen(captureConnID, srcConn.RemoteAddr().String(), dstAddr, true)
-	}
-
 	//update the src connection to have the initial buffer
 	srcConn = &util.Conn{
 		Conn:   srcConn,
