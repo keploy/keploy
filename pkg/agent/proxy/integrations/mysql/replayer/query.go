@@ -91,7 +91,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Match the request with the mock
-			resp, ok, closestQuery, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
+			resp, ok, closestQuery, closestMockName, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",
@@ -108,10 +108,6 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			if !ok {
-				logger.Error("Connection closing due to no matching mock found",
-					zap.Int("commands_processed", commandCount),
-					zap.String("request_type", req.Header.Type))
-
 				// Build mismatch report for propagation
 				actualQuery := ""
 				if qp, qok := req.Message.(*mysql.QueryPacket); qok {
@@ -122,10 +118,14 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				report := &models.MockMismatchReport{
 					Protocol:      "MySQL",
 					ActualSummary: fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 120)),
-					ClosestMock:   closestQuery,
+					ClosestMock:   closestMockName,
 					Diff:          fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200)),
 					NextSteps:     "Re-record mocks if the SQL query has changed.",
 				}
+				logger.Error("Connection closing due to no matching mock found. Re-record mocks if the SQL query has changed.",
+					zap.Int("commands_processed", commandCount),
+					zap.String("request_type", req.Header.Type),
+					zap.String("closest_mock", closestMockName))
 				baseErr := fmt.Errorf("error while simulating the command phase due to no matching mock found")
 				return models.NewMockMismatchError(baseErr, report)
 			}

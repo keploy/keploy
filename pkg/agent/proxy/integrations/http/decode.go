@@ -141,7 +141,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				h.Logger.Debug("no matching http mock found", zap.Any("metadata", utils.GetReqMeta(request)))
 
 				// Build mismatch report for the user (surfaced in the mismatch table)
-				report := h.buildHTTPMismatchReport(request, mockDb)
+				report := h.buildHTTPMismatchReport(request, mockDb, nil)
 				if report != nil {
 					h.Logger.Debug("mock miss",
 						zap.String("protocol", report.Protocol),

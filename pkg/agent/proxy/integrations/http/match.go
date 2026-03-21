@@ -491,17 +491,20 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 }
 
 // buildHTTPMismatchReport finds the closest HTTP mock to the given request
-// and returns a human-readable diff report.
-func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integrations.MockMemDb) *models.MockMismatchReport {
-	mocks, err := mockDb.GetUnFilteredMocks()
-	if err != nil || len(mocks) == 0 {
-		return &models.MockMismatchReport{
-			Protocol:      "HTTP",
-			ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
-			NextSteps:     "No HTTP mocks available. Re-record mocks to capture this endpoint.",
+// and returns a human-readable diff report. If httpMocks is nil, it fetches
+// from mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
+func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integrations.MockMemDb, httpMocks []*models.Mock) *models.MockMismatchReport {
+	if httpMocks == nil {
+		mocks, err := mockDb.GetUnFilteredMocks()
+		if err != nil || len(mocks) == 0 {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "No HTTP mocks available. Re-record mocks to capture this endpoint.",
+			}
 		}
+		httpMocks = FilterHTTPMocks(mocks)
 	}
-	httpMocks := FilterHTTPMocks(mocks)
 	if len(httpMocks) == 0 {
 		return &models.MockMismatchReport{
 			Protocol:      "HTTP",
