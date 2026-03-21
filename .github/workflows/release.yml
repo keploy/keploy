@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  packages: write
+  id-token: write
 
 jobs:
 #  build-ui:
@@ -105,3 +107,79 @@ jobs:
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
           GITTHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
           SERVER_URL: https://api.keploy.io
+
+  build-docker:
+    needs: build-go
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.4.0
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@79abd3f86f79a9d68a23c75a09a9a85889262adf
+
+      - name: Log into registry ghcr.io
+        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+        with:
+          images: ghcr.io/${{ github.repository }}
+
+      - name: Set version
+        shell: bash
+        run: echo "VERSION=$(echo ${GITHUB_REF#refs/tags/v})" >> $GITHUB_ENV
+
+      - name: Prepare Dockerfile for Release Build
+        run: |
+          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' ./Dockerfile
+          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile
+
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+        with:
+          context: .
+          ssh: default
+          platforms: linux/amd64, linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
+            VERSION=${{ env.VERSION }}
+            SERVER_URL=https://api.keploy.io
+            GITTHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+
+      - name: Sign the published Docker image
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}
+
+  mark-latest:
+    needs: [build-go, build-docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark release as latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --latest

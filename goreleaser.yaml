@@ -5,8 +5,9 @@ release:
   prerelease: auto
   # Optional but useful; avoids accumulating duplicate draft releases.
   mode: replace
-  # You probably want published releases rather than drafts.
+  # Release is published but not marked as latest until binaries and Docker image are ready.
   draft: false
+  make_latest: false
 
 archives:
   - id: default
