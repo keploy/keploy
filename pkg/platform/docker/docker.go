@@ -608,12 +608,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		},
 	}
 
-	// Allow enterprise to mutate the service node (e.g., add capabilities,
-	// security_opt, tmpfs for low-latency mode).
-	if ComposeServiceHook != nil {
-		ComposeServiceHook(serviceNode)
-	}
-
 	// Add environment variables
 	if len(envVars) > 0 {
 		envNode := &yaml.Node{Kind: yaml.SequenceNode}
@@ -814,6 +808,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		} else {
 			idc.logger.Warn("Failed to get current working directory for pprof mount", zap.Error(err))
 		}
+	}
+
+	// Allow enterprise to mutate the fully-built service node (e.g., add
+	// capabilities, security_opt, tmpfs for low-latency mode). This runs
+	// last so the hook can see and modify all fields including volumes.
+	if ComposeServiceHook != nil {
+		ComposeServiceHook(serviceNode)
 	}
 
 	return serviceNode, nil

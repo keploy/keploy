@@ -88,6 +88,8 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	var mappingEntry *models.TestMockMapping
 
 	m.mu.Lock()
+	outChan := m.outChan
+	mappingChan := m.mappingChan
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
 	cutoffTime := time.Now().Add(-7 * time.Second)
@@ -107,6 +109,13 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// MATCHING LOGIC: Process mocks in the requested window
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
+				// If output channel is not wired yet, keep matching mocks buffered
+				// so they can be emitted later instead of blocking on a nil channel.
+				if outChan == nil {
+					m.buffer[keepIdx] = mock
+					keepIdx++
+					continue
+				}
 				mock.Name = "mock-" + generateRandomString(8)
 				associatedMockIDs = append(associatedMockIDs, mock.Name)
 				mocksToSend = append(mocksToSend, mock)
@@ -130,15 +139,13 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 	// Reslice the buffer
 	m.buffer = m.buffer[:keepIdx]
 
-	if len(associatedMockIDs) > 0 && m.mappingChan != nil && mapping {
+	if len(associatedMockIDs) > 0 && mappingChan != nil && mapping {
 		mappingEntry = &models.TestMockMapping{
 			TestName: testName,
 			MockIDs:  associatedMockIDs,
 		}
 	}
 
-	outChan := m.outChan
-	mappingChan := m.mappingChan
 	m.mu.Unlock()
 
 	// Send mocks and mapping outside the lock to avoid deadlock.
