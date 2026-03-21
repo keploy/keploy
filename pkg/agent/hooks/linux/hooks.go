@@ -572,4 +572,3 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 
 	return result, nil
 }
-
