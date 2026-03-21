@@ -6,7 +6,6 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.uber.org/zap"
 )
 
 type AgentHooks interface {
@@ -85,17 +84,10 @@ type Pinnable interface {
 	Pin(fileName string) error
 }
 
-// EbpfMapPinHook is called after eBPF objects are loaded to allow enterprise
-// to pin specific maps to bpffs for cross-process access (e.g. sockmap proxy).
-// It receives a map of name → Pinnable and returns a cleanup function to unpin
-// on shutdown.
-type EbpfMapPinHook func(maps map[string]Pinnable) (cleanup func(), err error)
-
-var MapPinHook EbpfMapPinHook
-
-func RegisterMapPinHook(h EbpfMapPinHook) {
-	MapPinHook = h
-}
+// EbpfMaps holds references to loaded eBPF maps, allowing enterprise to
+// access them (e.g., for pinning to bpffs). Populated by OSS hooks after
+// eBPF objects are loaded.
+var EbpfMaps map[string]Pinnable
 
 var EbpfProxyPortOverride uint32
 
@@ -103,14 +95,6 @@ var ActiveIncomingProxy agent.IncomingProxy
 
 func RegisterIncomingProxy(ip agent.IncomingProxy) {
 	ActiveIncomingProxy = ip
-}
-
-type SockmapLoadHookFn func(logger *zap.Logger) (cleanup func(), err error)
-
-var SockmapHook SockmapLoadHookFn
-
-func RegisterSockmapLoadHook(h SockmapLoadHookFn) {
-	SockmapHook = h
 }
 
 type ExtraPassThroughPortsFn func() []uint

@@ -312,7 +312,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	defer func(listener net.Listener) {
 		err := listener.Close()
 
-		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+		if err != nil && !isNetworkClosedErr(err) {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}
 		p.logger.Debug("proxy stopped...")
@@ -740,8 +740,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if v, ok := parserCtx.Value(models.ClientConnectionIDKey).(string); ok {
 			connID = v
 		}
-		rule.MC <- pTls.NewPostgresSSLConfigMock(connID, sslResponse)
-		logger.Debug("Injected synthetic SSLRequest/SSLResponse config mock for backward compatibility", zap.String("sslResponse", string(sslResponse)))
+		sslConfigMock := pTls.NewPostgresSSLConfigMock(connID, sslResponse)
+		if rule.MC == nil {
+			utils.LogError(logger, fmt.Errorf("mock channel is nil"), "failed to enqueue synthetic SSLRequest/SSLResponse config mock for backward compatibility")
+		} else {
+			select {
+			case rule.MC <- sslConfigMock:
+				logger.Debug("Injected synthetic SSLRequest/SSLResponse config mock for backward compatibility", zap.String("sslResponse", string(sslResponse)))
+			case <-ctx.Done():
+				utils.LogError(logger, ctx.Err(), "context was cancelled before PostgreSQL SSL config mock could be recorded")
+			default:
+				utils.LogError(logger, fmt.Errorf("mock channel is full"), "unable to record PostgreSQL SSL config mock because the mock channel is full")
+			}
+		}
 
 		// After SSL negotiation, we need to read the next packet (StartupMessage)
 		// and wrap it in the srcConn so parsers see it

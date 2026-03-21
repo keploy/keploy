@@ -60,7 +60,6 @@ type Hooks struct {
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
-	agentKernelPidMap     *ebpf.Map
 	redirectProxyMap      *ebpf.Map
 
 	// eBPF C shared objectsobjects
@@ -79,11 +78,7 @@ type Hooks struct {
 	BindEvents *ebpf.Map
 	sockops    link.Link
 
-	// mapPinCleanup is set by the EbpfMapPinHook to unpin maps on shutdown.
-	mapPinCleanup func()
 
-	// sockmapCleanup is set by the enterprise SockmapLoadHook to unload sockmap BPF on shutdown.
-	sockmapCleanup func()
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -170,7 +165,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.objectsMutex.Lock()
 	h.clientRegistrationMap = objs.M_1773927248001
 	h.agentRegistartionMap = objs.M_1773927248002
-	h.agentKernelPidMap = objs.KeployAgentKernelPidMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -185,21 +179,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
 
-	// If enterprise registered a map-pin hook, expose maps for pinning.
-	if agentSvc.MapPinHook != nil {
-		pinnableMaps := map[string]agentSvc.Pinnable{
-			"redirect_proxy_map":    objs.RedirectProxyMap,
-			"target_namespace_pids": objs.TargetNamespacePids,
-		}
-		cleanup, pinErr := agentSvc.MapPinHook(pinnableMaps)
-		if pinErr != nil {
-			h.logger.Error(
-				"EbpfMapPinHook failed; cross-process eBPF map access will be disabled. Ensure the container has CAP_SYS_ADMIN or is run with --enable-docker-unconfined, and verify that bpffs is mounted and writable.",
-				zap.Error(pinErr),
-			)
-		} else {
-			h.mapPinCleanup = cleanup
-		}
+	// Expose loaded eBPF maps so enterprise can access them (e.g., for pinning).
+	agentSvc.EbpfMaps = map[string]agentSvc.Pinnable{
+		"redirect_proxy_map":    objs.RedirectProxyMap,
+		"target_namespace_pids": objs.TargetNamespacePids,
 	}
 
 	// Get the first-mounted cgroupv2 path.
@@ -375,18 +358,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
-	// If enterprise registered a sockmap load hook, invoke it to load
-	// sk_skb BPF programs for low-latency mode.
-	if agentSvc.SockmapHook != nil {
-		cleanup, smErr := agentSvc.SockmapHook(h.logger)
-		if smErr != nil {
-			h.logger.Warn("SockmapLoadHook failed (low-latency mode unavailable)", zap.Error(smErr))
-		} else {
-			h.sockmapCleanup = cleanup
-			h.logger.Info("Sockmap BPF programs loaded via enterprise hook")
-		}
-	}
-
 	return nil
 }
 
@@ -461,17 +432,6 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	}
 	h.logger.Debug("eBPF resources released successfully...")
 
-	// Clean up pinned eBPF maps (if enterprise pinned any)
-	if h.mapPinCleanup != nil {
-		h.mapPinCleanup()
-		h.mapPinCleanup = nil
-	}
-
-	// Clean up sockmap BPF resources (loaded by enterprise hook)
-	if h.sockmapCleanup != nil {
-		h.sockmapCleanup()
-		h.sockmapCleanup = nil
-	}
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {

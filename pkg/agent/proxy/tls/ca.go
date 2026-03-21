@@ -476,17 +476,27 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 
 	SrcPortToDstURL.Store(sourcePort, dstURL)
 
+	certHost := dstURL
+	if certHost == "" {
+		// Non-SNI clients can reach this path; use a stable fallback host for CSR
+		// generation and skip cache usage to avoid sharing empty-key entries.
+		certHost = "localhost"
+		logger.Debug("TLS client did not send SNI; using fallback host for certificate generation and bypassing cert cache")
+	}
+
 	// ── Fast path: return cached cert (< 1 ms) ──
-	if cert, ok := getCachedCert(dstURL); ok {
-		logger.Debug("TLS cert cache hit", zap.String("host", dstURL))
-		return cert, nil
+	if dstURL != "" {
+		if cert, ok := getCachedCert(dstURL); ok {
+			logger.Debug("TLS cert cache hit", zap.String("host", dstURL))
+			return cert, nil
+		}
 	}
 
 	// ── Slow path: generate new cert ──
 	serverReq := &csr.CertificateRequest{
-		CN: clientHello.ServerName,
+		CN: certHost,
 		Hosts: []string{
-			clientHello.ServerName,
+			certHost,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}
@@ -528,9 +538,11 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
 	}
 
-	// Cache for future connections to the same host
-	setCachedCert(dstURL, &serverTLSCert)
-	logger.Debug("TLS cert cached", zap.String("host", dstURL))
+	// Cache for future connections to the same host only when SNI is present.
+	if dstURL != "" {
+		setCachedCert(dstURL, &serverTLSCert)
+		logger.Debug("TLS cert cached", zap.String("host", dstURL))
+	}
 
 	return &serverTLSCert, nil
 }
