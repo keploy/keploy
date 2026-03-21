@@ -35,6 +35,7 @@ if [ $? -ne 0 ]; then echo "FATAL: build failed"; exit 1; fi
 echo "Starting MySQL, Redis, PostgreSQL..."
 docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d 2>/dev/null
 echo "Waiting for services to be healthy..."
+MYSQL_OK=0; REDIS_OK=0; PG_OK=0
 for i in $(seq 1 30); do
     MYSQL_OK=$(docker exec capture-test-mysql mysqladmin ping -ppassword 2>/dev/null | grep -c alive)
     REDIS_OK=$(docker exec capture-test-redis redis-cli ping 2>/dev/null | grep -c PONG)
@@ -45,6 +46,12 @@ for i in $(seq 1 30); do
     fi
     sleep 2
 done
+if [ "$MYSQL_OK" != "1" ] || [ "$REDIS_OK" != "1" ] || [ "$PG_OK" != "1" ]; then
+    echo "ERROR: Backend services did not become healthy in time (MySQL=$MYSQL_OK Redis=$REDIS_OK PG=$PG_OK)"
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps 2>/dev/null || true
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" logs --tail=20 2>/dev/null || true
+    exit 1
+fi
 
 # ══════════════════════════════════════════════════
 # PHASE 1: Record with --debug

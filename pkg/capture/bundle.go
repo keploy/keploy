@@ -168,6 +168,7 @@ func ExtractBundle(bundlePath, targetDir string) (*BundleManifest, error) {
 
 	tarReader := tar.NewReader(gzReader)
 	var manifest *BundleManifest
+	manifestFound := false // true once the manifest.json entry is encountered
 
 	for {
 		header, err := tarReader.Next()
@@ -226,18 +227,25 @@ func ExtractBundle(bundlePath, targetDir string) (*BundleManifest, error) {
 
 			// Parse manifest if this is it
 			if filepath.Base(cleanName) == "manifest.json" {
+				manifestFound = true
 				data, err := os.ReadFile(targetPath)
-				if err == nil {
-					var m BundleManifest
-					if err := json.Unmarshal(data, &m); err == nil {
-						manifest = &m
-					}
+				if err != nil {
+					return nil, fmt.Errorf("manifest.json found but could not be read: %w", err)
 				}
+				var m BundleManifest
+				if err := json.Unmarshal(data, &m); err != nil {
+					return nil, fmt.Errorf("manifest.json found but contains invalid JSON: %w", err)
+				}
+				manifest = &m
 			}
 		}
 	}
 
 	if manifest == nil {
+		if manifestFound {
+			// Should not be reached (parse errors return above), but guard anyway.
+			return nil, fmt.Errorf("manifest.json could not be parsed")
+		}
 		return nil, fmt.Errorf("manifest.json not found in bundle")
 	}
 

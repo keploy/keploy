@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"time"
 
@@ -118,7 +119,7 @@ func handleHTTPEcho(w http.ResponseWriter, r *http.Request) {
 	if msg == "" {
 		msg = "hello-from-capture-test"
 	}
-	url := fmt.Sprintf("http://%s/echo?msg=%s", echoAddr, msg)
+	url := fmt.Sprintf("http://%s/echo?msg=%s", echoAddr, neturl.QueryEscape(msg))
 	resp, err := http.Get(url)
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
