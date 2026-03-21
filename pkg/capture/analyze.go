@@ -20,19 +20,19 @@ type AnalysisReport struct {
 
 // ConnectionSummary summarizes a single connection from the capture.
 type ConnectionSummary struct {
-	ID             uint64
-	SrcAddr        string
-	DstAddr        string
-	Protocol       Protocol
-	IsTLS          bool
-	Duration       time.Duration
-	ClientBytes    int64
-	ServerBytes    int64
-	PacketCount    int
-	FirstPacketAt  time.Time
-	LastPacketAt   time.Time
-	HasErrors      bool
-	ErrorMessages  []string
+	ID            uint64
+	SrcAddr       string
+	DstAddr       string
+	Protocol      Protocol
+	IsTLS         bool
+	Duration      time.Duration
+	ClientBytes   int64
+	ServerBytes   int64
+	PacketCount   int
+	FirstPacketAt time.Time
+	LastPacketAt  time.Time
+	HasErrors     bool
+	ErrorMessages []string
 }
 
 // Analyze produces a detailed analysis of a capture file.

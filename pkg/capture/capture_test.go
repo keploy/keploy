@@ -1314,8 +1314,8 @@ func TestUnicodeAndSpecialCharsInAddresses(t *testing.T) {
 		Timestamp:    time.Now(),
 		ConnectionID: 1,
 		Type:         PacketTypeConnOpen,
-		SrcAddr:      "[::1]:12345",                 // IPv6 loopback
-		DstAddr:      "[2001:db8::1]:443",            // IPv6 address
+		SrcAddr:      "[::1]:12345",       // IPv6 loopback
+		DstAddr:      "[2001:db8::1]:443", // IPv6 address
 	}
 	w.WritePacket(pkt)
 	w.Close()
@@ -1365,6 +1365,383 @@ func TestTLSFlagRoundtrip(t *testing.T) {
 	}
 	if pkt2.IsTLS {
 		t.Fatal("expected non-TLS for conn 2")
+	}
+}
+
+// ──────────────────────────────────────────────────
+// Compare tests (covers compare.go)
+// ──────────────────────────────────────────────────
+
+func TestCompareCaptureFiles_Identical(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.kpcap")
+	pathB := filepath.Join(dir, "b.kpcap")
+
+	// Write identical captures
+	for _, path := range []string{pathA, pathB} {
+		w, err := NewWriter(path, "record")
+		if err != nil {
+			t.Fatalf("NewWriter: %v", err)
+		}
+		_ = w.WritePacket(&Packet{
+			ConnectionID: 1, Type: PacketTypeData, Direction: DirClientToProxy,
+			Protocol: ProtoHTTP, SrcAddr: "127.0.0.1:1111", DstAddr: "1.2.3.4:80",
+			Payload: []byte("GET / HTTP/1.1\r\n\r\n"),
+		})
+		_ = w.WritePacket(&Packet{
+			ConnectionID: 1, Type: PacketTypeData, Direction: DirProxyToClient,
+			Protocol: ProtoHTTP, SrcAddr: "1.2.3.4:80", DstAddr: "127.0.0.1:1111",
+			Payload: []byte("HTTP/1.1 200 OK\r\n\r\n"),
+		})
+		w.Close()
+	}
+
+	result, err := Compare(pathA, pathB)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if result.Summary.DiffConns != 0 {
+		t.Errorf("expected 0 diff conns, got %d", result.Summary.DiffConns)
+	}
+	if result.Summary.MatchedConns != 1 {
+		t.Errorf("expected 1 matched conn, got %d", result.Summary.MatchedConns)
+	}
+	formatted := FormatCompareResult(result)
+	if formatted == "" {
+		t.Error("FormatCompareResult returned empty string")
+	}
+	if result.FileA != pathA || result.FileB != pathB {
+		t.Error("file paths not set correctly")
+	}
+}
+
+func TestCompareCaptureFiles_PayloadDiff(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.kpcap")
+	pathB := filepath.Join(dir, "b.kpcap")
+
+	writeCapture := func(path string, payload []byte) {
+		w, _ := NewWriter(path, "record")
+		_ = w.WritePacket(&Packet{
+			ConnectionID: 1, Type: PacketTypeData, Direction: DirClientToProxy,
+			Protocol: ProtoHTTP, SrcAddr: "127.0.0.1:1111", DstAddr: "1.2.3.4:80",
+			Payload: payload,
+		})
+		w.Close()
+	}
+	writeCapture(pathA, []byte("hello world"))
+	writeCapture(pathB, []byte("hello XXXXX"))
+
+	result, err := Compare(pathA, pathB)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if result.Summary.DiffConns != 1 {
+		t.Errorf("expected 1 diff conn, got %d", result.Summary.DiffConns)
+	}
+	formatted := FormatCompareResult(result)
+	if formatted == "" {
+		t.Error("FormatCompareResult returned empty string")
+	}
+}
+
+func TestCompareCaptureFiles_OnlyInA(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.kpcap")
+	pathB := filepath.Join(dir, "b.kpcap")
+
+	// A has a connection, B is empty
+	wA, _ := NewWriter(pathA, "record")
+	_ = wA.WritePacket(&Packet{
+		ConnectionID: 1, Type: PacketTypeData, Direction: DirClientToProxy,
+		Protocol: ProtoHTTP, SrcAddr: "127.0.0.1:1111", DstAddr: "9.9.9.9:80",
+		Payload: []byte("data"),
+	})
+	wA.Close()
+
+	wB, _ := NewWriter(pathB, "record")
+	wB.Close()
+
+	result, err := Compare(pathA, pathB)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if result.Summary.ConnectionsOnlyInA != 1 {
+		t.Errorf("expected 1 only-in-A conn, got %d", result.Summary.ConnectionsOnlyInA)
+	}
+	formatted := FormatCompareResult(result)
+	if formatted == "" {
+		t.Error("FormatCompareResult returned empty")
+	}
+}
+
+func TestCompareCaptureFiles_OnlyInB(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.kpcap")
+	pathB := filepath.Join(dir, "b.kpcap")
+
+	wA, _ := NewWriter(pathA, "record")
+	wA.Close()
+
+	wB, _ := NewWriter(pathB, "record")
+	_ = wB.WritePacket(&Packet{
+		ConnectionID: 2, Type: PacketTypeData, Direction: DirClientToProxy,
+		Protocol: ProtoMySQL, SrcAddr: "127.0.0.1:2222", DstAddr: "10.0.0.1:3306",
+		Payload: []byte("mysql query"),
+	})
+	wB.Close()
+
+	result, err := Compare(pathA, pathB)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if result.Summary.ConnectionsOnlyInB != 1 {
+		t.Errorf("expected 1 only-in-B conn, got %d", result.Summary.ConnectionsOnlyInB)
+	}
+}
+
+func TestCompareCaptureFiles_PacketCountDiff(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.kpcap")
+	pathB := filepath.Join(dir, "b.kpcap")
+
+	wA, _ := NewWriter(pathA, "record")
+	_ = wA.WritePacket(&Packet{
+		ConnectionID: 1, Type: PacketTypeData, Direction: DirClientToProxy,
+		Protocol: ProtoHTTP, SrcAddr: "127.0.0.1:1111", DstAddr: "1.2.3.4:80",
+		Payload: []byte("req"),
+	})
+	_ = wA.WritePacket(&Packet{
+		ConnectionID: 1, Type: PacketTypeData, Direction: DirProxyToClient,
+		Protocol: ProtoHTTP, SrcAddr: "1.2.3.4:80", DstAddr: "127.0.0.1:1111",
+		Payload: []byte("resp"),
+	})
+	wA.Close()
+
+	wB, _ := NewWriter(pathB, "record")
+	_ = wB.WritePacket(&Packet{
+		ConnectionID: 1, Type: PacketTypeData, Direction: DirClientToProxy,
+		Protocol: ProtoHTTP, SrcAddr: "127.0.0.1:1111", DstAddr: "1.2.3.4:80",
+		Payload: []byte("req"),
+	})
+	wB.Close()
+
+	result, err := Compare(pathA, pathB)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if result.Summary.DiffConns != 1 {
+		t.Errorf("expected 1 diff conn, got %d", result.Summary.DiffConns)
+	}
+}
+
+func TestCompareCaptureFiles_ExtraConnectionsInGroups(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.kpcap")
+	pathB := filepath.Join(dir, "b.kpcap")
+
+	// A has 2 connections to same dst, B has 1
+	wA, _ := NewWriter(pathA, "record")
+	for _, id := range []uint64{1, 2} {
+		_ = wA.WritePacket(&Packet{
+			ConnectionID: id, Type: PacketTypeData, Direction: DirClientToProxy,
+			Protocol: ProtoHTTP, SrcAddr: "127.0.0.1:1111", DstAddr: "5.5.5.5:80",
+			Payload: []byte("req"),
+		})
+	}
+	wA.Close()
+
+	wB, _ := NewWriter(pathB, "record")
+	_ = wB.WritePacket(&Packet{
+		ConnectionID: 10, Type: PacketTypeData, Direction: DirClientToProxy,
+		Protocol: ProtoHTTP, SrcAddr: "127.0.0.1:1111", DstAddr: "5.5.5.5:80",
+		Payload: []byte("req"),
+	})
+	wB.Close()
+
+	result, err := Compare(pathA, pathB)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	// One connection matched, one only in A
+	if result.Summary.ConnectionsOnlyInA != 1 {
+		t.Errorf("expected 1 only-in-A, got %d", result.Summary.ConnectionsOnlyInA)
+	}
+}
+
+func TestCompare_InvalidFile(t *testing.T) {
+	_, err := Compare("/nonexistent/a.kpcap", "/nonexistent/b.kpcap")
+	if err == nil {
+		t.Error("expected error for nonexistent files")
+	}
+}
+
+func TestFormatCompareResult_AllMatch(t *testing.T) {
+	r := &CompareResult{
+		FileA: "a.kpcap",
+		FileB: "b.kpcap",
+		Summary: CompareSummary{
+			MatchedConns: 3,
+		},
+	}
+	out := FormatCompareResult(r)
+	if out == "" {
+		t.Error("expected non-empty output")
+	}
+}
+
+// ──────────────────────────────────────────────────
+// CaptureConn additional coverage (SetWriter, ConnectionID)
+// ──────────────────────────────────────────────────
+
+func TestCaptureConnSetWriterAndConnectionID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.kpcap")
+
+	w, err := NewWriter(path, "record")
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	defer w.Close()
+
+	srv, cli := net.Pipe()
+	defer srv.Close()
+	defer cli.Close()
+
+	cc := NewCaptureConn(cli, nil, 42, DirClientToProxy, DirProxyToClient)
+
+	if cc.ConnectionID() != 42 {
+		t.Errorf("expected ConnectionID 42, got %d", cc.ConnectionID())
+	}
+
+	// SetWriter should replace the writer
+	cc.SetWriter(w)
+	cc.SetProtocol(ProtoHTTP)
+
+	// Write something and verify it's captured
+	done := make(chan struct{})
+	go func() {
+		buf := make([]byte, 5)
+		srv.Read(buf)
+		close(done)
+	}()
+	_, err = cc.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	<-done
+	w.Close()
+
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+	cf, err := r.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(cf.Packets) == 0 {
+		t.Error("expected packets after SetWriter")
+	}
+}
+
+// ──────────────────────────────────────────────────
+// Manager.GetWriter and WrapConn coverage
+// ──────────────────────────────────────────────────
+
+func TestManagerGetWriterAndWrapConn(t *testing.T) {
+	dir := t.TempDir()
+	logger := newTestLogger()
+
+	m, err := NewManager(logger, dir, "record")
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer m.Close()
+
+	w := m.GetWriter()
+	if w == nil {
+		t.Fatal("GetWriter returned nil")
+	}
+
+	srv, cli := net.Pipe()
+	defer srv.Close()
+	defer cli.Close()
+
+	var connID uint64 = 99
+	m.RecordConnectionOpen(connID, "127.0.0.1:1234", "1.2.3.4:80", false)
+
+	cc := NewCaptureConn(cli, nil, connID, DirClientToProxy, DirProxyToClient)
+	wrapped := m.WrapConn(cc)
+	if wrapped == nil {
+		t.Fatal("WrapConn returned nil")
+	}
+
+	// Exercise write on the wrapped conn
+	done := make(chan struct{})
+	go func() {
+		buf := make([]byte, 4)
+		srv.Read(buf)
+		close(done)
+	}()
+	wrapped.Write([]byte("test"))
+	<-done
+}
+
+// ──────────────────────────────────────────────────
+// Reader.Header coverage
+// ──────────────────────────────────────────────────
+
+func TestReaderHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hdr.kpcap")
+
+	w, _ := NewWriter(path, "record")
+	_ = w.WritePacket(&Packet{
+		ConnectionID: 1, Type: PacketTypeData, Direction: DirClientToProxy,
+		Protocol: ProtoHTTP, SrcAddr: "a:1", DstAddr: "b:2",
+		Payload: []byte("x"),
+	})
+	w.Close()
+
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	hdr := r.Header()
+	if hdr.Version != CurrentVersion {
+		t.Errorf("unexpected version %d", hdr.Version)
+	}
+	if string(hdr.Magic[:len(MagicBytes)]) != MagicBytes {
+		t.Errorf("unexpected magic bytes")
+	}
+}
+
+// ──────────────────────────────────────────────────
+// Writer.Sync coverage
+// ──────────────────────────────────────────────────
+
+func TestWriterSync(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sync.kpcap")
+
+	w, err := NewWriter(path, "record")
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	defer w.Close()
+
+	_ = w.WritePacket(&Packet{
+		ConnectionID: 1, Type: PacketTypeData, Direction: DirClientToProxy,
+		Protocol: ProtoHTTP, SrcAddr: "a:1", DstAddr: "b:2",
+		Payload: []byte("sync-test"),
+	})
+
+	if err := w.Sync(); err != nil {
+		t.Errorf("Sync returned error: %v", err)
 	}
 }
 

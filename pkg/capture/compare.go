@@ -7,10 +7,10 @@ import (
 
 // CompareResult holds the result of comparing two capture files.
 type CompareResult struct {
-	FileA          string               `json:"file_a"`
-	FileB          string               `json:"file_b"`
-	ConnectionDiffs []ConnectionDiff    `json:"connection_diffs"`
-	Summary        CompareSummary       `json:"summary"`
+	FileA           string           `json:"file_a"`
+	FileB           string           `json:"file_b"`
+	ConnectionDiffs []ConnectionDiff `json:"connection_diffs"`
+	Summary         CompareSummary   `json:"summary"`
 }
 
 // CompareSummary gives high-level stats on the comparison.
@@ -24,14 +24,14 @@ type CompareSummary struct {
 
 // ConnectionDiff describes how a connection differs between two captures.
 type ConnectionDiff struct {
-	Protocol   Protocol `json:"protocol"`
-	DstAddr    string   `json:"dst_addr"`
-	Status     string   `json:"status"` // "match", "diff", "only_in_a", "only_in_b"
-	PacketsA   int      `json:"packets_a"`
-	PacketsB   int      `json:"packets_b"`
-	BytesA     int64    `json:"bytes_a"`
-	BytesB     int64    `json:"bytes_b"`
-	Details    string   `json:"details,omitempty"`
+	Protocol Protocol `json:"protocol"`
+	DstAddr  string   `json:"dst_addr"`
+	Status   string   `json:"status"` // "match", "diff", "only_in_a", "only_in_b"
+	PacketsA int      `json:"packets_a"`
+	PacketsB int      `json:"packets_b"`
+	BytesA   int64    `json:"bytes_a"`
+	BytesB   int64    `json:"bytes_b"`
+	Details  string   `json:"details,omitempty"`
 }
 
 // Compare two capture files and report differences.

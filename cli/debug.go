@@ -26,16 +26,21 @@ func Debug(ctx context.Context, logger *zap.Logger, cfg *config.Config, _ Servic
 		Long: `The debug command provides tools for working with Keploy network capture (.kpcap) files.
 
 These files are automatically generated when running keploy record or keploy test with the --debug flag.
-They capture raw network packets flowing through the proxy, enabling exact reproduction of issues.
+They capture raw network packets flowing through the proxy, enabling exact reproduction of issues.`,
+		Example: `  # Analyze a capture file:
+  keploy debug analyze keploy/debug/capture_record_20240101.kpcap
 
-Subcommands:
-  analyze    - Show a detailed analysis of a capture file
-  validate   - Verify capture file integrity
-  compare    - Compare two captures to find where proxy behavior diverges
-  reproduce  - Set up mocks/tests from a debug bundle for local reproduction
-  replay     - Replay captured traffic against a proxy
-  bundle     - Create a debug bundle (capture + mocks + logs + config)
-  extract    - Extract a debug bundle`,
+  # Validate capture integrity:
+  keploy debug validate capture.kpcap
+
+  # Compare two captures:
+  keploy debug compare customer.kpcap engineer.kpcap
+
+  # Create a debug bundle to share with the Keploy team:
+  keploy debug bundle --capture capture.kpcap --output bundle.tar.gz
+
+  # Extract a bundle and set up for reproduction:
+  keploy debug reproduce bundle.tar.gz`,
 	}
 
 	cmd.AddCommand(debugAnalyzeCmd(logger))

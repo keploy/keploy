@@ -15,17 +15,17 @@ import (
 
 // ReplayResult holds the results of replaying a captured connection.
 type ReplayResult struct {
-	ConnectionID   uint64        `json:"connection_id"`
-	Protocol       Protocol      `json:"protocol"`
-	SrcAddr        string        `json:"src_addr"`
-	DstAddr        string        `json:"dst_addr"`
-	PacketsSent    int           `json:"packets_sent"`
-	PacketsRecv    int           `json:"packets_recv"`
-	BytesSent      int64         `json:"bytes_sent"`
-	BytesRecv      int64         `json:"bytes_recv"`
-	Matched        bool          `json:"matched"`
-	Errors         []string      `json:"errors,omitempty"`
-	Duration       time.Duration `json:"duration"`
+	ConnectionID   uint64         `json:"connection_id"`
+	Protocol       Protocol       `json:"protocol"`
+	SrcAddr        string         `json:"src_addr"`
+	DstAddr        string         `json:"dst_addr"`
+	PacketsSent    int            `json:"packets_sent"`
+	PacketsRecv    int            `json:"packets_recv"`
+	BytesSent      int64          `json:"bytes_sent"`
+	BytesRecv      int64          `json:"bytes_recv"`
+	Matched        bool           `json:"matched"`
+	Errors         []string       `json:"errors,omitempty"`
+	Duration       time.Duration  `json:"duration"`
 	ByteMismatches []ByteMismatch `json:"byte_mismatches,omitempty"`
 }
 
@@ -40,21 +40,21 @@ type ByteMismatch struct {
 
 // ReplaySummary aggregates results across all replayed connections.
 type ReplaySummary struct {
-	CaptureFile    string          `json:"capture_file"`
-	TotalConns     int             `json:"total_connections"`
-	ReplayedConns  int             `json:"replayed_connections"`
-	MatchedConns   int             `json:"matched_connections"`
-	FailedConns    int             `json:"failed_connections"`
-	SkippedConns   int             `json:"skipped_connections"`
-	TotalDuration  time.Duration   `json:"total_duration"`
-	Results        []*ReplayResult `json:"results"`
+	CaptureFile   string          `json:"capture_file"`
+	TotalConns    int             `json:"total_connections"`
+	ReplayedConns int             `json:"replayed_connections"`
+	MatchedConns  int             `json:"matched_connections"`
+	FailedConns   int             `json:"failed_connections"`
+	SkippedConns  int             `json:"skipped_connections"`
+	TotalDuration time.Duration   `json:"total_duration"`
+	Results       []*ReplayResult `json:"results"`
 }
 
 // Replayer replays captured network traffic against a running proxy.
 type Replayer struct {
-	logger     *zap.Logger
-	proxyAddr  string // address of the proxy to replay against
-	timeout    time.Duration
+	logger    *zap.Logger
+	proxyAddr string // address of the proxy to replay against
+	timeout   time.Duration
 }
 
 // NewReplayer creates a new replay engine.
