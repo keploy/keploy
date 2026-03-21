@@ -35,7 +35,7 @@ type ByteMismatch struct {
 	Direction   string `json:"direction"`
 	Expected    int    `json:"expected_bytes"`
 	Actual      int    `json:"actual_bytes"`
-	Offset      int    `json:"first_diff_offset"` // byte offset of first difference, -1 if length mismatch only
+	Offset      int    `json:"first_diff_offset"` // byte offset of first difference; if contents match up to the shorter length and only lengths differ, this equals min(Expected, Actual)
 }
 
 // ReplaySummary aggregates results across all replayed connections.
@@ -189,6 +189,13 @@ func (r *Replayer) replayConnection(ctx context.Context, ct *ConnectionTimeline)
 		}
 
 		switch pkt.Direction {
+		case DirProxyToDest, DirDestToProxy:
+			// These packets record the proxy↔destination leg of the connection
+			// (used for analysis/compare). During replay we only exercise the
+			// client↔proxy leg, so skip them rather than silently counting them
+			// as matched.
+			continue
+
 		case DirClientToProxy:
 			// Send the captured client data
 			if err := conn.SetWriteDeadline(time.Now().Add(r.timeout)); err != nil {

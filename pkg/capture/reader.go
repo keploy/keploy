@@ -150,7 +150,7 @@ func (r *Reader) ReadPacket() (*Packet, error) {
 		return nil, fmt.Errorf("failed to read src addr len: %w", err)
 	}
 	if srcAddrLen > 0 {
-		if srcAddrLen > 512 { // sanity check
+		if srcAddrLen > 0xFFFF { // sanity check — matches Writer's max uint16 length
 			return nil, fmt.Errorf("src addr too long: %d bytes", srcAddrLen)
 		}
 		srcAddrBytes := make([]byte, srcAddrLen)
@@ -166,7 +166,7 @@ func (r *Reader) ReadPacket() (*Packet, error) {
 		return nil, fmt.Errorf("failed to read dst addr len: %w", err)
 	}
 	if dstAddrLen > 0 {
-		if dstAddrLen > 512 { // sanity check
+		if dstAddrLen > 0xFFFF { // sanity check — matches Writer's max uint16 length
 			return nil, fmt.Errorf("dst addr too long: %d bytes", dstAddrLen)
 		}
 		dstAddrBytes := make([]byte, dstAddrLen)

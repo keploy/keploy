@@ -126,7 +126,7 @@ keploy debug replay --proxy localhost:16789 capture.kpcap --json
 capture:
   enabled: true
   path: "keploy/debug"     # directory for .kpcap files
-  bundle: true              # auto-create debug bundle on completion
+  bundle: true              # reserved for future use; currently has no effect
 ```
 
 ### Via CLI Flags
@@ -309,7 +309,7 @@ keploy-debug-bundle/
 | Max packets per file | 10,000,000 | Prevent runaway captures |
 | Max metadata size | 1 MB | Prevent corrupt file OOM |
 | Max file in bundle | 100 MB | Prevent huge bundles |
-| Address length | 512 bytes | Sanity check for corrupt files |
+| Address length | 65535 bytes | Sanity check for corrupt files |
 
 ---
 

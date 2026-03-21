@@ -54,8 +54,8 @@ jobs:
       - name: Verify debug subcommands exist
         run: |
           go build -tags=viper_bind_struct -o keploy-bin .
-          for cmd in analyze validate replay bundle extract; do
-            ./keploy-bin debug --help | grep -q "$cmd" || (echo "Missing: debug $cmd" && exit 1)
+          for cmd in analyze validate replay bundle extract compare reproduce; do
+            ./keploy-bin debug --help | grep -q "$cmd" || (echo "Missing debug subcommand: $cmd" && exit 1)
           done
 
   e2e-multi-protocol:
