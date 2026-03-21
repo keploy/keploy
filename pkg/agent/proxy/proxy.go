@@ -568,13 +568,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		//mock the outgoing message
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-			utils.LogError(p.logger, err, "failed to mock the outgoing message")
-			// Send specific error type to error channel for external monitoring
-			proxyErr := models.ParserError{
-				ParserErrorType: models.ErrMockNotFound,
-				Err:             err,
-			}
-			p.SendError(proxyErr)
+			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
+			p.sendMockNotFoundError(err)
 			return err
 		}
 		return nil
@@ -832,11 +827,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
-				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrMockNotFound,
-					Err:             err,
-				}
-				p.SendError(proxyErr)
+				p.sendMockNotFoundError(err)
 				return err
 			}
 		}
@@ -855,11 +846,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
-				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrMockNotFound,
-					Err:             err,
-				}
-				p.SendError(proxyErr)
+				p.sendMockNotFoundError(err)
 				return err
 			}
 		}
@@ -1021,6 +1008,25 @@ func (p *Proxy) SendError(err error) {
 		// Channel is full, log the error instead
 		p.logger.Warn("Error channel is full, dropping error", zap.Error(err))
 	}
+}
+
+// sendMockNotFoundError builds a ParserError from a mock-miss error,
+// extracting the MismatchReport if the error carries one.
+func (p *Proxy) sendMockNotFoundError(err error) {
+	proxyErr := models.ParserError{
+		ParserErrorType: models.ErrMockNotFound,
+		Err:             err,
+	}
+	// Extract diff report from the error chain if available.
+	// Use errors.As to traverse wrapped errors.
+	type mismatchReporter interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	var reporter mismatchReporter
+	if errors.As(err, &reporter) && reporter != nil {
+		proxyErr.MismatchReport = reporter.MismatchReport()
+	}
+	p.SendError(proxyErr)
 }
 
 // CloseErrorChannel closes the error channel

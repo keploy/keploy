@@ -207,11 +207,12 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 }
 
 type TestFailure struct {
-	TestSetID     string
-	TestID        string
-	ExpectedMocks []string
-	ActualMocks   []string
-	FailureReason models.ParserErrorType
+	TestSetID      string
+	TestID         string
+	ExpectedMocks  []string
+	ActualMocks    []string
+	FailureReason  models.ParserErrorType
+	MismatchReport *models.MockMismatchReport
 }
 
 type TestFailureStore struct {
@@ -243,11 +244,12 @@ func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID s
 	defer tfs.mu.Unlock()
 
 	failure := TestFailure{
-		TestSetID:     testSetID,
-		TestID:        testCaseID,
-		ExpectedMocks: []string{},
-		ActualMocks:   []string{},
-		FailureReason: proxyErr.ParserErrorType,
+		TestSetID:      testSetID,
+		TestID:         testCaseID,
+		ExpectedMocks:  []string{},
+		ActualMocks:    []string{},
+		FailureReason:  proxyErr.ParserErrorType,
+		MismatchReport: proxyErr.MismatchReport,
 	}
 	tfs.failures = append(tfs.failures, failure)
 }
@@ -390,7 +392,22 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 
 			for _, failure := range testFailures {
 				if failure.FailureReason == models.ErrMockNotFound {
-					allDiffStrings = append(allDiffStrings, "Outgoing call mock was not matched")
+					if failure.MismatchReport != nil {
+						r := failure.MismatchReport
+						detail := fmt.Sprintf("[%s] %s", r.Protocol, r.ActualSummary)
+						if r.ClosestMock != "" {
+							detail += fmt.Sprintf(" | closest: %s", r.ClosestMock)
+						}
+						if r.Diff != "" {
+							detail += fmt.Sprintf(" | %s", strings.ReplaceAll(r.Diff, "\n", " "))
+						}
+						if r.NextSteps != "" {
+							detail += fmt.Sprintf(" | hint: %s", strings.ReplaceAll(r.NextSteps, "\n", " "))
+						}
+						allDiffStrings = append(allDiffStrings, detail)
+					} else {
+						allDiffStrings = append(allDiffStrings, "Outgoing call mock was not matched")
+					}
 				}
 
 				if len(failure.ExpectedMocks) > 0 || len(failure.ActualMocks) > 0 {

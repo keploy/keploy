@@ -28,6 +28,17 @@ type prepEntry struct { // minimal, enough for lookup
 	mockName    string // for debugging purpose
 }
 
+// truncate returns s trimmed to at most maxLen characters (including "..." suffix if truncated).
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
+}
+
 // case-insensitive prefix check without allocation
 func hasPrefixFold(s, p string) bool {
 	if len(s) < len(p) {
@@ -151,7 +162,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	return nil
 }
 
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, error) {
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, string, string, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -168,21 +179,21 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 	// Fast path: QUIT may have no mock
 	if req.Header.Type == sCOM_QUIT {
-		return nil, false, io.EOF
+		return nil, false, "", "", io.EOF
 	}
 
 	// Single fetch; no struct copies (see MockManager changes)
 	unfiltered, err := mockDb.GetUnFilteredMocks()
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, ctx.Err()
+			return nil, false, "", "", ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to get unfiltered mocks")
-		return nil, false, err
+		return nil, false, "", "", err
 	}
 	if len(unfiltered) == 0 {
 		utils.LogError(logger, nil, "no mysql mocks found")
-		return nil, false, fmt.Errorf("no mysql mocks found")
+		return nil, false, "", "", fmt.Errorf("no mysql mocks found")
 	}
 
 	// remove this block
@@ -216,11 +227,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	var (
-		maxMatchedCount int
-		matchedResp     *mysql.Response
-		matchedMock     *models.Mock
-		queryMatched    bool
-		stmtMatched     bool
+		maxMatchedCount  int
+		matchedResp      *mysql.Response
+		matchedMock      *models.Mock
+		queryMatched     bool
+		stmtMatched      bool
+		bestPartialMock  *models.Mock // closest non-exact match for diff reporting
+		bestPartialQuery string       // query of the closest partial match
 	)
 
 	// Single pass: filter & match on the fly.
@@ -234,7 +247,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		for _, mockReq := range mock.Spec.MySQLRequests {
 			select {
 			case <-ctx.Done():
-				return nil, false, ctx.Err()
+				return nil, false, "", "", ctx.Err()
 			default:
 			}
 			switch req.Header.Type {
@@ -257,6 +270,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					bestPartialMock = mock
+					if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
+						bestPartialQuery = qp.Query
+					}
 				}
 
 			case sCOM_STMT_PREP:
@@ -264,6 +281,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
 				} else if c > maxMatchedCount {
 					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+					bestPartialMock = mock
+					if sp, spOk := mockReq.PacketBundle.Message.(*mysql.StmtPreparePacket); spOk {
+						bestPartialQuery = sp.Query
+					}
 				}
 
 			case sCOM_STMT_EXEC:
@@ -373,11 +394,36 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 					logger.Debug("Returning synthetic OK for unmocked control/DDL", zap.String("query", q))
 
-					return generic, true, nil
+					return generic, true, "", "", nil
 				}
 			}
 		}
-		return nil, false, nil
+
+		actualQuery := ""
+		if qp, qok := req.Message.(*mysql.QueryPacket); qok {
+			actualQuery = qp.Query
+		} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
+			actualQuery = sp.Query
+		}
+		if bestPartialMock != nil {
+			logger.Debug("mock miss",
+				zap.String("protocol", "MySQL"),
+				zap.String("type", req.Header.Type),
+				zap.String("actual_query", truncate(actualQuery, 200)),
+				zap.String("closest_mock", bestPartialMock.Name),
+				zap.String("closest_query", truncate(bestPartialQuery, 200)))
+		} else if actualQuery != "" {
+			logger.Debug("mock miss",
+				zap.String("protocol", "MySQL"),
+				zap.String("type", req.Header.Type),
+				zap.String("actual_query", truncate(actualQuery, 200)))
+		}
+
+		bestPartialMockName := ""
+		if bestPartialMock != nil {
+			bestPartialMockName = bestPartialMock.Name
+		}
+		return nil, false, bestPartialQuery, bestPartialMockName, nil
 	}
 
 	// Update the mock in the database BEFORE modifying the response
@@ -385,7 +431,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	if okk := updateMock(ctx, logger, matchedMock, mockDb); !okk {
 		logger.Debug("failed to update the matched mock")
 		// Re-fetch once to avoid spin
-		return nil, false, fmt.Errorf("failed to update matched mock")
+		return nil, false, "", "", fmt.Errorf("failed to update matched mock")
 	}
 
 	// Create a copy of the response to avoid modifying the original mock
@@ -429,7 +475,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 
 	logger.Debug("matched command with the mock", zap.Any("mock", matchedMock.Name))
-	return responseCopy, true, nil
+	return responseCopy, true, "", "", nil
 }
 
 // func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
@@ -541,7 +587,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 
 	actualSignature, err := getQueryStructureCached(actualQuery)
 	if err != nil {
-		log.Warn("failed to get actual query structure",
+		log.Debug("failed to get actual query structure",
 			zap.String("actual Query", actualQuery),
 			zap.Error(err))
 		return false, matchCount
@@ -549,7 +595,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 
 	expectedSignature, err := getQueryStructureCached(expectedQuery)
 	if err != nil {
-		log.Warn("failed to get expected query structure",
+		log.Debug("failed to get expected query structure",
 			zap.String("expected Query", expectedQuery),
 			zap.Error(err))
 		return false, matchCount
