@@ -72,6 +72,16 @@ type Replayer struct {
 	fallbackDeprecateOnce sync.Once
 }
 
+// GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
+func (r *Replayer) GetMockMismatchFailures() []TestFailure {
+	return r.mockMismatchFailures.GetFailures()
+}
+
+// GetTestRunID returns the current test run ID.
+func (r *Replayer) GetTestRunID() string {
+	return r.testRunID
+}
+
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 
 	// TODO: add some comment.
