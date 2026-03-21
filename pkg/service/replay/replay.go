@@ -58,17 +58,18 @@ type Replayer struct {
 	afterTestRunCalled bool                 // guards duplicate AfterTestRun calls
 	hookImpl           TestHooks
 
-	completeTestReport   map[string]TestReportVerdict
-	firstRun             bool
-	completeTestReportMu sync.RWMutex
-	totalTests           int
-	totalTestPassed      int
-	totalTestFailed      int
-	totalTestObsolete    int
-	totalTestIgnored     int
-	totalTestTimeTaken   time.Duration
-	failedTCsBySetID     map[string][]string
-	mockMismatchFailures *TestFailureStore
+	completeTestReport    map[string]TestReportVerdict
+	firstRun              bool
+	completeTestReportMu  sync.RWMutex
+	totalTests            int
+	totalTestPassed       int
+	totalTestFailed       int
+	totalTestObsolete     int
+	totalTestIgnored      int
+	totalTestTimeTaken    time.Duration
+	failedTCsBySetID      map[string][]string
+	mockMismatchFailures  *TestFailureStore
+	fallbackDeprecateOnce sync.Once
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -815,7 +816,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
-			r.logger.Info("fallBackOnMiss flag is deprecated and ignored. Replay is now always deterministic. Remove this flag from your config.")
+			r.fallbackDeprecateOnce.Do(func() {
+				r.logger.Info("fallBackOnMiss flag is deprecated and ignored. Replay is now always deterministic. Remove this flag from your config.")
+			})
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
@@ -975,7 +978,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
 		if r.config.Test.FallBackOnMiss {
-			r.logger.Info("fallBackOnMiss flag is deprecated and ignored. Replay is now always deterministic. Remove this flag from your config.")
+			r.fallbackDeprecateOnce.Do(func() {
+				r.logger.Info("fallBackOnMiss flag is deprecated and ignored. Replay is now always deterministic. Remove this flag from your config.")
+			})
 		}
 
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
