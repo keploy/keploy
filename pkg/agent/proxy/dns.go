@@ -190,7 +190,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				return resp
 			}
 			// Send mock not found error if we couldn't match any DNS mock.
-			p.logger.Warn("mock miss",
+			p.logger.Debug("mock miss",
 				zap.String("protocol", "DNS"),
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),

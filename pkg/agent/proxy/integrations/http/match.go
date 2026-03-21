@@ -510,24 +510,33 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integration
 		}
 	}
 
-	// Find closest mock by method+path Levenshtein distance
+	// Find closest mock: first try same-method mocks (cheap filter), then fall back to all.
 	actualKey := request.Method + " " + request.URL.Path
 	bestDist := -1
 	var closestMock *models.Mock
-	for _, mock := range httpMocks {
-		if mock.Spec.HTTPReq == nil {
-			continue
+	// Two-pass: first same method only, then all if no match found
+	for pass := 0; pass < 2; pass++ {
+		for _, mock := range httpMocks {
+			if mock.Spec.HTTPReq == nil {
+				continue
+			}
+			if pass == 0 && string(mock.Spec.HTTPReq.Method) != request.Method {
+				continue
+			}
+			// Parse mock URL to extract just the path (mocks store full URL strings)
+			mockPath := mock.Spec.HTTPReq.URL
+			if parsed, err := url.Parse(mock.Spec.HTTPReq.URL); err == nil {
+				mockPath = parsed.Path
+			}
+			mockKey := string(mock.Spec.HTTPReq.Method) + " " + mockPath
+			dist := levenshtein.ComputeDistance(actualKey, mockKey)
+			if bestDist < 0 || dist < bestDist {
+				bestDist = dist
+				closestMock = mock
+			}
 		}
-		// Parse mock URL to extract just the path (mocks store full URL strings)
-		mockPath := mock.Spec.HTTPReq.URL
-		if parsed, err := url.Parse(mock.Spec.HTTPReq.URL); err == nil {
-			mockPath = parsed.Path
-		}
-		mockKey := string(mock.Spec.HTTPReq.Method) + " " + mockPath
-		dist := levenshtein.ComputeDistance(actualKey, mockKey)
-		if bestDist < 0 || dist < bestDist {
-			bestDist = dist
-			closestMock = mock
+		if closestMock != nil {
+			break
 		}
 	}
 	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
