@@ -828,7 +828,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		return fmt.Errorf("failed to read first post-TLS client packet: %w", err)
 	}
 
-	if len(firstPkt) < 5 {
+	if len(firstPkt) < 4 {
 		return fmt.Errorf("first post-TLS packet too short (%d bytes)", len(firstPkt))
 	}
 
