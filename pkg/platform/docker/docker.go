@@ -34,6 +34,11 @@ const (
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
+// ComposeServiceHook is called after the keploy-agent Docker Compose service
+// node is built, allowing enterprise to mutate it (e.g., add capabilities,
+// security_opt, tmpfs mounts for low-latency mode).
+var ComposeServiceHook func(serviceNode *yaml.Node)
+
 type Impl struct {
 	nativeDockerClient.APIClient
 	timeoutForDockerQuery time.Duration
@@ -578,14 +583,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
 	}
 
-	if opts.EnableDockerUnconfined {
-		capAdd = append(capAdd, &yaml.Node{
-			Kind:        yaml.ScalarNode,
-			Value:       "SYS_ADMIN",
-			LineComment: "required for bpffs mount and BPF map pinning (enabled via --enable-docker-unconfined)",
-		})
-	}
-
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
 		Kind: yaml.MappingNode,
@@ -605,29 +602,10 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		},
 	}
 
-	if opts.EnableDockerUnconfined {
-		// security_opt — Docker's default seccomp profile blocks the bpf()
-		// syscall even when CAP_BPF is granted, and AppArmor can block bpffs
-		// mount. Both must be unconfined for eBPF map pinning to work.
-		serviceNode.Content = append(serviceNode.Content,
-			&yaml.Node{
-				Kind:        yaml.ScalarNode,
-				Value:       "security_opt",
-				HeadComment: "Required for BPF map pinning: Docker's default seccomp/AppArmor profiles block bpf() and bpffs mount.",
-			},
-			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
-				{Kind: yaml.ScalarNode, Value: "apparmor:unconfined"},
-			}},
-			&yaml.Node{
-				Kind:        yaml.ScalarNode,
-				Value:       "tmpfs",
-				HeadComment: "Writable /sys/fs/bpf is required for BPF map pinning.",
-			},
-			&yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "/sys/fs/bpf:exec,mode=0755"},
-			}},
-		)
+	// Allow enterprise to mutate the service node (e.g., add capabilities,
+	// security_opt, tmpfs for low-latency mode).
+	if ComposeServiceHook != nil {
+		ComposeServiceHook(serviceNode)
 	}
 
 	// Add environment variables

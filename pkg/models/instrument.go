@@ -98,9 +98,8 @@ type SetupOptions struct {
 	AppNetworks            []string
 	NetworkAliases         map[string][]string
 	BuildDelay             uint64
-	PassThroughPorts       []uint
-	EnableDockerUnconfined bool
-	ConfigPath             string
+	PassThroughPorts []uint
+	ConfigPath       string
 	ExtraArgs              []string
 	EnableSampling         int
 }

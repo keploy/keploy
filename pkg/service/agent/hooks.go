@@ -97,9 +97,6 @@ func RegisterMapPinHook(h EbpfMapPinHook) {
 	MapPinHook = h
 }
 
-// EbpfProxyPortOverride is set by the enterprise proxy startup to tell
-// eBPF to redirect outgoing connections to the proxy port instead of the
-// Go proxy port. When zero (default), the normal config ProxyPort is used.
 var EbpfProxyPortOverride uint32
 
 var ActiveIncomingProxy agent.IncomingProxy

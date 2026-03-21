@@ -78,7 +78,9 @@ func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOp
 	return pm.tcChan
 }
 
-func (pm *IngressProxyManager) GetTCChan() chan *models.TestCase {
+// TCChan returns the test case channel for direct use by external consumers
+// (e.g., the enterprise sockmap proxy) without going through Start().
+func (pm *IngressProxyManager) TCChan() chan *models.TestCase {
 	return pm.tcChan
 }
 
