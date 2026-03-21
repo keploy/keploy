@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
@@ -24,6 +25,7 @@ import (
 
 	"go.uber.org/zap"
 
+	// "math/rand"
 	"net"
 	"strconv"
 	"strings"
@@ -38,15 +40,20 @@ func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
-// Conn is helpful for multiple reads from the same connection.
-// Each Conn is only read by a single goroutine, so no mutex is needed.
+// Conn is helpful for multiple reads from the same connection
 type Conn struct {
 	net.Conn
 	Reader io.Reader
 	Logger *zap.Logger
+	mu     sync.Mutex
 }
 
 func (c *Conn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(p) == 0 {
+		c.Logger.Debug("the length is 0 for the reading from customConn")
+	}
 	return c.Reader.Read(p)
 }
 
@@ -111,14 +118,6 @@ func HasHTTP2HeadersFrame(buf []byte) bool {
 // ReadWithTimeout attempts to read more data from the connection with a short timeout.
 // If data arrives within the timeout, it is returned. If the timeout expires without
 // data, an empty slice is returned with no error — this is not treated as a failure.
-// Uses a pooled buffer to avoid per-call allocations.
-var readWithTimeoutPool = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, 4096)
-		return &b
-	},
-}
-
 func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
@@ -126,10 +125,7 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 	// Always clear the deadline so subsequent reads are not affected.
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
-	bufPtr := readWithTimeoutPool.Get().(*[]byte)
-	buf := *bufPtr
-	defer readWithTimeoutPool.Put(bufPtr)
-
+	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -137,49 +133,42 @@ func ReadWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 			return nil, nil
 		}
 		if err == io.EOF && n > 0 {
-			out := make([]byte, n)
-			copy(out, buf[:n])
-			return out, nil
+			return buf[:n], nil
 		}
 		return nil, err
 	}
-	out := make([]byte, n)
-	copy(out, buf[:n])
-	return out, nil
+	return buf[:n], nil
 }
 
-// ReadBuffConn reads from the connection in a tight loop using direct conn.Read()
-// with a 32KB buffer and sends each chunk to bufferChannel. No goroutines or
-// channels are used internally — this is a simple read loop.
+// ReadBuffConn is used to read the buffer from the connection
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
-	buf := make([]byte, 32*1024) // 32KB read buffer
+	//TODO: where to close the errChannel
 	for {
 		select {
 		case <-ctx.Done():
+			// errChannel <- ctx.Err()
 			return
 		default:
-		}
+			if conn == nil {
+				logger.Debug("the conn is nil")
+			}
+			buffer, err := ReadBytes(ctx, logger, conn)
+			if err != nil {
+				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
+					return
+				}
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read the packet message in proxy")
+					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
 
-		n, err := conn.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			select {
-			case bufferChannel <- data:
-			case <-ctx.Done():
+				}
+				errChannel <- err
 				return
 			}
-		}
-
-		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 				return
 			}
-			if err != io.EOF {
-				utils.LogError(logger, err, "failed to read the packet message in proxy. Check if the connection was closed unexpectedly or verify network stability")
-			}
-			errChannel <- err
-			return
+			bufferChannel <- buffer
 		}
 	}
 }
@@ -263,65 +252,149 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 	return initialBuf, nil
 }
 
-// readBufPool holds reusable 32KB buffers for ReadBytes, avoiding a heap
-// allocation on every call.
-var readBufPool = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, 32*1024)
-		return &b
-	},
-}
-
-// ReadBytes reads available data from the reader using a pooled 32KB buffer.
-// It performs a direct read without spawning goroutines or using channels.
-// The function reads in a loop until a short read (n < bufSize) indicates
-// no more data is immediately available, or an error occurs.
-func ReadBytes(ctx context.Context, _ *zap.Logger, reader io.Reader) ([]byte, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	// Borrow a 32KB buffer from the pool.
-	bufPtr := readBufPool.Get().(*[]byte)
-	readBuf := *bufPtr
-	defer readBufPool.Put(bufPtr)
-
+// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
+// It returns the content as a byte array.
+func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
 	var buffer []byte
+	const maxEmptyReads = 5
+	emptyReads := 0
+
+	// Channel to communicate read results
+	readResult := make(chan struct {
+		n   int
+		err error
+		buf []byte
+	})
+
+	g, ctx := errgroup.WithContext(ctx)
+
+	defer func() {
+		err := g.Wait()
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the request message in proxy")
+		}
+		close(readResult)
+	}()
 
 	for {
-		if ctx.Err() != nil {
+		// Start a goroutine to perform the read operation
+		g.Go(func() error {
+			defer Recover(logger, nil, nil)
+			buf := make([]byte, 1024)
+			n, err := reader.Read(buf)
+			if ctx.Err() != nil {
+				return nil
+			}
+			readResult <- struct {
+				n   int
+				err error
+				buf []byte
+			}{n, err, buf}
+			return nil
+		})
+
+		// Use a select statement to wait for either the read result or context cancellation
+		select {
+		case <-ctx.Done():
 			return buffer, ctx.Err()
-		}
+		case result := <-readResult:
+			if result.n > 0 {
+				buffer = append(buffer, result.buf[:result.n]...)
+				emptyReads = 0 // Reset the counter because we got some data
+			}
 
-		n, err := reader.Read(readBuf)
-
-		if n > 0 {
-			buffer = append(buffer, readBuf[:n]...)
-		}
-
-		if err != nil {
-			return buffer, err
-		}
-
-		// Short read means no more data available right now.
-		if n < len(readBuf) {
-			return buffer, nil
+			if result.err != nil {
+				if result.err == io.EOF {
+					emptyReads++
+					if emptyReads >= maxEmptyReads {
+						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
+					}
+					time.Sleep(time.Millisecond * 100) // Sleep before trying again
+					continue
+				}
+				return buffer, result.err
+			}
+			if result.n < len(result.buf) {
+				return buffer, nil
+			}
 		}
 	}
 }
 
-// ReadRequiredBytes reads exactly numBytes from the reader.
-// It performs direct reads without spawning goroutines or sleeping.
-func ReadRequiredBytes(ctx context.Context, _ *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+// ReadRequiredBytes ReadBytes function is utilized to read the required number of bytes from the reader.
+// It returns the content as a byte array.
+func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
+	var buffer []byte
+	const maxEmptyReads = 5
+	emptyReads := 0
+
+	// Channel to communicate read results
+	readResult := make(chan struct {
+		n   int
+		err error
+		buf []byte
+	})
+
+	g, ctx := errgroup.WithContext(ctx)
+
+	defer func() {
+		err := g.Wait()
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the request message in proxy")
+		}
+		close(readResult)
+	}()
+
+	for numBytes > 0 {
+		// Start a goroutine to perform the read operation
+		g.Go(func() error {
+			defer Recover(logger, nil, nil)
+			buf := make([]byte, numBytes)
+			n, err := reader.Read(buf)
+			if ctx.Err() != nil {
+				return nil
+			}
+			readResult <- struct {
+				n   int
+				err error
+				buf []byte
+			}{n, err, buf}
+			return nil
+		})
+
+		// Use a select statement to wait for either the read result or context cancellation with timeout
+		select {
+		case <-ctx.Done():
+			return buffer, ctx.Err()
+		// case <-time.After(5 * time.Second):
+		// 	logger.Error("timeout occurred while reading the packet")
+		// 	return buffer, context.DeadlineExceeded
+		case result := <-readResult:
+			if result.n > 0 {
+				buffer = append(buffer, result.buf[:result.n]...)
+				numBytes -= result.n
+				emptyReads = 0 // Reset the counter because we got some data
+			}
+
+			if result.err != nil {
+				if result.err == io.EOF {
+					emptyReads++
+					if emptyReads >= maxEmptyReads {
+						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
+					}
+					time.Sleep(time.Millisecond * 100) // Sleep before trying again
+					continue
+				}
+				return buffer, result.err
+			}
+
+			if numBytes == 0 {
+				return buffer, nil
+			}
+		}
 	}
-	buf := make([]byte, numBytes)
-	_, err := io.ReadFull(reader, buf)
-	if err != nil {
-		return nil, err
-	}
-	return buf, nil
+
+	return buffer, nil
 }
 
 // ReadFromPeer function is used to read the buffer from the peer connection. The peer can be either the client or the destination.
