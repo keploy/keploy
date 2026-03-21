@@ -129,18 +129,20 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		// uprobe path can reconstruct the decode context for command-phase recording.
 		if opts.SkipTLSMITM {
 			logger.Debug("SkipTLSMITM set — pushing handshake data to TLSHandshakeStore for post-TLS path to combine")
-			if hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore); ok && hsStore != nil {
-				port := uint16(0)
-				if opts.DstCfg != nil {
-					port = uint16(opts.DstCfg.Port)
-				}
-				hsStore.Push(port, models.TLSHandshakeEntry{
-					RespPackets:  [][]byte{handshake},
-					ReqPackets:   [][]byte{handshakeResponse},
-					ReqTimestamp: res.reqTimestamp,
-				})
-				logger.Debug("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore", zap.Uint16("port", port))
+			hsStore, ok := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
+			if !ok || hsStore == nil {
+				return res, fmt.Errorf("SkipTLSMITM requires TLSHandshakeStore in context for MySQL handshake reconstruction")
 			}
+			port := uint16(0)
+			if opts.DstCfg != nil {
+				port = uint16(opts.DstCfg.Port)
+			}
+			hsStore.Push(port, models.TLSHandshakeEntry{
+				RespPackets:  [][]byte{handshake},
+				ReqPackets:   [][]byte{handshakeResponse},
+				ReqTimestamp: res.reqTimestamp,
+			})
+			logger.Debug("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore", zap.Uint16("port", port))
 			// Signal that the pre-TLS config mock should NOT be recorded here;
 			// the post-TLS path will produce a single combined config mock.
 			res.skipConfigMock = true
@@ -840,7 +842,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// can match the SSLRequest + HandshakeResponse41 during replay.
 		if ok && len(entry.ReqPackets) > 0 {
 			if err := recordSyntheticConfigMock(ctx, logger, clientConn, mocks, decodeCtx, greetingPkt, entry, opts); err != nil {
-				logger.Warn("failed to record synthetic config mock for seq=0 path", zap.Error(err))
+				logger.Debug("best-effort synthetic config mock generation failed for seq=0 path; continuing with command-phase capture", zap.Error(err))
 			}
 		}
 
@@ -870,7 +872,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	if ok && len(entry.ReqPackets) > 0 {
 		sslReqPkt, sslErr := wire.DecodePayload(ctx, logger, entry.ReqPackets[0], clientConn, decodeCtx)
 		if sslErr != nil {
-			logger.Warn("failed to decode stored SSLRequest for combined config mock", zap.Error(sslErr))
+			logger.Debug("failed to decode stored SSLRequest for combined config mock; proceeding with post-TLS packets only", zap.Error(sslErr))
 		} else {
 			requests = append(requests, mysql.Request{PacketBundle: *sslReqPkt})
 		}
@@ -971,8 +973,8 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	}
 
 	// Synthesize a HandshakeResponse41 from the SSLRequest fields.
-	// The test-mode matcher only checks MaxPacketSize, CharacterSet, and Filler,
-	// all of which are identical between SSLRequest and HandshakeResponse41.
+	// Username/Database are not present in SSLRequest and remain empty; matcher
+	// handles empty expected username/database as backward-compatible wildcards.
 	syntheticHR41 := &mysql.HandshakeResponse41Packet{
 		CapabilityFlags: sslReq.CapabilityFlags,
 		MaxPacketSize:   sslReq.MaxPacketSize,

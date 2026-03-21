@@ -407,13 +407,22 @@ var (
 	certCacheMu  sync.RWMutex
 	certCacheMap = make(map[string]*certCacheEntry)
 	certCacheTTL = 10 * time.Minute // regenerate after 10 min
+	certCacheMax = 1024             // hard cap to prevent unbounded growth
 )
 
 func getCachedCert(host string) (*tls.Certificate, bool) {
 	certCacheMu.RLock()
 	e, ok := certCacheMap[host]
 	certCacheMu.RUnlock()
-	if !ok || time.Since(e.createdAt) > certCacheTTL {
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.createdAt) > certCacheTTL {
+		certCacheMu.Lock()
+		if current, exists := certCacheMap[host]; exists && current == e && time.Since(current.createdAt) > certCacheTTL {
+			delete(certCacheMap, host)
+		}
+		certCacheMu.Unlock()
 		return nil, false
 	}
 	return e.cert, true
@@ -421,8 +430,38 @@ func getCachedCert(host string) (*tls.Certificate, bool) {
 
 func setCachedCert(host string, cert *tls.Certificate) {
 	certCacheMu.Lock()
+	now := time.Now()
+	pruneExpiredCertEntriesLocked(now)
+	// Evict oldest entry if inserting a new host at capacity.
+	if _, exists := certCacheMap[host]; !exists && len(certCacheMap) >= certCacheMax {
+		evictOldestCertEntryLocked()
+	}
 	certCacheMap[host] = &certCacheEntry{cert: cert, createdAt: time.Now()}
 	certCacheMu.Unlock()
+}
+
+func pruneExpiredCertEntriesLocked(now time.Time) {
+	for host, entry := range certCacheMap {
+		if now.Sub(entry.createdAt) > certCacheTTL {
+			delete(certCacheMap, host)
+		}
+	}
+}
+
+func evictOldestCertEntryLocked() {
+	var oldestHost string
+	var oldestTime time.Time
+	first := true
+	for host, entry := range certCacheMap {
+		if first || entry.createdAt.Before(oldestTime) {
+			first = false
+			oldestHost = host
+			oldestTime = entry.createdAt
+		}
+	}
+	if !first {
+		delete(certCacheMap, oldestHost)
+	}
 }
 
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
@@ -514,13 +553,22 @@ type pemCacheEntry struct {
 var (
 	pemCacheMu  sync.RWMutex
 	pemCacheMap = make(map[string]*pemCacheEntry)
+	pemCacheMax = 1024 // hard cap to prevent unbounded growth
 )
 
 func getCachedPEM(host string) (certPEM, keyPEM []byte, ok bool) {
 	pemCacheMu.RLock()
 	e, found := pemCacheMap[host]
 	pemCacheMu.RUnlock()
-	if !found || time.Since(e.createdAt) > certCacheTTL {
+	if !found {
+		return nil, nil, false
+	}
+	if time.Since(e.createdAt) > certCacheTTL {
+		pemCacheMu.Lock()
+		if current, exists := pemCacheMap[host]; exists && current == e && time.Since(current.createdAt) > certCacheTTL {
+			delete(pemCacheMap, host)
+		}
+		pemCacheMu.Unlock()
 		return nil, nil, false
 	}
 	return e.certPEM, e.keyPEM, true
@@ -528,8 +576,38 @@ func getCachedPEM(host string) (certPEM, keyPEM []byte, ok bool) {
 
 func setCachedPEM(host string, certPEM, keyPEM []byte) {
 	pemCacheMu.Lock()
+	now := time.Now()
+	pruneExpiredPEMEntriesLocked(now)
+	// Evict oldest entry if inserting a new host at capacity.
+	if _, exists := pemCacheMap[host]; !exists && len(pemCacheMap) >= pemCacheMax {
+		evictOldestPEMEntryLocked()
+	}
 	pemCacheMap[host] = &pemCacheEntry{certPEM: certPEM, keyPEM: keyPEM, createdAt: time.Now()}
 	pemCacheMu.Unlock()
+}
+
+func pruneExpiredPEMEntriesLocked(now time.Time) {
+	for host, entry := range pemCacheMap {
+		if now.Sub(entry.createdAt) > certCacheTTL {
+			delete(pemCacheMap, host)
+		}
+	}
+}
+
+func evictOldestPEMEntryLocked() {
+	var oldestHost string
+	var oldestTime time.Time
+	first := true
+	for host, entry := range pemCacheMap {
+		if first || entry.createdAt.Before(oldestTime) {
+			first = false
+			oldestHost = host
+			oldestTime = entry.createdAt
+		}
+	}
+	if !first {
+		delete(pemCacheMap, oldestHost)
+	}
 }
 
 // CertForHost generates (or returns cached) a per-host TLS certificate
