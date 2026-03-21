@@ -91,7 +91,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Match the request with the mock
-			resp, ok, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
+			resp, ok, closestQuery, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",
@@ -122,6 +122,8 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				report := &models.MockMismatchReport{
 					Protocol:      "MySQL",
 					ActualSummary: fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 120)),
+					ClosestMock:   closestQuery,
+					Diff:          fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200)),
 					NextSteps:     "Re-record mocks if the SQL query has changed.",
 				}
 				baseErr := fmt.Errorf("error while simulating the command phase due to no matching mock found")

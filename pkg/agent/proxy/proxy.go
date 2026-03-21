@@ -827,11 +827,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
-				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrMockNotFound,
-					Err:             err,
-				}
-				p.SendError(proxyErr)
+				p.sendMockNotFoundError(err)
 				return err
 			}
 		}
@@ -850,11 +846,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
-				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrMockNotFound,
-					Err:             err,
-				}
-				p.SendError(proxyErr)
+				p.sendMockNotFoundError(err)
 				return err
 			}
 		}
