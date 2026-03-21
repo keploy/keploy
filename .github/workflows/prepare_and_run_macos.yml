@@ -117,6 +117,28 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
           
+      - name: Ensure Docker Desktop is running (macOS)
+        shell: bash
+        run: |
+          set -e
+          if docker info >/dev/null 2>&1; then
+            echo "Docker daemon is already running."
+          else
+            echo "Docker daemon not responding. Starting Docker Desktop..."
+            open -a Docker || true
+            for i in $(seq 1 60); do
+              if docker info >/dev/null 2>&1; then
+                echo "Docker Desktop is ready (waited ~$((i*2))s)."
+                break
+              fi
+              if [ "$i" -eq 60 ]; then
+                echo "ERROR: Docker Desktop failed to start within 120s."
+                exit 1
+              fi
+              sleep 2
+            done
+          fi
+
       - name: Pull Docker image
         run: |
           docker pull ${{ needs.build-docker-image.outputs.image_tag }}
@@ -142,6 +164,24 @@ jobs:
     runs-on: [self-hosted, macOS, native]
     needs: [run_python_docker_macos, run_golang_docker_macos]
     steps:
+      - name: Ensure Docker Desktop is running (macOS)
+        shell: bash
+        continue-on-error: true
+        run: |
+          if docker info >/dev/null 2>&1; then
+            echo "Docker daemon is already running."
+          else
+            echo "Docker daemon not responding. Starting Docker Desktop..."
+            open -a Docker || true
+            for i in $(seq 1 60); do
+              if docker info >/dev/null 2>&1; then
+                echo "Docker Desktop is ready (waited ~$((i*2))s)."
+                break
+              fi
+              sleep 2
+            done
+          fi
+
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
