@@ -250,14 +250,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		return nil
 	})
 
-	if p.auxiliaryHook != nil {
-		err := p.auxiliaryHook.AfterStart(ctx, p)
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to execute auxiliary proxy hook")
-			return err
-		}
-	}
-
 	//change the ip4 and ip6 if provided in the opts in case of docker environment
 	if len(opts.DNSIPv4Addr) != 0 {
 		p.IP4 = opts.DNSIPv4Addr
@@ -326,6 +318,14 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// Wait for the proxy server to be ready or fail
 	if err := <-readyChan; err != nil {
 		return err
+	}
+
+	if p.auxiliaryHook != nil {
+		err := p.auxiliaryHook.AfterStart(ctx, p)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to execute auxiliary proxy hook")
+			return err
+		}
 	}
 
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
