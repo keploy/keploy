@@ -19,9 +19,14 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, router 
 		Handler: router,
 	}
 
+	// Derive a context tied to both the parent context and the lifetime of this function,
+	// so the shutdown goroutine will always terminate when the server stops or fails to start.
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	defer srvCancel()
+
 	// Shut down the HTTP server when context is cancelled.
 	go func() {
-		<-ctx.Done()
+		<-srvCtx.Done()
 		logger.Info("Shutting down agent HTTP server")
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
