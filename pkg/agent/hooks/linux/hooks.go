@@ -26,7 +26,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
-	agentSvc "go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
 
@@ -174,8 +173,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// If enterprise registered an eBPF loaded hook (low-latency mode),
 	// provide a lookup so it can access the maps it needs.
-	if agentSvc.EbpfLoadedHook != nil {
-		if err := agentSvc.EbpfLoadedHook(objs.lookupMap); err != nil {
+	if agent.EbpfLoadedHook != nil {
+		if err := agent.EbpfLoadedHook(objs.lookupMap); err != nil {
 			utils.LogError(h.logger, err, "EbpfLoadedHook failed; verify hook configuration/capabilities or disable the hook if not required")
 			return err
 		}
@@ -447,8 +446,8 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 
 	ports := agent.GetPortToSendToKernel(ctx, rules)
 
-	if agentSvc.ExtraPassThroughPortsHook != nil {
-		ports = append(ports, agentSvc.ExtraPassThroughPortsHook()...)
+	if agent.ExtraPassThroughPortsHook != nil {
+		ports = append(ports, agent.ExtraPassThroughPortsHook()...)
 	}
 
 	for i := 0; i < 10; i++ {

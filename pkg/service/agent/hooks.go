@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -73,35 +73,24 @@ func RegisterSetupHook(h SetupHooks) {
 	SetupAgentHook = h
 }
 
-var ProxyHook agent.AuxiliaryProxyHook
-
-func RegisterProxyHook(h agent.AuxiliaryProxyHook) {
-	ProxyHook = h
+func RegisterProxyHook(h coreAgent.AuxiliaryProxyHook) {
+	coreAgent.RegisterProxyHook(h)
 }
 
-// Pinnable is implemented by eBPF maps that support pinning to bpffs.
-type Pinnable interface {
-	Pin(fileName string) error
+func RegisterIncomingProxy(ip coreAgent.IncomingProxy) {
+	coreAgent.RegisterIncomingProxy(ip)
 }
 
-// EbpfLoadedHook is called after eBPF objects are loaded. The callback
-// receives a lookup function that resolves map names to Pinnable references.
-// Enterprise uses this to pin only the maps it needs — OSS has no knowledge
-// of which maps enterprise requires. Only invoked when registered.
-var EbpfLoadedHook func(getMap func(string) Pinnable) error
-
-var EbpfProxyPortOverride uint32
-
-var ActiveIncomingProxy agent.IncomingProxy
-
-func RegisterIncomingProxy(ip agent.IncomingProxy) {
-	ActiveIncomingProxy = ip
-}
-
-type ExtraPassThroughPortsFn func() []uint
-
-var ExtraPassThroughPortsHook ExtraPassThroughPortsFn
+type ExtraPassThroughPortsFn = coreAgent.ExtraPassThroughPortsFn
 
 func RegisterExtraPassThroughPortsHook(h ExtraPassThroughPortsFn) {
-	ExtraPassThroughPortsHook = h
+	coreAgent.RegisterExtraPassThroughPortsHook(h)
+}
+
+func RegisterEbpfLoadedHook(h func(getMap func(string) coreAgent.Pinnable) error) {
+	coreAgent.EbpfLoadedHook = h
+}
+
+func SetEbpfProxyPortOverride(port uint32) {
+	coreAgent.EbpfProxyPortOverride = port
 }
