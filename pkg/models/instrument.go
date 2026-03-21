@@ -57,11 +57,11 @@ type OutgoingOptions struct {
 	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay time.Duration // This is the same as Application delay.
-	Mocking  bool          // used to enable/disable mocking
-	DstCfg         *ConditionalDstCfg
-	Backdate       time.Time                      // used to set backdate in cacert request
-	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	SQLDelay    time.Duration // This is the same as Application delay.
+	Mocking     bool          // used to enable/disable mocking
+	DstCfg      *ConditionalDstCfg
+	Backdate    time.Time                      // used to set backdate in cacert request
+	NoiseConfig map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 }
 
 type ConditionalDstCfg struct {

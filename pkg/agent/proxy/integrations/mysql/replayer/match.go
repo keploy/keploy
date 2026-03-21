@@ -229,8 +229,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		matchedMock      *models.Mock
 		queryMatched     bool
 		stmtMatched      bool
-		bestPartialMock  *models.Mock  // closest non-exact match for diff reporting
-		bestPartialQuery string        // query of the closest partial match
+		bestPartialMock  *models.Mock // closest non-exact match for diff reporting
+		bestPartialQuery string       // query of the closest partial match
 	)
 
 	// Single pass: filter & match on the fly.

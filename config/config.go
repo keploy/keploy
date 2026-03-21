@@ -141,9 +141,9 @@ type Test struct {
 	IgnoreOrdering      bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
 	MongoPassword       string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
 	Language            models.Language     `json:"language" yaml:"language" mapstructure:"language"`
-	RemoveUnusedMocks bool   `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
-	FallBackOnMiss    bool   `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"` // Deprecated: this flag is ignored. Replay is now always deterministic.
-	JacocoAgentPath   string `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
+	RemoveUnusedMocks   bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
+	FallBackOnMiss      bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"` // Deprecated: this flag is ignored. Replay is now always deterministic.
+	JacocoAgentPath     string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
 	BasePath            string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking             bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests        map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
