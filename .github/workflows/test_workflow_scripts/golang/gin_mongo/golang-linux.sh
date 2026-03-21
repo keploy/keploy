@@ -72,13 +72,18 @@ send_request(){
       --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
       --header 'Accept: application/json'
 
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    # Wait for keploy to record the tcs and mocks.
     sleep 10
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     if [ -n "$REC_PID" ]; then
         sudo kill -INT "$REC_PID" 2>/dev/null || true
+        # Wait for keploy to flush and exit (up to 30s)
+        for i in {1..30}; do
+            kill -0 "$REC_PID" 2>/dev/null || break
+            sleep 1
+        done
     else
         echo "No keploy process found to kill."
     fi

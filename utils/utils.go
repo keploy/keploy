@@ -1181,15 +1181,16 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
 		return false
 	}
-	if err := f.Close(); err != nil {
-		LogError(logger, err, "failed to close file", zap.String("file", filePath))
-	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		}
+	}()
 
 	// Check for section names typical to Go binaries
 	sections := []string{".go.buildinfo", ".gopclntab"}
 	for _, section := range sections {
 		if sect := f.Section(section); sect != nil {
-			fmt.Println(section)
 			return true
 		}
 	}
