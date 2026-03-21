@@ -41,7 +41,6 @@ type Proxy interface {
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
 	Mapping(ctx context.Context, mappingCh chan models.TestMockMapping)
-	GetSessions() *Sessions
 	GetDestInfo() DestInfo
 	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations
 	SetAuxiliaryHook(h AuxiliaryProxyHook)

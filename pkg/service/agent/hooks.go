@@ -84,10 +84,11 @@ type Pinnable interface {
 	Pin(fileName string) error
 }
 
-// EbpfMaps holds references to loaded eBPF maps, allowing enterprise to
-// access them (e.g., for pinning to bpffs). Populated by OSS hooks after
-// eBPF objects are loaded.
-var EbpfMaps map[string]Pinnable
+// EbpfLoadedHook is called after eBPF objects are loaded. The callback
+// receives a lookup function that resolves map names to Pinnable references.
+// Enterprise uses this to pin only the maps it needs — OSS has no knowledge
+// of which maps enterprise requires. Only invoked when registered.
+var EbpfLoadedHook func(getMap func(string) Pinnable) error
 
 var EbpfProxyPortOverride uint32
 

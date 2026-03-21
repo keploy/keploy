@@ -177,10 +177,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
 
-	// Expose loaded eBPF maps so enterprise can access them (e.g., for pinning).
-	agentSvc.EbpfMaps = map[string]agentSvc.Pinnable{
-		"redirect_proxy_map":    objs.RedirectProxyMap,
-		"target_namespace_pids": objs.TargetNamespacePids,
+	// If enterprise registered an eBPF loaded hook (low-latency mode),
+	// provide a lookup so it can access the maps it needs.
+	if agentSvc.EbpfLoadedHook != nil {
+		if err := agentSvc.EbpfLoadedHook(objs.lookupMap); err != nil {
+			h.logger.Error("EbpfLoadedHook failed", zap.Error(err))
+		}
 	}
 
 	// Get the first-mounted cgroupv2 path.

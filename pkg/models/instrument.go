@@ -63,7 +63,7 @@ type OutgoingOptions struct {
 	DstCfg         *ConditionalDstCfg
 	Backdate       time.Time                      // used to set backdate in cacert request
 	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
-	SkipTLSMITM    bool                           // when true, parsers should not attempt TLS MITM (e.g. sockmap proxy where plaintext is provided by JSSE/SSL uprobes)
+	SkipTLSMITM    bool                           // when true, parsers should not attempt TLS MITM
 }
 
 type ConditionalDstCfg struct {
