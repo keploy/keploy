@@ -154,8 +154,14 @@ func HandlePostgresSSL(
 	}
 
 	// Upgrade server connection (act as TLS client to the real server)
+	allowInsecure := shouldSkipUpstreamCertVerification(dstURL)
+	if allowInsecure {
+		logger.Debug("Skipping upstream PostgreSQL TLS certificate verification for compatibility",
+			zap.String("serverName", dstURL),
+			zap.Bool("emptyServerName", dstURL == ""))
+	}
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: allowInsecure,
 		ServerName:         dstURL,
 		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tls.VersionTLS13,
@@ -163,7 +169,10 @@ func HandlePostgresSSL(
 	}
 	tlsServerConn := tls.Client(serverConn, tlsConfig)
 	if err := tlsServerConn.Handshake(); err != nil {
-		return nil, nil, 0, fmt.Errorf("failed to upgrade server connection to TLS: %w", err)
+		if allowInsecure {
+			return nil, nil, 0, fmt.Errorf("failed to upgrade server connection to TLS: %w", err)
+		}
+		return nil, nil, 0, fmt.Errorf("failed to upgrade server connection to TLS (verify the PostgreSQL certificate is valid for host %q and trusted by this agent): %w", dstURL, err)
 	}
 	upgradedServer = tlsServerConn
 
@@ -188,4 +197,14 @@ func getCompatibleCipherSuites() []uint16 {
 		tls.TLS_RSA_WITH_AES_256_CBC_SHA,
 	)
 	return ids
+}
+
+// shouldSkipUpstreamCertVerification determines when to bypass certificate
+// verification for compatibility with deployments that do not expose a
+// verifiable hostname identity during PostgreSQL SSL upgrade.
+func shouldSkipUpstreamCertVerification(serverName string) bool {
+	if serverName == "" {
+		return true
+	}
+	return net.ParseIP(serverName) != nil
 }
