@@ -95,7 +95,16 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 		if q := s.m[port]; len(q) > 0 {
 			// Keep timeout contract strict: only return entries that arrived before the deadline.
 			if q[0].pushedAt.After(deadline) {
-				return TLSHandshakeEntry{}, false
+				// Drop entries that arrived after this waiter's deadline so they do
+				// not get reused by a later waiter for the same port.
+				s.m[port] = q[1:]
+				if len(s.m[port]) == 0 {
+					delete(s.m, port)
+				}
+				if timedOut || time.Now().After(deadline) {
+					return TLSHandshakeEntry{}, false
+				}
+				continue
 			}
 			entry := q[0].entry
 			s.m[port] = q[1:]
