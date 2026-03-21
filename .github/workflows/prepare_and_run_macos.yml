@@ -267,17 +267,19 @@ jobs:
         run: |
           echo "No other workflows running. Proceeding with cleanup..."
 
-          # Stop running scripts 
+          # Stop running scripts
           pkill -9 -f "actions-runner-.*_work/keploy/keploy/.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker-macos\.sh" || true
-          
-          # Prune only dangling (untagged) images not in use
-          echo "Pruning Docker images..."
-          docker image prune -a -f
-          
-          # Prune dangling (unused) volumes as well
-          echo "Pruning Docker volumes..."
-          docker volume prune -a -f
-          
+
+          # Prune only dangling (untagged) images — NOT all unused images.
+          # Using -a removes ALL unused images (including cached base images like mongo)
+          # which forces re-pulls and can destabilize Docker Desktop on macOS.
+          echo "Pruning dangling Docker images..."
+          docker image prune -f
+
+          # Only prune dangling volumes, not all volumes
+          echo "Pruning dangling Docker volumes..."
+          docker volume prune -f
+
           echo "Docker cleanup completed successfully"
 
       - name: Skip cleanup - other workflows running
