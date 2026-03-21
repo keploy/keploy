@@ -95,23 +95,6 @@ func (s *Sessions) Get(id uint64) (*Session, bool) {
 	return v.(*Session), true
 }
 
-// GetAny returns an arbitrary active session.
-// This is useful for legacy single-session paths that do not have an app/client ID.
-func (s *Sessions) GetAny() (*Session, bool) {
-	var out *Session
-	var found bool
-	s.sessions.Range(func(_, v interface{}) bool {
-		session, ok := v.(*Session)
-		if !ok || session == nil {
-			return true
-		}
-		out = session
-		found = true
-		return false
-	})
-	return out, found
-}
-
 func (s *Sessions) Set(id uint64, session *Session) {
 	s.sessions.Store(id, session)
 }
