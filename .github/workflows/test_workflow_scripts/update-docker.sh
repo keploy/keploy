@@ -54,18 +54,32 @@ enable_ssh_mount_for_go_mod() {
     sed -i 's/^RUN[[:space:]]\+go[[:space:]]\+mod[[:space:]]\+download[[:space:]]*$/RUN --mount=type=ssh go mod download/' "$DOCKERFILE_PATH" || true
 }
 
+docker_build_with_retry() {
+    local max_attempts=3
+    for attempt in $(seq 1 $max_attempts); do
+        echo "Docker build attempt $attempt/$max_attempts..."
+        if "$@"; then
+            return 0
+        fi
+        echo "::warning::Docker build attempt $attempt failed"
+        [ "$attempt" -lt "$max_attempts" ] && sleep 10
+    done
+    echo "::error::Docker build failed after $max_attempts attempts"
+    return 1
+}
+
 build_docker_image_without_ssh() {
     echo "Building Docker image (no SSH forwarding)..."
     cat "$DOCKERFILE_PATH"
 
-    DOCKER_BUILDKIT=1 docker build -t ttl.sh/keploy/keploy:1h .
+    docker_build_with_retry env DOCKER_BUILDKIT=1 docker build -t ttl.sh/keploy/keploy:1h .
 }
 
 build_docker_image_with_ssh() {
     echo "Building Docker image (with SSH forwarding)..."
     cat "$DOCKERFILE_PATH"
 
-    DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
+    docker_build_with_retry env DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
 }
 
 main() {
