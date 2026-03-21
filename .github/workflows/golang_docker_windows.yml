@@ -69,6 +69,12 @@ jobs:
           image_tag: ${{ inputs.image_tag }}
           version: ${{ github.sha }}
 
+      - name: Update GitHub SSH known hosts (Windows)
+        shell: pwsh
+        run: |
+          mkdir -force "$env:USERPROFILE\.ssh" | Out-Null
+          ssh-keyscan github.com 2>$null | Set-Content "$env:USERPROFILE\.ssh\known_hosts"
+
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
         with:
