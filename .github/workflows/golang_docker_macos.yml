@@ -55,11 +55,11 @@ jobs:
           if docker info >/dev/null 2>&1; then
             echo "Docker daemon is already running."
           else
-            echo "Docker daemon not responding. Killing and restarting Docker Desktop..."
-            pkill -9 -f "Docker Desktop" || true
-            pkill -9 -f "com.docker" || true
-            sleep 5
-            open -a Docker || true
+            echo "Docker daemon not responding. Restarting Docker Desktop..."
+            # Start Docker Desktop detached from this process tree so the
+            # GH Actions runner won't kill it as an "orphan" in post-job cleanup.
+            nohup open -g -a Docker >/dev/null 2>&1 &
+            disown
             for i in $(seq 1 90); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."

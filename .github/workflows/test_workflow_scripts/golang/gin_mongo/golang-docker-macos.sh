@@ -9,10 +9,8 @@ ensure_docker() {
     return 0
   fi
   echo "Docker daemon not responding. Restarting Docker Desktop..."
-  pkill -9 -f "Docker Desktop" 2>/dev/null || true
-  pkill -9 -f "com.docker" 2>/dev/null || true
-  sleep 5
-  open -a Docker || true
+  nohup open -g -a Docker >/dev/null 2>&1 &
+  disown
   for i in $(seq 1 90); do
     if docker info >/dev/null 2>&1; then
       echo "Docker Desktop is ready (waited ~$((i*2))s)."
