@@ -1150,7 +1150,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		zap.Uint32("dns-port", dnsPort))
 
 	if isDockerCmd {
-		fmt.Println("getting here is case of compose")
 		var origCmd = cmd
 		a.logger.Debug("Application command provided :", zap.String("cmd", cmd))
 
