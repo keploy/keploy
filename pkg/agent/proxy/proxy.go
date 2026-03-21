@@ -568,7 +568,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		//mock the outgoing message
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m, outgoingOpts)
 		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
-			utils.LogError(p.logger, err, "failed to mock the outgoing message")
+			p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
 			p.sendMockNotFoundError(err)
 			return err
 		}

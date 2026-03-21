@@ -399,10 +399,10 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 							detail += fmt.Sprintf(" | closest: %s", r.ClosestMock)
 						}
 						if r.Diff != "" {
-							detail += fmt.Sprintf(" | %s", r.Diff)
+							detail += fmt.Sprintf(" | %s", strings.ReplaceAll(r.Diff, "\n", " "))
 						}
 						if r.NextSteps != "" {
-							detail += fmt.Sprintf(" | hint: %s", r.NextSteps)
+							detail += fmt.Sprintf(" | hint: %s", strings.ReplaceAll(r.NextSteps, "\n", " "))
 						}
 						allDiffStrings = append(allDiffStrings, detail)
 					} else {
