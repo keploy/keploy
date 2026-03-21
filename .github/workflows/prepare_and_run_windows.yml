@@ -136,6 +136,12 @@ jobs:
 
     steps:
 
+    - name: Update GitHub SSH known hosts
+      shell: pwsh
+      run: |
+        mkdir -force "$env:USERPROFILE\.ssh" | Out-Null
+        ssh-keyscan github.com 2>$null | Set-Content "$env:USERPROFILE\.ssh\known_hosts"
+
     - name: Checkout repository
       uses: actions/checkout@v4
 
