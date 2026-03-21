@@ -70,7 +70,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					zap.Int("requestCount", len(genericRequests)),
 					zap.Int("firstRequestBytes", len(genericRequests[0])),
 					zap.String("hint", "Re-record mocks if the wire protocol data has changed"),
-					zap.ByteString("preview", preview))
+					zap.Binary("preview", preview))
 				errCh <- fmt.Errorf("no matching generic mock found")
 				return
 			}
