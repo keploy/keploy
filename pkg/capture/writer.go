@@ -172,6 +172,9 @@ func (w *Writer) WritePacket(pkt *Packet) error {
 
 	// SrcAddr
 	srcAddrBytes := []byte(pkt.SrcAddr)
+	if len(srcAddrBytes) > 0xFFFF {
+		return fmt.Errorf("src addr too long: %d bytes (max 65535)", len(srcAddrBytes))
+	}
 	if err := binary.Write(w.file, binary.LittleEndian, uint16(len(srcAddrBytes))); err != nil {
 		return fmt.Errorf("failed to write src addr len: %w", err)
 	}
@@ -183,6 +186,9 @@ func (w *Writer) WritePacket(pkt *Packet) error {
 
 	// DstAddr
 	dstAddrBytes := []byte(pkt.DstAddr)
+	if len(dstAddrBytes) > 0xFFFF {
+		return fmt.Errorf("dst addr too long: %d bytes (max 65535)", len(dstAddrBytes))
+	}
 	if err := binary.Write(w.file, binary.LittleEndian, uint16(len(dstAddrBytes))); err != nil {
 		return fmt.Errorf("failed to write dst addr len: %w", err)
 	}

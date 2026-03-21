@@ -201,6 +201,9 @@ func ExtractBundle(bundlePath, targetDir string) (*BundleManifest, error) {
 		}
 
 		switch header.Typeflag {
+		case tar.TypeSymlink, tar.TypeLink:
+			// Reject symlinks and hard links to prevent traversal outside targetDir.
+			return nil, fmt.Errorf("tar entry %q: symlinks and hard links are not allowed in bundles", header.Name)
 		case tar.TypeDir:
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return nil, fmt.Errorf("failed to create directory %s: %w", targetPath, err)

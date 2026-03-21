@@ -165,7 +165,7 @@ The replay engine:
 						continue
 					}
 					fmt.Printf("\n  Connection #%d (%s → %s) [%s]:\n",
-						r.ConnectionID, r.SrcAddr, r.DstAddr, r.Protocol)
+						r.ConnectionID, r.SrcAddr, r.DstAddr, r.Protocol.String())
 					fmt.Printf("    Sent: %d packets (%d bytes), Recv: %d packets (%d bytes)\n",
 						r.PacketsSent, r.BytesSent, r.PacketsRecv, r.BytesRecv)
 					for _, mm := range r.ByteMismatches {
@@ -373,14 +373,14 @@ Workflow:
 				srcMocks := filepath.Join(bundleDir, manifest.MockDir)
 				dstMocks := filepath.Join(keployDir, "test-set-0")
 				if err := copyDir(srcMocks, dstMocks); err != nil {
-					logger.Warn("failed to copy mocks", zap.Error(err))
+					logger.Debug("failed to copy mocks", zap.Error(err))
 				}
 			}
 			if manifest.TestDir != "" {
 				srcTests := filepath.Join(bundleDir, manifest.TestDir)
 				dstTests := filepath.Join(keployDir, "test-set-0", "tests")
 				if err := copyDir(srcTests, dstTests); err != nil {
-					logger.Warn("failed to copy tests", zap.Error(err))
+					logger.Debug("failed to copy tests", zap.Error(err))
 				}
 			}
 			if manifest.ConfigFile != "" {
@@ -409,7 +409,7 @@ Workflow:
 			if err == nil {
 				for _, conn := range report.Connections {
 					fmt.Printf("    - %s → %s (%d packets, %s)\n",
-						conn.Protocol, conn.DstAddr, conn.PacketCount,
+						conn.Protocol.String(), conn.DstAddr, conn.PacketCount,
 						formatSize(conn.ClientBytes+conn.ServerBytes))
 				}
 			}

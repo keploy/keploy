@@ -22,7 +22,7 @@ cleanup() {
 # ── Setup ──────────────────────────────────────────
 echo "=== Setting up test environment ==="
 cleanup
-rm -rf "$WORKDIR" /keploy/debug
+rm -rf "$WORKDIR" $WORKDIR/keploy/debug
 mkdir -p "$WORKDIR"
 
 # Build app
@@ -77,7 +77,7 @@ kill -INT $KPID 2>/dev/null; wait $KPID 2>/dev/null; sleep 3
 # ── Validate Record Capture ──
 echo ""
 echo "--- Record Capture Validation ---"
-REC_CAP=$(find /keploy/debug -name "capture_record_*.kpcap" 2>/dev/null | sort | tail -1)
+REC_CAP=$(find $WORKDIR/keploy/debug -name "capture_record_*.kpcap" 2>/dev/null | sort | tail -1)
 check '[ -n "$REC_CAP" ]' "Record capture file created"
 
 if [ -n "$REC_CAP" ]; then
@@ -110,7 +110,7 @@ echo "  INFO: Test cases recorded: $TC_COUNT"
 # ══════════════════════════════════════════════════
 # PHASE 2: Test with --debug
 # ══════════════════════════════════════════════════
-# Save the record capture for later analysis (Phase 2 may clean /keploy/debug)
+# Save the record capture for later analysis (Phase 2 may clean $WORKDIR/keploy/debug)
 SAVED_REC_CAP=""
 if [ -n "$REC_CAP" ] && [ -f "$REC_CAP" ]; then
     cp "$REC_CAP" "$WORKDIR/saved_record_capture.kpcap"
@@ -120,7 +120,7 @@ fi
 echo ""
 echo "=== PHASE 2: Test (replay) with --debug ==="
 if [ "$TC_COUNT" -gt 0 ]; then
-    rm -rf /keploy/debug
+    rm -rf $WORKDIR/keploy/debug
     cleanup
     cd "$WORKDIR"
 
@@ -138,7 +138,7 @@ if [ "$TC_COUNT" -gt 0 ]; then
     fi
     rm -f "$TEST_LOG"
 
-    TEST_CAP=$(find /keploy/debug -name "capture_test_*.kpcap" 2>/dev/null | sort | tail -1)
+    TEST_CAP=$(find $WORKDIR/keploy/debug -name "capture_test_*.kpcap" 2>/dev/null | sort | tail -1)
     check '[ -n "$TEST_CAP" ]' "Test capture file created"
     if [ -n "$TEST_CAP" ]; then
         TVAL=$($KEPLOY debug validate "$TEST_CAP" --disable-ansi 2>&1)
@@ -149,11 +149,11 @@ if [ "$TC_COUNT" -gt 0 ]; then
 else
     echo "  SKIP: No test cases to replay (incoming proxy may not have intercepted requests)"
     # Still test that test mode creates a capture file
-    rm -rf /keploy/debug
+    rm -rf $WORKDIR/keploy/debug
     cleanup
     cd "$WORKDIR"
     timeout 30 $KEPLOY test -c "./capture-e2e-app" --debug --path "$WORKDIR" --disable-ansi > /dev/null 2>&1
-    TEST_CAP=$(find /keploy/debug -name "capture_test_*.kpcap" 2>/dev/null | sort | tail -1)
+    TEST_CAP=$(find $WORKDIR/keploy/debug -name "capture_test_*.kpcap" 2>/dev/null | sort | tail -1)
     check '[ -n "$TEST_CAP" ]' "Test capture file created (even with no test cases)"
 fi
 
@@ -162,7 +162,7 @@ fi
 # ══════════════════════════════════════════════════
 echo ""
 echo "=== PHASE 3: Bundle roundtrip ==="
-ANY_CAP=$(find /keploy/debug -name "*.kpcap" 2>/dev/null | head -1)
+ANY_CAP=$(find $WORKDIR/keploy/debug -name "*.kpcap" 2>/dev/null | head -1)
 if [ -n "$ANY_CAP" ]; then
     $KEPLOY debug bundle --capture "$ANY_CAP" \
         --mocks "$WORKDIR/keploy" --tests "$WORKDIR/keploy" \

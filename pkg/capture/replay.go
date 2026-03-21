@@ -217,10 +217,10 @@ func (r *Replayer) replayConnection(ctx context.Context, ct *ConnectionTimeline)
 			}
 
 			want := len(pkt.Payload)
-			buf := make([]byte, want+4096) // extra headroom for size differences
+			buf := make([]byte, want)
 			var n int
 			for n < want {
-				nr, err := conn.Read(buf[n:])
+				nr, err := conn.Read(buf[n:want])
 				n += nr
 				if err != nil {
 					if !errors.Is(err, io.EOF) {

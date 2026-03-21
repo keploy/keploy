@@ -104,7 +104,7 @@ jobs:
 
       - name: Validate HTTP capture (packets > 0, protocol = HTTP)
         run: |
-          CAP=$(sudo find /keploy/debug -name "capture_record_*.kpcap" | head -1)
+          CAP=$(sudo find /tmp/pokeapi-test/keploy/debug -name "capture_record_*.kpcap" | head -1)
           [ -n "$CAP" ] || (echo "No capture" && exit 1)
           OUTPUT=$(./keploy-bin debug validate "$CAP" --disable-ansi 2>&1)
           echo "$OUTPUT" | grep -v suspicious
@@ -114,20 +114,20 @@ jobs:
 
       - name: Analyze shows HTTP protocol
         run: |
-          CAP=$(sudo find /keploy/debug -name "capture_record_*.kpcap" | head -1)
+          CAP=$(sudo find /tmp/pokeapi-test/keploy/debug -name "capture_record_*.kpcap" | head -1)
           ./keploy-bin debug analyze "$CAP" --disable-ansi 2>&1 | grep -q "HTTP"
 
       - name: Test mode with --debug creates capture
         run: |
-          sudo rm -rf /keploy/debug
+          sudo rm -rf /tmp/pokeapi-test/keploy/debug
           cd /tmp/pokeapi-test
           sudo timeout 60 $GITHUB_WORKSPACE/keploy-bin test -c "./app" --debug --path /tmp/pokeapi-test --disable-ansi 2>&1 | tail -5
-          CAP=$(sudo find /keploy/debug -name "capture_test_*.kpcap" | head -1)
+          CAP=$(sudo find /tmp/pokeapi-test/keploy/debug -name "capture_test_*.kpcap" | head -1)
           [ -n "$CAP" ] || (echo "No test capture" && exit 1)
 
       - name: Bundle → extract → validate roundtrip
         run: |
-          CAP=$(sudo find /keploy/debug -name "*.kpcap" | head -1)
+          CAP=$(sudo find /tmp/pokeapi-test/keploy/debug -name "*.kpcap" | head -1)
           ./keploy-bin debug bundle --capture "$CAP" --output /tmp/bundle.tar.gz --notes "CI" --disable-ansi
           ./keploy-bin debug extract /tmp/bundle.tar.gz --dir /tmp/extracted --disable-ansi
           EXT=$(find /tmp/extracted -name "*.kpcap" | head -1)

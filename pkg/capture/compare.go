@@ -187,19 +187,19 @@ func compareTimelines(a, b *ConnectionTimeline) ConnectionDiff {
 		pa, pb := a.Packets[i], b.Packets[i]
 		if pa.Direction != pb.Direction {
 			diff.Status = "diff"
-			diff.Details = fmt.Sprintf("Packet %d direction differs: %s vs %s", i, pa.Direction, pb.Direction)
+			diff.Details = fmt.Sprintf("Packet %d direction differs: %s vs %s", i, pa.Direction.String(), pb.Direction.String())
 			return diff
 		}
 		if len(pa.Payload) != len(pb.Payload) {
 			diff.Status = "diff"
-			diff.Details = fmt.Sprintf("Packet %d size differs: %d vs %d bytes (direction: %s)", i, len(pa.Payload), len(pb.Payload), pa.Direction)
+			diff.Details = fmt.Sprintf("Packet %d size differs: %d vs %d bytes (direction: %s)", i, len(pa.Payload), len(pb.Payload), pa.Direction.String())
 			return diff
 		}
 		// Compare actual bytes
 		for j := 0; j < len(pa.Payload); j++ {
 			if pa.Payload[j] != pb.Payload[j] {
 				diff.Status = "diff"
-				diff.Details = fmt.Sprintf("Packet %d byte diff at offset %d (direction: %s, size: %d)", i, j, pa.Direction, len(pa.Payload))
+				diff.Details = fmt.Sprintf("Packet %d byte diff at offset %d (direction: %s, size: %d)", i, j, pa.Direction.String(), len(pa.Payload))
 				return diff
 			}
 		}
@@ -219,7 +219,7 @@ func compareTimelines(a, b *ConnectionTimeline) ConnectionDiff {
 func groupByDestAndProto(conns map[uint64]*ConnectionTimeline) map[string][]*ConnectionTimeline {
 	groups := make(map[string][]*ConnectionTimeline)
 	for _, ct := range conns {
-		key := fmt.Sprintf("%s:%s", ct.Protocol, ct.DstAddr)
+		key := fmt.Sprintf("%s:%s", ct.Protocol.String(), ct.DstAddr)
 		groups[key] = append(groups[key], ct)
 	}
 	return groups
@@ -246,7 +246,7 @@ func FormatCompareResult(r *CompareResult) string {
 			if d.Status == "match" {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("\n  [%d] %s → %s  [%s]\n", i+1, d.Protocol, d.DstAddr, d.Status))
+			sb.WriteString(fmt.Sprintf("\n  [%d] %s → %s  [%s]\n", i+1, d.Protocol.String(), d.DstAddr, d.Status))
 			if d.PacketsA > 0 || d.PacketsB > 0 {
 				sb.WriteString(fmt.Sprintf("       Packets: %d (customer) vs %d (engineer)\n", d.PacketsA, d.PacketsB))
 			}
