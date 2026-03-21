@@ -974,6 +974,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
+		if r.config.Test.FallBackOnMiss {
+			r.logger.Info("fallBackOnMiss flag is deprecated and ignored. Replay is now always deterministic. Remove this flag from your config.")
+		}
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
 			Rules:         r.config.BypassRules,
 			MongoPassword: r.config.Test.MongoPassword,
