@@ -157,7 +157,11 @@ func (p *Proxy) GetDestInfo() agent.DestInfo {
 }
 
 func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.Integrations {
-	return p.Integrations
+	result := make(map[integrations.IntegrationType]integrations.Integrations, len(p.Integrations))
+	for k, v := range p.Integrations {
+		result[k] = v
+	}
+	return result
 }
 
 // ResetRecordedDNSMocks clears the DNS mock deduplication tracker.

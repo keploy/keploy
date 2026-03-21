@@ -786,7 +786,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		logger.Debug("TLSHandshakeStore empty — fetching server greeting directly",
 			zap.Uint16("port", port))
 		var err error
-		serverGreetingBuf, err = fetchServerGreeting(opts)
+		serverGreetingBuf, err = fetchServerGreeting(ctx, opts)
 		if err != nil {
 			return fmt.Errorf("no server greeting in TLSHandshakeStore for port %d and direct fetch failed: %w", port, err)
 		}
@@ -1065,7 +1065,7 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 // initial HandshakeV10 greeting packet. This is used as a fallback when the
 // pre-TLS handshake was not captured by the proxy (e.g. the connection was
 // established before interception started).
-func fetchServerGreeting(opts models.OutgoingOptions) ([]byte, error) {
+func fetchServerGreeting(ctx context.Context, opts models.OutgoingOptions) ([]byte, error) {
 	addr := ""
 	if opts.DstCfg != nil {
 		addr = opts.DstCfg.Addr
@@ -1073,23 +1073,48 @@ func fetchServerGreeting(opts models.OutgoingOptions) ([]byte, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("no destination address available to fetch server greeting")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Close()
+	cancelRead := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetReadDeadline(time.Now())
+		case <-cancelRead:
+		}
+	}()
+	defer close(cancelRead)
 
 	// MySQL server sends greeting immediately upon connection.
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	readDeadline := time.Now().Add(3 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(readDeadline) {
+		readDeadline = d
+	}
+	if err := conn.SetReadDeadline(readDeadline); err != nil {
+		return nil, fmt.Errorf("set read deadline: %w", err)
+	}
 	// Read the 4-byte MySQL packet header first.
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("read greeting header: %w", err)
 	}
 	payloadLen := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
 	payload := make([]byte, payloadLen)
 	if _, err := io.ReadFull(conn, payload); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("read greeting payload: %w", err)
 	}
 
