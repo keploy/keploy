@@ -709,7 +709,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
 		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
 
-		moreBuf, err := util.ReadWithTimeout(srcConn, 5*time.Millisecond)
+		const http2HeadersReadTimeout = 150 * time.Millisecond
+		moreBuf, err := util.ReadWithTimeout(srcConn, http2HeadersReadTimeout)
 		if err != nil {
 			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
 			return err
