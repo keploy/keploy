@@ -465,24 +465,31 @@ func (idc *Impl) generateKeployVolumes() []string {
 			"/sys/fs/bpf:/sys/fs/bpf",
 		)
 	case "darwin":
+		// macOS volumes
 		volumes = append(volumes,
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
+			"/sys/fs/bpf:/sys/fs/bpf",
 		)
 	case "windows":
+		// Windows volumes - check if using default context or colima
 		cmd := exec.Command("docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err == nil {
 			dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 			if dockerContext != "colima" {
+				// Default Docker context on Windows
 				volumes = append(volumes,
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
+					"/sys/fs/bpf:/sys/fs/bpf",
 				)
 			} else {
+				// Colima context
 				volumes = append(volumes,
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
+					"/sys/fs/bpf:/sys/fs/bpf",
 				)
 			}
 		}
