@@ -119,7 +119,7 @@ endsec
 # Replay
 section "Start Replay"
 echo "Starting Replay..."
-sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-test" --delay 10 --debug --generateGithubActions=false 2>&1 | tee test.txt || true
+sudo -E env PATH=$PATH "$REPLAY_BIN" test -c "./dns-test" --delay 10 --generateGithubActions=false 2>&1 | tee test.txt || true
 check_for_errors "test.txt"
 check_test_report
 endsec
