@@ -120,12 +120,6 @@ type StmtPrepareOkPacket struct {
 	EOFAfterParamDefs  []byte                `yaml:"eofAfterParamDefs" json:"eofAfterParamDefs"`
 	ColumnDefs         []*ColumnDefinition41 `yaml:"column_definitions" json:"column_definitions"`
 	EOFAfterColumnDefs []byte                `yaml:"eofAfterColumnDefs" json:"eofAfterColumnDefs"`
-
-	// Raw data for async decoding
-	RawParamData          [][]byte `yaml:"-" json:"-"`
-	RawColumnDefData      [][]byte `yaml:"-" json:"-"`
-	RawEOFAfterParamDefs  []byte   `yaml:"-" json:"-"`
-	RawEOFAfterColumnDefs []byte   `yaml:"-" json:"-"`
 }
 
 // COM_STMT_EXECUTE packet

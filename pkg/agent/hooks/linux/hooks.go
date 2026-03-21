@@ -491,8 +491,6 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 
 	ports := agent.GetPortToSendToKernel(ctx, rules)
 
-	// Allow enterprise to add extra pass-through ports (e.g. JSSE capture port
-	// for low-latency mode).
 	if agentSvc.ExtraPassThroughPortsHook != nil {
 		ports = append(ports, agentSvc.ExtraPassThroughPortsHook()...)
 	}
@@ -523,7 +521,7 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.H
 
 		// Keep non-docker behavior backward-compatible with main by default:
 		// do not redirect generic IPv6 traffic to proxy unless an explicit
-		// proxy-port override is configured (used by low-latency paths).
+		// proxy-port override is configured.
 		var proxyIPv6 [4]uint32
 		if cfg.Port != 0 {
 			proxyIPv6, err = ToIPv4MappedIPv6("127.0.0.1")

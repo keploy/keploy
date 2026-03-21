@@ -108,9 +108,6 @@ func RegisterIncomingProxy(ip agent.IncomingProxy) {
 	ActiveIncomingProxy = ip
 }
 
-// SockmapLoadHookFn is called during eBPF hooks load to allow enterprise
-// to load sockmap BPF programs for low-latency mode. It returns a cleanup
-// function that will be called on unload to release sockmap resources.
 type SockmapLoadHookFn func(logger *zap.Logger) (cleanup func(), err error)
 
 var SockmapHook SockmapLoadHookFn
@@ -119,8 +116,6 @@ func RegisterSockmapLoadHook(h SockmapLoadHookFn) {
 	SockmapHook = h
 }
 
-// ExtraPassThroughPortsFn returns additional ports to add to the eBPF
-// pass-through list (e.g. JSSE capture port for low-latency mode).
 type ExtraPassThroughPortsFn func() []uint
 
 var ExtraPassThroughPortsHook ExtraPassThroughPortsFn

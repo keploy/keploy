@@ -544,8 +544,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// TODO: We have to remove the 0 key maps, since it was meant for appID keys maps for multiple clients-apps.
 		m, ok := p.MockManagers.Load(uint64(0))
 		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager")
-			return err
+			mockMgrErr := fmt.Errorf("mysql test-mode mock manager not initialized for app id 0")
+			utils.LogError(p.logger, mockMgrErr, "failed to fetch the mock manager")
+			return mockMgrErr
 		}
 
 		//mock the outgoing message
@@ -854,8 +855,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(uint64(0))
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager")
-		return err
+		mockMgrErr := fmt.Errorf("mock manager not initialized for app id 0")
+		utils.LogError(logger, mockMgrErr, "failed to fetch the mock manager")
+		return mockMgrErr
 	}
 
 	generic := true
