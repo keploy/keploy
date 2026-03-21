@@ -34,7 +34,6 @@ var (
 	regexCache   = make(map[string]*regexp.Regexp)
 )
 
-
 // getCompiled returns a cached compiled regexp for pattern.
 // It never panics: on invalid patterns, it returns a "never matches" regex (?!) and caches it.
 func getCompiled(pattern string) *regexp.Regexp {

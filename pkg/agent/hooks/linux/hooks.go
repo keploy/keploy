@@ -77,8 +77,6 @@ type Hooks struct {
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
-
-
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
