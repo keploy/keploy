@@ -12,6 +12,8 @@ import (
 
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
+	phase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
+	connPhase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	pUtils "go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -982,9 +984,44 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 		Filler:          sslReq.Filler,
 		AuthPluginName:  decodeCtx.PluginName,
 	}
+	hr41Payload, err := connPhase.EncodeHandshakeResponse41(ctx, logger, syntheticHR41)
+	if err != nil {
+		return fmt.Errorf("failed to encode synthetic HandshakeResponse41: %w", err)
+	}
+
+	authMorePacket := &mysql.AuthMoreDataPacket{
+		StatusTag: mysql.AuthMoreData,
+		Data:      "FastAuthSuccess",
+	}
+	authMorePayload, err := connPhase.EncodeAuthMoreData(ctx, authMorePacket)
+	if err != nil {
+		return fmt.Errorf("failed to encode synthetic AuthMoreData: %w", err)
+	}
+
+	okPacket := &mysql.OKPacket{
+		Header:      mysql.OK,
+		StatusFlags: 2,
+	}
+	serverCaps := decodeCtx.ServerCaps
+	if greeting, ok := greetingPkt.Message.(*mysql.HandshakeV10Packet); ok {
+		serverCaps = greeting.CapabilityFlags
+	}
+	okPayload, err := phase.EncodeOk(ctx, okPacket, serverCaps)
+	if err != nil {
+		return fmt.Errorf("failed to encode synthetic OK packet: %w", err)
+	}
+
+	sslReqSeq := byte(1) // Default sequence for SSLRequest in the SSL handshake path.
+	if sslReqPkt.Header != nil && sslReqPkt.Header.Header != nil {
+		sslReqSeq = sslReqPkt.Header.Header.SequenceID
+	}
+	hr41Seq := sslReqSeq + 1
+	authMoreSeq := hr41Seq + 1
+	okSeq := authMoreSeq + 1
+
 	hr41Bundle := mysql.PacketBundle{
 		Header: &mysql.PacketInfo{
-			Header: &mysql.Header{PayloadLength: 187, SequenceID: 2},
+			Header: &mysql.Header{PayloadLength: uint32(len(hr41Payload)), SequenceID: hr41Seq},
 			Type:   mysql.HandshakeResponse41,
 		},
 		Message: syntheticHR41,
@@ -993,23 +1030,17 @@ func recordSyntheticConfigMock(ctx context.Context, logger *zap.Logger, clientCo
 	// Synthesize auth responses: AuthMoreData(FastAuthSuccess) + OK.
 	authMoreBundle := mysql.PacketBundle{
 		Header: &mysql.PacketInfo{
-			Header: &mysql.Header{PayloadLength: 2, SequenceID: 3},
+			Header: &mysql.Header{PayloadLength: uint32(len(authMorePayload)), SequenceID: authMoreSeq},
 			Type:   mysql.AuthStatusToString(mysql.AuthMoreData),
 		},
-		Message: &mysql.AuthMoreDataPacket{
-			StatusTag: mysql.AuthMoreData,
-			Data:      "FastAuthSuccess",
-		},
+		Message: authMorePacket,
 	}
 	okBundle := mysql.PacketBundle{
 		Header: &mysql.PacketInfo{
-			Header: &mysql.Header{PayloadLength: 7, SequenceID: 4},
+			Header: &mysql.Header{PayloadLength: uint32(len(okPayload)), SequenceID: okSeq},
 			Type:   mysql.StatusToString(mysql.OK),
 		},
-		Message: &mysql.OKPacket{
-			Header:      mysql.OK,
-			StatusFlags: 2,
-		},
+		Message: okPacket,
 	}
 
 	requests := []mysql.Request{

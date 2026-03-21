@@ -458,12 +458,11 @@ func (idc *Impl) generateKeployVolumes() []string {
 
 	switch osName {
 	case "linux":
-		// /sys/fs/bpf is NOT bind-mounted — the host's bpffs has mode=700,
-		// making it unwritable from inside the container. The agent mounts
-		// a fresh container-local bpffs at startup (see ensureBPFFS).
+		// Standard Linux volumes
 		volumes = append(volumes,
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
+			"/sys/fs/bpf:/sys/fs/bpf",
 		)
 	case "darwin":
 		volumes = append(volumes,

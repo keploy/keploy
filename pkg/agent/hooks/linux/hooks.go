@@ -108,11 +108,6 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
-	// Ensure /sys/fs/bpf is a writable bpffs. When running inside Docker,
-	// the host's bpffs may be bind-mounted with restrictive permissions
-	// (mode=700). In that case, mount a fresh container-local bpffs.
-	ensureBPFFS(h.logger)
-
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
@@ -578,36 +573,3 @@ func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
 	return result, nil
 }
 
-// ensureBPFFS checks that /sys/fs/bpf is a bpffs filesystem. When running
-// inside Docker, /sys/fs/bpf may be a tmpfs or a bind-mounted host bpffs
-// with restrictive permissions. In either case, mount a fresh bpffs on top.
-func ensureBPFFS(logger *zap.Logger) {
-	const bpfFSPath = "/sys/fs/bpf"
-
-	// Check if /sys/fs/bpf is already a bpffs (magic = 0xcafe4a11).
-	var stat unix.Statfs_t
-	if err := unix.Statfs(bpfFSPath, &stat); err == nil && stat.Type == 0xcafe4a11 {
-		// Already a bpffs — check if it's writable.
-		testPath := bpfFSPath + "/.keploy_write_test"
-		f, err := os.Create(testPath)
-		if err == nil {
-			f.Close()
-			os.Remove(testPath)
-			return // bpffs is writable
-		}
-		logger.Debug("bpffs exists but is not writable, remounting",
-			zap.String("path", bpfFSPath), zap.Error(err))
-	}
-
-	// Ensure the mount point directory exists.
-	_ = os.MkdirAll(bpfFSPath, 0755)
-
-	// Mount a fresh bpffs. This requires CAP_SYS_ADMIN + no AppArmor restriction.
-	if err := unix.Mount("bpf", bpfFSPath, "bpf", 0, ""); err != nil {
-		logger.Warn("Failed to mount bpffs — BPF map pinning will not work",
-			zap.String("path", bpfFSPath), zap.Error(err))
-		return
-	}
-
-	logger.Info("Mounted fresh bpffs for BPF map pinning", zap.String("path", bpfFSPath))
-}
