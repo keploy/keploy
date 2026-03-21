@@ -174,59 +174,6 @@ func HandlePostgresSSL(
 	return upgradedClient, upgradedServer, sslResponse, nil
 }
 
-// UpgradeMySQLServerToTLS upgrades only the server connection to TLS for MySQL.
-// This is used when the client connection has already been upgraded separately
-// via HandleTLSConnection.
-//
-// Parameters:
-// - serverConn: the connection to the server (proxy -> MySQL), will be upgraded to TLS client
-// - sourcePort: the source port for looking up destination URL
-// - serverAddr: fallback server address for TLS config
-//
-// Returns the upgraded server connection.
-func UpgradeMySQLServerToTLS(
-	_ context.Context,
-	logger *zap.Logger,
-	serverConn net.Conn,
-	sourcePort int,
-	serverAddr string,
-) (upgradedServer net.Conn, err error) {
-	// Get destination URL from source port mapping (if available)
-	var serverName string
-	if urlValue, ok := SrcPortToDstURL.Load(sourcePort); ok {
-		if s, ok := urlValue.(string); ok {
-			serverName = s
-		}
-	}
-	if serverName == "" {
-		// Fall back to extracting from server address
-		host, _, _ := net.SplitHostPort(serverAddr)
-		serverName = host
-	}
-
-	logger.Debug("Upgrading MySQL server connection to TLS",
-		zap.String("serverName", serverName),
-		zap.Int("sourcePort", sourcePort))
-
-	// Upgrade server connection (act as TLS client to the real server)
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         serverName,
-		MinVersion:         tls.VersionTLS12,
-		MaxVersion:         tls.VersionTLS13,
-		CipherSuites:       getCompatibleCipherSuites(),
-	}
-	tlsServerConn := tls.Client(serverConn, tlsConfig)
-	if err := tlsServerConn.Handshake(); err != nil {
-		return nil, fmt.Errorf("failed to upgrade MySQL server connection to TLS: %w", err)
-	}
-
-	logger.Debug("MySQL server TLS upgrade complete",
-		zap.String("serverName", serverName))
-
-	return tlsServerConn, nil
-}
-
 // getCompatibleCipherSuites returns secure cipher suites plus specific legacy ones
 // needed for MySQL compatibility (e.g. RSA-CBC), avoiding the blanket InsecureCipherSuites().
 func getCompatibleCipherSuites() []uint16 {
