@@ -1171,6 +1171,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				zap.String("cmd", cmd),
 			)
 		}
+		// Lower perf_event_paranoid to allow eBPF programs to attach to syscall tracepoints
+		// like sys_socket via perf_event_open. Ubuntu/Debian default (4) blocks this for
+		// unprivileged users, so setting 2 relaxes the restriction and enables tracing.
 		if runtime.GOOS == "linux" {
 			paranoidPath := "/proc/sys/kernel/perf_event_paranoid"
 			currentValue, err := os.ReadFile(paranoidPath)
