@@ -38,31 +38,33 @@ func NewCaptureConn(conn net.Conn, reader io.Reader, connID uint64, readDir, wri
 
 // Read reads from the underlying connection and records the data.
 func (cc *CaptureConn) Read(p []byte) (int, error) {
+	// Snapshot mutable fields under the lock, then release before the
+	// potentially blocking network read to avoid holding mu for the
+	// entire duration of the I/O (which would stall SetWriter/SetProtocol).
 	cc.mu.Lock()
-	defer cc.mu.Unlock()
+	writer := cc.writer
+	proto := cc.protocol
+	cc.mu.Unlock()
 
 	var n int
 	var err error
-
 	if cc.Reader != nil {
 		n, err = cc.Reader.Read(p)
 	} else {
 		n, err = cc.Conn.Read(p)
 	}
 
-	if n > 0 && cc.writer != nil {
-		// Best-effort capture: don't fail the read if capture fails
+	if n > 0 && writer != nil {
 		pkt := &Packet{
 			Timestamp:    time.Now(),
 			ConnectionID: cc.connectionID,
 			Type:         PacketTypeData,
 			Direction:    cc.readDir,
-			Protocol:     cc.protocol,
+			Protocol:     proto,
 			Payload:      make([]byte, n),
 		}
 		copy(pkt.Payload, p[:n])
-		// Fire and forget - capture errors don't affect the actual connection
-		_ = cc.writer.WritePacket(pkt)
+		_ = writer.WritePacket(pkt)
 	}
 
 	return n, err

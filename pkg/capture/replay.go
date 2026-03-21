@@ -96,7 +96,8 @@ func (r *Replayer) ReplayCaptureFile(ctx context.Context, cf *CaptureFile, path 
 
 	start := time.Now()
 
-	// Sort connections by open time for deterministic replay order
+	// Sort connections by open time so replay starts them in capture order,
+	// though individual connections are replayed concurrently.
 	sortedConns := make([]*ConnectionTimeline, 0, len(conns))
 	for _, ct := range conns {
 		sortedConns = append(sortedConns, ct)

@@ -226,6 +226,16 @@ Share this bundle with the Keploy team for issue reproduction.`,
 				}
 			}
 
+			// Derive mode from the capture file metadata so the bundle manifest
+			// accurately reflects whether this was a record or test capture.
+			bundleMode := "debug"
+			if r, err := capture.NewReader(captureFile); err == nil {
+				if meta := r.Metadata(); meta.Mode != "" {
+					bundleMode = meta.Mode
+				}
+				r.Close()
+			}
+
 			bundlePath, err := capture.CreateBundle(logger, capture.BundleOptions{
 				CaptureFile: captureFile,
 				MockDir:     mockDir,
@@ -234,7 +244,7 @@ Share this bundle with the Keploy team for issue reproduction.`,
 				ConfigFile:  configFile,
 				OutputPath:  output,
 				AppName:     cfg.AppName,
-				Mode:        "debug",
+				Mode:        bundleMode,
 				Notes:       notes,
 			})
 			if err != nil {

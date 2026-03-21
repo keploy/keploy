@@ -16,7 +16,7 @@ type MockDownload struct {
 type NetworkCapture struct {
 	Enabled bool   `json:"enabled" yaml:"enabled" mapstructure:"enabled"` // auto-enabled when --debug is used
 	Path    string `json:"path" yaml:"path" mapstructure:"path"`          // output directory for .kpcap files (default: keploy/debug/)
-	Bundle  bool   `json:"bundle" yaml:"bundle" mapstructure:"bundle"`    // auto-create debug bundle on completion
+	Bundle  bool   `json:"bundle" yaml:"bundle" mapstructure:"bundle"`    // reserved for future use; currently has no effect
 }
 
 type Config struct {

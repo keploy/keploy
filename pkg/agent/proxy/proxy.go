@@ -147,10 +147,10 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		}
 		cm, err := capture.NewManager(logger, captureDir, mode)
 		if err != nil {
-			logger.Warn("Failed to initialize network capture (continuing without capture)", zap.Error(err))
+			logger.Info("network capture disabled (init failed; check path permissions)", zap.Error(err), zap.String("path", captureDir))
 		} else {
 			proxy.captureManager = cm
-			logger.Info("Network capture enabled", zap.String("output", cm.GetOutputPath()))
+			logger.Info("network capture enabled", zap.String("output", cm.GetOutputPath()))
 		}
 	}
 
@@ -551,11 +551,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
-	// Network capture: record connection open with source/destination info
-	if cm != nil && cm.IsEnabled() {
-		cm.RecordConnectionOpen(captureConnID, srcConn.RemoteAddr().String(), dstAddr, false)
-	}
-
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
@@ -722,6 +717,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				}
 			}
 		}
+	}
+
+	// Network capture: record connection open now that isTLS is known.
+	if cm != nil && cm.IsEnabled() {
+		cm.RecordConnectionOpen(captureConnID, srcConn.RemoteAddr().String(), dstAddr, isTLS)
 	}
 
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)

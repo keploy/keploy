@@ -129,16 +129,16 @@ func (w *Writer) WritePacket(pkt *Packet) error {
 		return fmt.Errorf("packet payload too large: %d bytes (max %d)", len(pkt.Payload), MaxPayloadSize)
 	}
 
-	count := w.packetCount.Add(1)
-	if count > MaxPacketsInFile {
-		return fmt.Errorf("capture file packet limit exceeded (%d)", MaxPacketsInFile)
-	}
-
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.file == nil {
 		return fmt.Errorf("capture writer file is nil")
+	}
+
+	// Check limit while holding the lock so close/write races don't skew the count.
+	if w.packetCount.Load()+1 > MaxPacketsInFile {
+		return fmt.Errorf("capture file packet limit exceeded (%d)", MaxPacketsInFile)
 	}
 
 	// Timestamp
@@ -202,6 +202,8 @@ func (w *Writer) WritePacket(pkt *Packet) error {
 		}
 	}
 
+	// Increment only after a successful write so the count stays accurate.
+	w.packetCount.Add(1)
 	return nil
 }
 

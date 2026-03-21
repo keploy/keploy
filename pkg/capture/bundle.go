@@ -117,10 +117,10 @@ func CreateBundle(logger *zap.Logger, opts BundleOptions) (string, error) {
 		}
 	}
 
-	// Add config file
+	// Add config file (optional)
 	if opts.ConfigFile != "" {
 		if _, err := addFileToTar(tarWriter, opts.ConfigFile, filepath.Join(bundleDir, filepath.Base(opts.ConfigFile))); err != nil {
-			logger.Warn("failed to add config file to bundle", zap.Error(err))
+			logger.Debug("skipping config file in bundle", zap.Error(err))
 		} else {
 			manifest.ConfigFile = filepath.Base(opts.ConfigFile)
 		}

@@ -154,10 +154,17 @@ func FormatReport(report *AnalysisReport) string {
 	sb.WriteString(fmt.Sprintf("  Total Data: %s\n", formatBytes(report.TotalBytes)))
 	sb.WriteString(fmt.Sprintf("  Connections: %d\n", len(report.Connections)))
 
-	// Protocol breakdown
+	// Protocol breakdown — sort keys for stable, diff-friendly output.
 	sb.WriteString("\n─── Protocol Breakdown ───────────────────────────\n")
-	for proto, count := range report.Protocols {
-		sb.WriteString(fmt.Sprintf("  %-12s %d connections\n", proto.String()+":", count))
+	protoKeys := make([]Protocol, 0, len(report.Protocols))
+	for proto := range report.Protocols {
+		protoKeys = append(protoKeys, proto)
+	}
+	sort.Slice(protoKeys, func(i, j int) bool {
+		return protoKeys[i].String() < protoKeys[j].String()
+	})
+	for _, proto := range protoKeys {
+		sb.WriteString(fmt.Sprintf("  %-12s %d connections\n", proto.String()+":", report.Protocols[proto]))
 	}
 
 	// Connection details
