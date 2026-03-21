@@ -52,6 +52,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure Docker Desktop is running (macOS)
+        shell: bash
+        run: |
+          set -e
+          if docker info >/dev/null 2>&1; then
+            echo "Docker daemon is already running."
+          else
+            echo "Docker daemon not responding. Restarting Docker Desktop..."
+            nohup open -g -a Docker >/dev/null 2>&1 &
+            disown
+            for i in $(seq 1 90); do
+              if docker info >/dev/null 2>&1; then
+                echo "Docker Desktop is ready (waited ~$((i*2))s)."
+                break
+              fi
+              if [ "$i" -eq 90 ]; then
+                echo "ERROR: Docker Desktop failed to start within 180s."
+                exit 1
+              fi
+              sleep 2
+            done
+          fi
+
       - id: image
         uses: ./.github/actions/download-image
         with:
