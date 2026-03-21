@@ -115,11 +115,15 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				} else if sp, spOk := req.Message.(*mysql.StmtPreparePacket); spOk {
 					actualQuery = sp.Query
 				}
+				diff := ""
+				if actualQuery != "" || closestQuery != "" {
+					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
+				}
 				report := &models.MockMismatchReport{
 					Protocol:      "MySQL",
 					ActualSummary: fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 120)),
 					ClosestMock:   closestMockName,
-					Diff:          fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200)),
+					Diff:          diff,
 					NextSteps:     "Re-record mocks if the SQL query has changed.",
 				}
 				logger.Error("Connection closing due to no matching mock found. Re-record mocks if the SQL query has changed.",

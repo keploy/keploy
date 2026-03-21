@@ -78,6 +78,9 @@ func TestBuildHTTPMismatchReport_DbError(t *testing.T) {
 	if report.ClosestMock != "" {
 		t.Errorf("expected empty ClosestMock on db error, got %s", report.ClosestMock)
 	}
+	if report.NextSteps != "Failed to read mock database. Check logs for errors and retry." {
+		t.Errorf("expected db error next steps, got %s", report.NextSteps)
+	}
 }
 
 func TestBuildHTTPMismatchReport_NoHTTPMocks(t *testing.T) {

@@ -496,7 +496,14 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integrations.MockMemDb, httpMocks []*models.Mock) *models.MockMismatchReport {
 	if httpMocks == nil {
 		mocks, err := mockDb.GetUnFilteredMocks()
-		if err != nil || len(mocks) == 0 {
+		if err != nil {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "Failed to read mock database. Check logs for errors and retry.",
+			}
+		}
+		if len(mocks) == 0 {
 			return &models.MockMismatchReport{
 				Protocol:      "HTTP",
 				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),

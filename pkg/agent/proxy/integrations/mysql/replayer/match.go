@@ -28,12 +28,15 @@ type prepEntry struct { // minimal, enough for lookup
 	mockName    string // for debugging purpose
 }
 
-// truncate returns s trimmed to at most maxLen characters, with "..." appended if truncated.
+// truncate returns s trimmed to at most maxLen characters (including "..." suffix if truncated).
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // case-insensitive prefix check without allocation
