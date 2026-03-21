@@ -384,39 +384,45 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		p.nsSwitchMutex.Unlock()
 	}()
 
-	// Close the listener when context is cancelled to unblock Accept().
-	// This avoids creating a goroutine + two channels per accept iteration.
-	go func() {
-		<-ctx.Done()
-		listener.Close()
-	}()
-
 	for {
-		clientConn, err := listener.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if strings.Contains(err.Error(), "use of closed network connection") {
-				return nil
-			}
-			utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-			return err
-		}
-		clientConnErrGrp.Go(func() error {
-			defer util.Recover(p.logger, clientConn, nil)
-			err := p.handleConnection(clientConnCtx, clientConn)
-			if err != nil && err != io.EOF {
-				// Network closed errors are expected when client closes connection (e.g., app shutdown)
-				// Only log as error if it's not a shutdown/network closed error
-				if isShutdownError(err) || isNetworkClosedErr(err) {
-					p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
-				} else {
-					utils.LogError(p.logger, err, "failed to handle the client connection")
+		clientConnCh := make(chan net.Conn, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			defer utils.Recover(p.logger)
+			conn, err := listener.Accept()
+			if err != nil {
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					errCh <- nil
+					return
 				}
+				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
+				errCh <- err
+				return
 			}
+			clientConnCh <- conn
+		}()
+		select {
+		case <-ctx.Done():
 			return nil
-		})
+		case err := <-errCh:
+			return err
+		// handle the client connection
+		case clientConn := <-clientConnCh:
+			clientConnErrGrp.Go(func() error {
+				defer util.Recover(p.logger, clientConn, nil)
+				err := p.handleConnection(clientConnCtx, clientConn)
+				if err != nil && err != io.EOF {
+					// Network closed errors are expected when client closes connection (e.g., app shutdown)
+					// Only log as error if it's not a shutdown/network closed error
+					if isShutdownError(err) || isNetworkClosedErr(err) {
+						p.logger.Debug("failed to handle the client connection (connection closed)", zap.Error(err))
+					} else {
+						utils.LogError(p.logger, err, "failed to handle the client connection")
+					}
+				}
+				return nil
+			})
+		}
 	}
 }
 
