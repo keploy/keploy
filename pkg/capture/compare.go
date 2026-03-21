@@ -205,11 +205,18 @@ func compareTimelines(a, b *ConnectionTimeline) ConnectionDiff {
 		}
 	}
 
-	// Check errors
+	// Check errors (compare count and content)
 	if len(a.Errors) != len(b.Errors) {
 		diff.Status = "diff"
 		diff.Details = fmt.Sprintf("Error count differs: %d vs %d", len(a.Errors), len(b.Errors))
 		return diff
+	}
+	for i := range a.Errors {
+		if a.Errors[i] != b.Errors[i] {
+			diff.Status = "diff"
+			diff.Details = fmt.Sprintf("Error %d differs: %q vs %q", i, a.Errors[i], b.Errors[i])
+			return diff
+		}
 	}
 
 	diff.Status = "match"

@@ -17,8 +17,9 @@ type Writer struct {
 	file *os.File
 	path string
 
-	packetCount atomic.Uint64
-	closed      atomic.Bool
+	packetCount   atomic.Uint64
+	droppedWrites atomic.Uint64 // packets dropped due to write errors (best-effort capture)
+	closed        atomic.Bool
 }
 
 // NewWriter creates a new capture file writer.
@@ -241,7 +242,18 @@ func (w *Writer) Close() error {
 	return err
 }
 
-// PacketCount returns the number of packets written.
+// PacketCount returns the number of packets successfully written.
 func (w *Writer) PacketCount() uint64 {
 	return w.packetCount.Load()
+}
+
+// RecordDropped increments the dropped-write counter. Called by CaptureConn
+// when WritePacket returns an error so the Manager can report partial captures.
+func (w *Writer) RecordDropped() {
+	w.droppedWrites.Add(1)
+}
+
+// DroppedWrites returns the number of packets dropped due to write errors.
+func (w *Writer) DroppedWrites() uint64 {
+	return w.droppedWrites.Load()
 }

@@ -289,6 +289,11 @@ func addDirToTar(tw *tar.Writer, srcDir, tarDir string) error {
 
 		tarPath := filepath.Join(tarDir, relPath)
 
+		// Skip symlinks to avoid bundling files outside srcDir.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+
 		if info.IsDir() {
 			header := &tar.Header{
 				Name:     tarPath + "/",

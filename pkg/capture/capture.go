@@ -143,6 +143,7 @@ func (m *Manager) RecordConnectionClose(connID uint64) {
 }
 
 // RecordData records raw data flowing through a connection.
+// data is copied internally so callers may reuse the slice after returning.
 func (m *Manager) RecordData(connID uint64, direction Direction, data []byte, protocol Protocol) {
 	if !m.IsEnabled() || len(data) == 0 {
 		return
@@ -153,13 +154,17 @@ func (m *Manager) RecordData(connID uint64, direction Direction, data []byte, pr
 	m.stats.TotalBytes += uint64(len(data))
 	m.mu.Unlock()
 
+	// Copy the payload so the caller can reuse its buffer.
+	payload := make([]byte, len(data))
+	copy(payload, data)
+
 	pkt := &Packet{
 		Timestamp:    time.Now(),
 		ConnectionID: connID,
 		Type:         PacketTypeData,
 		Direction:    direction,
 		Protocol:     protocol,
-		Payload:      data,
+		Payload:      payload,
 	}
 
 	if err := m.writer.WritePacket(pkt); err != nil {
@@ -240,13 +245,19 @@ func (m *Manager) Close() error {
 		return nil
 	}
 
-	stats := m.stats
+	// Use Writer counters for accurate totals — they count every write including
+	// those from CaptureConn (which bypass Manager.RecordData).
+	totalPackets := uint64(0)
+	droppedWrites := uint64(0)
+	if m.writer != nil {
+		totalPackets = m.writer.PacketCount()
+		droppedWrites = m.writer.DroppedWrites()
+	}
 	m.logger.Info("Closing network capture",
 		zap.String("output", m.outputPath),
-		zap.Uint64("connections", stats.TotalConnections),
-		zap.Uint64("packets", stats.TotalPackets),
-		zap.Uint64("bytes", stats.TotalBytes),
-		zap.Uint64("dropped", stats.DroppedPackets))
+		zap.Uint64("connections", m.stats.TotalConnections),
+		zap.Uint64("packets", totalPackets),
+		zap.Uint64("dropped", m.stats.DroppedPackets+droppedWrites))
 
 	err := m.writer.Close()
 	m.writer = nil

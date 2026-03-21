@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -139,7 +140,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	if opts.Debug || opts.Capture.Enabled {
 		captureDir := opts.Capture.Path
 		if captureDir == "" {
-			captureDir = fmt.Sprintf("%s/keploy/debug", opts.Path)
+			captureDir = filepath.Join(opts.Path, "keploy", "debug")
 		}
 		mode := string(opts.Agent.Mode)
 		if mode == "" {
@@ -150,7 +151,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 			logger.Info("network capture disabled (init failed; check path permissions)", zap.Error(err), zap.String("path", captureDir))
 		} else {
 			proxy.captureManager = cm
-			logger.Info("network capture enabled", zap.String("output", cm.GetOutputPath()))
+			// NewManager already logs "Network capture enabled"; skip duplicating it here.
 		}
 	}
 
@@ -609,6 +610,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if destInfo.Port == 3306 {
 		mysqlCaptureActive := cm != nil && cm.IsEnabled()
 		if mysqlCaptureActive {
+			// Record connection open here because the MySQL fast-path returns
+			// before the generic RecordConnectionOpen call later in handleConnection.
+			// MySQL does not use TLS at the proxy level, so isTLS=false.
+			cm.RecordConnectionOpen(captureConnID, srcConn.RemoteAddr().String(), dstAddr, false)
 			cm.RecordProtocolDetected(captureConnID, capture.ProtoMySQL)
 		}
 		if rule.Mode != models.MODE_TEST {

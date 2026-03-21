@@ -212,12 +212,14 @@ Share this bundle with the Keploy team for issue reproduction.`,
 				logger.Info("Using most recent capture file", zap.String("file", captureFile))
 			}
 
-			// Default directories from config
+			// Default directories from config — use the primary test-set directory
+			// to avoid bundling unrelated keploy subdirs (debug, reports) and
+			// prevent nested test-set-0/test-set-0 layouts on reproduce.
 			if mockDir == "" {
-				mockDir = filepath.Join(cfg.Path, "keploy")
+				mockDir = filepath.Join(cfg.Path, "keploy", "test-set-0")
 			}
 			if testDir == "" {
-				testDir = filepath.Join(cfg.Path, "keploy")
+				testDir = filepath.Join(cfg.Path, "keploy", "test-set-0")
 			}
 			if configFile == "" {
 				configFile = filepath.Join(cfg.Path, "keploy.yml")

@@ -64,7 +64,9 @@ func (cc *CaptureConn) Read(p []byte) (int, error) {
 			Payload:      make([]byte, n),
 		}
 		copy(pkt.Payload, p[:n])
-		_ = writer.WritePacket(pkt)
+		if writeErr := writer.WritePacket(pkt); writeErr != nil {
+			writer.RecordDropped()
+		}
 	}
 
 	return n, err
@@ -90,7 +92,9 @@ func (cc *CaptureConn) Write(p []byte) (int, error) {
 				Payload:      make([]byte, n),
 			}
 			copy(pkt.Payload, p[:n])
-			_ = writer.WritePacket(pkt)
+			if writeErr := writer.WritePacket(pkt); writeErr != nil {
+				writer.RecordDropped()
+			}
 		}
 	}
 

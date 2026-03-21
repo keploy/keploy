@@ -89,6 +89,7 @@ func main() {
 func startEchoServer(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
 		body, _ := io.ReadAll(r.Body)
 		resp := map[string]interface{}{
 			"method":  r.Method,
@@ -173,8 +174,15 @@ func handleMySQLSelect(w http.ResponseWriter, _ *http.Request) {
 	for rows.Next() {
 		var id int
 		var k, v string
-		rows.Scan(&id, &k, &v)
+		if err := rows.Scan(&id, &k, &v); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
 		items = append(items, map[string]interface{}{"id": id, "name": k, "value": v})
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
 	}
 	writeJSON(w, 200, map[string]interface{}{"items": items})
 }
@@ -270,8 +278,15 @@ func handlePGSelect(w http.ResponseWriter, _ *http.Request) {
 	for rows.Next() {
 		var id int
 		var k, v string
-		rows.Scan(&id, &k, &v)
+		if err := rows.Scan(&id, &k, &v); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
 		items = append(items, map[string]interface{}{"id": id, "name": k, "value": v})
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
 	}
 	writeJSON(w, 200, map[string]interface{}{"items": items})
 }

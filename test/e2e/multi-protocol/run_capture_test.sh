@@ -165,7 +165,7 @@ echo "=== PHASE 3: Bundle roundtrip ==="
 ANY_CAP=$(find $WORKDIR/keploy/debug -name "*.kpcap" 2>/dev/null | head -1)
 if [ -n "$ANY_CAP" ]; then
     $KEPLOY debug bundle --capture "$ANY_CAP" \
-        --mocks "$WORKDIR/keploy" --tests "$WORKDIR/keploy" \
+        --mocks "$WORKDIR/keploy/test-set-0" --tests "$WORKDIR/keploy/test-set-0" \
         --output /tmp/mp-bundle.tar.gz --notes "multi-protocol CI test" --disable-ansi 2>/dev/null
     check '[ -f /tmp/mp-bundle.tar.gz ]' "Bundle created"
 
