@@ -91,7 +91,6 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 	defer timer.Stop()
 
 	for {
-		s.cond.Wait()
 		s.pruneExpiredLocked(time.Now())
 		if q := s.m[port]; len(q) > 0 {
 			// Keep timeout contract strict: only return entries that arrived before the deadline.
@@ -105,9 +104,10 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 			}
 			return entry, true
 		}
-		if timedOut {
+		if timedOut || time.Now().After(deadline) {
 			return TLSHandshakeEntry{}, false
 		}
+		s.cond.Wait()
 	}
 }
 
