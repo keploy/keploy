@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/cloudflare/cfssl/csr"
-	"github.com/cloudflare/cfssl/helpers"
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
@@ -368,135 +367,37 @@ var SrcPortToDstURL = sync.Map{}
 
 var setLogLevelOnce sync.Once
 
-// ── Parsed-once CA credentials ──────────────────────────────────────────
-// Instead of parsing PEM on every TLS handshake we do it once.
-var (
-	parsedCAOnce sync.Once
-	parsedCAKey  any // crypto.Signer
-	parsedCACert *x509.Certificate
-	parsedCAErr  error
-)
-
-// GetParsedCA returns the CA private key and certificate, parsing them only
-// once and caching the result for all subsequent calls.
-func GetParsedCA() (any, *x509.Certificate, error) {
-	parsedCAOnce.Do(func() {
-		parsedCAKey, parsedCAErr = helpers.ParsePrivateKeyPEM(caPKey)
-		if parsedCAErr != nil {
-			parsedCAErr = fmt.Errorf("failed to parse CA private key; ensure CA key files are present and valid: %w", parsedCAErr)
-			return
-		}
-		parsedCACert, parsedCAErr = helpers.ParseCertificatePEM(caCrt)
-		if parsedCAErr != nil {
-			parsedCAErr = fmt.Errorf("failed to parse CA certificate; ensure CA certificate files are present and valid: %w", parsedCAErr)
-		}
-	})
-	return parsedCAKey, parsedCACert, parsedCAErr
-}
-
-// ── Certificate cache ───────────────────────────────────────────────────
-// Generating a certificate (CSR + sign) costs ~30-50 ms with CFSSL.
-// We cache the result keyed by hostname so repeat connections to the same
-// host are served in < 1 ms.
-type certCacheEntry struct {
-	cert      *tls.Certificate
-	createdAt time.Time
-}
-
-var (
-	certCacheMu  sync.RWMutex
-	certCacheMap = make(map[string]*certCacheEntry)
-	certCacheTTL = 10 * time.Minute // regenerate after 10 min
-	certCacheMax = 1024             // hard cap to prevent unbounded growth
-)
-
-func getCachedCert(host string) (*tls.Certificate, bool) {
-	certCacheMu.RLock()
-	e, ok := certCacheMap[host]
-	certCacheMu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.createdAt) > certCacheTTL {
-		certCacheMu.Lock()
-		if current, exists := certCacheMap[host]; exists && current == e && time.Since(current.createdAt) > certCacheTTL {
-			delete(certCacheMap, host)
-		}
-		certCacheMu.Unlock()
-		return nil, false
-	}
-	return e.cert, true
-}
-
-func setCachedCert(host string, cert *tls.Certificate) {
-	certCacheMu.Lock()
-	now := time.Now()
-	pruneExpiredCertEntriesLocked(now)
-	// Evict oldest entry if inserting a new host at capacity.
-	if _, exists := certCacheMap[host]; !exists && len(certCacheMap) >= certCacheMax {
-		evictOldestCertEntryLocked()
-	}
-	certCacheMap[host] = &certCacheEntry{cert: cert, createdAt: time.Now()}
-	certCacheMu.Unlock()
-}
-
-func pruneExpiredCertEntriesLocked(now time.Time) {
-	for host, entry := range certCacheMap {
-		if now.Sub(entry.createdAt) > certCacheTTL {
-			delete(certCacheMap, host)
-		}
-	}
-}
-
-func evictOldestCertEntryLocked() {
-	var oldestHost string
-	var oldestTime time.Time
-	first := true
-	for host, entry := range certCacheMap {
-		if first || entry.createdAt.Before(oldestTime) {
-			first = false
-			oldestHost = host
-			oldestTime = entry.createdAt
-		}
-	}
-	if !first {
-		delete(certCacheMap, oldestHost)
-	}
-}
-
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
 	// Ensure log level is set only once
+
+	/*
+	* Since multiple goroutines can call this function concurrently, we need to ensure that the log level is set only once.
+	 */
 	setLogLevelOnce.Do(func() {
+		// * Set the log level to error to avoid unnecessary logs. like below...
+
+		// 2025/03/18 20:54:25 [INFO] received CSR
+		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
+		// 2025/03/18 20:54:25 [INFO] received CSR
+		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
+		// 2025/03/18 20:54:25 [INFO] encoded CSR
+		// 2025/03/18 20:54:25 [INFO] encoded CSR
+		// 2025/03/18 20:54:25 [INFO] signed certificate with serial number 435398774381835435678674951099961010543769077102
 		cfsslLog.Level = cfsslLog.LevelError
 	})
 
+	// Generate a new server certificate and private key for the given hostname
 	dstURL := clientHello.ServerName
 	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
 	SrcPortToDstURL.Store(sourcePort, dstURL)
 
-	certHost := dstURL
-	if certHost == "" {
-		// Non-SNI clients can reach this path; use a stable fallback host for CSR
-		// generation and skip cache usage to avoid sharing empty-key entries.
-		certHost = "localhost"
-		logger.Debug("TLS client did not send SNI; using fallback host for certificate generation and bypassing cert cache")
-	}
-
-	// ── Fast path: return cached cert (< 1 ms) ──
-	if dstURL != "" {
-		if cert, ok := getCachedCert(dstURL); ok {
-			logger.Debug("TLS cert cache hit", zap.String("host", dstURL))
-			return cert, nil
-		}
-	}
-
-	// ── Slow path: generate new cert ──
 	serverReq := &csr.CertificateRequest{
-		CN: certHost,
+		//Make the name accordng to the ip of the request
+		CN: clientHello.ServerName,
 		Hosts: []string{
-			certHost,
+			clientHello.ServerName,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}
@@ -515,9 +416,18 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	}
 
 	if backdate.IsZero() {
+		logger.Debug("backdate is zero, using current time")
 		backdate = time.Now()
 	}
 
+	// Case: time freezing (an Ent. feature) is enabled,
+	// If application time is frozen in past, and the certificate is signed today, then the certificate will be invalid.
+	// This results in a certificate error during tls handshake.
+	// To avoid this, we set the certificate’s validity period (NotBefore and NotAfter)
+	// by referencing the testcase request time of the application (backdate) instead of the current real time.
+	//
+	// Note: If you have recorded test cases before April 20, 2024 (http://www.sslchecker.com/certdecoder?su=269725513dfeb137f6f29b8488f17ca9)
+	// and are using time freezing, please reach out to us if you get tls handshake error.
 	signReq := signer.SignRequest{
 		Hosts:     serverReq.Hosts,
 		Request:   string(serverCsr),
@@ -531,17 +441,12 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		return nil, fmt.Errorf("failed to sign server certificate: %v", err)
 	}
 
-	logger.Debug("signed the certificate", zap.String("notBefore", signReq.NotBefore.String()), zap.String("notAfter", signReq.NotAfter.String()))
+	logger.Debug("signed the certificate for a duration of 2 years", zap.String("notBefore", signReq.NotBefore.String()), zap.String("notAfter", signReq.NotAfter.String()))
 
+	// Load the server certificate and private key
 	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
-	}
-
-	// Cache for future connections to the same host only when SNI is present.
-	if dstURL != "" {
-		setCachedCert(dstURL, &serverTLSCert)
-		logger.Debug("TLS cert cached", zap.String("host", dstURL))
 	}
 
 	return &serverTLSCert, nil

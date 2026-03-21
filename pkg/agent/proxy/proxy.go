@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -599,33 +600,35 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
-	// Read 5 bytes directly instead of allocating a 4KB bufio.Reader just to peek.
-	peekBuf := make([]byte, 5)
-	n, peekErr := io.ReadFull(srcConn, peekBuf)
-	if n == 0 {
-		if peekErr == io.EOF || peekErr == io.ErrUnexpectedEOF {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(peekErr))
+	reader := bufio.NewReader(srcConn)
+	initialData := make([]byte, 5)
+	// reading the initial data from the client connection to determine if the connection is a TLS handshake
+	testBuffer, err := reader.Peek(len(initialData))
+	if err != nil {
+		if err == io.EOF && len(testBuffer) == 0 {
+			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-		if isShutdownError(peekErr) || isNetworkClosedErr(peekErr) {
-			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(peekErr))
+		// Network closed errors are expected when client closes connection (e.g., app shutdown)
+		if isShutdownError(err) || isNetworkClosedErr(err) {
+			p.logger.Debug("failed to peek the request message in proxy (connection closed)", zap.Uint32("proxy port", p.Port), zap.Error(err))
 		} else {
-			utils.LogError(p.logger, peekErr, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+			utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		}
-		return peekErr
+		return err
 	}
-	testBuffer := peekBuf[:n]
+
+	multiReader := io.MultiReader(reader, srcConn)
+	srcConn = &util.Conn{
+		Conn:   srcConn,
+		Reader: multiReader,
+		Logger: p.logger,
+	}
 
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		// Prepend the consumed peek bytes back so the TLS handler sees the full ClientHello.
-		srcConn = &util.Conn{
-			Conn:   srcConn,
-			Reader: io.MultiReader(bytes.NewReader(testBuffer), srcConn),
-			Logger: p.logger,
-		}
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
@@ -657,23 +660,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
-	if isTLS {
-		// TLS: srcConn is a fresh tls.Conn after handshake, read normally.
-		initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
-	} else {
-		// Non-TLS: the 5 peek bytes were consumed from the raw conn.
-		// Read the rest of the initial data from the raw conn and prepend
-		// the peek bytes to form the complete initial buffer.
-		// This avoids a MultiReader short-read issue where ReadBytes returns
-		// only the 5 prepended bytes (short read < 32KB buffer) instead of
-		// continuing to read from the actual connection.
-		restBuf, err2 := util.ReadInitialBuf(parserCtx, p.logger, srcConn)
-		if err2 != nil {
-			err = err2
-		} else {
-			initialBuf = append(testBuffer, restBuf...)
-		}
-	}
+	// attempt to read conn until buffer is either filled or conn is closed
+	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err
