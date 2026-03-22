@@ -48,32 +48,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Docker Desktop is running (macOS)
-        shell: bash
+      - name: Verify Docker Desktop is running (macOS)
         run: |
-          set -e
-          if docker info >/dev/null 2>&1; then
-            echo "Docker daemon is already running."
-          else
-            echo "Docker daemon not responding. Starting via launchctl..."
-            # Start Docker Desktop via launchctl so it's owned by launchd,
-            # not the CI job. The Actions runner kills child processes as
-            # "orphans" during post-job cleanup — launchctl avoids this.
-            # Use 'open' to start Docker Desktop — it's owned by
-            # launchd (WindowServer), not the CI job process tree.
-            open -g -a Docker
-            for i in $(seq 1 90); do
-              if docker info >/dev/null 2>&1; then
-                echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                break
-              fi
-              if [ "$i" -eq 90 ]; then
-                echo "ERROR: Docker Desktop failed to start within 180s."
-                exit 1
-              fi
-              sleep 2
-            done
+          # Never start Docker Desktop from CI — the Actions runner will
+          # track it as a child process and kill it between jobs.
+          # Docker Desktop must be running as a Login Item before the runner.
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
           fi
+          echo "Docker Desktop is running."
 
       - name: Clean up stale Docker state
         continue-on-error: true

@@ -3,26 +3,14 @@
 # macOS variant for gin-mongo (docker). Uses BSD sed.
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
-# Ensure Docker Desktop is healthy before doing anything
-ensure_docker() {
-  if docker info >/dev/null 2>&1; then
-    return 0
-  fi
-  echo "Docker daemon not responding. Restarting Docker Desktop..."
-  nohup open -g -a Docker >/dev/null 2>&1 &
-  disown
-  for i in $(seq 1 90); do
-    if docker info >/dev/null 2>&1; then
-      echo "Docker Desktop is ready (waited ~$((i*2))s)."
-      return 0
-    fi
-    sleep 2
-  done
-  echo "ERROR: Docker Desktop failed to start within 180s."
-  return 1
-}
-
-ensure_docker
+# Verify Docker Desktop is running — never start it from CI.
+# Starting Docker from a CI job makes the runner track it as a child
+# process and kill it between jobs.
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: Docker Desktop is not running."
+  echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+  exit 1
+fi
 
 # Clean up stale containers and networks from previous runs to avoid
 # port conflicts on the self-hosted macOS runner.
@@ -36,12 +24,7 @@ pgrep -f 'keploy' | xargs -r sudo kill -9 2>/dev/null || true
 
 # Start mongo before starting keploy (retry once if Docker crashes).
 docker network create keploy-network
-if ! docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo; then
-  echo "Docker run failed. Attempting Docker Desktop recovery..."
-  ensure_docker
-  docker network create keploy-network 2>/dev/null || true
-  docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
-fi
+docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
 $RECORD_BIN config --generate

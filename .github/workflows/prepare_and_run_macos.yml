@@ -91,44 +91,14 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
 
-      - name: Ensure Docker Desktop is healthy (macOS)
-        shell: bash
+      - name: Verify Docker Desktop is running (macOS)
         run: |
-          set -e
-
-          start_docker() {
-            # Start via launchctl so the process is owned by launchd,
-            # not the CI job. The Actions runner kills child processes
-            # as "orphans" during post-job cleanup.
-            open -g -a Docker
-            for i in $(seq 1 60); do
-              if docker info >/dev/null 2>&1; then
-                echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                return 0
-              fi
-              sleep 2
-            done
-            echo "ERROR: Docker Desktop failed to start within 120s."
-            return 1
-          }
-
           if ! docker info >/dev/null 2>&1; then
-            echo "Docker daemon not responding."
-            start_docker
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
           fi
-
-          # Verify containers can actually be created — overlayfs
-          # snapshots can be corrupted while docker info still works.
-          if ! docker run --rm busybox true >/dev/null 2>&1; then
-            echo "Docker health check failed. Purging all images..."
-            docker system prune -af --volumes 2>/dev/null || true
-            if ! docker run --rm busybox true >/dev/null 2>&1; then
-              echo "ERROR: Docker still unhealthy after purge."
-              exit 1
-            fi
-          fi
-
-          echo "Docker Desktop is healthy."
+          echo "Docker Desktop is running."
 
       - name: Pull Docker image
         run: |
@@ -155,22 +125,13 @@ jobs:
     runs-on: [self-hosted, macOS, native]
     needs: [run_python_docker_macos, run_golang_docker_macos]
     steps:
-      - name: Ensure Docker Desktop is running (macOS)
-        shell: bash
+      - name: Verify Docker Desktop is running (macOS)
         continue-on-error: true
         run: |
           if docker info >/dev/null 2>&1; then
-            echo "Docker daemon is already running."
+            echo "Docker Desktop is running."
           else
-            echo "Docker daemon not responding. Starting via launchctl..."
-            open -g -a Docker
-            for i in $(seq 1 60); do
-              if docker info >/dev/null 2>&1; then
-                echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                break
-              fi
-              sleep 2
-            done
+            echo "WARNING: Docker Desktop is not running. Cleanup will be skipped."
           fi
 
       - name: Unlock keychain
