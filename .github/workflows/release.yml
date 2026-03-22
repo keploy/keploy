@@ -149,7 +149,7 @@ jobs:
       - name: Prepare Dockerfile for Release Build
         run: |
           cp Dockerfile Dockerfile.release
-          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& { echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnxrYX0GvQ3Z8b5vVdBObJ2f9qNpkac8PW3T6g7b"; echo "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrY\/SGNRIp5HRf7o1qYSMq6h6S4dhp8lN5XdM+sP8lvNabzB6xTnI0="; echo "github.com rsa-sha2-512 AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgLn3a\/+6EVMblT2TImKt+kNWm1U3VFAj7BO\/P3E42EwS\/N+N5gAe3+q8FPVRfnGVjnRz1hb8fgbzJ8cRtKm6EIHzEbLepFW5C8uK0MJbYGm3M5Dz5PjQqL4M+PEuY1VQ3BqFkP8PU2HhGwWIkGpMpI1f6+JpJQ3XnO9GzGqJHPhq7ZJ5MJHbYfCrH4AJzqHB\/S0Kbl2SFVJLABFrqbI8M\/oUGmT+jlJUBEw6SIenU2MXFuVdxCQHWOdMFkFCUj8Rm\/k+LFqelS6XAaEtJXTLv5eSXNjBkqj7r3hMBbYJJNg+wdXq2oUw2M4NiTy7A0FGqYVD9UVzgw=="; } >> ~\/.ssh\/known_hosts' ./Dockerfile.release
+          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan -t ed25519,ecdsa,rsa github.com >> ~\/.ssh\/known_hosts 2>\/dev\/null' ./Dockerfile.release
           sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile.release
           sed -i '/RUN --mount=type=ssh go mod download/i ENV GOPRIVATE=github.com/keploy/*' ./Dockerfile.release
 
