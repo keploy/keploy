@@ -96,12 +96,12 @@ jobs:
         run: |
           set -e
 
-          restart_docker() {
-            echo "Restarting Docker Desktop..."
-            pkill -f "Docker Desktop" || true
-            sleep 5
-            nohup open -g -a Docker >/dev/null 2>&1 &
-            disown
+          start_docker() {
+            # Start via launchctl so the process is owned by launchd,
+            # not the CI job. The Actions runner kills child processes
+            # as "orphans" during post-job cleanup.
+            launchctl start com.docker.docker 2>/dev/null \
+              || open -g -a Docker
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."
@@ -113,24 +113,18 @@ jobs:
             return 1
           }
 
-          # Ensure daemon is responding
           if ! docker info >/dev/null 2>&1; then
             echo "Docker daemon not responding."
-            restart_docker
+            start_docker
           fi
 
-          # Verify containers can actually be created. Use the keploy
-          # image (already pulled below) rather than busybox, since
-          # corruption can be specific to certain image layer caches.
-          # If creation fails, wipe all images to clear corrupted
-          # overlayfs snapshots — the VM disk persists across Docker
-          # Desktop restarts so a restart alone is not sufficient.
+          # Verify containers can actually be created — overlayfs
+          # snapshots can be corrupted while docker info still works.
           if ! docker run --rm busybox true >/dev/null 2>&1; then
-            echo "Docker health check failed. Purging all images and restarting..."
+            echo "Docker health check failed. Purging all images..."
             docker system prune -af --volumes 2>/dev/null || true
-            restart_docker
             if ! docker run --rm busybox true >/dev/null 2>&1; then
-              echo "ERROR: Docker still unhealthy after full purge and restart."
+              echo "ERROR: Docker still unhealthy after purge."
               exit 1
             fi
           fi
@@ -169,9 +163,9 @@ jobs:
           if docker info >/dev/null 2>&1; then
             echo "Docker daemon is already running."
           else
-            echo "Docker daemon not responding. Restarting Docker Desktop..."
-            nohup open -g -a Docker >/dev/null 2>&1 &
-            disown
+            echo "Docker daemon not responding. Starting via launchctl..."
+            launchctl start com.docker.docker 2>/dev/null \
+              || open -g -a Docker
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."

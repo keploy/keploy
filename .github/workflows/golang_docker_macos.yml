@@ -55,9 +55,12 @@ jobs:
           if docker info >/dev/null 2>&1; then
             echo "Docker daemon is already running."
           else
-            echo "Docker daemon not responding. Restarting Docker Desktop..."
-            nohup open -g -a Docker >/dev/null 2>&1 &
-            disown
+            echo "Docker daemon not responding. Starting via launchctl..."
+            # Start Docker Desktop via launchctl so it's owned by launchd,
+            # not the CI job. The Actions runner kills child processes as
+            # "orphans" during post-job cleanup — launchctl avoids this.
+            launchctl start com.docker.docker 2>/dev/null \
+              || open -g -a Docker
             for i in $(seq 1 90); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."
