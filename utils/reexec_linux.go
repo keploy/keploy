@@ -91,5 +91,32 @@ func ShouldReexecWithSudo() bool {
 
 // isCloudReplayCmd checks if the args represent the "keploy cloud replay" subcommand.
 func isCloudReplayCmd(args []string) bool {
-	return len(args) >= 3 && args[1] == "cloud" && args[2] == "replay"
+	// It is tolerant of flags that may appear before or between subcommands,
+	// e.g. `keploy --debug cloud replay` or `keploy cloud --debug replay`.
+	if len(args) < 3 {
+		return false
+	}
+
+	// Skip args[0] (program name) and search for "cloud" followed by "replay".
+	for i := 1; i < len(args); i++ {
+		if args[i] != "cloud" {
+			continue
+		}
+
+		// Look ahead for "replay", allowing only flag-like args (starting with "-")
+		// between "cloud" and "replay".
+		for j := i + 1; j < len(args); j++ {
+			if args[j] == "replay" {
+				return true
+			}
+
+			// If we encounter a non-flag argument that isn't "replay", this is not
+			// the "cloud replay" sequence; continue searching for another "cloud".
+			if len(args[j]) == 0 || args[j][0] != '-' {
+				break
+			}
+		}
+	}
+
+	return false
 }

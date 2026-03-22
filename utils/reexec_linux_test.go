@@ -21,6 +21,16 @@ func TestIsCloudReplayCmd(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "persistent flag before subcommands",
+			args: []string{"keploy", "--debug", "cloud", "replay"},
+			want: true,
+		},
+		{
+			name: "persistent flag between cloud and replay",
+			args: []string{"keploy", "cloud", "--debug", "replay"},
+			want: true,
+		},
+		{
 			name: "cloud without replay",
 			args: []string{"keploy", "cloud", "record"},
 			want: false,
