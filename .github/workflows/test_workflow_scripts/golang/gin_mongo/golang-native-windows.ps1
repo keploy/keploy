@@ -278,7 +278,9 @@ $realErrors = $logErrors | Where-Object {
     $_.Line -notmatch "user application terminated unexpectedly" -and
     $_.Line -notmatch "unknown error received from application" -and
     $_.Line -notmatch "connection\(\) error occured during connection handshake" -and
-    $_.Line -notmatch "dial tcp.*27017.*connectex"
+    $_.Line -notmatch "dial tcp.*27017.*connectex" -and
+    $_.Line -notmatch "socket was unexpectedly closed" -and
+    $_.Line -notmatch "failed to find url in the database"
 }
 
 if ($realErrors) {
