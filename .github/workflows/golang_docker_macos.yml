@@ -71,6 +71,14 @@ jobs:
             done
           fi
 
+      - name: Clean up stale Docker state
+        continue-on-error: true
+        run: |
+          # Remove all stopped containers and unused networks left by
+          # previous runs that were killed before cleanup traps could fire.
+          docker container prune -f 2>/dev/null || true
+          docker network prune -f 2>/dev/null || true
+
       - id: image
         uses: ./.github/actions/download-image
         with:
