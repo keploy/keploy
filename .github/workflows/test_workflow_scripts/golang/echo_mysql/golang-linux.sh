@@ -140,8 +140,8 @@ run_record_iteration() {
 section "Environment"
 echo "RECORD_BIN: $RECORD_BIN"
 echo "REPLAY_BIN : $REPLAY_BIN"
-"$RECORD_BIN" version 2>/dev/null || true
-"$REPLAY_BIN" version  2>/dev/null || true
+"$RECORD_BIN" --version 2>/dev/null || true
+"$REPLAY_BIN" --version 2>/dev/null || true
 # Clean slate per run
 rm -rf keploy/ keploy.yml || true
  # Generate config
