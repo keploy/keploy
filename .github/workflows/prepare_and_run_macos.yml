@@ -117,49 +117,28 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
           
-      - name: Ensure Docker Desktop is healthy (macOS)
+      - name: Ensure Docker Desktop is running (macOS)
         shell: bash
         run: |
           set -e
-
-          restart_docker() {
-            echo "Restarting Docker Desktop..."
-            pkill -f "Docker Desktop" || true
-            sleep 5
+          if docker info >/dev/null 2>&1; then
+            echo "Docker daemon is already running."
+          else
+            echo "Docker daemon not responding. Restarting Docker Desktop..."
             nohup open -g -a Docker >/dev/null 2>&1 &
             disown
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                return 0
+                break
               fi
               if [ "$i" -eq 60 ]; then
                 echo "ERROR: Docker Desktop failed to start within 120s."
-                return 1
+                exit 1
               fi
               sleep 2
             done
-          }
-
-          if ! docker info >/dev/null 2>&1; then
-            echo "Docker daemon not responding."
-            restart_docker
           fi
-
-          # Health check: verify containers can actually be created.
-          # Docker can respond to 'docker info' while having corrupted
-          # container storage (overlayfs snapshots), so test for real.
-          if ! docker run --rm busybox true >/dev/null 2>&1; then
-            echo "Docker health check failed (cannot create containers)."
-            restart_docker
-            # After restart, verify the health check passes
-            if ! docker run --rm busybox true >/dev/null 2>&1; then
-              echo "ERROR: Docker still unhealthy after restart."
-              exit 1
-            fi
-          fi
-
-          echo "Docker Desktop is healthy."
 
       - name: Pull Docker image
         run: |
@@ -313,12 +292,6 @@ jobs:
           # Kill leftover keploy processes
           pkill -9 -f 'keploy' 2>/dev/null || true
 
-          # Remove ALL stopped containers before pruning images.
-          # This is critical — docker image prune can delete layers still
-          # referenced by stopped containers, corrupting overlayfs snapshots.
-          echo "Removing all stopped containers..."
-          docker container prune -f
-
           # Prune only dangling (untagged) images — NOT all unused images.
           # Using -a removes ALL unused images (including cached base images like mongo)
           # which forces re-pulls and can destabilize Docker Desktop on macOS.
@@ -330,26 +303,6 @@ jobs:
           docker volume prune -f
 
           echo "Docker cleanup completed successfully"
-
-      - name: Restart Docker Desktop (clear corrupted overlayfs state)
-        if: steps.check_locks.outputs.lock_count == '0'
-        continue-on-error: true
-        run: |
-          echo "Restarting Docker Desktop to clear any corrupted container state..."
-          pkill -f "Docker Desktop" || true
-          sleep 5
-          nohup open -g -a Docker >/dev/null 2>&1 &
-          disown
-          for i in $(seq 1 60); do
-            if docker info >/dev/null 2>&1; then
-              echo "Docker Desktop restarted successfully (waited ~$((i*2))s)."
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "WARNING: Docker Desktop did not restart in 120s."
-            fi
-            sleep 2
-          done
 
       - name: Skip cleanup - other workflows running
         if: steps.check_locks.outputs.lock_count != '0' && steps.stop_longrunning.outputs.stopped_any != '1'

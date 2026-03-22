@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 
@@ -108,6 +109,18 @@ func start(ctx context.Context) {
 			}
 			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
 				return
+			}
+			// Run docker compose down before deleting the temp file to remove
+			// all containers and networks created by the compose stack.
+			// Without this, stopped containers retain references to image
+			// layers; a subsequent docker image prune can delete those
+			// layers and corrupt Docker Desktop's overlayfs snapshots.
+			if _, err := os.Stat("docker-compose-tmp.yaml"); err == nil {
+				downCmd := exec.Command("docker", "compose", "-f", "docker-compose-tmp.yaml", "down")
+				if output, downErr := downCmd.CombinedOutput(); downErr != nil {
+					logger.Debug("docker compose down finished with error (may be expected if containers already removed)",
+						zap.Error(downErr), zap.String("output", string(output)))
+				}
 			}
 			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
 				return
