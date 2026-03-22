@@ -31,6 +31,16 @@ func TestIsCloudReplayCmd(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "flag with value between cloud and replay",
+			args: []string{"keploy", "cloud", "--config", "/tmp/cfg", "replay"},
+			want: true,
+		},
+		{
+			name: "flag with inline value between cloud and replay",
+			args: []string{"keploy", "cloud", "--config=/tmp/cfg", "replay"},
+			want: true,
+		},
+		{
 			name: "cloud without replay",
 			args: []string{"keploy", "cloud", "record"},
 			want: false,

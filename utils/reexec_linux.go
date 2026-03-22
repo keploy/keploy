@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -103,17 +104,36 @@ func isCloudReplayCmd(args []string) bool {
 			continue
 		}
 
-		// Look ahead for "replay", allowing only flag-like args (starting with "-")
-		// between "cloud" and "replay".
+		// Look ahead for "replay", allowing flags and their separate values between
+		// "cloud" and "replay" (e.g. `cloud --config /tmp/cfg replay`).
 		for j := i + 1; j < len(args); j++ {
-			if args[j] == "replay" {
+			token := args[j]
+			if token == "replay" {
 				return true
 			}
 
-			// If we encounter a non-flag argument that isn't "replay", this is not
-			// the "cloud replay" sequence; continue searching for another "cloud".
-			if len(args[j]) == 0 || args[j][0] != '-' {
+			// End-of-options marker; next token must be the subcommand.
+			if token == "--" {
+				if j+1 < len(args) && args[j+1] == "replay" {
+					return true
+				}
 				break
+			}
+
+			// If this is not a flag, this isn't "cloud replay".
+			if !strings.HasPrefix(token, "-") {
+				break
+			}
+
+			// Flag with inline value (`--config=/tmp/cfg`) is fully consumed.
+			if strings.Contains(token, "=") {
+				continue
+			}
+
+			// Heuristically treat the next non-flag token as a flag value and skip it.
+			// If the next token is "replay", keep it as the subcommand candidate.
+			if j+1 < len(args) && args[j+1] != "replay" && !strings.HasPrefix(args[j+1], "-") {
+				j++
 			}
 		}
 	}
