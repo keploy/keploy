@@ -47,7 +47,7 @@ func ReexecWithSudo(logger *zap.Logger) {
 	// Append original arguments (skip the first one which is the program name)
 	args = append(args, os.Args[1:]...)
 
-	logger.Info("Re-executing with sudo for elevated privileges...")
+	logger.Info("Re-executing with sudo for elevated privileges as Linux Docker/cloud replay path needs root-level eBPF privileges.")
 	logger.Debug("Re-exec command", zap.Strings("args", args))
 
 	// Use syscall.Exec to replace the current process
