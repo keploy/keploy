@@ -1048,6 +1048,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	if err := r.hookImpl.BeforeTestSetReplay(runTestSetCtx, testSetID); err != nil {
+		stopReason := fmt.Sprintf("failed to run BeforeTestSetReplay hook: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+	}
+
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
