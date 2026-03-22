@@ -328,7 +328,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		err := p.auxiliaryHook.AfterStart(ctx, p)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to execute auxiliary proxy hook; verify auxiliary hook configuration or disable the hook if not required")
-			return err
 		}
 	}
 

@@ -100,11 +100,20 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 		return
 	}
 	hook := pm.ingressHook
+	startDone := make(chan struct{})
+	started := false
 	// Reserve the slot so concurrent callers see this port as active.
-	pm.active[origAppPort] = func() error { return nil }
+	pm.active[origAppPort] = func() error {
+		<-startDone
+		if !started {
+			return nil
+		}
+		return hook.StopIngress(origAppPort)
+	}
 	pm.mu.Unlock()
 
 	if err := hook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
+		close(startDone)
 		pm.logger.Error("Ingress hook failed to start",
 			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
 		pm.mu.Lock()
@@ -112,23 +121,26 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 		pm.mu.Unlock()
 		return
 	}
+	started = true
+	close(startDone)
 	pm.logger.Info("Started ingress forwarding",
 		zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
-	pm.mu.Lock()
-	pm.active[origAppPort] = func() error { return hook.StopIngress(origAppPort) }
-	pm.mu.Unlock()
 }
 
 // StopAll gracefully shuts down all active ingress proxies.
 func (pm *IngressProxyManager) StopAll() {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	stops := make(map[uint16]proxyStop, len(pm.active))
 	for p, s := range pm.active {
+		stops[p] = s
+	}
+	pm.active = make(map[uint16]proxyStop)
+	pm.mu.Unlock()
+
+	for p, s := range stops {
 		if err := s(); err != nil {
 			pm.logger.Warn("Failed to stop ingress proxy", zap.Uint16("port", p), zap.Error(err))
-
 		}
-		delete(pm.active, p)
 	}
 }
 
