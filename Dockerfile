@@ -24,7 +24,7 @@ COPY . /app
 RUN GOMAXPROCS=2 go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITHUB_APP_CLIENT_ID" -o keploy .
 
 # === Runtime Stage ===
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ENV KEPLOY_INDOCKER=true
 
