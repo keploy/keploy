@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -8,8 +9,8 @@ import (
 const (
 	// tlsHandshakeEntryTTL bounds how long an unconsumed handshake entry is kept.
 	tlsHandshakeEntryTTL = 30 * time.Second
-	// tlsHandshakeMaxQueuePerPort bounds queue growth for a single destination port.
-	tlsHandshakeMaxQueuePerPort = 128
+	// tlsHandshakeMaxQueuePerKey bounds queue growth for a single key.
+	tlsHandshakeMaxQueuePerKey = 128
 )
 
 // TLSHandshakeEntry holds the raw MySQL handshake packets captured by the
@@ -21,13 +22,15 @@ type TLSHandshakeEntry struct {
 	ReqTimestamp time.Time // timestamp from the start of the relay handshake
 }
 
-// TLSHandshakeStore is a FIFO queue of handshake entries per destination
-// port. The relay path pushes entries when it finishes TLSOnly handshake
-// capture; the post-TLS path pops them to merge with auth exchange data.
+// TLSHandshakeStore is a keyed store of handshake entries. Each key
+// identifies a unique connection (e.g. "conn:<srcPort>:<dstPort>" or
+// a port-only fallback "port:<dstPort>"). The relay path pushes entries
+// when it finishes TLSOnly handshake capture; the post-TLS path pops
+// them to merge with auth exchange data.
 type TLSHandshakeStore struct {
 	mu   sync.Mutex
 	cond *sync.Cond
-	m    map[uint16][]timedTLSHandshakeEntry
+	m    map[string][]timedTLSHandshakeEntry
 }
 
 type timedTLSHandshakeEntry struct {
@@ -37,21 +40,31 @@ type timedTLSHandshakeEntry struct {
 
 // NewTLSHandshakeStore creates a new store.
 func NewTLSHandshakeStore() *TLSHandshakeStore {
-	s := &TLSHandshakeStore{m: make(map[uint16][]timedTLSHandshakeEntry)}
+	s := &TLSHandshakeStore{m: make(map[string][]timedTLSHandshakeEntry)}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
 
-// Push adds a handshake entry to the FIFO queue for the given port.
-func (s *TLSHandshakeStore) Push(port uint16, entry TLSHandshakeEntry) {
+// HandshakeStoreKey builds a store key from a ConnKey (connection-level
+// identifier) and a destination port fallback.
+// When ConnKey is set, the key is connection-specific, eliminating FIFO
+// ordering issues across concurrent connections to the same port.
+func HandshakeStoreKey(connKey string, dstPort uint16) string {
+	if connKey != "" {
+		return "conn:" + connKey
+	}
+	return fmt.Sprintf("port:%d", dstPort)
+}
+
+// Push adds a handshake entry for the given key.
+func (s *TLSHandshakeStore) Push(key string, entry TLSHandshakeEntry) {
 	s.mu.Lock()
 	s.pruneExpiredLocked(time.Now())
-	q := s.m[port]
-	if len(q) >= tlsHandshakeMaxQueuePerPort {
-		// Drop oldest to preserve FIFO behavior among retained entries.
+	q := s.m[key]
+	if len(q) >= tlsHandshakeMaxQueuePerKey {
 		q = q[1:]
 	}
-	s.m[port] = append(s.m[port], timedTLSHandshakeEntry{
+	s.m[key] = append(s.m[key], timedTLSHandshakeEntry{
 		entry:    entry,
 		pushedAt: time.Now(),
 	})
@@ -59,19 +72,19 @@ func (s *TLSHandshakeStore) Push(port uint16, entry TLSHandshakeEntry) {
 	s.mu.Unlock()
 }
 
-// PopWait pops the oldest handshake entry for the given port, waiting up
+// PopWait pops the oldest handshake entry for the given key, waiting up
 // to timeout for one to appear. Returns false if no entry arrived in time.
-func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHandshakeEntry, bool) {
+func (s *TLSHandshakeStore) PopWait(key string, timeout time.Duration) (TLSHandshakeEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneExpiredLocked(time.Now())
 
 	// Fast path: already available.
-	if q := s.m[port]; len(q) > 0 {
+	if q := s.m[key]; len(q) > 0 {
 		entry := q[0].entry
-		s.m[port] = q[1:]
-		if len(s.m[port]) == 0 {
-			delete(s.m, port)
+		s.m[key] = q[1:]
+		if len(s.m[key]) == 0 {
+			delete(s.m, key)
 		}
 		return entry, true
 	}
@@ -92,14 +105,11 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 
 	for {
 		s.pruneExpiredLocked(time.Now())
-		if q := s.m[port]; len(q) > 0 {
-			// Keep timeout contract strict: only return entries that arrived before the deadline.
+		if q := s.m[key]; len(q) > 0 {
 			if q[0].pushedAt.After(deadline) {
-				// Drop entries that arrived after this waiter's deadline so they do
-				// not get reused by a later waiter for the same port.
-				s.m[port] = q[1:]
-				if len(s.m[port]) == 0 {
-					delete(s.m, port)
+				s.m[key] = q[1:]
+				if len(s.m[key]) == 0 {
+					delete(s.m, key)
 				}
 				if timedOut || time.Now().After(deadline) {
 					return TLSHandshakeEntry{}, false
@@ -107,9 +117,9 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 				continue
 			}
 			entry := q[0].entry
-			s.m[port] = q[1:]
-			if len(s.m[port]) == 0 {
-				delete(s.m, port)
+			s.m[key] = q[1:]
+			if len(s.m[key]) == 0 {
+				delete(s.m, key)
 			}
 			return entry, true
 		}
@@ -122,7 +132,7 @@ func (s *TLSHandshakeStore) PopWait(port uint16, timeout time.Duration) (TLSHand
 
 func (s *TLSHandshakeStore) pruneExpiredLocked(now time.Time) {
 	cutoff := now.Add(-tlsHandshakeEntryTTL)
-	for port, q := range s.m {
+	for key, q := range s.m {
 		trim := 0
 		for trim < len(q) && q[trim].pushedAt.Before(cutoff) {
 			trim++
@@ -131,9 +141,9 @@ func (s *TLSHandshakeStore) pruneExpiredLocked(now time.Time) {
 			q = q[trim:]
 		}
 		if len(q) == 0 {
-			delete(s.m, port)
+			delete(s.m, key)
 			continue
 		}
-		s.m[port] = q
+		s.m[key] = q
 	}
 }

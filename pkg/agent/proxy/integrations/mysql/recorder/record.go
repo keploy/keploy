@@ -155,16 +155,19 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			ResTimestampMock: resTimestampMock,
 		},
 	}
-	// Send to the mocks channel for YAML output (used by both normal and
-	// sockmap proxy paths). Also add to syncMock for request-mock correlation.
+	// Send to the mocks channel for YAML output. Use either the direct
+	// mocks channel or syncMock.AddMock, but NOT both — AddMock also sends
+	// to outChan (which is the same channel in the sockmap proxy path),
+	// causing every mock to be written to YAML twice.
 	if mocks != nil {
 		select {
 		case mocks <- mysqlMock:
 		case <-ctx.Done():
 			return
 		}
+	} else {
+		mgr := syncMock.Get()
+		mgr.AddMock(mysqlMock)
 	}
-	mgr := syncMock.Get()
-	mgr.AddMock(mysqlMock)
 	return
 }

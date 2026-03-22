@@ -171,8 +171,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
 
-	// If enterprise registered an eBPF loaded hook (low-latency mode),
-	// provide a lookup so it can access the maps it needs.
+	// If an eBPF loaded hook is registered, provide a lookup so it can
+	// access the maps it needs.
 	if agent.EbpfLoadedHook != nil {
 		if err := agent.EbpfLoadedHook(objs.lookupMap); err != nil {
 			utils.LogError(h.logger, err, "EbpfLoadedHook failed; verify hook configuration/capabilities or disable the hook if not required")

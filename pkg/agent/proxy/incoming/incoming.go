@@ -24,11 +24,15 @@ type proxyStop func() error
 
 // IngressHook allows an external component (e.g. enterprise sockmap proxy)
 // to handle ingress forwarding instead of the default Go TCP forwarder.
+// When an IngressHook is registered, it fully replaces the Go TCP forwarder;
+// there is no fallback if the hook fails.
 type IngressHook interface {
 	// StartIngress delegates ingress forwarding for the given port pair.
-	// Returns nil on success; if it returns an error the caller falls back
-	// to the Go TCP forwarder.
-	StartIngress(origPort, newPort uint16) error
+	// The provided context should be used for lifetime management of the
+	// forwarding goroutines. On success it returns a stop function that
+	// tears down the forwarder (stored in the active map for StopAll)
+	// and a nil error.
+	StartIngress(ctx context.Context, origPort, newPort uint16) (stop func() error, err error)
 }
 
 type IngressProxyManager struct {
@@ -95,20 +99,27 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 	pm.active[origAppPort] = func() error { return nil }
 	pm.mu.Unlock()
 
-	// If an external ingress hook (e.g. sockmap proxy) is wired up, delegate forwarding to it
+	// If an external ingress hook (e.g. sockmap proxy) is wired up, delegate forwarding to it.
+	// The hook fully replaces the Go TCP forwarder — no fallback on failure.
 	if pm.ingressHook != nil {
-		if err := pm.ingressHook.StartIngress(origAppPort, newAppPort); err != nil {
-			pm.logger.Debug("Unable to delegate ingress to external hook; continuing with Go TCP forwarder",
+		stop, err := pm.ingressHook.StartIngress(ctx, origAppPort, newAppPort)
+		if err != nil {
+			pm.logger.Error("External ingress hook failed to start",
 				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
-		} else {
-			pm.logger.Info("Delegated ingress forwarding to external hook",
-				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
-			// Hook manages the listener lifetime; placeholder stop already in place.
+			pm.mu.Lock()
+			delete(pm.active, origAppPort)
+			pm.mu.Unlock()
 			return
 		}
+		pm.logger.Info("Delegated ingress forwarding to external hook",
+			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
+		pm.mu.Lock()
+		pm.active[origAppPort] = stop
+		pm.mu.Unlock()
+		return
 	}
 
-	// Fallback: Go-based TCP forwarder
+	// Default: Go-based TCP forwarder (used only when no hook is registered)
 	// TODO : We will change this interface implementation to the IP
 	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origAppPort))
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newAppPort))

@@ -35,8 +35,7 @@ const (
 )
 
 // ComposeServiceHook is called after the keploy-agent Docker Compose service
-// node is built, allowing enterprise to mutate it (e.g., add capabilities,
-// security_opt, tmpfs mounts for low-latency mode).
+// node is built, allowing downstream callers to mutate it.
 var ComposeServiceHook func(serviceNode *yaml.Node)
 
 type Impl struct {
@@ -810,9 +809,8 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		}
 	}
 
-	// Allow enterprise to mutate the fully-built service node (e.g., add
-	// capabilities, security_opt, tmpfs for low-latency mode). This runs
-	// last so the hook can see and modify all fields including volumes.
+	// Allow callers to mutate the fully-built service node. This runs last
+	// so the hook can see and modify all fields including volumes.
 	if ComposeServiceHook != nil {
 		ComposeServiceHook(serviceNode)
 	}

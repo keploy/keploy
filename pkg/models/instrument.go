@@ -63,6 +63,7 @@ type OutgoingOptions struct {
 	Backdate    time.Time                      // used to set backdate in cacert request
 	NoiseConfig map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	SkipTLSMITM bool
+	ConnKey     string // connection-level key for TLSHandshakeStore correlation
 }
 
 type ConditionalDstCfg struct {

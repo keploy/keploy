@@ -124,7 +124,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// handle the SSL request
 	if decodeCtx.UseSSL {
 
-		// In sockmap/low-latency mode the proxy does NOT MITM the TLS session.
+		// When TLS MITM is skipped, the proxy does not terminate TLS.
 		// The pre-TLS config mock (server greeting + SSL request) has been captured;
 		// post-TLS command phase data is provided by SSL/GoTLS uprobes separately.
 		// Push the raw server greeting to TLSHandshakeStore so the post-TLS
@@ -135,16 +135,20 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			if !ok || hsStore == nil {
 				return res, fmt.Errorf("SkipTLSMITM requires TLSHandshakeStore in context for MySQL handshake reconstruction")
 			}
-			port := uint16(0)
+			dstPort := uint16(0)
 			if opts.DstCfg != nil {
-				port = uint16(opts.DstCfg.Port)
+				dstPort = uint16(opts.DstCfg.Port)
 			}
-			hsStore.Push(port, models.TLSHandshakeEntry{
+			storeKey := models.HandshakeStoreKey(opts.ConnKey, dstPort)
+			hsStore.Push(storeKey, models.TLSHandshakeEntry{
 				RespPackets:  [][]byte{handshake},
 				ReqPackets:   [][]byte{handshakeResponse},
 				ReqTimestamp: res.reqTimestamp,
 			})
-			logger.Debug("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore", zap.Uint16("port", port))
+			logger.Info("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore",
+				zap.String("key", storeKey),
+				zap.String("connKey", opts.ConnKey),
+				zap.Uint16("dstPort", dstPort))
 			// Signal that the pre-TLS config mock should NOT be recorded here;
 			// the post-TLS path will produce a single combined config mock.
 			res.skipConfigMock = true
@@ -767,28 +771,37 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 // greeting was captured by the ringbuf path and stored in TLSHandshakeStore.
 func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 	// 1. Pop the server greeting from TLSHandshakeStore.
-	port := uint16(0)
+	dstPort := uint16(0)
 	if opts.DstCfg != nil {
-		port = uint16(opts.DstCfg.Port)
+		dstPort = uint16(opts.DstCfg.Port)
 	}
 	hsStore, _ := ctx.Value(models.TLSHandshakeStoreKey).(*models.TLSHandshakeStore)
 	if hsStore == nil {
 		return fmt.Errorf("TLSHandshakeStore not available in context for post-TLS MySQL recording")
 	}
-	entry, ok := hsStore.PopWait(port, 5*time.Second)
+	storeKey := models.HandshakeStoreKey(opts.ConnKey, dstPort)
+	logger.Info("Post-TLS MySQL: popping from TLSHandshakeStore",
+		zap.String("key", storeKey),
+		zap.String("connKey", opts.ConnKey),
+		zap.Uint16("dstPort", dstPort))
+	entry, ok := hsStore.PopWait(storeKey, 5*time.Second)
 	var serverGreetingBuf []byte
 	if ok && len(entry.RespPackets) > 0 {
 		serverGreetingBuf = entry.RespPackets[0]
+		logger.Info("Post-TLS MySQL: successfully popped handshake data from TLSHandshakeStore",
+			zap.String("key", storeKey))
 	} else {
 		// Fallback: the pre-TLS handshake was not captured (e.g. the MySQL
 		// connection was established before the proxy started intercepting).
 		// Connect to the MySQL server directly to fetch the server greeting.
-		logger.Debug("TLSHandshakeStore empty — fetching server greeting directly",
-			zap.Uint16("port", port))
+		logger.Warn("TLSHandshakeStore empty — fetching server greeting directly (key mismatch or relay didn't push?)",
+			zap.String("key", storeKey),
+			zap.String("connKey", opts.ConnKey),
+			zap.Uint16("dstPort", dstPort))
 		var err error
 		serverGreetingBuf, err = fetchServerGreeting(ctx, opts)
 		if err != nil {
-			return fmt.Errorf("no server greeting in TLSHandshakeStore for port %d and direct fetch failed: %w", port, err)
+			return fmt.Errorf("no server greeting in TLSHandshakeStore for key %s and direct fetch failed: %w", storeKey, err)
 		}
 	}
 
@@ -813,7 +826,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
 
 	logger.Debug("Post-TLS MySQL: restored server greeting",
-		zap.Uint16("port", port),
+		zap.String("key", storeKey),
 		zap.String("pluginName", pluginName))
 
 	// 3. Read the first packet from the client to determine if this is
