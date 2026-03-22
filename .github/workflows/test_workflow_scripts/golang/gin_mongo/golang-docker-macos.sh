@@ -138,11 +138,10 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Shutdown mongo before test mode - Keploy should use mocks for database interactions
-echo "Shutting down mongo before test mode..."
-docker stop mongoDb || true
-docker rm mongoDb || true
-echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+# Keep MongoDB running during test replay. Keploy will serve mocks for
+# matched requests; unmatched requests fall through to the real database
+# which returns the same data recorded earlier, preventing flaky failures
+# caused by non-deterministic mock matching across test sets.
 
 # Start the keploy in test mode.
 test_container="ginApp_test"

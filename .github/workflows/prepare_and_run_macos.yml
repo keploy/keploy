@@ -304,6 +304,26 @@ jobs:
 
           echo "Docker cleanup completed successfully"
 
+      - name: Restart Docker Desktop (clear corrupted overlayfs state)
+        if: steps.check_locks.outputs.lock_count == '0'
+        continue-on-error: true
+        run: |
+          echo "Restarting Docker Desktop to clear any corrupted container state..."
+          pkill -f "Docker Desktop" || true
+          sleep 5
+          nohup open -g -a Docker >/dev/null 2>&1 &
+          disown
+          for i in $(seq 1 60); do
+            if docker info >/dev/null 2>&1; then
+              echo "Docker Desktop restarted successfully (waited ~$((i*2))s)."
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "WARNING: Docker Desktop did not restart in 120s."
+            fi
+            sleep 2
+          done
+
       - name: Skip cleanup - other workflows running
         if: steps.check_locks.outputs.lock_count != '0' && steps.stop_longrunning.outputs.stopped_any != '1'
         run: |
