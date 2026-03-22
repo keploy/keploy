@@ -119,11 +119,20 @@ jobs:
             restart_docker
           fi
 
-          # Verify containers can actually be created — Docker can respond
-          # to 'docker info' while overlayfs snapshots are corrupted.
+          # Verify containers can actually be created. Use the keploy
+          # image (already pulled below) rather than busybox, since
+          # corruption can be specific to certain image layer caches.
+          # If creation fails, wipe all images to clear corrupted
+          # overlayfs snapshots — the VM disk persists across Docker
+          # Desktop restarts so a restart alone is not sufficient.
           if ! docker run --rm busybox true >/dev/null 2>&1; then
-            echo "Docker health check failed (cannot create containers). Restarting..."
+            echo "Docker health check failed. Purging all images and restarting..."
+            docker system prune -af --volumes 2>/dev/null || true
             restart_docker
+            if ! docker run --rm busybox true >/dev/null 2>&1; then
+              echo "ERROR: Docker still unhealthy after full purge and restart."
+              exit 1
+            fi
           fi
 
           echo "Docker Desktop is healthy."
