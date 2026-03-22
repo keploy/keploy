@@ -154,8 +154,8 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 // goTCPIngressHook is the default IngressHook implementation that uses a
 // Go-based TCP forwarder for ingress traffic capture.
 type goTCPIngressHook struct {
-	pm       *IngressProxyManager
-	mu       sync.Mutex
+	pm         *IngressProxyManager
+	mu         sync.Mutex
 	forwarders map[uint16]*tcpForwarderState
 }
 
@@ -167,7 +167,7 @@ type tcpForwarderState struct {
 
 func newGoTCPIngressHook(pm *IngressProxyManager) *goTCPIngressHook {
 	return &goTCPIngressHook{
-		pm:       pm,
+		pm:         pm,
 		forwarders: make(map[uint16]*tcpForwarderState),
 	}
 }
