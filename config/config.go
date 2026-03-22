@@ -169,6 +169,7 @@ type Report struct {
 	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
 	Summary          bool                `json:"summary" yaml:"summary" mapstructure:"summary"`
 	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
+	Format           string              `json:"format" yaml:"format" mapstructure:"format"`
 }
 
 type Globalnoise struct {

@@ -379,6 +379,14 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		}
 	}
 
+	if r.config.Report.Format == "junit" {
+		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to collect reports for JUnit output: %w", err)
+		}
+		return r.generateJUnit(reports)
+	}
+
 	if r.config.Report.Summary {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
