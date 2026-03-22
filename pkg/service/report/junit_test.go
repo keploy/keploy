@@ -31,6 +31,7 @@ func TestBuildJUnitSuites_Basic(t *testing.T) {
 				{
 					TestCaseID: "tc-3",
 					Name:       "test-set-1",
+					Kind:       models.HTTP,
 					Status:     models.TestStatusFailed,
 					TimeTaken:  "600ms",
 					Result: models.Result{
@@ -122,6 +123,38 @@ func TestBuildJUnitSuites_ObsoleteSkipped(t *testing.T) {
 	}
 	if suite.Cases[1].Skipped.Message != "obsolete test case" {
 		t.Errorf("expected 'obsolete test case' message, got %q", suite.Cases[1].Skipped.Message)
+	}
+}
+
+func TestBuildJUnitSuites_IgnoredSkipped(t *testing.T) {
+	reports := map[string]*models.TestReport{
+		"test-set-1": {
+			Total:   2,
+			Success: 1,
+			Tests: []models.TestResult{
+				{
+					TestCaseID: "tc-1",
+					Status:     models.TestStatusPassed,
+				},
+				{
+					TestCaseID: "tc-2",
+					Status:     models.TestStatusIgnored,
+				},
+			},
+		},
+	}
+
+	suites := buildJUnitSuites(reports)
+	suite := suites.Suites[0]
+
+	if suite.Skipped != 1 {
+		t.Errorf("expected 1 skipped for ignored test, got %d", suite.Skipped)
+	}
+	if suite.Cases[1].Skipped == nil {
+		t.Fatal("expected skip element for ignored test")
+	}
+	if suite.Cases[1].Skipped.Message != "ignored test case" {
+		t.Errorf("expected 'ignored test case' message, got %q", suite.Cases[1].Skipped.Message)
 	}
 }
 

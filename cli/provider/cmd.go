@@ -777,6 +777,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "failed to get the format flag")
 			return errors.New("failed to get the format flag")
 		}
+		format = strings.ToLower(strings.TrimSpace(format))
+		if format == "" {
+			format = "text"
+		}
+		switch format {
+		case "text", "junit":
+			// valid
+		default:
+			return fmt.Errorf("invalid --format value %q: allowed values are 'text' and 'junit'", format)
+		}
 		c.cfg.Report.Format = format
 
 	case "sanitize":

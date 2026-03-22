@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/xml"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,7 +71,15 @@ func buildJUnitSuites(reports map[string]*models.TestReport) junitTestSuites {
 	var totalDuration time.Duration
 	suites := make([]junitTestSuite, 0, len(reports))
 
-	for name, rep := range reports {
+	// Sort test-set names for deterministic XML output.
+	names := make([]string, 0, len(reports))
+	for name := range reports {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		rep := reports[name]
 		suite := buildJUnitSuite(name, rep)
 		totalTests += suite.Tests
 		totalFailures += suite.Failures
@@ -108,6 +117,9 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 		case models.TestStatusObsolete:
 			skipped++
 			tc.Skipped = &junitSkipped{Message: "obsolete test case"}
+		case models.TestStatusIgnored:
+			skipped++
+			tc.Skipped = &junitSkipped{Message: "ignored test case"}
 		}
 
 		cases = append(cases, tc)
@@ -133,7 +145,7 @@ func buildJUnitSuite(name string, rep *models.TestReport) junitTestSuite {
 func buildFailure(t models.TestResult) *junitFailure {
 	var parts []string
 
-	if !t.Result.StatusCode.Normal {
+	if t.Kind == models.HTTP && !t.Result.StatusCode.Normal {
 		parts = append(parts, fmt.Sprintf("status: expected %d, got %d",
 			t.Result.StatusCode.Expected, t.Result.StatusCode.Actual))
 	}
