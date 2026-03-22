@@ -92,4 +92,8 @@ jobs:
       - name: Clean up git config
         if: always()
         continue-on-error: true
-        run: git config --global --unset url."git@github.com:".insteadOf
+        shell: powershell
+        run: |
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
