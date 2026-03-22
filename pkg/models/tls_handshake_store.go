@@ -107,14 +107,7 @@ func (s *TLSHandshakeStore) PopWait(key string, timeout time.Duration) (TLSHands
 		s.pruneExpiredLocked(time.Now())
 		if q := s.m[key]; len(q) > 0 {
 			if q[0].pushedAt.After(deadline) {
-				s.m[key] = q[1:]
-				if len(s.m[key]) == 0 {
-					delete(s.m, key)
-				}
-				if timedOut || time.Now().After(deadline) {
-					return TLSHandshakeEntry{}, false
-				}
-				continue
+				return TLSHandshakeEntry{}, false
 			}
 			entry := q[0].entry
 			s.m[key] = q[1:]

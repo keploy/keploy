@@ -147,15 +147,26 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 				dstPort = uint16(opts.DstCfg.Port)
 			}
 			storeKey := models.HandshakeStoreKey(opts.ConnKey, dstPort)
-			hsStore.Push(storeKey, models.TLSHandshakeEntry{
+			hsEntry := models.TLSHandshakeEntry{
 				RespPackets:  [][]byte{handshake},
 				ReqPackets:   [][]byte{handshakeResponse},
 				ReqTimestamp: res.reqTimestamp,
-			})
-			logger.Info("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore",
+			}
+			hsStore.Push(storeKey, hsEntry)
+			logger.Debug("Pushed MySQL server greeting + SSLRequest to TLSHandshakeStore",
 				zap.String("key", storeKey),
 				zap.String("connKey", opts.ConnKey),
 				zap.Uint16("dstPort", dstPort))
+			// Also push under the port-only fallback key. The proxy and uprobe
+			// see different TCP connections (different ephemeral ports) due to
+			// sockmap/eBPF redirection, so conn-specific keys won't match.
+			// The port-only key ensures the post-TLS path can find the entry.
+			portKey := models.HandshakeStoreKey("", dstPort)
+			if portKey != storeKey {
+				hsStore.Push(portKey, hsEntry)
+				logger.Debug("Also pushed to port-only fallback key",
+					zap.String("portKey", portKey))
+			}
 			// Signal that the pre-TLS config mock should NOT be recorded here;
 			// the post-TLS path will produce a single combined config mock.
 			res.skipConfigMock = true
@@ -792,6 +803,15 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		zap.String("connKey", opts.ConnKey),
 		zap.Uint16("dstPort", dstPort))
 	entry, ok := hsStore.PopWait(storeKey, 5*time.Second)
+	// If conn-specific key missed, try the port-only fallback key.
+	// The proxy and uprobe see different TCP connections with different
+	// ephemeral ports, so conn-specific keys may not match.
+	if !ok && opts.ConnKey != "" {
+		portKey := models.HandshakeStoreKey("", dstPort)
+		logger.Debug("Conn-specific key missed, trying port-only fallback",
+			zap.String("portKey", portKey))
+		entry, ok = hsStore.PopWait(portKey, 2*time.Second)
+	}
 	var serverGreetingBuf []byte
 	if ok && len(entry.RespPackets) > 0 {
 		serverGreetingBuf = entry.RespPackets[0]
@@ -801,7 +821,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		// Fallback: the pre-TLS handshake was not captured (e.g. the MySQL
 		// connection was established before the proxy started intercepting).
 		// Connect to the MySQL server directly to fetch the server greeting.
-		logger.Warn("TLSHandshakeStore empty — fetching server greeting directly (key mismatch or relay didn't push?)",
+		logger.Debug("TLSHandshakeStore empty — fetching server greeting directly (this can be transient; if repeated, verify proxy intercept timing and handshake key consistency)",
 			zap.String("key", storeKey),
 			zap.String("connKey", opts.ConnKey),
 			zap.Uint16("dstPort", dstPort))

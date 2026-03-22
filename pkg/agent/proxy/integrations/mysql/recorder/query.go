@@ -79,7 +79,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			// and cascade into errors like "expected TextResultSet, got
 			// *mysql.QueryPacket".
 			if strings.HasPrefix(commandPkt.Header.Type, "0x") {
-				logger.Warn("Skipping unknown command packet to avoid stream desync",
+				logger.Debug("Skipping unknown command packet to avoid stream desync",
 					zap.String("type", commandPkt.Header.Type))
 				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
 				requests = []mysql.Request{}
@@ -165,7 +165,7 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 	// cascading into handleTextResultSet which would fail with a type
 	// assertion error and kill the parser pipeline.
 	if isCommandPacket(commandRespPkt.Message) {
-		logger.Warn("Response decoded as command packet — stream desync detected, returning raw response",
+		logger.Debug("Response decoded as command packet — stream desync detected, returning raw response",
 			zap.String("responseType", commandRespPkt.Header.Type),
 			zap.String("prevLastOp", fmt.Sprintf("%#x", prevLastOp)),
 			zap.String("lastOp", fmt.Sprintf("%#x", lastOp)))
