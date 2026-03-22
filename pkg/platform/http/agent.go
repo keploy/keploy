@@ -413,6 +413,12 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	if err != nil {
 		return fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
 	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for mockOutgoing")
+		}
+	}()
 
 	var mockResp models.AgentResp
 	err = json.NewDecoder(res.Body).Decode(&mockResp)
@@ -692,6 +698,12 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	if err != nil {
 		return fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
 	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for updatemockparams")
+		}
+	}()
 
 	var mockResp models.AgentResp
 	err = json.NewDecoder(res.Body).Decode(&mockResp)
@@ -855,6 +867,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	}
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
+	}
+	if a.conf.Record.EnableSampling > 0 {
+		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
 	}
 	if opts.EnableTesting {
 		args = append(args, "--enable-testing")

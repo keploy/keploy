@@ -112,6 +112,9 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 		"responseOperation": responseOperation,
 		"connID":            ctx.Value(models.ClientConnectionIDKey).(string),
 	}
+	if opts.DstCfg != nil && opts.DstCfg.Addr != "" {
+		meta["destAddr"] = opts.DstCfg.Addr
+	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),
 		Kind:    models.MySQL,

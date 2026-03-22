@@ -219,6 +219,8 @@ for ($i = 1; $i -le 2; $i++) {
       Select-Object -First 1
 
     if ($REC_PROC) { Kill-Tree -ProcessId $REC_PROC.ProcessId }
+    # Wait for keploy to flush mocks to disk
+    Start-Sleep -Seconds 10
 
     Write-Host "`n⬇️⬇️⬇️ Keploy Record Logs ($appName) ⬇️⬇️⬇️"
     Drain-JobOutput -Job $recJob -LogFile $logFile
@@ -226,10 +228,12 @@ for ($i = 1; $i -le 2; $i++) {
     
     Remove-Job $recJob -Force
 
-    # Scan for errors, but apply filter
+    # Scan for errors, but apply filter (force-kill on Windows causes expected app termination errors)
     $recErrors = Select-String -Path $logFile -Pattern "ERROR"
-    $filteredRecErrors = $recErrors | Where-Object { 
-        $_.Line -notmatch "Failed to read upstream response.*wsarecv"
+    $filteredRecErrors = $recErrors | Where-Object {
+        $_.Line -notmatch "Failed to read upstream response.*wsarecv" -and
+        $_.Line -notmatch "user application terminated unexpectedly" -and
+        $_.Line -notmatch "unknown error received from application"
     }
 
     if ($filteredRecErrors) {
@@ -254,7 +258,7 @@ Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
 $keployPath = (Get-Command $env:REPLAY_BIN).Source
 
-& $keployPath test -c ".\ginApp.exe" --delay 15 2>&1 | Tee-Object -FilePath $testLogFile
+& $keployPath test -c ".\ginApp.exe" --delay 20 2>&1 | Tee-Object -FilePath $testLogFile
 
 # =============================================================================
 # 4. Validation
@@ -268,7 +272,9 @@ $realErrors = $logErrors | Where-Object {
     $_.Line -notmatch "The process .* not found" -and
     $_.Line -notmatch "Error removing file.*keploy-logs\.txt" -and
     $_.Line -notmatch "remove keploy-logs\.txt: The process cannot access the file because it is being used by another process" -and
-    $_.Line -notmatch "Failed to read upstream response.*wsarecv"
+    $_.Line -notmatch "Failed to read upstream response.*wsarecv" -and
+    $_.Line -notmatch "user application terminated unexpectedly" -and
+    $_.Line -notmatch "unknown error received from application"
 }
 
 if ($realErrors) {

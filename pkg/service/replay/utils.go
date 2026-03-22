@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
+
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -141,6 +143,50 @@ func getFailedTCs(results []models.TestResult) []string {
 	return ids
 }
 
+// retainNoisyTestCaseMocks injects mocks used by noisy test cases into the
+// consumed-mocks set used for pruning so those mocks are not deleted.
+func retainNoisyTestCaseMocks(noisyTestCaseNames []string, mapping *models.Mapping, consumed map[string]models.MockState) int {
+	if len(noisyTestCaseNames) == 0 || mapping == nil || len(mapping.TestCases) == 0 || consumed == nil {
+		return 0
+	}
+
+	noisySet := make(map[string]struct{}, len(noisyTestCaseNames))
+	for _, testCaseName := range noisyTestCaseNames {
+		if testCaseName == "" {
+			continue
+		}
+		noisySet[testCaseName] = struct{}{}
+	}
+	if len(noisySet) == 0 {
+		return 0
+	}
+
+	added := 0
+	for _, mappedTestCase := range mapping.TestCases {
+		if _, ok := noisySet[mappedTestCase.ID]; !ok {
+			continue
+		}
+
+		for _, mock := range mappedTestCase.Mocks {
+			if mock.Name == "" {
+				continue
+			}
+			if _, exists := consumed[mock.Name]; exists {
+				continue
+			}
+
+			consumed[mock.Name] = models.MockState{
+				Name:      mock.Name,
+				Kind:      models.Kind(mock.Kind),
+				Timestamp: mock.Timestamp,
+			}
+			added++
+		}
+	}
+
+	return added
+}
+
 func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []string) bool {
 	expectedMap := make(map[string]bool)
 	for _, name := range expectedMocks {
@@ -161,11 +207,12 @@ func isMockSubsetWithConfig(consumedMocks []models.MockState, expectedMocks []st
 }
 
 type TestFailure struct {
-	TestSetID     string
-	TestID        string
-	ExpectedMocks []string
-	ActualMocks   []string
-	FailureReason models.ParserErrorType
+	TestSetID      string
+	TestID         string
+	ExpectedMocks  []string
+	ActualMocks    []string
+	FailureReason  models.ParserErrorType
+	MismatchReport *models.MockMismatchReport
 }
 
 type TestFailureStore struct {
@@ -197,11 +244,12 @@ func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID s
 	defer tfs.mu.Unlock()
 
 	failure := TestFailure{
-		TestSetID:     testSetID,
-		TestID:        testCaseID,
-		ExpectedMocks: []string{},
-		ActualMocks:   []string{},
-		FailureReason: proxyErr.ParserErrorType,
+		TestSetID:      testSetID,
+		TestID:         testCaseID,
+		ExpectedMocks:  []string{},
+		ActualMocks:    []string{},
+		FailureReason:  proxyErr.ParserErrorType,
+		MismatchReport: proxyErr.MismatchReport,
 	}
 	tfs.failures = append(tfs.failures, failure)
 }
@@ -290,22 +338,22 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 
 	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
-	table.SetBorder(true)
-	table.SetRowLine(true)
-	table.SetCenterSeparator("|")
-	table.SetColumnSeparator("|")
-	table.SetRowSeparator("-")
-	table.SetAutoWrapText(true)
-	table.SetReflowDuringAutoWrap(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetColWidth(120)
-	table.SetTablePadding(" ")
-	table.SetColMinWidth(0, 15) // TEST SET column min width
-	table.SetColMinWidth(1, 12) // TEST ID column min width
-	table.SetColMinWidth(2, 50) // MOCK DIFFERENCES column min width
+	colWidths := tw.NewMapper[int, int]().Set(0, 15).Set(1, 12).Set(2, 50)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRendition(tw.Rendition{
+			Settings: tw.Settings{
+				Separators: tw.Separators{
+					BetweenRows: tw.On,
+				},
+			},
+		}),
+		tablewriter.WithRowAutoWrap(1),
+		tablewriter.WithHeaderAlignment(tw.AlignCenter),
+		tablewriter.WithRowAlignment(tw.AlignCenter),
+		tablewriter.WithMaxWidth(120),
+		tablewriter.WithColumnWidths(colWidths),
+	)
+	table.Header([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
 
 	// Group failures by test set for better presentation
 	testSetGroups := make(map[string][]TestFailure)
@@ -344,7 +392,22 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 
 			for _, failure := range testFailures {
 				if failure.FailureReason == models.ErrMockNotFound {
-					allDiffStrings = append(allDiffStrings, "Outgoing call mock was not matched")
+					if failure.MismatchReport != nil {
+						r := failure.MismatchReport
+						detail := fmt.Sprintf("[%s] %s", r.Protocol, r.ActualSummary)
+						if r.ClosestMock != "" {
+							detail += fmt.Sprintf(" | closest: %s", r.ClosestMock)
+						}
+						if r.Diff != "" {
+							detail += fmt.Sprintf(" | %s", strings.ReplaceAll(r.Diff, "\n", " "))
+						}
+						if r.NextSteps != "" {
+							detail += fmt.Sprintf(" | hint: %s", strings.ReplaceAll(r.NextSteps, "\n", " "))
+						}
+						allDiffStrings = append(allDiffStrings, detail)
+					} else {
+						allDiffStrings = append(allDiffStrings, "Outgoing call mock was not matched")
+					}
 				}
 
 				if len(failure.ExpectedMocks) > 0 || len(failure.ActualMocks) > 0 {

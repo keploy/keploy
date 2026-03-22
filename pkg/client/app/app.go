@@ -279,6 +279,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				if err != nil {
+					warning := fmt.Sprintf("error sending SIGINT: %s", err)
+					a.logger.Warn(warning)
+				}
 				gracePeriod := 5
 				for i := 0; i < gracePeriod; i++ {
 					time.Sleep(1 * time.Second)
@@ -304,7 +308,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 				// "SIGKILL" string is standard for Docker API to force kill
 				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
-
+				if err != nil {
+					warning := fmt.Sprintf("error killing container: %s", err)
+					a.logger.Warn(warning)
+				}
 				// Clean up the CLI process as well
 				err = utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				return err
