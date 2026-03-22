@@ -47,7 +47,7 @@ func ReexecWithSudo(logger *zap.Logger) {
 	// Append original arguments (skip the first one which is the program name)
 	args = append(args, os.Args[1:]...)
 
-	logger.Info("Docker command detected, re-executing with sudo for elevated privileges...")
+	logger.Info("Re-executing with sudo for elevated privileges...")
 	logger.Debug("Re-exec command", zap.Strings("args", args))
 
 	// Use syscall.Exec to replace the current process
@@ -63,12 +63,19 @@ func ReexecWithSudo(logger *zap.Logger) {
 
 // ShouldReexecWithSudo checks if keploy should re-execute itself with sudo.
 // Returns true if:
-// 1. A Docker/Docker Compose command is detected in the -c/--command flag
-// 2. Keploy is NOT currently running as root
+// 1. A Docker/Docker Compose command is detected in the -c/--command flag, OR
+// 2. The "cloud replay" subcommand is being used (it generates a docker-compose internally)
+// AND Keploy is NOT currently running as root.
 func ShouldReexecWithSudo() bool {
 	// Already running as root - no need to re-exec
 	if os.Geteuid() == 0 {
 		return false
+	}
+
+	// Check if this is a "cloud replay" command, which always needs root
+	// because it generates and runs a docker-compose file internally.
+	if isCloudReplayCmd(os.Args) {
+		return true
 	}
 
 	// Extract the command from arguments
@@ -80,4 +87,23 @@ func ShouldReexecWithSudo() bool {
 	// Check if it's a Docker command
 	cmdType := FindDockerCmd(cmd)
 	return IsDockerCmd(cmdType)
+}
+
+// isCloudReplayCmd checks if the args contain the "cloud replay" subcommand.
+func isCloudReplayCmd(args []string) bool {
+	foundCloud := false
+	for _, arg := range args[1:] {
+		// Skip flags and their values
+		if len(arg) > 0 && arg[0] == '-' {
+			continue
+		}
+		if !foundCloud {
+			if arg == "cloud" {
+				foundCloud = true
+			}
+		} else {
+			return arg == "replay"
+		}
+	}
+	return false
 }
