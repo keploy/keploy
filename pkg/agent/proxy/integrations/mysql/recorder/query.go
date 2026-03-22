@@ -128,13 +128,9 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		return nil, time.Time{}, err
 	}
 
-	// Ensure lastOp is correctly set to the command we just processed before
-	// decoding the response. In the post-TLS uprobe path, DecodePayload for
-	// the command may have gone through decodePacket (if lastOp was stale),
-	// which stores the command byte. But if lastOp was not correctly set,
-	// the response decode will go through decodePacket instead of
-	// handleQueryStmtResponse, misinterpreting server data (e.g. column
-	// count 3 = 0x03) as a COM_QUERY command. Restore it here.
+	// Snapshot the previous lastOp for diagnostics. If decode sees stale
+	// state and parses a response as a command packet, we include this in
+	// logs to explain the desync path.
 	prevLastOp, _ := decodeCtx.LastOp.Load(clientConn)
 
 	//decode the command response packet

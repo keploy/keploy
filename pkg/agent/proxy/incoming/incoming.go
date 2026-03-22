@@ -74,6 +74,8 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 // SetIngressHook replaces the default Go TCP forwarder with an external
 // ingress handler (e.g. enterprise sockmap proxy).
 func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 	pm.ingressHook = h
 }
 
@@ -97,11 +99,12 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 		pm.mu.Unlock()
 		return
 	}
+	hook := pm.ingressHook
 	// Reserve the slot so concurrent callers see this port as active.
 	pm.active[origAppPort] = func() error { return nil }
 	pm.mu.Unlock()
 
-	if err := pm.ingressHook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
+	if err := hook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
 		pm.logger.Error("Ingress hook failed to start",
 			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
 		pm.mu.Lock()
@@ -112,7 +115,7 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 	pm.logger.Info("Started ingress forwarding",
 		zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
 	pm.mu.Lock()
-	pm.active[origAppPort] = func() error { return pm.ingressHook.StopIngress(origAppPort) }
+	pm.active[origAppPort] = func() error { return hook.StopIngress(origAppPort) }
 	pm.mu.Unlock()
 }
 

@@ -125,7 +125,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	})
 
 	// handle the SSL request
-	logger.Info("handleInitialHandshake: client response decoded",
+	logger.Debug("handleInitialHandshake: client response decoded",
 		zap.Bool("useSSL", decodeCtx.UseSSL),
 		zap.Bool("skipTLSMITM", opts.SkipTLSMITM),
 		zap.String("packetType", handshakeResponsePkt.Header.Type))
@@ -798,7 +798,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		return fmt.Errorf("TLSHandshakeStore not available in context for post-TLS MySQL recording")
 	}
 	storeKey := models.HandshakeStoreKey(opts.ConnKey, dstPort)
-	logger.Info("Post-TLS MySQL: popping from TLSHandshakeStore",
+	logger.Debug("Post-TLS MySQL: popping from TLSHandshakeStore",
 		zap.String("key", storeKey),
 		zap.String("connKey", opts.ConnKey),
 		zap.Uint16("dstPort", dstPort))
@@ -815,7 +815,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 	var serverGreetingBuf []byte
 	if ok && len(entry.RespPackets) > 0 {
 		serverGreetingBuf = entry.RespPackets[0]
-		logger.Info("Post-TLS MySQL: successfully popped handshake data from TLSHandshakeStore",
+		logger.Debug("Post-TLS MySQL: successfully popped handshake data from TLSHandshakeStore",
 			zap.String("key", storeKey))
 	} else {
 		// Fallback: the pre-TLS handshake was not captured (e.g. the MySQL
