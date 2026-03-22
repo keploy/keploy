@@ -258,13 +258,26 @@ jobs:
           done < <(docker ps -a --format '{{.ID}} {{.Names}}')
           echo "stopped_any=$stopped_any" >> $GITHUB_OUTPUT
 
-      - name: Docker Image Prune (unused only, wait if locked)
+      - name: Docker cleanup (containers, networks, images, volumes)
         if: steps.check_locks.outputs.lock_count == '0' || steps.stop_longrunning.outputs.stopped_any == '1'
         run: |
           echo "No other workflows running. Proceeding with cleanup..."
 
           # Stop running scripts
           pkill -9 -f "actions-runner-.*_work/keploy/keploy/.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker-macos\.sh" || true
+
+          # Remove stale test containers that may block the next run
+          echo "Removing stale test containers..."
+          for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb flask-mongo flask-app; do
+            docker rm -f "$c" 2>/dev/null || true
+          done
+
+          # Remove stale Docker networks left by test scripts
+          echo "Removing stale Docker networks..."
+          docker network rm keploy-network 2>/dev/null || true
+
+          # Kill leftover keploy processes
+          pgrep -f 'keploy' | xargs -r kill -9 2>/dev/null || true
 
           # Prune only dangling (untagged) images — NOT all unused images.
           # Using -a removes ALL unused images (including cached base images like mongo)
@@ -281,6 +294,36 @@ jobs:
       - name: Skip cleanup - other workflows running
         if: steps.check_locks.outputs.lock_count != '0' && steps.stop_longrunning.outputs.stopped_any != '1'
         run: |
-          echo "⚠️ Skipping Docker cleanup - ${{ steps.check_locks.outputs.lock_count }} other workflow run(s) still in progress"
+          echo "Skipping Docker cleanup - ${{ steps.check_locks.outputs.lock_count }} other workflow run(s) still in progress"
           echo "This is expected behavior to prevent cleanup conflicts"
+
+  gate:
+    name: CI Gate (macOS)
+    if: always()
+    needs:
+      - build-and-upload
+      - build-docker-image
+      - pull-docker-image
+      - run_python_docker_macos
+      - run_golang_docker_macos
+      - clean_up_docker_macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results=( \
+            "${{ needs.build-and-upload.result }}" \
+            "${{ needs.build-docker-image.result }}" \
+            "${{ needs.pull-docker-image.result }}" \
+            "${{ needs.run_python_docker_macos.result }}" \
+            "${{ needs.run_golang_docker_macos.result }}" \
+            "${{ needs.clean_up_docker_macos.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "::error::One or more upstream jobs failed or were cancelled. Re-run all jobs, not individual ones."
+              exit 1
+            fi
+          done
+          echo "All jobs passed."
 
