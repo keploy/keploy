@@ -13,58 +13,26 @@ concurrency:
 
 jobs:
   build-and-upload:
-    runs-on: [self-hosted, macOS, native]
+    # Cross-compile darwin/arm64 on a GitHub-hosted runner — no CGO or
+    # macOS-specific deps needed. Keeps the self-hosted runner free for
+    # integration tests that actually require Docker Desktop on macOS.
+    runs-on: ubuntu-latest
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     steps:
-      - name: Clean up git config
-        if: always()
-        continue-on-error: true
-        run: |
-          rm -rf ~/.gitconfig
-      
-      - name: Create workflow start lock
-        run: |
-          LOCK_DIR="$HOME/.github-workflow-locks"
-          mkdir -p "$LOCK_DIR"
-          echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
-          echo "Created workflow lock file: $LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
-      
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-    
+
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-          go-cache: false
+          go-cache: true
 
       - name: Build Keploy - macOS (darwin/arm64)
         run: |
           GOOS=darwin GOARCH=arm64 go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
-
-  # upload-latest:
-  #   runs-on: [self-hosted, macOS, native]
-  #   steps:
-  #     - name: Download latest release (macOS)
-  #       run: |
-  #         LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
-  #         URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_darwin_all.tar.gz"
-  #         curl -L "$URL" -o keploy.tar.gz
-  #         tar -xzf keploy.tar.gz
-  #         chmod +x keploy
-
-  #     - uses: actions/upload-artifact@v4
-  #       with: { name: latest, path: keploy }
-
-  #     - name: Clean up git config
-  #       if: always() # This ensures the step runs even if previous steps fail
-  #       continue-on-error: true
-  #       run: |
-  #         git config --global --unset url."git@github.com:".insteadOf
 
   # Build docker image on Ubuntu and push to registry
   build-docker-image:
@@ -110,13 +78,19 @@ jobs:
     needs: [build-docker-image]
     
     steps:
+      - name: Create workflow start lock
+        run: |
+          LOCK_DIR="$HOME/.github-workflow-locks"
+          mkdir -p "$LOCK_DIR"
+          echo "started-$(date +%s)" > "$LOCK_DIR/prepare-macos-workflow-${{ github.run_id }}.lock"
+
       - name: Unlock keychain
         if: runner.os == 'macOS'
         run: |
           security unlock-keychain -p $KEYCHAIN_PASSWORD
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
-          
+
       - name: Ensure Docker Desktop is healthy (macOS)
         shell: bash
         run: |
