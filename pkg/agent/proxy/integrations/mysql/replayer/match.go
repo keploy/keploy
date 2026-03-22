@@ -134,8 +134,11 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 		return fmt.Errorf("filler mismatch for handshake response, expected: %v, actual: %v", exp.Filler, act.Filler)
 	}
 
-	// Match the Username
-	if exp.Username != act.Username {
+	// Match the Username.
+	// Some synthetic config mocks (built from SSLRequest-only captures) cannot
+	// carry username and store it as empty. Treat empty expected username as a
+	// wildcard for backward-compatible replay matching.
+	if exp.Username != "" && exp.Username != act.Username {
 		return fmt.Errorf("username mismatch for handshake response, expected: %s, actual: %s", exp.Username, act.Username)
 	}
 

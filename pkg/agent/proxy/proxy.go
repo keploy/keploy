@@ -53,7 +53,6 @@ type Proxy struct {
 
 	integrationsPriority []ParserPriority
 	errChannel           chan error
-
 	// session holds the single active session for this proxy.
 	// Previously this was a sync.Map keyed by appID (always 0), which is
 	// no longer needed since the proxy serves a single client-app.
@@ -90,6 +89,8 @@ type Proxy struct {
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
+
+	auxiliaryHook agent.AuxiliaryProxyHook
 }
 
 // isNetworkClosedErr checks if the error is due to a closed network connection.
@@ -146,18 +147,29 @@ func (p *Proxy) setSession(s *agent.Session) {
 	p.session = s
 }
 
-// getMockManager returns the current mock manager in a thread-safe manner.
-func (p *Proxy) getMockManager() *MockManager {
-	p.sessionMu.RLock()
-	defer p.sessionMu.RUnlock()
-	return p.mockManager
+// GetSession returns the current session in a thread-safe manner (exported for enterprise).
+func (p *Proxy) GetSession() *agent.Session {
+	return p.getSession()
 }
 
-// setMockManager replaces the current mock manager in a thread-safe manner.
-func (p *Proxy) setMockManager(m *MockManager) {
-	p.sessionMu.Lock()
-	defer p.sessionMu.Unlock()
-	p.mockManager = m
+func (p *Proxy) GetDestInfo() agent.DestInfo {
+	return p.DestInfo
+}
+
+func (p *Proxy) GetIntegrations() map[integrations.IntegrationType]integrations.Integrations {
+	result := make(map[integrations.IntegrationType]integrations.Integrations, len(p.Integrations))
+	for k, v := range p.Integrations {
+		result[k] = v
+	}
+	return result
+}
+
+// ResetRecordedDNSMocks clears the DNS mock deduplication tracker.
+// This should be called when starting a new recording session to ensure
+// DNS mocks are recorded fresh for the new session.
+func (p *Proxy) ResetRecordedDNSMocks() {
+	p.recordedDNSMocks = newRecordedDNSMocksCache()
+	p.logger.Debug("DNS mock deduplication tracker reset")
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -173,12 +185,22 @@ func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
 }
 
-// ResetRecordedDNSMocks clears the DNS mock deduplication tracker.
-// This should be called when starting a new recording session to ensure
-// DNS mocks are recorded fresh for the new session.
-func (p *Proxy) ResetRecordedDNSMocks() {
-	p.recordedDNSMocks = newRecordedDNSMocksCache()
-	p.logger.Debug("DNS mock deduplication tracker reset")
+func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
+	p.auxiliaryHook = h
+}
+
+// getMockManager returns the current mock manager in a thread-safe manner.
+func (p *Proxy) getMockManager() *MockManager {
+	p.sessionMu.RLock()
+	defer p.sessionMu.RUnlock()
+	return p.mockManager
+}
+
+// setMockManager replaces the current mock manager in a thread-safe manner.
+func (p *Proxy) setMockManager(m *MockManager) {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	p.mockManager = m
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
@@ -223,6 +245,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		err := p.start(ctx, readyChan)
+
 		readyChan <- err
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
@@ -301,6 +324,13 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 		return err
 	}
 
+	if p.auxiliaryHook != nil {
+		err := p.auxiliaryHook.AfterStart(ctx, p)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to execute auxiliary proxy hook; verify auxiliary hook configuration or disable the hook if not required")
+		}
+	}
+
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
@@ -325,7 +355,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	defer func(listener net.Listener) {
 		err := listener.Close()
 
-		if err != nil {
+		if err != nil && !isNetworkClosedErr(err) {
 			p.logger.Error("failed to close the listener", zap.Error(err))
 		}
 		p.logger.Debug("proxy stopped...")
@@ -543,7 +573,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
 			}
-
 			dstCfg := &models.ConditionalDstCfg{
 				Addr: dstAddr,
 				Port: uint(destInfo.Port),
@@ -679,7 +708,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
 		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
 
-		moreBuf, err := util.ReadWithTimeout(srcConn, 150*time.Millisecond)
+		const http2HeadersReadTimeout = 150 * time.Millisecond
+		moreBuf, err := util.ReadWithTimeout(srcConn, http2HeadersReadTimeout)
 		if err != nil {
 			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
 			return err
@@ -774,7 +804,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
 	} else {
-		if rule.Mode != models.MODE_TEST {
+		// Only dial if dstConn not already set (e.g., from PostgreSQL SSL handling)
+		if rule.Mode != models.MODE_TEST && dstConn == nil {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
