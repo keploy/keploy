@@ -31,6 +31,18 @@ APP_IMAGE="go-app-${JOB_ID}"
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
 
+# Clean up stale Docker state from previous killed runs.
+echo "Cleaning up stale docker compose project state..."
+docker compose down --remove-orphans -v 2>/dev/null || true
+docker compose -p echo-sql down --remove-orphans -v 2>/dev/null || true
+# Force-remove ghost containers stuck in Docker's containerd metadata.
+# These don't show in 'docker ps -a' but compose still tries to recreate them.
+for id in $(docker compose ps -aq 2>/dev/null); do
+  docker rm -f "$id" 2>/dev/null || true
+done
+# Also try removing by inspecting compose config for stale references
+docker compose rm -f -s 2>/dev/null || true
+
 # Cleanup function to remove containers
 cleanup() {
     echo "Cleaning up containers and services..."
