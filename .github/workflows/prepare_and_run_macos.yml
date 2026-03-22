@@ -313,6 +313,12 @@ jobs:
           # Kill leftover keploy processes
           pkill -9 -f 'keploy' 2>/dev/null || true
 
+          # Remove ALL stopped containers before pruning images.
+          # This is critical — docker image prune can delete layers still
+          # referenced by stopped containers, corrupting overlayfs snapshots.
+          echo "Removing all stopped containers..."
+          docker container prune -f
+
           # Prune only dangling (untagged) images — NOT all unused images.
           # Using -a removes ALL unused images (including cached base images like mongo)
           # which forces re-pulls and can destabilize Docker Desktop on macOS.
