@@ -99,9 +99,12 @@ use_ssh_for_github_and_known_hosts() {
 
 build_docker_image() {
   echo "Building Docker image with BuildKit and SSH forwarding..."
-  # On mac, Docker Desktop supports BuildKit and --ssh if enabled.
-  # Ensure you have an SSH agent running with your key loaded (ssh-add -l to verify).
-  DOCKER_BUILDKIT=1 docker build --ssh default -t ttl.sh/keploy/keploy:1h .
+  # Use buildx with --provenance=false to produce a clean single-platform
+  # image. With Docker Desktop's containerd image store (enabled by
+  # default), regular 'docker build' can produce manifests that cause
+  # 'exec format error' when the image is pulled on another machine.
+  docker buildx build --platform linux/arm64 --ssh default \
+    --provenance=false --load -t ttl.sh/keploy/keploy:1h .
 }
 
 main() {
