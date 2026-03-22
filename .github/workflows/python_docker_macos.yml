@@ -77,6 +77,9 @@ jobs:
       - name: Clean up stale Docker state
         continue-on-error: true
         run: |
+          for project in $(docker compose ls -q 2>/dev/null); do
+            docker compose -p "$project" down --remove-orphans 2>/dev/null || true
+          done
           docker container prune -f 2>/dev/null || true
           docker network prune -f 2>/dev/null || true
 

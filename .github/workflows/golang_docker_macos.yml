@@ -78,8 +78,12 @@ jobs:
       - name: Clean up stale Docker state
         continue-on-error: true
         run: |
-          # Remove all stopped containers and unused networks left by
-          # previous runs that were killed before cleanup traps could fire.
+          # Tear down ALL docker compose projects — their internal state
+          # can reference dead container IDs that docker container prune
+          # doesn't clear (compose tracks projects separately).
+          for project in $(docker compose ls -q 2>/dev/null); do
+            docker compose -p "$project" down --remove-orphans 2>/dev/null || true
+          done
           docker container prune -f 2>/dev/null || true
           docker network prune -f 2>/dev/null || true
 
