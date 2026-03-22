@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-upload:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -25,8 +29,8 @@ jobs:
         continue-on-error: true
         shell: powershell
         run: |
-          git config --global --unset-all url."git@github.com:".insteadof  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
           git config --global --unset-all core.sshCommand  2>$null
           git config --global --list
 
@@ -88,7 +92,9 @@ jobs:
         continue-on-error: true
         shell: powershell
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
 
   docker-image-build:
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -135,6 +141,14 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
 
     steps:
+
+      - name: Clean up git config (ensure HTTPS for checkout)
+        continue-on-error: true
+        shell: powershell
+        run: |
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
 
       - name: Update GitHub SSH known hosts
         shell: pwsh
@@ -194,6 +208,14 @@ jobs:
     needs: [run_golang_docker_windows, run_golang_native_windows]
     steps:
 
+      - name: Clean up git config
+        continue-on-error: true
+        shell: powershell
+        run: |
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
+          git config --global --unset-all core.sshCommand  2>$null
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -216,4 +238,33 @@ jobs:
             Write-Error "Cleanup script not found at $script"
             exit 1
           }
-      
+
+  gate:
+    name: CI Gate (Windows)
+    if: always()
+    needs:
+      - build-and-upload
+      - docker-image-build
+      - pull-docker-image
+      - run_golang_docker_windows
+      - run_golang_native_windows
+      - cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results=( \
+            "${{ needs.build-and-upload.result }}" \
+            "${{ needs.docker-image-build.result }}" \
+            "${{ needs.pull-docker-image.result }}" \
+            "${{ needs.run_golang_docker_windows.result }}" \
+            "${{ needs.run_golang_native_windows.result }}" \
+            "${{ needs.cleanup.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              echo "::error::One or more upstream jobs failed or were cancelled. Re-run all jobs, not individual ones."
+              exit 1
+            fi
+          done
+          echo "All jobs passed."
