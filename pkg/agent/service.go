@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -23,6 +24,10 @@ type HookCfg struct {
 	Port     uint32
 }
 
+type AuxiliaryProxyHook interface {
+	AfterStart(ctx context.Context, proxy Proxy) error
+}
+
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
 	StartProxy(ctx context.Context, opts ProxyOptions) error
@@ -36,6 +41,10 @@ type Proxy interface {
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
 	Mapping(ctx context.Context, mappingCh chan models.TestMockMapping)
+	GetDestInfo() DestInfo
+	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations
+	GetSession() *Session
+	SetAuxiliaryHook(h AuxiliaryProxyHook)
 }
 
 type IncomingProxy interface {

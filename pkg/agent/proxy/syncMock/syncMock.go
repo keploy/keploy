@@ -52,14 +52,19 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// storing startup mocks until first request is seen
 	if !m.firstReqSeen && m.outChan != nil {
-		m.outChan <- mock
+		outChan := m.outChan
+		m.mu.Unlock()
+		// Send outside the lock to avoid deadlock: if the channel is
+		// full, holding mu would block AddMock callers and any
+		// ResolveRange call trying to flush the buffer.
+		outChan <- mock
 		return
 	}
 	m.buffer = append(m.buffer, mock)
+	m.mu.Unlock()
 }
 
 func (m *SyncMockManager) SetFirstRequestSignaled() {
@@ -74,12 +79,20 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	return m.firstReqSeen
 }
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
+	// Collect mocks and mapping data under the lock, then send to channels
+	// AFTER releasing it. Sending while holding mu can deadlock: the channel
+	// consumer (e.g. gob encoder in HandleOutgoing) may block, and a
+	// concurrent AddMock caller waiting on mu would stall the pipeline.
+	var mocksToSend []*models.Mock
+	var associatedMockIDs []string
+	var mappingEntry *models.TestMockMapping
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	outChan := m.outChan
+	mappingChan := m.mappingChan
 
 	// Any mock older than 7 seconds from NOW is considered dead and will be removed.
 	cutoffTime := time.Now().Add(-7 * time.Second)
-	var associatedMockIDs []string
 	keepIdx := 0
 
 	for i := 0; i < len(m.buffer); i++ {
@@ -96,9 +109,16 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		// MATCHING LOGIC: Process mocks in the requested window
 		if (mockTime.Equal(start) || mockTime.After(start)) && (mockTime.Equal(end) || mockTime.Before(end)) {
 			if keep {
+				// If output channel is not wired yet, keep matching mocks buffered
+				// so they can be emitted later instead of blocking on a nil channel.
+				if outChan == nil {
+					m.buffer[keepIdx] = mock
+					keepIdx++
+					continue
+				}
 				mock.Name = "mock-" + generateRandomString(8)
 				associatedMockIDs = append(associatedMockIDs, mock.Name)
-				m.outChan <- mock
+				mocksToSend = append(mocksToSend, mock)
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -116,16 +136,25 @@ func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, ke
 		m.buffer[i] = nil
 	}
 
-	if len(associatedMockIDs) > 0 && m.mappingChan != nil && mapping {
-		mapping := models.TestMockMapping{
+	// Reslice the buffer
+	m.buffer = m.buffer[:keepIdx]
+
+	if len(associatedMockIDs) > 0 && mappingChan != nil && mapping {
+		mappingEntry = &models.TestMockMapping{
 			TestName: testName,
 			MockIDs:  associatedMockIDs,
 		}
-		m.mappingChan <- mapping
 	}
 
-	// Reslice the buffer
-	m.buffer = m.buffer[:keepIdx]
+	m.mu.Unlock()
+
+	// Send mocks and mapping outside the lock to avoid deadlock.
+	for _, mock := range mocksToSend {
+		outChan <- mock
+	}
+	if mappingEntry != nil && mappingChan != nil {
+		mappingChan <- *mappingEntry
+	}
 }
 
 func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
