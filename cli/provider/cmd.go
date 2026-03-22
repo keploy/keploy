@@ -277,6 +277,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
+		cmd.Flags().String("format", "text", "Output format for test report (text or junit)")
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -770,6 +771,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		c.cfg.Report.TestCaseIDs = cleaned
+
+		format, err := cmd.Flags().GetString("format")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the format flag")
+			return errors.New("failed to get the format flag")
+		}
+		format = strings.ToLower(strings.TrimSpace(format))
+		if format == "" {
+			format = "text"
+		}
+		switch format {
+		case "text", "junit":
+			// valid
+		default:
+			return fmt.Errorf("invalid --format value %q: allowed values are 'text' and 'junit'", format)
+		}
+		c.cfg.Report.Format = format
 
 	case "sanitize":
 		path, err := cmd.Flags().GetString("path")

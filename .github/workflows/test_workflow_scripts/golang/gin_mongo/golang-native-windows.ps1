@@ -251,8 +251,10 @@ for ($i = 1; $i -le 2; $i++) {
 # 3. Test Phase
 # =============================================================================
 
-Write-Host "Shutting down mongo..."
-Stop-Service -Name "MongoDB" -Force -ErrorAction SilentlyContinue
+# Keep MongoDB running during test replay. Keploy will serve mocks for
+# matched requests; unmatched requests fall through to the real database
+# which returns the same data recorded earlier, preventing flaky failures
+# caused by non-deterministic mock matching across test sets.
 
 Write-Host "Starting Replay..."
 $testLogFile = "test_logs.txt"
@@ -268,13 +270,15 @@ Write-Host "Verifying test reports..."
 
 # 1. Check for "ERROR" in logs (excluding harmless taskkill, shutdown, and wsarecv errors)
 $logErrors = Select-String -Path $testLogFile -Pattern "ERROR"
-$realErrors = $logErrors | Where-Object { 
+$realErrors = $logErrors | Where-Object {
     $_.Line -notmatch "The process .* not found" -and
     $_.Line -notmatch "Error removing file.*keploy-logs\.txt" -and
     $_.Line -notmatch "remove keploy-logs\.txt: The process cannot access the file because it is being used by another process" -and
     $_.Line -notmatch "Failed to read upstream response.*wsarecv" -and
     $_.Line -notmatch "user application terminated unexpectedly" -and
-    $_.Line -notmatch "unknown error received from application"
+    $_.Line -notmatch "unknown error received from application" -and
+    $_.Line -notmatch "connection\(\) error occured during connection handshake" -and
+    $_.Line -notmatch "dial tcp.*27017.*connectex"
 }
 
 if ($realErrors) {

@@ -48,30 +48,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Docker Desktop is running (macOS)
-        shell: bash
+      - name: Verify Docker Desktop is running (macOS)
         run: |
-          set -e
-          if docker info >/dev/null 2>&1; then
-            echo "Docker daemon is already running."
-          else
-            echo "Docker daemon not responding. Restarting Docker Desktop..."
-            # Start Docker Desktop detached from this process tree so the
-            # GH Actions runner won't kill it as an "orphan" in post-job cleanup.
-            nohup open -g -a Docker >/dev/null 2>&1 &
-            disown
-            for i in $(seq 1 90); do
-              if docker info >/dev/null 2>&1; then
-                echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                break
-              fi
-              if [ "$i" -eq 90 ]; then
-                echo "ERROR: Docker Desktop failed to start within 180s."
-                exit 1
-              fi
-              sleep 2
-            done
+          # Never start Docker Desktop from CI — the Actions runner will
+          # track it as a child process and kill it between jobs.
+          # Docker Desktop must be running as a Login Item before the runner.
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
           fi
+          echo "Docker Desktop is running."
+
+      - name: Clean up stale Docker state
+        continue-on-error: true
+        run: |
+          # Tear down ALL docker compose projects — their internal state
+          # can reference dead container IDs that docker container prune
+          # doesn't clear (compose tracks projects separately).
+          for project in $(docker compose ls -q 2>/dev/null); do
+            docker compose -p "$project" down --remove-orphans 2>/dev/null || true
+          done
+          docker container prune -f 2>/dev/null || true
+          docker network prune -f 2>/dev/null || true
 
       - id: image
         uses: ./.github/actions/download-image
@@ -128,8 +127,20 @@ jobs:
         run: |
           pkill -f "bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-docker-macos.sh" || true
 
+      - name: Clean up Docker artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb; do
+            docker rm -f "$c" 2>/dev/null || true
+          done
+          docker network rm keploy-network 2>/dev/null || true
+          pkill -9 -f 'keploy record|keploy test' 2>/dev/null || true
+
       - name: Clean up git config
         if: always()
         continue-on-error: true
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true
