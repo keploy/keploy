@@ -117,28 +117,49 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
           
-      - name: Ensure Docker Desktop is running (macOS)
+      - name: Ensure Docker Desktop is healthy (macOS)
         shell: bash
         run: |
           set -e
-          if docker info >/dev/null 2>&1; then
-            echo "Docker daemon is already running."
-          else
-            echo "Docker daemon not responding. Restarting Docker Desktop..."
+
+          restart_docker() {
+            echo "Restarting Docker Desktop..."
+            pkill -f "Docker Desktop" || true
+            sleep 5
             nohup open -g -a Docker >/dev/null 2>&1 &
             disown
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                break
+                return 0
               fi
               if [ "$i" -eq 60 ]; then
                 echo "ERROR: Docker Desktop failed to start within 120s."
-                exit 1
+                return 1
               fi
               sleep 2
             done
+          }
+
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker daemon not responding."
+            restart_docker
           fi
+
+          # Health check: verify containers can actually be created.
+          # Docker can respond to 'docker info' while having corrupted
+          # container storage (overlayfs snapshots), so test for real.
+          if ! docker run --rm busybox true >/dev/null 2>&1; then
+            echo "Docker health check failed (cannot create containers)."
+            restart_docker
+            # After restart, verify the health check passes
+            if ! docker run --rm busybox true >/dev/null 2>&1; then
+              echo "ERROR: Docker still unhealthy after restart."
+              exit 1
+            fi
+          fi
+
+          echo "Docker Desktop is healthy."
 
       - name: Pull Docker image
         run: |
