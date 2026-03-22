@@ -277,7 +277,7 @@ jobs:
           docker network rm keploy-network 2>/dev/null || true
 
           # Kill leftover keploy processes
-          pgrep -f 'keploy' | xargs -r kill -9 2>/dev/null || true
+          pkill -9 -f 'keploy' 2>/dev/null || true
 
           # Prune only dangling (untagged) images — NOT all unused images.
           # Using -a removes ALL unused images (including cached base images like mongo)

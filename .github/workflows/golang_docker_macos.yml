@@ -136,10 +136,12 @@ jobs:
             docker rm -f "$c" 2>/dev/null || true
           done
           docker network rm keploy-network 2>/dev/null || true
-          pgrep -f 'keploy' | xargs -r kill -9 2>/dev/null || true
+          pkill -9 -f 'keploy' 2>/dev/null || true
 
       - name: Clean up git config
         if: always()
         continue-on-error: true
         run: |
-          rm -rf ~/.gitconfig
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true
