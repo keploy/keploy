@@ -52,7 +52,16 @@ jobs:
       
       - name: Build and push Docker image
         run: |
+          # Log the build platform for debugging
+          echo "Build runner arch: $(uname -m)"
+          echo "Docker server arch: $(docker version --format '{{.Server.Arch}}')"
           source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+
+      - name: Verify image architecture
+        run: |
+          echo "Image arch: $(docker image inspect ttl.sh/keploy/keploy:1h --format '{{.Architecture}}')"
+          # Verify the binary inside is actually arm64
+          docker run --rm --entrypoint="" ttl.sh/keploy/keploy:1h sh -c "uname -m"
 
       - name: Make unique tag for this run
         id: tag
