@@ -124,13 +124,13 @@ jobs:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@3c164c1f3d2f4cf7483e0e4040d3ba93926ab9dd
+        uses: sigstore/cosign-installer@v3.10.1
 
       - name: Setup Docker buildx
-        uses: docker/setup-buildx-action@79abd3f86f79a9d68a23c75a09a9a85889262adf
+        uses: docker/setup-buildx-action@v3.12.0
 
       - name: Log into registry ghcr.io
-        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+        uses: docker/login-action@v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -138,7 +138,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+        uses: docker/metadata-action@v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
 
@@ -149,13 +149,13 @@ jobs:
       - name: Prepare Dockerfile for Release Build
         run: |
           cp Dockerfile Dockerfile.release
-          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& { echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnxrYX0GvQ3Z8b5vVdBObJ2f9qNpkac8PW3T6g7b"; echo "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrY\/SGNRIp5HRf7o1qYSMq6h6S4dhp8lN5XdM+sP8lvNabzB6xTnI0="; echo "github.com rsa-sha2-512 AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgLn3a\/+6EVMblT2TImKt+kNWm1U3VFAj7BO\/P3E42EwS\/N+N5gAe3+q8FPVRfnGVjnRz1hb8fgbzJ8cRtKm6EIHzEbLepFW5C8uK0MJbYGm3M5Dz5PjQqL4M+PEuY1VQ3BqFkP8PU2HhGwWIkGpMpI1f6+JpJQ3XnO9GzGqJHPhq7ZJ5MJHbYfCrH4AJzqHB\/S0Kbl2SFVJLABFrqbI8M\/oUGmT+jlJUBEw6SIenU2MXFuVdxCQHWOdMFkFCUj8Rm\/k+LFqelS6XAaEtJXTLv5eSXNjBkqj7r3hMBbYJJNg+wdXq2oUw2M4NiTy7A0FGqYVD9UVzgw=="; } >> ~\/.ssh\/known_hosts' ./Dockerfile.release
+          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan -t ed25519,ecdsa,rsa github.com >> ~\/.ssh\/known_hosts 2>\/dev\/null' ./Dockerfile.release
           sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile.release
           sed -i '/RUN --mount=type=ssh go mod download/i ENV GOPRIVATE=github.com/keploy/*' ./Dockerfile.release
 
       - name: Build and push Docker image
         id: build-and-push
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+        uses: docker/build-push-action@v6.19.2
         with:
           context: .
           file: ./Dockerfile.release
