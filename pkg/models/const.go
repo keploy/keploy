@@ -38,6 +38,7 @@ const (
 	SQLDB               string = "SQL_DB"
 	GRPC                string = "GRPC"
 	HTTPClient          string = "HTTP_CLIENT"
+	HTTP2Client         string = "HTTP2_CLIENT"
 	TestSetPattern      string = "test-set-"
 	String              string = "string"
 	TestRunTemplateName string = "test-run-"

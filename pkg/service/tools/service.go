@@ -3,7 +3,6 @@ package tools
 
 import (
 	"context"
-	"sync"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -11,7 +10,7 @@ import (
 type Service interface {
 	Update(ctx context.Context) error
 	CreateConfig(ctx context.Context, filePath string, config string) error
-	SendTelemetry(event string, output ...*sync.Map)
+	SendTelemetry(event string, output ...map[string]interface{})
 	Login(ctx context.Context) bool
 	Export(ctx context.Context) error
 	Import(ctx context.Context, path, basePath string) error
@@ -22,7 +21,7 @@ type Service interface {
 }
 
 type teleDB interface {
-	SendTelemetry(event string, output ...*sync.Map)
+	SendTelemetry(event string, output ...map[string]interface{})
 }
 
 type TestSetConfig interface {

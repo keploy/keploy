@@ -10,6 +10,7 @@ type Service interface {
 	Setup(ctx context.Context, startCh chan int) error
 	StartIncomingProxy(ctx context.Context, opts models.IncomingOptions) (chan *models.TestCase, error) // Commenting out this for now need to move this and the instrument in the agent setup only
 	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
+	GetMapping(ctx context.Context) (<-chan models.TestMockMapping, error)
 	MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)

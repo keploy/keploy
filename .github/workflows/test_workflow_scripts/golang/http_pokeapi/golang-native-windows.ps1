@@ -1,6 +1,5 @@
 <#
   PowerShell test runner for Keploy (Windows) - http-pokeapi sample
-
   - Synchronous (PID-controlled) record phase using Start-Process
   - Cleans keploy dirs/files up-front
   - Generates keploy.yml
@@ -281,6 +280,7 @@ $testArgs = @(
   '-c', 'go run .',
   '--api-timeout', '60',
   '--delay', '30',
+  '--debug',
   # '--port', '8080',
   '--generate-github-actions=false'
 )

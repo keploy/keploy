@@ -453,7 +453,14 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 		}
 
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout, o.config.ReRecord.Port)
+		hostToUse := o.config.Test.Host
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, pkg.SimulationConfig{
+			APITimeout:      o.config.Test.APITimeout,
+			ConfigPort:      o.config.ReRecord.Port,
+			KeployPath:      o.config.Path,
+			ConfigHost:      hostToUse,
+			URLReplacements: nil,
+		})
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			if resp == nil {
@@ -548,7 +555,19 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 
 	// Save the test-mock mappings to YAML file
 	if len(mappings) > 0 && isMappingEnabled {
-		err := o.replay.StoreMappings(ctx, mappingTestSet, mappings)
+		mapping := &models.Mapping{
+			Version:   string(models.GetVersion()), // or models.GetVersion() casted
+			Kind:      models.MappingKind,
+			TestSetID: mappingTestSet,
+		}
+		for tcID, mocks := range mappings {
+			mapping.Tests = append(mapping.Tests, models.Test{
+				ID:    tcID,
+				Mocks: models.FromSlice(mocks),
+			})
+		}
+
+		err := o.replay.StoreMappings(ctx, mapping)
 		if err != nil {
 			o.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
@@ -573,7 +592,7 @@ func (o *Orchestrator) showResponseDiff(originalTC *models.TestCase, newResp *mo
 	switch originalTC.Kind {
 	case models.HTTP:
 		// Use the HTTP matcher to compare responses - this will automatically show diffs
-		matched, _ := o.replay.CompareHTTPResp(originalTC, newResp, testSetID)
+		matched, _ := o.replay.CompareHTTPResp(originalTC, newResp, testSetID, true)
 		if !matched {
 			o.logger.Info("Response differences detected during re-record",
 				zap.String("testcase", originalTC.Name),

@@ -176,7 +176,8 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			finalResp = append(finalResp, resp...)
 			h.Logger.Debug("This is the initial response: " + string(resp))
 
-			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp)
+			var streamRef *models.StreamRef
+			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp, &streamRef, opts)
 			if err != nil {
 				if err == io.EOF {
 					h.Logger.Debug("conn closed by the server", zap.Error(err))
@@ -186,6 +187,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 						Resp:             finalResp,
 						ReqTimestampMock: reqTimestampMock,
 						ResTimestampMock: resTimestampMock,
+						StreamRef:        streamRef,
 					}
 					parseErr := h.parseFinalHTTP(ctx, m, destPort, mocks, opts)
 					if parseErr != nil {
@@ -207,6 +209,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				Resp:             finalResp,
 				ReqTimestampMock: reqTimestampMock,
 				ResTimestampMock: resTimestampMock,
+				StreamRef:        streamRef,
 			}
 
 			err = h.parseFinalHTTP(ctx, m, destPort, mocks, opts)

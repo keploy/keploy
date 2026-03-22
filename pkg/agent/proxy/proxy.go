@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
@@ -71,6 +74,9 @@ type Proxy struct {
 	GlobalPassthrough bool
 	IsDocker          bool
 
+	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
+	dnsCache *expirable.LRU[string, dnsCacheEntry]
+
 	// isGracefulShutdown indicates the application is shutting down gracefully
 	// When set, connection errors should be logged as debug instead of error
 	isGracefulShutdown atomic.Bool
@@ -94,7 +100,7 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	return &Proxy{
+	proxy := &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort,
 		DNSPort:           opts.DNSPort, // default: 26789
@@ -111,7 +117,10 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		GlobalPassthrough: opts.Agent.GlobalPassthrough,
 		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 		IsDocker:          opts.Agent.IsDocker,
+		dnsCache:          newDNSCache(),
 	}
+
+	return proxy
 }
 
 // SetGracefulShutdown sets the graceful shutdown flag to indicate the application is shutting down
@@ -576,12 +585,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	var clientPeerCert *x509.Certificate
+	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
+		}
+
+		if isMTLS {
+			if tlsConn, ok := srcConn.(*tls.Conn); ok {
+				state := tlsConn.ConnectionState()
+				if len(state.PeerCertificates) > 0 {
+					clientPeerCert = state.PeerCertificates[0]
+				}
+			}
 		}
 	}
 
@@ -628,6 +648,30 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		// Append the additional data to the initial buffer.
 		initialBuf = append(initialBuf, headerBuf...)
+	}
+
+	// For HTTP/2 connections, the initial buffer may only contain the client
+	// preface and SETTINGS frames. Protocol matchers (gRPC vs h2c) need to
+	// inspect the HEADERS frame's content-type to decide.
+	//
+	// We use a short timeout read instead of a blocking read because:
+	//  - h2c clients typically send preface+SETTINGS+HEADERS in quick succession
+	//  - gRPC clients send preface+SETTINGS, then WAIT for server SETTINGS_ACK
+	//    before sending HEADERS — a blocking read would deadlock.
+	//
+	// If HEADERS arrives within the timeout → matchers can inspect content-type.
+	// If it doesn't (gRPC pattern) → matchers treat missing HEADERS as gRPC.
+	if util.IsHTTP2Preface(initialBuf) && !util.HasHTTP2HeadersFrame(initialBuf) {
+		logger.Debug("HTTP/2 preface detected but no HEADERS frame yet, attempting short timeout read")
+
+		moreBuf, err := util.ReadWithTimeout(srcConn, 150*time.Millisecond)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read HTTP/2 HEADERS frame from client")
+			return err
+		}
+		if len(moreBuf) > 0 {
+			initialBuf = append(initialBuf, moreBuf...)
+		}
 	}
 
 	//update the src connection to have the initial buffer
@@ -687,7 +731,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			NextProtos:         nextProtos,
 		}
 
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
+			err = p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
+			if err != nil {
+				return err
+			}
+		}
+
+		addr := dstAddr
+		if dstURL != "" {
+			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		}
+
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
@@ -749,9 +804,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
-				utils.LogError(logger, err, "failed to record the outgoing message")
+				if isNetworkClosedErr(err) {
+					p.logger.Debug("failed to record the outgoing message (connection closed)", zap.Error(err))
+				} else {
+					utils.LogError(logger, err, "failed to record the outgoing message")
+				}
 				return err
 			}
+			p.logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
@@ -830,6 +890,48 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	}
 }
 
+func (p *Proxy) applyMTLSClientCert(cfg *tls.Config, clientPeerCert *x509.Certificate, tlsPrivateKey string) error {
+	if cfg == nil || clientPeerCert == nil {
+		return nil
+	}
+
+	if tlsPrivateKey == "" {
+		err := errors.New("failed to read private key from outgoing options")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	keyBytes := []byte(tlsPrivateKey)
+	block, _ := pem.Decode(keyBytes)
+	if block == nil {
+		err := errors.New("failed to decode PEM block containing private key")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	var privKey any
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		privKey = key
+	} else if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		privKey = key
+	}
+
+	if privKey == nil {
+		err := errors.New("failed to parse private key from PEM")
+		utils.LogError(p.logger, err, "failed to apply mTLS client cert")
+		return err
+	}
+
+	cfg.Certificates = []tls.Certificate{{
+		Certificate: [][]byte{clientPeerCert.Raw},
+		PrivateKey:  privKey,
+	}}
+	p.logger.Debug("Successfully constructed mTLS certificate using client peer cert and local key")
+	return nil
+}
+
 func (p *Proxy) Record(_ context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	// Reset graceful shutdown flag for a new recording session.
 	p.isGracefulShutdown.Store(false)
@@ -877,6 +979,7 @@ func (p *Proxy) SetMocks(_ context.Context, filtered []*models.Mock, unFiltered 
 	if ok {
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
+		p.dnsCache.Purge()
 	}
 
 	return nil
@@ -889,24 +992,6 @@ func (p *Proxy) GetConsumedMocks(_ context.Context) ([]models.MockState, error) 
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
-}
-
-// DeleteMocks removes the specified mocks from the filtered tree only.
-// This allows for efficient incremental updates (O(k log N)) instead of full rebuilds (O(N log N)).
-// Note: We only delete from filtered tree because unfiltered mocks are config/reusable mocks
-// (like HTTP external API calls) that should remain available across tests.
-func (p *Proxy) DeleteMocks(_ context.Context, mocks []*models.Mock) error {
-	m, ok := p.MockManagers.Load(uint64(0))
-	if ok {
-		mgr := m.(*MockManager)
-		for _, mock := range mocks {
-			if mock != nil {
-				// Only delete from filtered tree - unfiltered mocks are reusable
-				mgr.DeleteFilteredMock(*mock)
-			}
-		}
-	}
-	return nil
 }
 
 // GetErrorChannel returns the error channel for external monitoring
@@ -928,6 +1013,13 @@ func (p *Proxy) SendError(err error) {
 // CloseErrorChannel closes the error channel
 func (p *Proxy) CloseErrorChannel() {
 	close(p.errChannel)
+}
+
+func (p *Proxy) Mapping(ctx context.Context, mappingCh chan models.TestMockMapping) {
+	mgr := syncMock.Get()
+	if mgr != nil {
+		mgr.SetMappingChannel(mappingCh)
+	}
 }
 
 func isShutdownError(err error) bool {

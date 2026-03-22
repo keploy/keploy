@@ -46,6 +46,7 @@ type IngressEvent struct {
 type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
+	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay       time.Duration // This is the same as Application delay.
@@ -55,6 +56,7 @@ type OutgoingOptions struct {
 	Backdate       time.Time                      // used to set backdate in cacert request
 	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	Name           string                         // Name of the session
+	ConfigPath     string                         // path to the config file (used to resolve relative paths for assets/streams)
 }
 
 type ConditionalDstCfg struct {

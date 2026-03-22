@@ -44,15 +44,66 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
+	// Extract URL replacements: merge global + per-test-set (test-set level overrides global for same key)
+	var urlReplacements map[string]string
+	rw := h.cfg.Test.ReplaceWith
+	if len(rw.Global.URL) > 0 || len(rw.TestSets) > 0 {
+		urlReplacements = make(map[string]string)
+		// Start with global replacements
+		for k, v := range rw.Global.URL {
+			urlReplacements[k] = v
+		}
+		// Override/add with per-test-set replacements
+		if tsRW, ok := rw.TestSets[testSetID]; ok {
+			for k, v := range tsRW.URL {
+				urlReplacements[k] = v
+			}
+		}
+	}
+
 	switch tc.Kind {
 	case models.HTTP:
+		noiseConfig := h.cfg.Test.GlobalNoise.Global
+		if tsNoise, ok := h.cfg.Test.GlobalNoise.Testsets[testSetID]; ok {
+			noiseConfig = LeftJoinNoise(h.cfg.Test.GlobalNoise.Global, tsNoise)
+		}
+		streamBodyNoise := map[string][]string{}
+		if bodyNoise, ok := noiseConfig["body"]; ok {
+			streamBodyNoise = cloneNoiseMap(bodyNoise)
+		}
 
 		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
 			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
 		}
 
+		hostToUse := h.cfg.Test.Host
+		if hostToUse == "" {
+			hostToUse = "localhost"
+		}
+
+		cfg := pkg.SimulationConfig{
+			APITimeout:         h.cfg.Test.APITimeout,
+			ConfigPort:         h.cfg.Test.Port,
+			KeployPath:         h.cfg.Path,
+			ConfigHost:         hostToUse,
+			URLReplacements:    urlReplacements,
+			StreamingBodyNoise: streamBodyNoise,
+		}
+
+		// Check if this is a streaming test case
+		if pkg.IsHTTPStreamingTestCase(tc) {
+			h.logger.Debug("Simulating HTTP streaming request", zap.Any("Test case", tc.Name))
+			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
+
+			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
+				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+			}
+
+			return resp, err
+		}
+
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout, h.cfg.Test.Port)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
@@ -66,7 +117,15 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, h.cfg.Test.GRPCPort)
+		hostToUse := h.cfg.Test.Host
+		if hostToUse == "" {
+			hostToUse = "localhost"
+		}
+		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
+			ConfigPort:      h.cfg.Test.GRPCPort,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
+		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
 			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
@@ -275,6 +334,16 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 type getPlanRes struct {
 	Plan  models.Plan `json:"plan"`
 	Error string      `json:"error"`
+}
+
+func cloneNoiseMap(input map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(input))
+	for k, v := range input {
+		copied := make([]string, len(v))
+		copy(copied, v)
+		out[k] = copied
+	}
+	return out
 }
 
 func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {

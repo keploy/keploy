@@ -299,7 +299,7 @@ func (ys *MockYaml) LoadMocksFromPath(ctx context.Context, mockFilePath string) 
 	return filtered, unfiltered, nil
 }
 
-func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
+func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
 	mockFileName := "mocks"
@@ -341,6 +341,12 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			}
 
 			for _, mock := range mocks {
+				_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+
+				_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+				if isMappedToSpecificTest && !isNeededForCurrentRun {
+					continue
+				}
 				isFilteredMock := true
 				switch mock.Kind {
 				case "Generic":
@@ -349,9 +355,13 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 					isFilteredMock = false
 				case "Http":
 					isFilteredMock = false
+				case "Http2":
+					isFilteredMock = false
 				case "Redis":
 					isFilteredMock = false
 				case "MySQL":
+					isFilteredMock = false
+				case "DNS":
 					isFilteredMock = false
 				}
 				if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
@@ -372,7 +382,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	return filtered, nil
 }
 
-func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
+func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error) {
 
 	var configMocks = make([]*models.Mock, 0)
 
@@ -414,6 +424,12 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			}
 
 			for _, mock := range mocks {
+				_, isMappedToSpecificTest := mocksThatHaveMappings[mock.Name]
+
+				_, isNeededForCurrentRun := mocksWeNeed[mock.Name]
+				if isMappedToSpecificTest && !isNeededForCurrentRun {
+					continue
+				}
 				isUnFilteredMock := false
 				switch mock.Kind {
 				case "Generic":
@@ -422,9 +438,13 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 					isUnFilteredMock = true
 				case "Http":
 					isUnFilteredMock = true
+				case "Http2":
+					isUnFilteredMock = true
 				case "Redis":
 					isUnFilteredMock = true
 				case "MySQL", "PostgresV2":
+					isUnFilteredMock = true
+				case "DNS":
 					isUnFilteredMock = true
 				}
 				if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
@@ -554,7 +574,7 @@ func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath
 	}
 	ys.MockPath = mockPath
 
-	tcsMocks, err := ys.GetUnFilteredMocks(ctx, testSetID, time.Time{}, time.Time{})
+	tcsMocks, err := ys.GetUnFilteredMocks(ctx, testSetID, time.Time{}, time.Time{}, nil, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -6,22 +6,30 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
+	"math"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg/models"
@@ -33,6 +41,45 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 var SortCounter int64 = -1
+var templateValuesMu sync.RWMutex
+
+const maxStreamTokenSize = 10 * 1024 * 1024
+
+// HTTPStreamMode represents the type of HTTP streaming response.
+type HTTPStreamMode string
+
+const (
+	HTTPStreamModeNone      HTTPStreamMode = "none"
+	HTTPStreamModeSSE       HTTPStreamMode = "sse"
+	HTTPStreamModeNDJSON    HTTPStreamMode = "ndjson"
+	HTTPStreamModeMultipart HTTPStreamMode = "multipart"
+	HTTPStreamModePlainText HTTPStreamMode = "plain-text"
+	HTTPStreamModeBinary    HTTPStreamMode = "binary"
+)
+
+// HTTPStreamConfig holds configuration for HTTP streaming responses.
+type HTTPStreamConfig struct {
+	Mode     HTTPStreamMode
+	Boundary string
+}
+
+// StreamMismatchInfo holds details about a streaming frame mismatch for reporting.
+type StreamMismatchInfo struct {
+	FrameIndex    int    // Index of the mismatched frame (-1 if no specific frame)
+	ExpectedFrame string // The expected frame content
+	ActualFrame   string // The actual frame content received
+	Reason        string // Description of why frames don't match
+}
+
+// StreamingHTTPResponse holds the response metadata and a reader for streaming responses.
+// The caller is responsible for reading from the Reader and closing it when done.
+type StreamingHTTPResponse struct {
+	StatusCode    int
+	StatusMessage string
+	Header        map[string]string
+	Reader        io.ReadCloser
+	StreamConfig  HTTPStreamConfig
+}
 
 func InitSortCounter(counter int64) {
 	atomic.StoreInt64(&SortCounter, counter)
@@ -155,21 +202,40 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64, configPort uint32) (*models.HTTPResp, error) {
-	var resp *models.HTTPResp
-	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
+type SimulationConfig struct {
+	APITimeout         uint64
+	RequestTimeout     time.Duration
+	ConfigPort         uint32
+	KeployPath         string
+	ConfigHost         string
+	URLReplacements    map[string]string
+	StreamingBodyNoise map[string][]string
+}
 
-	if strings.Contains(tc.HTTPReq.URL, "%7B") { // case in which URL string has encoded template placeholders
+// preparedHTTPRequest holds the prepared HTTP request and client for execution.
+type preparedHTTPRequest struct {
+	Request *http.Request
+	Client  *http.Client
+}
+
+// prepareHTTPRequest handles all common request preparation logic shared between
+// SimulateHTTP and SimulateHTTPStreaming: URL decoding, template rendering,
+// body loading, multipart construction, compression, and client creation.
+func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*preparedHTTPRequest, error) {
+	// case in which URL string has encoded template placeholders
+	if strings.Contains(tc.HTTPReq.URL, "%7B") {
 		decoded, err := url.QueryUnescape(tc.HTTPReq.URL)
 		if err == nil {
 			tc.HTTPReq.URL = decoded
 		}
 	}
-	//TODO: adjust this logic in the render function in order to remove the redundant code
-	// convert testcase to string and render the template values.
-	// Render any template values in the test case before simulation.
-	// Render any template values in the test case before simulation.
-	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
+
+	// TODO: adjust this logic in the render function in order to remove the redundant code.
+	// Convert testcase to string and render template values before simulation.
+	templateValuesMu.RLock()
+	hasTemplateOrSecretValues := len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0
+	templateValuesMu.RUnlock()
+	if hasTemplateOrSecretValues {
 		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
@@ -177,6 +243,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 
 		// Build the template data
+		templateValuesMu.RLock()
 		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
 		for k, v := range utils.TemplatizedValues {
 			templateData[k] = v
@@ -184,6 +251,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if len(utils.SecretValues) > 0 {
 			templateData["secret"] = utils.SecretValues
 		}
+		templateValuesMu.RUnlock()
 
 		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
 		// ignoring LaTeX/HTML like {{\pi}}.
@@ -202,6 +270,149 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
 
+	// If the request body was offloaded to an asset file (>1MB), load it back
+	if tc.HTTPReq.BodyRef.Path != "" {
+		bodyRefPath := tc.HTTPReq.BodyRef.Path
+		// Resolve relative paths against keployPath so assets work even if
+		// the keploy directory has been moved since recording.
+		if cfg.KeployPath != "" && !filepath.IsAbs(bodyRefPath) {
+			bodyRefPath = filepath.Join(cfg.KeployPath, bodyRefPath)
+		}
+		bodyData, readErr := os.ReadFile(bodyRefPath)
+		if readErr != nil {
+			utils.LogError(logger, readErr, "failed to read request body from asset file", zap.String("path", bodyRefPath))
+			return nil, readErr
+		}
+		reqBody = bodyData
+		logger.Debug("loaded request body from asset file",
+			zap.String("path", bodyRefPath),
+			zap.Int("size", len(bodyData)))
+	}
+
+	// If form field values were offloaded to asset files (>1MB) and they were not actual files (json,html,xml,txt etc...), load them back
+	for i, form := range tc.HTTPReq.Form {
+		if len(form.FileNames) == 0 && len(form.Paths) > 0 && len(form.Values) > 0 {
+			for j, value := range form.Values {
+				if value == "" && j < len(form.Paths) && form.Paths[j] != "" {
+					formPath := form.Paths[j]
+					if cfg.KeployPath != "" && !filepath.IsAbs(formPath) {
+						formPath = filepath.Join(cfg.KeployPath, formPath)
+					}
+					valData, readErr := os.ReadFile(formPath)
+					if readErr != nil {
+						utils.LogError(logger, readErr, "failed to read form value from asset file",
+							zap.String("path", formPath),
+							zap.String("key", form.Key))
+						return nil, readErr
+					}
+					tc.HTTPReq.Form[i].Values[j] = string(valData)
+					logger.Debug("loaded form value from asset file",
+						zap.String("key", form.Key),
+						zap.String("path", formPath),
+						zap.Int("size", len(valData)))
+				}
+			}
+			// Clear Paths after restoring values so the multipart builder
+			// doesn't treat these asset paths as file uploads.
+			tc.HTTPReq.Form[i].Paths = nil
+		}
+	}
+
+	// Build multipart body if needed
+	contentType := tc.HTTPReq.Header["Content-Type"]
+	if strings.HasPrefix(contentType, "multipart/form-data") && len(tc.HTTPReq.Form) > 0 {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		logger.Debug("building multipart body",
+			zap.Int("form_fields", len(tc.HTTPReq.Form)),
+			zap.String("content_type", contentType),
+		)
+		for _, field := range tc.HTTPReq.Form {
+			logger.Debug("multipart field",
+				zap.String("key", field.Key),
+				zap.Int("values", len(field.Values)),
+				zap.Int("paths", len(field.Paths)),
+			)
+			for _, path := range field.Paths {
+				// Resolve relative paths against keployPath
+				resolvedPath := path
+				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
+					resolvedPath = filepath.Join(cfg.KeployPath, path)
+				}
+				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
+				file, ferr := os.Open(resolvedPath)
+				if ferr != nil {
+					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
+					return nil, ferr
+				}
+				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
+				if perr != nil {
+					file.Close()
+					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+					return nil, perr
+				}
+				if _, cerr := io.Copy(part, file); cerr != nil {
+					file.Close()
+					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", field.Key))
+					return nil, cerr
+				}
+				if cerr := file.Close(); cerr != nil {
+					utils.LogError(logger, cerr, "failed to close multipart file", zap.String("path", path))
+					return nil, cerr
+				}
+			}
+			for valueIndex, value := range field.Values {
+				logger.Debug("multipart field value",
+					zap.String("field", field.Key),
+					zap.Int("value_len", len(value)),
+					zap.Bool("looks_binary", looksBinary(value)),
+				)
+				isFileValue := false
+				fileName := ""
+				if len(field.Paths) == 0 && len(field.FileNames) > 0 {
+					isFileValue = true
+				} else if len(field.Paths) == 0 && len(field.FileNames) == 0 && looksBinary(value) {
+					isFileValue = true
+				}
+
+				if isFileValue {
+					if len(field.FileNames) > 0 && valueIndex < len(field.FileNames) {
+						fileName = field.FileNames[valueIndex]
+					}
+					if fileName == "" {
+						fileName = "upload.bin"
+					}
+					fileName = filepath.Base(fileName)
+					if fileName == "." || fileName == string(filepath.Separator) || fileName == "" {
+						fileName = "upload.bin"
+					}
+					part, perr := writer.CreateFormFile(field.Key, fileName)
+					if perr != nil {
+						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+						return nil, perr
+					}
+					if _, werr := part.Write([]byte(value)); werr != nil {
+						utils.LogError(logger, werr, "failed to write multipart file content", zap.String("field", field.Key))
+						return nil, werr
+					}
+					continue
+				}
+				if werr := writer.WriteField(field.Key, value); werr != nil {
+					utils.LogError(logger, werr, "failed to write multipart field", zap.String("field", field.Key))
+					return nil, werr
+				}
+			}
+		}
+		if cerr := writer.Close(); cerr != nil {
+			utils.LogError(logger, cerr, "failed to close multipart writer")
+			return nil, cerr
+		}
+		logger.Debug("multipart body built", zap.Int("body_len", body.Len()), zap.String("content_type", writer.FormDataContentType()))
+		reqBody = body.Bytes()
+		tc.HTTPReq.Header["Content-Type"] = writer.FormDataContentType()
+		delete(tc.HTTPReq.Header, "Content-Length")
+	}
+
 	if tc.HTTPReq.Header["Content-Encoding"] != "" {
 		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], reqBody)
 		if err != nil {
@@ -210,55 +421,20 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+	// Determine which URL/port to use for test execution.
+	// Priority logic (refined):
+	// 1. Check replaceWith against the ORIGINAL test case URL.
+	//    If a match is found, apply it.
+	//    CRITICAL: If the replacement VALUE itself contains a port, treat it as the final authority (skip AppPort/ConfigPort).
+	//    If the replacement value is just a host, continue to apply AppPort/ConfigPort logic.
+	// 2. ConfigHost (if provided) overrides host (ONLY if replaceWith didn't match)
+	// 3. AppPort (if present) overrides port
+	// 4. ConfigPort (if present) overrides port
 
-	// Determine which port to use for test execution
-	// Priority: 1. Config port (from flag/config file) 2. Test case AppPort 3. Original URL port (defaults to 80 for HTTP, 443 for HTTPS)
-	testURL := tc.HTTPReq.URL
-	parsedURL, parseErr := url.Parse(tc.HTTPReq.URL)
-	if parseErr != nil {
-		utils.LogError(logger, parseErr, "failed to parse test case URL")
-		return nil, parseErr
-	}
-
-	// Get the port from URL (returns empty string if not specified, meaning default 80/443)
-	urlPort := parsedURL.Port()
-
-	if configPort > 0 {
-		// Config port takes highest priority - use it for all test cases
-		host := parsedURL.Hostname()
-		parsedURL.Host = fmt.Sprintf("%s:%d", host, configPort)
-		testURL = parsedURL.String()
-
-		// Warn if config port differs from recorded app_port (may cause test failures)
-		if tc.AppPort > 0 && uint32(tc.AppPort) != configPort {
-			logger.Info("Using port from config/flag which differs from recorded app_port. This may cause test failures if the app behavior differs on different ports.",
-				zap.Uint32("config_port", configPort),
-				zap.Uint16("recorded_app_port", tc.AppPort),
-				zap.String("url", testURL))
-		} else {
-			logger.Debug("Using port from config/flag", zap.Uint32("port", configPort), zap.String("url", testURL))
-		}
-	} else if tc.AppPort > 0 {
-		// Use test case AppPort if no config port is provided
-		host := parsedURL.Hostname()
-		parsedURL.Host = fmt.Sprintf("%s:%d", host, tc.AppPort)
-		testURL = parsedURL.String()
-		logger.Debug("Using app_port from test case", zap.Uint16("app_port", tc.AppPort), zap.String("url", testURL))
-	} else {
-		// Neither configPort nor AppPort is set - use original URL
-		// If URL has no explicit port, Go's http.Client uses scheme defaults (80 for HTTP, 443 for HTTPS)
-		if urlPort == "" {
-			defaultPort := "80"
-			if parsedURL.Scheme == "https" {
-				defaultPort = "443"
-			}
-			logger.Debug("No port specified in config or test case. Using URL as-is with default port.",
-				zap.String("url", testURL),
-				zap.String("default_port", defaultPort))
-		} else {
-			logger.Debug("Using port from URL", zap.String("url", testURL), zap.String("port", urlPort))
-		}
+	// Step 1: Resolve the target URL/Authority using the helper
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
@@ -275,7 +451,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if tc.IsLast {
 		req.Header.Set("KEPLOY-LAST-TESTCASE", "true")
 	}
-	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]
@@ -285,16 +460,15 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Creating the client and disabling redirects
-	var client *http.Client
-
 	_, hasAcceptEncoding := req.Header["Accept-Encoding"]
 	disableCompression := !hasAcceptEncoding
 
+	var client *http.Client
 	keepAlive, ok := req.Header["Connection"]
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
 		logger.Debug("simulating request with conn:keep-alive")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: cfg.RequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -305,7 +479,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
 		logger.Debug("simulating request with conn:close")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: cfg.RequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -317,7 +491,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	} else {
 		logger.Debug("simulating request with conn:keep-alive (maxIdleConn=1)")
 		client = &http.Client{
-			Timeout: time.Second * time.Duration(apiTimeout),
+			Timeout: cfg.RequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -329,7 +503,28 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	httpResp, errHTTPReq := client.Do(req)
+	return &preparedHTTPRequest{
+		Request: req,
+		Client:  client,
+	}, nil
+}
+
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {
+	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
+
+	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+
+	// Prepare the HTTP request using the shared helper
+	cfg.RequestTimeout = time.Second * time.Duration(cfg.APITimeout)
+	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
+
+	// Execute the request
+	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
@@ -343,12 +538,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}()
 
+	// Read full response body
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
 	}
 
+	// Decompress if needed
 	if httpResp.Header.Get("Content-Encoding") != "" {
 		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
 		if err != nil {
@@ -359,7 +556,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	statusMessage := http.StatusText(httpResp.StatusCode)
 
-	resp = &models.HTTPResp{
+	resp := &models.HTTPResp{
 		StatusCode:    httpResp.StatusCode,
 		StatusMessage: statusMessage,
 		Body:          string(respBody),
@@ -367,23 +564,1231 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
+	templateValuesMu.Lock()
+	defer templateValuesMu.Unlock()
+
 	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
 
-		prev := make(map[string]interface{}, len(utils.TemplatizedValues))
-		for k, v := range utils.TemplatizedValues {
-			prev[k] = v
-		}
-
-		// Compare the current response with previous template values and update if needed
-		if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
-			updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
-			if updated {
-				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
-			}
+		updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
+		if updated {
+			logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
 		}
 	}
 	return resp, errHTTPReq
+}
+
+// SimulateHTTPStreaming sends an HTTP request and returns the streaming response with a reader.
+// The caller is responsible for reading from the response Reader and closing it when done.
+// Use CompareHTTPStream to compare the streaming response with expected values.
+func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*StreamingHTTPResponse, error) {
+	logger.Info("starting streaming test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+
+	// Calculate streaming timeout
+	APITimeout := ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
+	cfg.RequestTimeout = time.Second * time.Duration(APITimeout)
+
+	// Prepare the HTTP request using the shared helper
+	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
+
+	// Execute the request
+	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
+	if errHTTPReq != nil {
+		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		return nil, errHTTPReq
+	}
+
+	statusMessage := http.StatusText(httpResp.StatusCode)
+	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
+
+	logger.Debug("detected HTTP streaming response",
+		zap.String("testcase", tc.Name),
+		zap.String("content_type", httpResp.Header.Get("Content-Type")),
+		zap.String("stream_mode", string(streamCfg.Mode)))
+
+	// Wrap the response body with decompression if needed
+	streamReader := io.ReadCloser(httpResp.Body)
+	contentEncoding := strings.ToLower(strings.TrimSpace(httpResp.Header.Get("Content-Encoding")))
+	switch contentEncoding {
+	case "gzip":
+		gzipReader, gzErr := gzip.NewReader(httpResp.Body)
+		if gzErr != nil {
+			httpResp.Body.Close()
+			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
+			return nil, gzErr
+		}
+		streamReader = &gzipReadCloser{gzipReader: gzipReader, underlying: httpResp.Body}
+	case "br":
+		streamReader = &brotliReadCloser{reader: brotli.NewReader(httpResp.Body), underlying: httpResp.Body}
+	case "":
+		// no-op, use httpResp.Body directly
+	default:
+		logger.Debug("unsupported content-encoding for stream; returning raw response body",
+			zap.String("content_encoding", contentEncoding))
+	}
+
+	return &StreamingHTTPResponse{
+		StatusCode:    httpResp.StatusCode,
+		StatusMessage: statusMessage,
+		Header:        ToYamlHTTPHeader(httpResp.Header),
+		Reader:        streamReader,
+		StreamConfig:  streamCfg,
+	}, nil
+}
+
+// gzipReadCloser wraps a gzip reader and its underlying body to close both.
+type gzipReadCloser struct {
+	gzipReader *gzip.Reader
+	underlying io.ReadCloser
+}
+
+func (g *gzipReadCloser) Read(p []byte) (int, error) {
+	return g.gzipReader.Read(p)
+}
+
+func (g *gzipReadCloser) Close() error {
+	gzErr := g.gzipReader.Close()
+	underErr := g.underlying.Close()
+	if gzErr != nil {
+		return gzErr
+	}
+	return underErr
+}
+
+// brotliReadCloser wraps a brotli reader and its underlying body.
+type brotliReadCloser struct {
+	reader     io.Reader
+	underlying io.ReadCloser
+}
+
+func (b *brotliReadCloser) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (b *brotliReadCloser) Close() error {
+	return b.underlying.Close()
+}
+
+// DetectHTTPStreamConfig detects the streaming mode of an HTTP response based on content type and other factors.
+func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStreamConfig {
+	contentType := ""
+	if resp != nil {
+		contentType = resp.Header.Get("Content-Type")
+	}
+	if contentType == "" && tc != nil {
+		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
+	}
+
+	mediaType := ""
+	params := map[string]string{}
+	if contentType != "" {
+		parsedType, parsedParams, err := mime.ParseMediaType(contentType)
+		if err == nil {
+			mediaType = strings.ToLower(strings.TrimSpace(parsedType))
+			params = parsedParams
+		} else {
+			mediaType = strings.ToLower(strings.TrimSpace(contentType))
+		}
+	}
+
+	switch mediaType {
+	case "text/event-stream":
+		if isSSETestCase(tc, resp) {
+			return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
+		}
+		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
+	case "application/x-ndjson", "application/ndjson":
+		return HTTPStreamConfig{Mode: HTTPStreamModeNDJSON}
+	case "multipart/x-mixed-replace", "multipart/mixed":
+		boundary := strings.TrimSpace(params["boundary"])
+		if boundary == "" && tc != nil {
+			boundary = boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type"))
+		}
+		if boundary != "" {
+			return HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: boundary}
+		}
+	case "text/plain":
+		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
+			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
+		}
+		if isLikelyStreamingHTTPResponse(tc, resp) {
+			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
+		}
+	case "application/octet-stream":
+		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
+			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
+		}
+		if isLikelyStreamingHTTPResponse(tc, resp) {
+			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
+		}
+	}
+
+	return HTTPStreamConfig{Mode: HTTPStreamModeNone}
+}
+
+// IsHTTPStreamingTestCase returns true if the testcase response is identified as a stream format
+// supported by replay-time incremental validators.
+func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
+	if tc == nil {
+		return false
+	}
+	return DetectHTTPStreamConfig(tc, nil).Mode != HTTPStreamModeNone
+}
+
+// CompareHTTPStream compares an expected HTTP response with a streaming response.
+// It returns whether they match, the captured body content, mismatch details (if any), and any error.
+func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	switch cfg.Mode {
+	case HTTPStreamModeSSE:
+		return compareSSEStream(expectedResp, stream, jsonNoiseKeys, logger)
+	case HTTPStreamModeNDJSON:
+		return compareNDJSONStream(expectedResp, stream, jsonNoiseKeys, logger)
+	case HTTPStreamModeMultipart:
+		return compareMultipartStream(expectedResp, stream, cfg.Boundary, jsonNoiseKeys, logger)
+	case HTTPStreamModePlainText:
+		return comparePlainTextStream(expectedResp, stream, logger)
+	case HTTPStreamModeBinary:
+		return compareBinaryStream(expectedResp, stream, logger)
+	default:
+		return false, "", nil, fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
+	}
+}
+
+func ComputeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
+	baseTimeout := defaultSeconds
+	if baseTimeout == 0 {
+		baseTimeout = 10
+	}
+
+	if tc == nil {
+		return baseTimeout
+	}
+
+	reqTs := tc.HTTPReq.Timestamp
+	respTs := tc.HTTPResp.Timestamp
+	if reqTs.IsZero() || respTs.IsZero() {
+		return baseTimeout
+	}
+
+	diff := respTs.Sub(reqTs)
+	if diff < 0 {
+		diff = -diff
+	}
+
+	timeout := diff + 10*time.Second
+	if timeout < 10*time.Second {
+		timeout = 10 * time.Second
+	}
+	streamTimeoutSeconds := uint64(math.Ceil(timeout.Seconds()))
+	if streamTimeoutSeconds < 10 {
+		streamTimeoutSeconds = 10
+	}
+	if baseTimeout > streamTimeoutSeconds {
+		return baseTimeout
+	}
+	return streamTimeoutSeconds
+}
+
+// CollectStreamingGlobalNoiseKeys extracts noise keys from global body noise and test case noise configurations
+// that should be ignored during streaming response comparison.
+func CollectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNoise map[string][]string) map[string]struct{} {
+	keys := make(map[string]struct{})
+	add := func(candidate string) {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			return
+		}
+		if strings.HasPrefix(candidate, "body.") {
+			candidate = strings.TrimPrefix(candidate, "body.")
+		}
+		if strings.Contains(candidate, ".") {
+			return
+		}
+		keys[candidate] = struct{}{}
+	}
+
+	for k := range globalBodyNoise {
+		add(k)
+	}
+	for k := range tcNoise {
+		add(k)
+	}
+	return keys
+}
+
+func isSSETestCase(tc *models.TestCase, resp *http.Response) bool {
+	if tc != nil {
+		respContentType := getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
+		if hasSSEContentType(respContentType) {
+			return true
+		}
+		acceptHeader := getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept")
+		if hasSSEContentType(acceptHeader) {
+			return true
+		}
+	}
+	if resp != nil && hasSSEContentType(resp.Header.Get("Content-Type")) {
+		return true
+	}
+	return false
+}
+
+func getHeaderValueCaseInsensitive(headers map[string]string, key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for k, v := range headers {
+		if strings.ToLower(strings.TrimSpace(k)) == key {
+			return v
+		}
+	}
+	return ""
+}
+
+func hasSSEContentType(value string) bool {
+	return strings.Contains(strings.ToLower(value), "text/event-stream")
+}
+
+func boundaryFromContentTypeHeader(contentType string) string {
+	if contentType == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(params["boundary"])
+}
+
+func isLikelyStreamingHTTPResponse(tc *models.TestCase, resp *http.Response) bool {
+	if resp != nil {
+		for _, te := range resp.TransferEncoding {
+			if strings.EqualFold(strings.TrimSpace(te), "chunked") {
+				return true
+			}
+		}
+		if strings.Contains(strings.ToLower(resp.Header.Get("Transfer-Encoding")), "chunked") {
+			return true
+		}
+		if resp.ContentLength == -1 {
+			return true
+		}
+	}
+
+	if tc != nil {
+		respTE := strings.ToLower(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Transfer-Encoding"))
+		if strings.Contains(respTE, "chunked") {
+			return true
+		}
+	}
+
+	return false
+}
+
+type expectedSSEFrame struct {
+	fields []sseField
+	raw    string
+}
+
+func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	expectedQueue := extractExpectedSSEQueue(expectedResp)
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	scanner.Split(splitSSEFrames)
+
+	for scanner.Scan() {
+		rawFrame := normalizeLineEndings(scanner.Text())
+		frame := strings.Trim(rawFrame, "\n")
+		if strings.TrimSpace(frame) == "" {
+			continue
+		}
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_frames", len(expectedQueue)))
+			break
+		}
+
+		actualQueue = append(actualQueue, frame)
+		expectedFrame := expectedQueue[nextExpected]
+		match, reason := compareSSEFields(expectedFrame.fields, parseSSEFrame(frame), jsonNoiseKeys, logger)
+		if !match {
+			logger.Debug("SSE frame mismatch",
+				zap.Int("frame_index", nextExpected),
+				zap.String("reason", reason),
+				zap.String("expected_frame", expectedFrame.raw),
+				zap.String("actual_frame", frame))
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expectedFrame.raw,
+				ActualFrame:   frame,
+				Reason:        reason,
+			}
+			return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Debug("all expected SSE frames matched; closing stream capture early to avoid waiting for extra stream events",
+				zap.Int("matched_frames", nextExpected))
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, strings.Join(actualQueue, "\n\n"), nil, err
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Debug("SSE stream ended before all expected frames were received",
+			zap.Int("expected_frames", len(expectedQueue)),
+			zap.Int("matched_frames", nextExpected))
+		// Build expected frames that were not received
+		var missingFrames []string
+		for i := nextExpected; i < len(expectedQueue); i++ {
+			missingFrames = append(missingFrames, expectedQueue[i].raw)
+		}
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: strings.Join(missingFrames, "\n\n"),
+			ActualFrame:   "(stream ended - no more frames)",
+			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n\n"), mismatchInfo, nil
+	}
+
+	return true, strings.Join(actualQueue, "\n\n"), nil, nil
+}
+
+func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+
+	for scanner.Scan() {
+		line := canonicalizeNDJSONLine(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Debug("received additional NDJSON data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_frames", len(expectedQueue)))
+			break
+		}
+
+		actualQueue = append(actualQueue, line)
+		expected := expectedQueue[nextExpected]
+		ok, cmpErr := compareJSONTextWithNoise(expected, line, jsonNoiseKeys)
+		if cmpErr != nil || !ok {
+			reason := "json mismatch"
+			if cmpErr != nil {
+				reason = cmpErr.Error()
+			}
+			logger.Debug("NDJSON stream mismatch",
+				zap.Int("frame_index", nextExpected),
+				zap.String("reason", reason),
+				zap.String("expected_frame", expected),
+				zap.String("actual_frame", line))
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expected,
+				ActualFrame:   line,
+				Reason:        reason,
+			}
+			return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Debug("all expected NDJSON frames matched; closing stream capture early to avoid waiting for extra stream events",
+				zap.Int("matched_frames", nextExpected))
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, strings.Join(actualQueue, "\n"), nil, err
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Debug("NDJSON stream ended before all expected frames were received",
+			zap.Int("expected_frames", len(expectedQueue)),
+			zap.Int("matched_frames", nextExpected))
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: expectedQueue[nextExpected],
+			ActualFrame:   "(stream ended - no more frames)",
+			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
+	}
+
+	return true, strings.Join(actualQueue, "\n"), nil, nil
+}
+
+func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+
+	for scanner.Scan() {
+		line := canonicalizePlainTextLine(scanner.Text())
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Debug("received additional plain-text stream data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_frames", len(expectedQueue)))
+			break
+		}
+
+		actualQueue = append(actualQueue, line)
+		expected := expectedQueue[nextExpected]
+		if len(line) != len(expected) {
+			logger.Debug("plain-text stream mismatch",
+				zap.Int("frame_index", nextExpected),
+				zap.Int("expected_size", len(expected)),
+				zap.Int("actual_size", len(line)))
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expected,
+				ActualFrame:   line,
+				Reason:        fmt.Sprintf("size mismatch: expected %d bytes, got %d bytes", len(expected), len(line)),
+			}
+			return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Debug("all expected plain-text frames matched; closing stream capture early to avoid waiting for extra stream events",
+				zap.Int("matched_frames", nextExpected))
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, strings.Join(actualQueue, "\n"), nil, err
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Debug("plain-text stream ended before all expected frames were received",
+			zap.Int("expected_frames", len(expectedQueue)),
+			zap.Int("matched_frames", nextExpected))
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: expectedQueue[nextExpected],
+			ActualFrame:   "(stream ended - no more frames)",
+			Reason:        fmt.Sprintf("expected %d frames but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
+	}
+
+	return true, strings.Join(actualQueue, "\n"), nil, nil
+}
+
+func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	expectedSize := len([]byte(expectedResp.Body))
+	if structuredSize, ok := expectedStructuredRawSize(expectedResp.StreamBody); ok {
+		expectedSize = structuredSize
+	}
+	actualSize := 0
+	buffer := make([]byte, 32*1024)
+
+	for {
+		n, err := stream.Read(buffer)
+		if n > 0 {
+			actualSize += n
+			if actualSize >= expectedSize {
+				if actualSize > expectedSize {
+					logger.Debug("received additional binary stream data after expected size was matched; closing stream capture",
+						zap.Int("expected_size", expectedSize),
+						zap.Int("actual_size", actualSize))
+				}
+				break
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return false, strconv.Itoa(actualSize), nil, err
+		}
+	}
+
+	if actualSize != expectedSize {
+		logger.Debug("binary stream size mismatch",
+			zap.Int("expected_size", expectedSize),
+			zap.Int("actual_size", actualSize))
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    0,
+			ExpectedFrame: fmt.Sprintf("%d bytes", expectedSize),
+			ActualFrame:   fmt.Sprintf("%d bytes", actualSize),
+			Reason:        fmt.Sprintf("size mismatch: expected %d bytes, got %d bytes", expectedSize, actualSize),
+		}
+		return false, strconv.Itoa(actualSize), mismatchInfo, nil
+	}
+
+	return true, strconv.Itoa(actualSize), nil, nil
+}
+
+func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
+	if len(expectedResp.StreamBody) == 0 {
+		return nil
+	}
+	queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
+	for _, chunk := range expectedResp.StreamBody {
+		if len(chunk.Data) == 0 {
+			continue
+		}
+		fields := make([]sseField, 0, len(chunk.Data))
+		lines := make([]string, 0, len(chunk.Data))
+		for _, dataField := range chunk.Data {
+			key := strings.TrimSpace(dataField.Key)
+			if key == "" {
+				continue
+			}
+			if strings.EqualFold(key, "comment") {
+				fields = append(fields, sseField{
+					key:      ":",
+					value:    dataField.Value,
+					hasValue: true,
+					comment:  true,
+				})
+				lines = append(lines, ":"+dataField.Value)
+				continue
+			}
+
+			lowerKey := strings.ToLower(key)
+			fields = append(fields, sseField{
+				key:      lowerKey,
+				value:    dataField.Value,
+				hasValue: true,
+			})
+			lines = append(lines, lowerKey+":"+dataField.Value)
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		queue = append(queue, expectedSSEFrame{
+			fields: fields,
+			raw:    strings.Join(lines, "\n"),
+		})
+	}
+	return queue
+}
+
+func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
+	if len(expectedResp.StreamBody) == 0 {
+		return nil
+	}
+	queue := make([]string, 0, len(expectedResp.StreamBody))
+	for _, chunk := range expectedResp.StreamBody {
+		raw, ok := streamChunkFieldValue(chunk, "raw")
+		if !ok {
+			continue
+		}
+		raw = canonicalizer(raw)
+		if ignoreEmpty && raw == "" {
+			continue
+		}
+		queue = append(queue, raw)
+	}
+	return queue
+}
+
+func expectedStructuredRawSize(chunks []models.HTTPStreamChunk) (int, bool) {
+	if len(chunks) == 0 {
+		return 0, false
+	}
+
+	total := 0
+	found := false
+	for _, chunk := range chunks {
+		raw, ok := streamChunkFieldValue(chunk, "raw")
+		if !ok {
+			continue
+		}
+		total += len([]byte(raw))
+		found = true
+	}
+
+	return total, found
+}
+
+func streamChunkFieldValue(chunk models.HTTPStreamChunk, key string) (string, bool) {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, field := range chunk.Data {
+		if strings.ToLower(strings.TrimSpace(field.Key)) == key {
+			return field.Value, true
+		}
+	}
+	return "", false
+}
+
+type sseField struct {
+	key      string
+	value    string
+	hasValue bool
+	comment  bool
+}
+
+func parseSSEFrame(frame string) []sseField {
+	frame = normalizeLineEndings(frame)
+	frame = strings.Trim(frame, "\n")
+	if strings.TrimSpace(frame) == "" {
+		return nil
+	}
+
+	lines := strings.Split(frame, "\n")
+	fields := make([]sseField, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, ":") {
+			fields = append(fields, sseField{
+				key:      ":",
+				value:    strings.TrimPrefix(line, ":"),
+				hasValue: true,
+				comment:  true,
+			})
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			fields = append(fields, sseField{
+				key:      strings.ToLower(strings.TrimSpace(line)),
+				value:    "",
+				hasValue: false,
+			})
+			continue
+		}
+
+		if strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+		fields = append(fields, sseField{
+			key:      strings.ToLower(strings.TrimSpace(key)),
+			value:    value,
+			hasValue: true,
+		})
+	}
+	return fields
+}
+
+func compareSSEFrame(expectedFrame, actualFrame string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string) {
+	return compareSSEFields(parseSSEFrame(expectedFrame), parseSSEFrame(actualFrame), jsonNoiseKeys, logger)
+}
+
+func compareSSEFields(expectedFields, actualFields []sseField, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string) {
+	expectedFields = mergeConsecutiveSSEDataFields(expectedFields)
+	actualFields = mergeConsecutiveSSEDataFields(actualFields)
+
+	if len(expectedFields) != len(actualFields) {
+		return false, "field-count mismatch"
+	}
+
+	for i := range expectedFields {
+		e := expectedFields[i]
+		a := actualFields[i]
+
+		if e.comment {
+			if !a.comment {
+				return false, "comment-position mismatch"
+			}
+			if len(strings.TrimSpace(e.value)) != len(strings.TrimSpace(a.value)) {
+				logger.Debug("SSE comment size differs (ignored)",
+					zap.Int("frame_field_index", i),
+					zap.Int("expected_size", len(strings.TrimSpace(e.value))),
+					zap.Int("actual_size", len(strings.TrimSpace(a.value))))
+			}
+			continue
+		}
+
+		if e.key != a.key {
+			return false, "field-key-order mismatch"
+		}
+
+		if e.hasValue != a.hasValue {
+			return false, "field-value-presence mismatch"
+		}
+
+		if !e.hasValue {
+			continue
+		}
+
+		if e.key == "data" {
+			eVal := strings.TrimSpace(e.value)
+			aVal := strings.TrimSpace(a.value)
+			expJSON := json.Valid([]byte(eVal))
+			actJSON := json.Valid([]byte(aVal))
+			if expJSON || actJSON {
+				if !(expJSON && actJSON) {
+					return false, "data-json-type mismatch"
+				}
+				ok, err := compareJSONTextWithNoise(eVal, aVal, jsonNoiseKeys)
+				if err != nil {
+					return false, "data-json-parse-error"
+				}
+				if !ok {
+					return false, "data-json-mismatch"
+				}
+				continue
+			}
+
+			if detectScalarType(eVal) != detectScalarType(aVal) {
+				return false, "data-type mismatch"
+			}
+			if len(eVal) != len(aVal) {
+				return false, "data-size mismatch"
+			}
+			continue
+		}
+
+		eType := detectScalarType(strings.TrimSpace(e.value))
+		aType := detectScalarType(strings.TrimSpace(a.value))
+		if eType != aType {
+			return false, "field-type mismatch"
+		}
+	}
+
+	return true, ""
+}
+
+func mergeConsecutiveSSEDataFields(fields []sseField) []sseField {
+	if len(fields) == 0 {
+		return fields
+	}
+
+	merged := make([]sseField, 0, len(fields))
+	for _, field := range fields {
+		if !field.comment && strings.EqualFold(field.key, "data") {
+			current := field
+			if !current.hasValue {
+				current.hasValue = true
+				current.value = ""
+			}
+
+			if len(merged) > 0 {
+				last := &merged[len(merged)-1]
+				if !last.comment && strings.EqualFold(last.key, "data") && last.hasValue {
+					last.value = last.value + "\n" + current.value
+					continue
+				}
+			}
+			merged = append(merged, current)
+			continue
+		}
+
+		merged = append(merged, field)
+	}
+
+	return merged
+}
+
+func detectScalarType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "empty"
+	}
+
+	if strings.EqualFold(value, "null") {
+		return "null"
+	}
+	if strings.EqualFold(value, "true") || strings.EqualFold(value, "false") {
+		return "bool"
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return "number"
+	}
+	return "string"
+}
+
+func compareJSONTextWithNoise(expected, actual string, jsonNoiseKeys map[string]struct{}) (bool, error) {
+	var exp any
+	var act any
+
+	if err := json.Unmarshal([]byte(expected), &exp); err != nil {
+		return false, err
+	}
+	if err := json.Unmarshal([]byte(actual), &act); err != nil {
+		return false, err
+	}
+
+	exp = removeGlobalNoiseKeys(exp, jsonNoiseKeys)
+	act = removeGlobalNoiseKeys(act, jsonNoiseKeys)
+
+	return reflect.DeepEqual(exp, act), nil
+}
+
+func removeGlobalNoiseKeys(node any, jsonNoiseKeys map[string]struct{}) any {
+	switch v := node.(type) {
+	case map[string]any:
+		filtered := make(map[string]any, len(v))
+		for k, child := range v {
+			lk := strings.ToLower(strings.TrimSpace(k))
+			if _, ignored := jsonNoiseKeys[lk]; ignored {
+				continue
+			}
+			filtered[k] = removeGlobalNoiseKeys(child, jsonNoiseKeys)
+		}
+		return filtered
+	case []any:
+		arr := make([]any, 0, len(v))
+		for _, child := range v {
+			arr = append(arr, removeGlobalNoiseKeys(child, jsonNoiseKeys))
+		}
+		return arr
+	default:
+		return node
+	}
+}
+
+func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	if strings.TrimSpace(boundary) == "" {
+		return false, "", nil, fmt.Errorf("missing multipart boundary for stream comparison")
+	}
+
+	expectedBody := expectedResp.Body
+	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), boundary)
+	if err != nil {
+		return false, "", nil, err
+	}
+
+	actualQueue := make([]string, 0, len(expectedQueue))
+	nextExpected := 0
+	reader := multipart.NewReader(stream, boundary)
+
+	for {
+		part, partErr := reader.NextPart()
+		if partErr == io.EOF {
+			break
+		}
+		if partErr != nil {
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partErr
+		}
+
+		actualPart, partReadErr := readMultipartPart(part)
+		_ = part.Close()
+		if partReadErr != nil {
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partReadErr
+		}
+
+		if nextExpected >= len(expectedQueue) {
+			logger.Debug("received additional multipart stream data after expected stream was fully matched; closing stream capture",
+				zap.Int("expected_parts", len(expectedQueue)))
+			break
+		}
+
+		expected := expectedQueue[nextExpected]
+		actualQueue = append(actualQueue, actualPart.describe())
+		ok, reason := compareMultipartPart(expected, actualPart, jsonNoiseKeys)
+		if !ok {
+			logger.Debug("multipart stream mismatch",
+				zap.Int("part_index", nextExpected),
+				zap.String("reason", reason),
+				zap.String("expected_part", expected.describe()),
+				zap.String("actual_part", actualPart.describe()))
+			mismatchInfo := &StreamMismatchInfo{
+				FrameIndex:    nextExpected,
+				ExpectedFrame: expected.describe(),
+				ActualFrame:   actualPart.describe(),
+				Reason:        reason,
+			}
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), mismatchInfo, nil
+		}
+
+		nextExpected++
+		if nextExpected == len(expectedQueue) {
+			logger.Debug("all expected multipart parts matched; closing stream capture early to avoid waiting for extra stream parts",
+				zap.Int("matched_parts", nextExpected))
+			break
+		}
+	}
+
+	if nextExpected < len(expectedQueue) {
+		logger.Debug("multipart stream ended before all expected parts were received",
+			zap.Int("expected_parts", len(expectedQueue)),
+			zap.Int("matched_parts", nextExpected))
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    nextExpected,
+			ExpectedFrame: expectedQueue[nextExpected].describe(),
+			ActualFrame:   "(stream ended - no more parts)",
+			Reason:        fmt.Sprintf("expected %d parts but only received %d", len(expectedQueue), nextExpected),
+		}
+		return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), mismatchInfo, nil
+	}
+
+	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, nil
+}
+
+type multipartPartPayload struct {
+	contentType string
+	body        []byte
+}
+
+func (m multipartPartPayload) describe() string {
+	return fmt.Sprintf("content-type:%s size:%d", m.contentType, len(m.body))
+}
+
+func parseMultipartQueue(reader io.Reader, boundary string) ([]multipartPartPayload, error) {
+	if strings.TrimSpace(boundary) == "" {
+		return nil, fmt.Errorf("multipart boundary is empty")
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	queue, parseErr := parseMultipartQueueBytes(data, boundary)
+	if parseErr == nil {
+		return queue, nil
+	}
+
+	closingBoundary := []byte("--" + boundary + "--")
+	if !bytes.Contains(data, closingBoundary) {
+		patchedData := append([]byte{}, data...)
+		patchedData = append(patchedData, []byte("\r\n--"+boundary+"--\r\n")...)
+		if patchedQueue, patchedErr := parseMultipartQueueBytes(patchedData, boundary); patchedErr == nil {
+			return patchedQueue, nil
+		}
+	}
+
+	return nil, parseErr
+}
+
+func parseMultipartQueueBytes(data []byte, boundary string) ([]multipartPartPayload, error) {
+	mr := multipart.NewReader(bytes.NewReader(data), boundary)
+	queue := make([]multipartPartPayload, 0)
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		payload, readErr := readMultipartPart(part)
+		_ = part.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if payload.contentType == "" && len(payload.body) == 0 {
+			continue
+		}
+		queue = append(queue, payload)
+	}
+
+	return queue, nil
+}
+
+func readMultipartPart(part *multipart.Part) (multipartPartPayload, error) {
+	bodyBytes, err := io.ReadAll(part)
+	if err != nil {
+		return multipartPartPayload{}, err
+	}
+
+	contentType := strings.ToLower(strings.TrimSpace(part.Header.Get("Content-Type")))
+	if parsedType, _, err := mime.ParseMediaType(contentType); err == nil {
+		contentType = strings.ToLower(strings.TrimSpace(parsedType))
+	}
+
+	if isJSONContentType(contentType) {
+		bodyBytes = []byte(strings.TrimSpace(string(bodyBytes)))
+	} else if strings.HasPrefix(contentType, "text/") || contentType == "application/xml" || contentType == "application/x-ndjson" || contentType == "application/ndjson" {
+		normalized := normalizeLineEndings(string(bodyBytes))
+		normalized = strings.TrimSuffix(normalized, "\n")
+		bodyBytes = []byte(normalized)
+	}
+
+	return multipartPartPayload{
+		contentType: contentType,
+		body:        append([]byte(nil), bodyBytes...),
+	}, nil
+}
+
+func compareMultipartPart(expected multipartPartPayload, actual multipartPartPayload, jsonNoiseKeys map[string]struct{}) (bool, string) {
+	if expected.contentType != actual.contentType {
+		return false, "content-type mismatch"
+	}
+
+	if isJSONContentType(expected.contentType) {
+		ok, err := compareJSONTextWithNoise(strings.TrimSpace(string(expected.body)), strings.TrimSpace(string(actual.body)), jsonNoiseKeys)
+		if err != nil {
+			return false, err.Error()
+		}
+		if !ok {
+			return false, "json body mismatch"
+		}
+		return true, ""
+	}
+
+	if len(expected.body) != len(actual.body) {
+		return false, "body-size mismatch"
+	}
+	return true, ""
+}
+
+func isJSONContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	return contentType == "application/json" || strings.HasSuffix(contentType, "+json") || contentType == "application/x-ndjson" || contentType == "application/ndjson"
+}
+
+func canonicalizeNDJSONLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+
+	var parsed interface{}
+	if err := json.NewDecoder(strings.NewReader(line)).Decode(&parsed); err == nil {
+		if marshaled, err := json.Marshal(parsed); err == nil {
+			return string(marshaled)
+		}
+	}
+
+	return line
+}
+
+func canonicalizePlainTextLine(line string) string {
+	return strings.TrimRight(normalizeLineEndings(line), "\n")
+}
+
+func splitSSEFrames(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+
+	doubleLFIdx := bytes.Index(data, []byte("\n\n"))
+	doubleCRLFIdx := bytes.Index(data, []byte("\r\n\r\n"))
+
+	switch {
+	case doubleLFIdx == -1 && doubleCRLFIdx == -1:
+		if atEOF {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	case doubleLFIdx == -1:
+		return doubleCRLFIdx + len("\r\n\r\n"), data[:doubleCRLFIdx], nil
+	case doubleCRLFIdx == -1:
+		return doubleLFIdx + len("\n\n"), data[:doubleLFIdx], nil
+	case doubleLFIdx < doubleCRLFIdx:
+		return doubleLFIdx + len("\n\n"), data[:doubleLFIdx], nil
+	default:
+		return doubleCRLFIdx + len("\r\n\r\n"), data[:doubleCRLFIdx], nil
+	}
+}
+
+func canonicalizeSSEFrame(frame string) string {
+	frame = normalizeLineEndings(frame)
+	frame = strings.Trim(frame, "\n")
+	if strings.TrimSpace(frame) == "" {
+		return ""
+	}
+
+	lines := strings.Split(frame, "\n")
+	canonicalLines := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, ":") {
+			comment := strings.TrimSpace(strings.TrimPrefix(line, ":"))
+			canonicalLines = append(canonicalLines, ":"+comment)
+			continue
+		}
+
+		key, value, hasColon := strings.Cut(line, ":")
+		if !hasColon {
+			canonicalLines = append(canonicalLines, strings.ToLower(strings.TrimSpace(line)))
+			continue
+		}
+
+		key = strings.ToLower(strings.TrimSpace(key))
+		if strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+
+		switch key {
+		case "data":
+			value = canonicalizeSSEDataValue(value)
+		case "event", "id", "retry":
+			value = strings.TrimSpace(value)
+		default:
+			value = strings.TrimSpace(value)
+		}
+
+		canonicalLines = append(canonicalLines, key+":"+value)
+	}
+
+	return strings.Join(canonicalLines, "\n")
+}
+
+func canonicalizeSSEDataValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+
+	var parsed interface{}
+	if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+		marshaled, err := json.Marshal(parsed)
+		if err == nil {
+			return string(marshaled)
+		}
+	}
+
+	if strings.Contains(trimmed, ";base64,") {
+		prefix, encoded, ok := strings.Cut(trimmed, ",")
+		if ok {
+			if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
+				return prefix + "," + base64.StdEncoding.EncodeToString(decoded)
+			}
+			if decoded, err := base64.RawStdEncoding.DecodeString(encoded); err == nil {
+				return prefix + "," + base64.StdEncoding.EncodeToString(decoded)
+			}
+		}
+	}
+
+	return trimmed
+}
+
+func normalizeLineEndings(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return value
+}
+
+func looksBinary(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateTemplateValuesFromHTTPResp checks the HTTP response body and the previous templatized response body
@@ -977,37 +2382,41 @@ func FilterConfigMocksMapping(ctx context.Context, logger *zap.Logger, m []*mode
 }
 
 func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
-	// Early exit if no time filters
-	if afterTime.Equal(time.Time{}) || beforeTime.Equal(time.Time{}) {
-		return m, nil
+
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
 	}
 
-	// OPTIMIZATION: Pre-allocate slices based on expected distribution
-	// Assuming most mocks will be filtered (within time range)
-	filteredMocks := make([]*models.Mock, 0, len(m))
-	unfilteredMocks := make([]*models.Mock, 0, len(m)/4) // Expect ~25% unfiltered
+	if beforeTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
 
 	isNonKeploy := false
 
 	for _, mock := range m {
-		// OPTIMIZATION: Removed deep copy - using thread-safe SetIsFiltered method
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
+		p := mock.DeepCopy()
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		if mock.Spec.ReqTimestampMock.Equal(time.Time{}) || mock.Spec.ResTimestampMock.Equal(time.Time{}) {
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
 
-		if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
-		mock.TestModeInfo.SetIsFiltered(false)
-		unfilteredMocks = append(unfilteredMocks, mock)
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
@@ -1016,35 +2425,40 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 }
 
 func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string) ([]*models.Mock, []*models.Mock) {
-	// OPTIMIZATION: Pre-allocate slices
-	filteredMocks := make([]*models.Mock, 0, len(mocksPresentInMapping))
-	unfilteredMocks := make([]*models.Mock, 0, len(m))
-
-	// OPTIMIZATION: Build a set for O(1) lookup instead of O(n) linear search
-	mappingSet := make(map[string]struct{}, len(mocksPresentInMapping))
-	for _, name := range mocksPresentInMapping {
-		mappingSet[name] = struct{}{}
-	}
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
 
 	isNonKeploy := false
 
 	for _, mock := range m {
-		// OPTIMIZATION: Removed deep copy (same rationale as filterByTimeStamp)
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+
+		p := mock.DeepCopy()
+
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
 
-		if _, found := mappingSet[mock.Name]; found {
-			mock.TestModeInfo.SetIsFiltered(true)
-			filteredMocks = append(filteredMocks, mock)
-		} else {
-			mock.TestModeInfo.SetIsFiltered(false)
-			unfilteredMocks = append(unfilteredMocks, mock)
+		matched := false
+		for _, name := range mocksPresentInMapping {
+			if p.Name == name {
+				p.TestModeInfo.IsFiltered = true
+				filteredMocks = append(filteredMocks, p)
+				matched = true
+				break
+			}
 		}
+
+		if matched {
+			continue
+		}
+
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
 	}
 
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+		return filteredMocks, unfilteredMocks
 	}
 
 	return filteredMocks, unfilteredMocks
@@ -1269,4 +2683,180 @@ func LooksLikeJSON(s string) bool {
 	}
 	return (strings.HasPrefix(s, "{") && strings.Contains(s, "}")) ||
 		(strings.HasPrefix(s, "[") && strings.Contains(s, "]"))
+}
+
+// hasExplicitPort checks if the given host string (or host:port)
+// has an explicit port defined. It handles IPv6 addresses (e.g. [::1]:8080) correctly.
+func hasExplicitPort(hostStr string) bool {
+	// Basic check: if no colon, definitely no port (unless it's a bare IPv6, but that doesn't have a port either)
+	if !strings.Contains(hostStr, ":") {
+		return false
+	}
+
+	// Attempt to split host/port
+	// net.SplitHostPort handles IPv6 addresses enclosed in brackets [::1]:8080
+	_, port, err := net.SplitHostPort(hostStr)
+	if err != nil {
+		return false
+	}
+
+	// If a port is found, verify it is numeric
+	if port != "" {
+		if _, err := strconv.Atoi(port); err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
+// by applying replacement logic and precedence rules.
+//
+// Priority logic:
+//  1. Check urlReplacements against originalTarget.
+//     If match found, apply it.
+//     CRITICAL: If replacement has explicit port, it is FINAL (skip overrides).
+//  2. ConfigHost (if provided) overrides host (ONLY if replacement didn't match).
+//  3. AppPort (if present) overrides port.
+//  4. ConfigPort (if present) overrides port (takes precedence over AppPort).
+func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
+	finalTarget := originalTarget
+	replacementHasPort := false
+	replacementMatched := false
+
+	// Step 1: Check replaceWith
+	if len(urlReplacements) > 0 {
+		for substr, replacement := range urlReplacements {
+			if strings.Contains(finalTarget, substr) {
+				replacementMatched = true
+				finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
+
+				// Check if the replacement value explicitly defines a port.
+				// Heuristic: check if the string contains a port using `hasExplicitPort`.
+				// For HTTP/HTTPS, we usually ignore the scheme part for port detection,
+				// but `hasExplicitPort` expects "host:port".
+				checkStr := replacement
+				if isHTTP {
+					// Strip scheme for port check if present
+					if strings.HasPrefix(replacement, "http://") {
+						checkStr = strings.TrimPrefix(replacement, "http://")
+					} else if strings.HasPrefix(replacement, "https://") {
+						checkStr = strings.TrimPrefix(replacement, "https://")
+					}
+				}
+
+				if hasExplicitPort(checkStr) {
+					replacementHasPort = true
+				}
+
+				logger.Debug("Applied replaceWith substitution",
+					zap.String("find", substr),
+					zap.String("replace", replacement),
+					zap.String("result_target", finalTarget),
+					zap.Bool("replacement_has_port", replacementHasPort))
+				break
+			}
+		}
+	}
+
+	// If replacement defined a port, we are done
+	if replacementHasPort {
+		return finalTarget, nil
+	}
+
+	// Step 2a: ConfigHost override (if no replacement match)
+	if !replacementMatched && configHost != "" {
+		var err error
+		if isHTTP {
+			finalTarget, err = utils.ReplaceHost(finalTarget, configHost)
+		} else {
+			finalTarget, err = utils.ReplaceGrpcHost(finalTarget, configHost)
+		}
+		if err != nil {
+			utils.LogError(logger, err, "failed to replace host with config host")
+			return "", err
+		}
+		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("target", finalTarget))
+	}
+
+	// Step 2b: Port overrides (AppPort / ConfigPort)
+	// We need to parse valid host/port from finalTarget.
+	// For HTTP, it's a URL. For gRPC, it's usually "host:port" or just "host".
+
+	var host string
+	var port string
+	var scheme string // only for HTTP
+
+	if isHTTP {
+		parsedURL, parseErr := url.Parse(finalTarget)
+		if parseErr != nil {
+			utils.LogError(logger, parseErr, "failed to parse test case URL")
+			return "", parseErr
+		}
+		host = parsedURL.Hostname()
+		port = parsedURL.Port()
+		scheme = parsedURL.Scheme
+		if port == "" {
+			// Set default port if missing
+			if scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+			logger.Debug("URL has no explicit port, using scheme default",
+				zap.String("target", finalTarget), zap.String("default_port", port))
+		}
+	} else {
+		// gRPC Authority parsing
+		host = finalTarget
+		if colonIdx := strings.LastIndex(finalTarget, ":"); colonIdx != -1 {
+			// Check if it's not part of IPv6 brackets ??
+			// safest is SplitHostPort if possible, or manual logic
+			h, p, err := net.SplitHostPort(finalTarget)
+			if err == nil {
+				host = h
+				port = p
+			} else {
+				// Fallback or assume it's just host if Split failed or it's just host
+				// If no colon, port is empty
+			}
+		}
+		if port == "" {
+			logger.Debug("Authority has no explicit port, using gRPC default",
+				zap.String("target", finalTarget), zap.String("default_port", "443"))
+			port = "443" // Default for gRPC logic
+		}
+	}
+
+	// Apply overrides
+	// AppPort
+	if appPort > 0 {
+		port = fmt.Sprintf("%d", appPort)
+		logger.Debug("Overriding port with app_port",
+			zap.Uint16("app_port", appPort))
+	}
+
+	// ConfigPort (Precedence)
+	if configPort > 0 {
+		if appPort > 0 && uint32(appPort) != configPort {
+			logger.Info("Config port overrides recorded app_port",
+				zap.Uint32("config_port", configPort),
+				zap.Uint16("recorded_app_port", appPort))
+		}
+		port = fmt.Sprintf("%d", configPort)
+	}
+
+	// Reassemble
+	if isHTTP {
+		// For URL, we can reconstruct
+		u, _ := url.Parse(finalTarget) // assumed valid from before
+		u.Host = net.JoinHostPort(host, port)
+		finalTarget = u.String()
+	} else {
+		finalTarget = net.JoinHostPort(host, port)
+	}
+
+	logger.Debug("Final resolved target", zap.String("target", finalTarget))
+	return finalTarget, nil
 }

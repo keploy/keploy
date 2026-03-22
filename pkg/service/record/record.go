@@ -5,13 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -21,6 +25,7 @@ type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	mappingDb       MappingDb
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
@@ -28,11 +33,12 @@ type Recorder struct {
 	globalMockCh    chan<- *models.Mock
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, mappingDB MappingDb, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
+		mappingDb:       mappingDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		testSetConf:     testSetConf,
@@ -142,6 +148,8 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	if opts.MockDB != nil {
 		mockDB = opts.MockDB
 	}
+	domainSet := telemetry.NewDomainSet()
+	var recordingStarted bool
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -196,7 +204,14 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 			}
 			result.MockCount = total
 		}
-		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
+		if recordingStarted {
+			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap, map[string]interface{}{
+				"host-domains": domainSet.ToSlice(),
+			})
+		}
+		if s, ok := r.telemetry.(interface{ Shutdown() }); ok {
+			s.Shutdown()
+		}
 	}()
 
 	defer close(appErrChan)
@@ -304,6 +319,7 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
+	var correlationMap sync.Map
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(reqCtx, opts)
 	if err != nil {
@@ -313,6 +329,10 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 			return result, err
 		}
 		return result, fmt.Errorf("%s", stopReason)
+	}
+	recordingStarted = true
+	if ctx.Err() != nil {
+		return result, ctx.Err()
 	}
 
 	if r.config.CommandType == string(utils.DockerCompose) {
@@ -332,17 +352,23 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	if opts.CaptureIncoming {
 		errGrp.Go(func() error {
 			for testCase := range frames.Incoming {
-				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+				// Skip curl generation for either form data requests or large body (>1MB)
+				if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
+					testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+				}
+				domainSet.AddAll(telemetry.ExtractDomainsFromTestCase(testCase))
 				if reRecordCfg.TestSet == "" {
 					err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 					if err != nil {
 						if ctx.Err() == context.Canceled {
 							continue
 						}
+						insertTestErrChan <- err
 					}
 				} else {
 					r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 				}
+				testCount++
 			}
 			return nil
 		})
@@ -362,6 +388,12 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 					return nil
 				}
 				mock := frame.Mock
+
+				// Domain tracking
+				domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
+				tempID := mock.Name
+
+				// Send copy to global mock channel for correlation manager
 				if r.globalMockCh != nil {
 					currMockID := mockDB.GetCurrMockID()
 					mockCopy := mock.DeepCopy()
@@ -398,6 +430,11 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 					}
 				}
 
+				// Correlation tracking
+				if tempID != "" && mock.Name != "" {
+					correlationMap.Store(tempID, mock.Name)
+				}
+
 				if opts.OnMock != nil {
 					if err := opts.OnMock(mock); err != nil {
 						return err
@@ -418,6 +455,46 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 			return nil
 		})
 	}
+
+	// Mapping correlation goroutine
+	errGrp.Go(func() error {
+		for mapping := range frames.Mappings {
+			var realMockNames []string
+
+			for _, tempID := range mapping.MockIDs {
+				var realName string
+				found := false
+
+				// Simple retry loop (fast spin) to wait for the Mock Loop
+				for i := 0; i < 50; i++ { // Wait up to ~500ms
+					if val, ok := correlationMap.Load(tempID); ok {
+						realName = val.(string)
+						found = true
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+
+				if found {
+					realMockNames = append(realMockNames, realName)
+					correlationMap.Delete(tempID)
+				} else {
+					r.logger.Warn("Failed to correlate mock mapping",
+						zap.String("test", mapping.TestName),
+						zap.String("tempMockID", tempID))
+				}
+			}
+
+			// Write to mappings.yaml
+			if len(realMockNames) > 0 {
+				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to save mapping")
+				}
+			}
+		}
+		return nil
+	})
 
 	if commandType != string(utils.DockerCompose) {
 		runAppErrGrp.Go(func() error {
@@ -505,6 +582,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 	// Create channels to receive incoming and outgoing data
 	incomingChan := make(chan *models.TestCase)
 	outgoingChan := make(chan *models.MockFrame)
+	mappingChan := make(chan models.TestMockMapping)
 
 	incomingEnabled := opts.CaptureIncoming || opts.EnableIncomingProxy
 	if !incomingEnabled {
@@ -514,9 +592,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 		close(outgoingChan)
 	}
 	if !incomingEnabled && !opts.CaptureOutgoing {
+		close(mappingChan)
 		return FrameChan{
 			Incoming: incomingChan,
 			Outgoing: outgoingChan,
+			Mappings: mappingChan,
 		}, nil
 	}
 
@@ -563,13 +643,26 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 	// OUTGOING
 	// Create a cancelable child that we always cancel when ctx is done.
 	mockCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	var tlsPrivateKey string
+	if r.config.Record.TLSPrivateKeyPath != "" {
+		keyBytes, err := os.ReadFile(r.config.Record.TLSPrivateKeyPath)
+		if err != nil {
+			r.logger.Error("failed to read tls private key", zap.Error(err))
+			cancel()
+			return FrameChan{}, err
+		}
+		tlsPrivateKey = string(keyBytes)
+	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
+		TLSPrivateKey:  tlsPrivateKey,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		ConfigPath:     filepath.Join(r.config.Path, opts.TestSetID),
 	})
 	if err != nil {
+
 		cancel()
 		if ctx.Err() != nil || utils.IsShutdownError(err) {
 			r.logger.Debug("Context cancelled or shutdown error while getting outgoing mocks")
@@ -613,9 +706,48 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 		})
 	}
 
+	// MAPPINGS
+	g.Go(func() error {
+		defer close(mappingChan)
+
+		// Create context that cancels with parent
+		mapCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancel()
+		go func() {
+			<-ctx.Done()
+			cancel()
+		}()
+
+		// Call the new AgentClient method
+		ch, err := r.instrumentation.GetMappings(mapCtx, incomingOpts)
+		if err != nil {
+			if ctx.Err() != nil || utils.IsShutdownError(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get mappings: %w", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case m, ok := <-ch:
+				if !ok {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case mappingChan <- m:
+				}
+			}
+		}
+	})
+
 	return FrameChan{
 		Incoming: incomingChan,
 		Outgoing: outgoingChan,
+		Mappings: mappingChan,
 	}, nil
 
 }

@@ -3,14 +3,18 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -98,38 +102,72 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 
 // Handled chunked requests when content-length is given.
 func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn, contentLength int) error {
+	// Use a larger buffer (e.g., 32KB) for better performance than 1KB
+	buf := make([]byte, 32*1024)
+
 	for contentLength > 0 {
-		err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		// 1. Check if context is already done before trying to read
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// 2. Refresh the deadline
+		err := clientConn.SetReadDeadline(time.Now().Add(20 * time.Second))
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to set the read deadline for the client conn")
 			return err
 		}
-		requestChunked, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
+
+		// 3. Read directly from connection
+		// This blocks only until *some* data is available or error occurs.
+		readBuf := buf
+		if contentLength < len(buf) {
+			readBuf = buf[:contentLength]
+		}
+		n, err := clientConn.Read(readBuf)
+
+		if n > 0 {
+			chunk := buf[:n]
+
+			// Append to final request
+			*finalReq = append(*finalReq, chunk...)
+			contentLength -= n
+
+			h.Logger.Debug("Read chunk", zap.Int("chunkSize", n), zap.Int("remaining", contentLength))
+
+			// Write to destination
+			if destConn != nil {
+				_, wErr := destConn.Write(chunk)
+				if wErr != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					utils.LogError(h.Logger, wErr, "failed to write request message to the destination server")
+					return wErr
+				}
+			}
+		}
+
 		if err != nil {
 			if err == io.EOF {
+				// Client closed connection cleanly
 				utils.LogError(h.Logger, nil, "conn closed by the user client")
 				return err
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				h.Logger.Info("Stopped getting data from the conn", zap.Error(err))
+			}
+
+			// Check for Timeout
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				h.Logger.Info("Stopped getting data from the conn (Timeout)", zap.Error(err))
 				break
 			}
-			utils.LogError(h.Logger, nil, "failed to read the response message from the destination server")
-			return err
-		}
-		h.Logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
-		*finalReq = append(*finalReq, requestChunked...)
-		contentLength -= len(requestChunked)
 
-		// destConn is nil in case of test mode.
-		if destConn != nil {
-			_, err = destConn.Write(requestChunked)
-			if err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				utils.LogError(h.Logger, nil, "failed to write request message to the destination server")
-				return err
+			// Check for Context Cancel (if Read failed due to context closure wrapped in net error)
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
+
+			utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
+			return err
 		}
 	}
 	return nil
@@ -180,7 +218,7 @@ func (h *HTTP) chunkedRequest(ctx context.Context, finalReq *[]byte, clientConn,
 	}
 }
 
-func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn, resp []byte) error {
+func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn, resp []byte, streamRef **models.StreamRef, opts models.OutgoingOptions) error {
 
 	if hasCompleteHeaders(*finalResp) {
 		h.Logger.Debug("this response has complete headers in the first chunk itself.")
@@ -225,7 +263,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 	}
 
 	//Getting the content-length or the transfer-encoding header
-	var contentLengthHeader, transferEncodingHeader string
+	var contentLengthHeader, transferEncodingHeader, contentTypeHeader string
 	lines := strings.Split(string(resp), "\n")
 	for _, line := range lines {
 		line = strings.TrimRight(line, "\r") // remove trailing \r if present
@@ -247,8 +285,14 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 			contentLengthHeader = val
 		case "transfer-encoding":
 			transferEncodingHeader = val
+		case "content-type":
+			contentTypeHeader = val
 		}
 	}
+
+	isStream := strings.Contains(contentTypeHeader, "text/event-stream") ||
+		strings.Contains(contentTypeHeader, "application/x-ndjson") ||
+		strings.Contains(contentTypeHeader, "application/ndjson")
 
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
@@ -269,7 +313,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 			if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
 				return nil
 			}
-			if err := h.chunkedResponse(ctx, finalResp, clientConn, destConn); err != nil {
+			if err := h.chunkedResponse(ctx, finalResp, clientConn, destConn, isStream, streamRef, opts); err != nil {
 				return err
 			}
 		}
@@ -278,7 +322,42 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 }
 
 // Handles chunked responses when transfer-encoding is given.
-func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn) error {
+func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientConn, destConn net.Conn, isStream bool, streamRef **models.StreamRef, opts models.OutgoingOptions) error {
+	var file *os.File
+	var encoder *json.Encoder
+	var chunkCount int
+	var streamPath string
+
+	if isStream {
+		configPath := opts.ConfigPath
+		if configPath == "" {
+			configPath = "."
+		}
+
+		streamsDir := filepath.Join(configPath, "streams")
+		if err := os.MkdirAll(streamsDir, 0777); err != nil {
+			utils.LogError(h.Logger, err, "failed to create streams directory")
+			return err
+		}
+		// Restore ownership of dirs created by the agent (root) so the CLI process
+		// (running as the normal user) can write mocks/tests into the same test-set dir.
+		utils.RestoreFileOwnership(h.Logger, configPath, streamsDir)
+
+		streamPath = filepath.Join("streams", fmt.Sprintf("stream_%d_%d.ndjson", time.Now().UnixNano(), pUtil.GetNextID()))
+		fullPath := filepath.Join(configPath, streamPath)
+
+		f, err := os.Create(fullPath)
+		if err != nil {
+			utils.LogError(h.Logger, err, "failed to create stream file")
+			return err
+		}
+		defer f.Close()
+		file = f
+		encoder = json.NewEncoder(file)
+		utils.RestoreFileOwnership(h.Logger, fullPath)
+		h.Logger.Debug("Created stream file", zap.String("path", fullPath))
+	}
+
 	isEOF := false
 ReadLoop:
 	for {
@@ -300,7 +379,22 @@ ReadLoop:
 				}
 			}
 
-			*finalResp = append(*finalResp, resp...)
+			if isStream {
+				chunk := models.HTTPStreamChunk{
+					TS: time.Now(),
+					Data: []models.HTTPStreamDataField{
+						{Key: "raw", Value: string(resp)},
+					},
+				}
+				if err := encoder.Encode(chunk); err != nil {
+					utils.LogError(h.Logger, err, "failed to write chunk to stream file")
+				} else {
+					chunkCount++
+				}
+			} else {
+				*finalResp = append(*finalResp, resp...)
+			}
+
 			// write the response message to the user client
 			_, err = clientConn.Write(resp)
 			if err != nil {
@@ -318,10 +412,19 @@ ReadLoop:
 			}
 
 			if string(resp) == "0\r\n\r\n" {
-				return nil
+				break ReadLoop
 			}
 		}
 	}
+
+	if isStream {
+		*streamRef = &models.StreamRef{
+			Path:       streamPath,
+			Created:    time.Now(),
+			ChunkCount: chunkCount,
+		}
+	}
+
 	return nil
 }
 

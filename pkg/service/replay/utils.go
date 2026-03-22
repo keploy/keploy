@@ -13,6 +13,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	// "encoding/json"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -20,6 +21,7 @@ type TestReportVerdict struct {
 	total     int
 	passed    int
 	failed    int
+	obsolete  int
 	ignored   int
 	status    bool
 	duration  time.Duration
@@ -27,7 +29,7 @@ type TestReportVerdict struct {
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
-	noise := globalNoise
+	noise := CloneGlobalNoise(globalNoise)
 
 	if _, ok := noise["body"]; !ok {
 		noise["body"] = make(map[string][]string)
@@ -50,12 +52,26 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	return noise
 }
 
+func CloneGlobalNoise(src config.GlobalNoise) config.GlobalNoise {
+	cloned := make(config.GlobalNoise, len(src))
+	for section, fields := range src {
+		fieldCopy := make(map[string][]string, len(fields))
+		for field, patterns := range fields {
+			patternCopy := make([]string, len(patterns))
+			copy(patternCopy, patterns)
+			fieldCopy[field] = patternCopy
+		}
+		cloned[section] = fieldCopy
+	}
+	return cloned
+}
+
 // PrepareHeaderNoiseConfig prepares the header noise configuration for mock matching.
 // It merges global and test-set specific noise, then extracts only the header noise.
 func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
-	noiseConfig := globalNoise
+	noiseConfig := CloneGlobalNoise(globalNoise)
 	if tsNoise, ok := testSetNoise[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
 	// Extract only header noise for mock matching
@@ -119,6 +135,43 @@ func removeFromMap(map1, map2 map[string][]string) map[string][]string {
 	return map1
 }
 
+func testCaseRequestTimestamp(tc *models.TestCase) time.Time {
+	if tc == nil {
+		return time.Time{}
+	}
+	switch tc.Kind {
+	case models.HTTP:
+		return tc.HTTPReq.Timestamp
+	case models.GRPC_EXPORT:
+		return tc.GrpcReq.Timestamp
+	default:
+		return time.Time{}
+	}
+}
+
+// effectiveStreamMockWindow calculates the effective time window for streaming mocks.
+// It returns the start time (request timestamp) and end time (request timestamp + timeout).
+// The timeout is calculated using pkg.ComputeStreamingTimeoutSeconds which considers the test case's timeout configuration.
+func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
+	if tc == nil {
+		return time.Time{}, time.Time{}
+	}
+
+	reqTs := tc.HTTPReq.Timestamp
+	respTs := tc.HTTPResp.Timestamp
+	timeoutSeconds := pkg.ComputeStreamingTimeoutSeconds(tc, defaultAPITimeout)
+
+	anchor := reqTs
+	if anchor.IsZero() || (!respTs.IsZero() && respTs.After(anchor)) {
+		anchor = respTs
+	}
+	if anchor.IsZero() {
+		anchor = time.Now().UTC()
+	}
+
+	return reqTs, anchor.Add(time.Duration(timeoutSeconds) * time.Second)
+}
+
 func timeWithUnits(duration time.Duration) string {
 	if duration.Seconds() < 1 {
 		return fmt.Sprintf("%v ms", duration.Milliseconds())
@@ -140,29 +193,43 @@ func getFailedTCs(results []models.TestResult) []string {
 	return ids
 }
 
-func compareMockArrays(arr1, arr2 []string) bool {
-	counts1 := make(map[string]int)
-	counts2 := make(map[string]int)
-
-	for _, mock := range arr1 {
-		counts1[mock]++
+func isMockSubset(subset, superset []string) bool {
+	supersetCounts := make(map[string]int)
+	for _, mock := range superset {
+		supersetCounts[mock]++
 	}
 
-	for _, mock := range arr2 {
-		counts2[mock]++
-	}
-
-	if len(counts1) != len(counts2) {
-		return false
-	}
-
-	for mock, count := range counts1 {
-		if counts2[mock] != count {
+	for _, mock := range subset {
+		if supersetCounts[mock] == 0 {
 			return false
 		}
+		supersetCounts[mock]--
 	}
 
 	return true
+}
+
+// upsertActualTestMockMapping updates the actual test-to-mock mappings with the mocks
+// consumed during the replay of a specific test case.
+func upsertActualTestMockMapping(actualTestMockMappings *models.Mapping, testCaseID string, mockNames []string) {
+	if actualTestMockMappings == nil || testCaseID == "" || len(mockNames) == 0 {
+		return
+	}
+
+	// If the test case already has an entry, append the new mock names to it.
+	for i := range actualTestMockMappings.Tests {
+		if actualTestMockMappings.Tests[i].ID == testCaseID {
+			existing := actualTestMockMappings.Tests[i].Mocks.ToSlice()
+			actualTestMockMappings.Tests[i].Mocks = models.FromSlice(append(existing, mockNames...))
+			return
+		}
+	}
+
+	// No existing entry — create a new one.
+	actualTestMockMappings.Tests = append(actualTestMockMappings.Tests, models.Test{
+		ID:    testCaseID,
+		Mocks: models.FromSlice(mockNames),
+	})
 }
 
 type TestFailure struct {
