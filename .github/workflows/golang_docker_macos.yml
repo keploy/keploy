@@ -59,8 +59,9 @@ jobs:
             # Start Docker Desktop via launchctl so it's owned by launchd,
             # not the CI job. The Actions runner kills child processes as
             # "orphans" during post-job cleanup — launchctl avoids this.
-            launchctl start com.docker.docker 2>/dev/null \
-              || open -g -a Docker
+            # Use 'open' to start Docker Desktop — it's owned by
+            # launchd (WindowServer), not the CI job process tree.
+            open -g -a Docker
             for i in $(seq 1 90); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."

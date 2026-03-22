@@ -100,8 +100,7 @@ jobs:
             # Start via launchctl so the process is owned by launchd,
             # not the CI job. The Actions runner kills child processes
             # as "orphans" during post-job cleanup.
-            launchctl start com.docker.docker 2>/dev/null \
-              || open -g -a Docker
+            open -g -a Docker
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."
@@ -164,8 +163,7 @@ jobs:
             echo "Docker daemon is already running."
           else
             echo "Docker daemon not responding. Starting via launchctl..."
-            launchctl start com.docker.docker 2>/dev/null \
-              || open -g -a Docker
+            open -g -a Docker
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."
