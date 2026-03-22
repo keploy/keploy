@@ -22,17 +22,16 @@ import (
 
 type proxyStop func() error
 
-// IngressHook allows an external component (e.g. enterprise sockmap proxy)
-// to handle ingress forwarding instead of the default Go TCP forwarder.
-// When an IngressHook is registered, it fully replaces the Go TCP forwarder;
-// there is no fallback if the hook fails.
+// IngressHook defines the interface for ingress forwarding implementations.
+// Both the default Go TCP forwarder and external components (e.g. enterprise
+// sockmap proxy) implement this interface.
 type IngressHook interface {
-	// StartIngress delegates ingress forwarding for the given port pair.
+	// StartIngress begins ingress forwarding for the given port pair.
 	// The provided context should be used for lifetime management of the
-	// forwarding goroutines. On success it returns a stop function that
-	// tears down the forwarder (stored in the active map for StopAll)
-	// and a nil error.
-	StartIngress(ctx context.Context, origPort, newPort uint16) (stop func() error, err error)
+	// forwarding goroutines.
+	StartIngress(ctx context.Context, origPort, newPort uint16) error
+	// StopIngress tears down the ingress forwarder for the given original port.
+	StopIngress(origPort uint16) error
 }
 
 type IngressProxyManager struct {
@@ -67,11 +66,13 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 	if cfg.Agent.EnableSampling > 0 {
 		pm.sampling = true
 	}
+	// Default to the Go TCP forwarder; can be replaced via SetIngressHook.
+	pm.ingressHook = newGoTCPIngressHook(pm)
 	return pm
 }
 
-// SetIngressHook registers an external ingress handler (e.g. enterprise sockmap proxy).
-// When set, StartIngressProxy delegates to this hook instead of the Go TCP forwarder.
+// SetIngressHook replaces the default Go TCP forwarder with an external
+// ingress handler (e.g. enterprise sockmap proxy).
 func (pm *IngressProxyManager) SetIngressHook(h IngressHook) {
 	pm.ingressHook = h
 }
@@ -88,7 +89,8 @@ func (pm *IngressProxyManager) TCChan() chan *models.TestCase {
 	return pm.tcChan
 }
 
-// Ensure starts a new ingress proxy on the given original app port if it's not already running.
+// StartIngressProxy starts a new ingress proxy on the given original app port if it's not already running.
+// It delegates to the registered IngressHook (default: Go TCP forwarder).
 func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPort, newAppPort uint16) {
 	pm.mu.Lock()
 	if _, ok := pm.active[origAppPort]; ok {
@@ -99,34 +101,18 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 	pm.active[origAppPort] = func() error { return nil }
 	pm.mu.Unlock()
 
-	// If an external ingress hook (e.g. sockmap proxy) is wired up, delegate forwarding to it.
-	// The hook fully replaces the Go TCP forwarder — no fallback on failure.
-	if pm.ingressHook != nil {
-		stop, err := pm.ingressHook.StartIngress(ctx, origAppPort, newAppPort)
-		if err != nil {
-			pm.logger.Error("External ingress hook failed to start",
-				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
-			pm.mu.Lock()
-			delete(pm.active, origAppPort)
-			pm.mu.Unlock()
-			return
-		}
-		pm.logger.Info("Delegated ingress forwarding to external hook",
-			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
+	if err := pm.ingressHook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
+		pm.logger.Error("Ingress hook failed to start",
+			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
 		pm.mu.Lock()
-		pm.active[origAppPort] = stop
+		delete(pm.active, origAppPort)
 		pm.mu.Unlock()
 		return
 	}
-
-	// Default: Go-based TCP forwarder (used only when no hook is registered)
-	// TODO : We will change this interface implementation to the IP
-	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origAppPort))
-	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newAppPort))
-	// Start the basic TCP forwarder
-	stop := pm.runTCPForwarder(ctx, pm.logger, origAppAddr, newAppAddr, origAppPort)
+	pm.logger.Info("Started ingress forwarding",
+		zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
 	pm.mu.Lock()
-	pm.active[origAppPort] = stop
+	pm.active[origAppPort] = func() error { return pm.ingressHook.StopIngress(origAppPort) }
 	pm.mu.Unlock()
 }
 
@@ -165,24 +151,47 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 	pm.StopAll()
 }
 
-// runTCPForwarder starts a basic proxy that forwards traffic and logs data.
-func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.Logger, origAppAddr, newAppAddr string, appPort uint16) func() error {
+// goTCPIngressHook is the default IngressHook implementation that uses a
+// Go-based TCP forwarder for ingress traffic capture.
+type goTCPIngressHook struct {
+	pm       *IngressProxyManager
+	mu       sync.Mutex
+	forwarders map[uint16]*tcpForwarderState
+}
+
+type tcpForwarderState struct {
+	listener net.Listener
+	cancel   context.CancelFunc
+	done     chan struct{} // closed when the accept loop exits
+}
+
+func newGoTCPIngressHook(pm *IngressProxyManager) *goTCPIngressHook {
+	return &goTCPIngressHook{
+		pm:       pm,
+		forwarders: make(map[uint16]*tcpForwarderState),
+	}
+}
+
+func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort uint16) error {
+	// TODO : We will change this interface implementation to the IP
+	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origPort))
+	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
+	logger := h.pm.logger
+
 	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
-		logger.Error("Ingress proxy failed to listen", zap.String("original_addr", origAppAddr), zap.Error(err))
-		return func() error { return err }
+		return fmt.Errorf("ingress proxy failed to listen on %s: %w", origAppAddr, err)
 	}
 	tcpListener, ok := listener.(*net.TCPListener)
 	if !ok {
-		err := fmt.Errorf("listener was not a TCP listener, which is unexpected")
-		logger.Error("Ingress proxy setup failed", zap.Error(err))
 		listener.Close()
-		return func() error { return err }
+		return fmt.Errorf("listener on %s was not a TCP listener", origAppAddr)
 	}
 
 	logger.Debug("Started Ingress forwarder", zap.String("listening_on", origAppAddr), zap.String("forwarding_to", newAppAddr))
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+
 	go func() {
 		defer close(done)
 		sem := make(chan struct{}, 1)
@@ -207,16 +216,36 @@ func (pm *IngressProxyManager) runTCPForwarder(ctx context.Context, logger *zap.
 			}
 
 			go func(cc net.Conn) {
-				pm.handleConnection(ctx, cc, newAppAddr, logger, pm.tcChan, sem, appPort)
+				h.pm.handleConnection(ctx, cc, newAppAddr, logger, h.pm.tcChan, sem, origPort)
 			}(clientConn)
 		}
 	}()
-	return func() error {
-		cancel()
-		_ = listener.Close()
-		<-done
-		return nil
+
+	h.mu.Lock()
+	h.forwarders[origPort] = &tcpForwarderState{
+		listener: listener,
+		cancel:   cancel,
+		done:     done,
 	}
+	h.mu.Unlock()
+
+	return nil
+}
+
+func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
+	h.mu.Lock()
+	st, ok := h.forwarders[origPort]
+	if !ok {
+		h.mu.Unlock()
+		return fmt.Errorf("no TCP forwarder for port %d", origPort)
+	}
+	delete(h.forwarders, origPort)
+	h.mu.Unlock()
+
+	st.cancel()
+	_ = st.listener.Close()
+	<-st.done
+	return nil
 }
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"

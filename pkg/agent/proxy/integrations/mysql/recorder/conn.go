@@ -37,6 +37,9 @@ type handshakeRes struct {
 }
 
 func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
+	logger.Debug("handleInitialHandshake: entered",
+		zap.String("connKey", opts.ConnKey),
+		zap.Bool("skipTLSMITM", opts.SkipTLSMITM))
 
 	res := handshakeRes{
 		req:  make([]mysql.Request, 0),
@@ -122,6 +125,10 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	})
 
 	// handle the SSL request
+	logger.Info("handleInitialHandshake: client response decoded",
+		zap.Bool("useSSL", decodeCtx.UseSSL),
+		zap.Bool("skipTLSMITM", opts.SkipTLSMITM),
+		zap.String("packetType", handshakeResponsePkt.Header.Type))
 	if decodeCtx.UseSSL {
 
 		// When TLS MITM is skipped, the proxy does not terminate TLS.

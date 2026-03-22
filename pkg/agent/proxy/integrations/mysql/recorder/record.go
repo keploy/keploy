@@ -71,6 +71,9 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		}
 
 		// handle the initial client-server handshake (connection phase)
+		logger.Debug("Record: entering relay path (non-postTLS) handleInitialHandshake",
+			zap.String("connKey", opts.ConnKey),
+			zap.Bool("skipTLSMITM", opts.SkipTLSMITM))
 		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts)
 		if err != nil {
 			utils.LogError(logger, err, "failed to handle initial handshake")
