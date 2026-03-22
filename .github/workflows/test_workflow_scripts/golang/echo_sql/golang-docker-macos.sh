@@ -31,11 +31,12 @@ APP_IMAGE="go-app-${JOB_ID}"
 echo "Using ports - APP: $APP_PORT, DB: $DB_PORT, PROXY: $PROXY_PORT, DNS: $DNS_PORT"
 echo "Using containers - APP: $APP_CONTAINER, DB: $DB_CONTAINER, KEPLOY: $KEPLOY_CONTAINER"
 
-# Tear down any stale compose project from a previous killed run.
-# Must happen BEFORE sed rewrites the compose file, so the original
-# service names match the stale project's internal state.
+# Clean up stale Docker state from previous killed runs.
+# Use both the directory-inferred project name and explicit -p flag
+# to clear compose's internal state that references dead containers.
 echo "Cleaning up stale docker compose project state..."
-docker compose down --remove-orphans 2>/dev/null || true
+docker compose down --remove-orphans -v 2>/dev/null || true
+docker compose -p echo-sql down --remove-orphans -v 2>/dev/null || true
 
 # Cleanup function to remove containers
 cleanup() {
