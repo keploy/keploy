@@ -135,7 +135,7 @@ jobs:
             docker rm -f "$c" 2>/dev/null || true
           done
           docker network rm keploy-network 2>/dev/null || true
-          pkill -9 -f 'keploy' 2>/dev/null || true
+          pkill -9 -f 'keploy record|keploy test' 2>/dev/null || true
 
       - name: Clean up git config
         if: always()
