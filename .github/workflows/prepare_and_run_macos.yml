@@ -117,28 +117,42 @@ jobs:
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.MAC_RUNNER_USER_PASSWORD }}
           
-      - name: Ensure Docker Desktop is running (macOS)
+      - name: Ensure Docker Desktop is healthy (macOS)
         shell: bash
         run: |
           set -e
-          if docker info >/dev/null 2>&1; then
-            echo "Docker daemon is already running."
-          else
-            echo "Docker daemon not responding. Restarting Docker Desktop..."
+
+          restart_docker() {
+            echo "Restarting Docker Desktop..."
+            pkill -f "Docker Desktop" || true
+            sleep 5
             nohup open -g -a Docker >/dev/null 2>&1 &
             disown
             for i in $(seq 1 60); do
               if docker info >/dev/null 2>&1; then
                 echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                break
-              fi
-              if [ "$i" -eq 60 ]; then
-                echo "ERROR: Docker Desktop failed to start within 120s."
-                exit 1
+                return 0
               fi
               sleep 2
             done
+            echo "ERROR: Docker Desktop failed to start within 120s."
+            return 1
+          }
+
+          # Ensure daemon is responding
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker daemon not responding."
+            restart_docker
           fi
+
+          # Verify containers can actually be created — Docker can respond
+          # to 'docker info' while overlayfs snapshots are corrupted.
+          if ! docker run --rm busybox true >/dev/null 2>&1; then
+            echo "Docker health check failed (cannot create containers). Restarting..."
+            restart_docker
+          fi
+
+          echo "Docker Desktop is healthy."
 
       - name: Pull Docker image
         run: |
@@ -292,9 +306,12 @@ jobs:
           # Kill leftover keploy processes
           pkill -9 -f 'keploy' 2>/dev/null || true
 
-          # Prune only dangling (untagged) images — NOT all unused images.
-          # Using -a removes ALL unused images (including cached base images like mongo)
-          # which forces re-pulls and can destabilize Docker Desktop on macOS.
+          # Prune stopped containers before images — images must never be
+          # pruned while stopped containers still reference their layers
+          # (that corrupts Docker Desktop's overlayfs snapshots).
+          echo "Pruning stopped containers..."
+          docker container prune -f
+
           echo "Pruning dangling Docker images..."
           docker image prune -f
 
