@@ -32,8 +32,8 @@ jobs:
         continue-on-error: true
         shell: powershell
         run: |
-          git config --global --unset-all url."git@github.com:".insteadof  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
           git config --global --unset-all core.sshCommand  2>$null
 
       - name: Checkout repository
@@ -107,6 +107,6 @@ jobs:
         continue-on-error: true
         shell: powershell
         run: |
-          git config --global --unset-all url."git@github.com:".insteadof  2>$null
-          git config --global --unset-all url."ssh://git@github.com/".insteadof  2>$null
+          git config --global --unset-all url."git@github.com:".insteadOf  2>$null
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf  2>$null
           git config --global --unset-all core.sshCommand  2>$null
