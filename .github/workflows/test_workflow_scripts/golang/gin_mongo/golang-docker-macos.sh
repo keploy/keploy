@@ -19,8 +19,8 @@ for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb; do
 done
 docker network rm keploy-network 2>/dev/null || true
 
-# Also kill any leftover keploy processes holding ports
-pgrep -f 'keploy' | xargs -r sudo kill -9 2>/dev/null || true
+# Kill leftover keploy CLI processes holding ports (not Docker-managed ones)
+pgrep -f 'keploy record|keploy test' | xargs kill -9 2>/dev/null || true
 
 # Start mongo before starting keploy (retry once if Docker crashes).
 docker network create keploy-network
