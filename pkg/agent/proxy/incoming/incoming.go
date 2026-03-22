@@ -84,14 +84,16 @@ func (pm *IngressProxyManager) TCChan() chan *models.TestCase {
 	return pm.tcChan
 }
 
-// Ensure starts a new ingress proxy on the given original app pory if it's not already running.
+// Ensure starts a new ingress proxy on the given original app port if it's not already running.
 func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPort, newAppPort uint16) {
 	pm.mu.Lock()
-	_, ok := pm.active[origAppPort]
-	pm.mu.Unlock()
-	if ok {
+	if _, ok := pm.active[origAppPort]; ok {
+		pm.mu.Unlock()
 		return
 	}
+	// Reserve the slot so concurrent callers see this port as active.
+	pm.active[origAppPort] = func() error { return nil }
+	pm.mu.Unlock()
 
 	// If an external ingress hook (e.g. sockmap proxy) is wired up, delegate forwarding to it
 	if pm.ingressHook != nil {
@@ -101,10 +103,7 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 		} else {
 			pm.logger.Info("Delegated ingress forwarding to external hook",
 				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort))
-			// Mark as active with a no-op stop (hook manages the listener lifetime)
-			pm.mu.Lock()
-			pm.active[origAppPort] = func() error { return nil }
-			pm.mu.Unlock()
+			// Hook manages the listener lifetime; placeholder stop already in place.
 			return
 		}
 	}
