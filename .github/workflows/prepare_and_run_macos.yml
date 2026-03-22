@@ -266,11 +266,24 @@ jobs:
           # Stop running scripts
           pkill -9 -f "actions-runner-.*_work/keploy/keploy/.github/workflows/test_workflow_scripts/golang/echo_sql/golang-docker-macos\.sh" || true
 
-          # Remove stale test containers that may block the next run
+          # Remove stale test containers that may block the next run.
+          # Covers both fixed-name containers (gin-mongo tests) and
+          # JOB_ID-suffixed containers (python/flask tests).
           echo "Removing stale test containers..."
-          for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb flask-mongo flask-app; do
+          for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb mongo; do
             docker rm -f "$c" 2>/dev/null || true
           done
+          for prefix in flaskApp_ mongo_ keploy_; do
+            ids=$(docker ps -aq --filter "name=${prefix}" 2>/dev/null || true)
+            if [ -n "$ids" ]; then
+              docker rm -f $ids 2>/dev/null || true
+            fi
+          done
+          # Remove any containers still attached to keploy-network
+          ids=$(docker ps -aq --filter "network=keploy-network" 2>/dev/null || true)
+          if [ -n "$ids" ]; then
+            docker rm -f $ids 2>/dev/null || true
+          fi
 
           # Remove stale Docker networks left by test scripts
           echo "Removing stale Docker networks..."
