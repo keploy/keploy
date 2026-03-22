@@ -52,28 +52,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure Docker Desktop is running (macOS)
-        shell: bash
+      - name: Verify Docker Desktop is running (macOS)
         run: |
-          set -e
-          if docker info >/dev/null 2>&1; then
-            echo "Docker daemon is already running."
-          else
-            echo "Docker daemon not responding. Restarting Docker Desktop..."
-            nohup open -g -a Docker >/dev/null 2>&1 &
-            disown
-            for i in $(seq 1 90); do
-              if docker info >/dev/null 2>&1; then
-                echo "Docker Desktop is ready (waited ~$((i*2))s)."
-                break
-              fi
-              if [ "$i" -eq 90 ]; then
-                echo "ERROR: Docker Desktop failed to start within 180s."
-                exit 1
-              fi
-              sleep 2
-            done
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Docker Desktop is not running."
+            echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+            exit 1
           fi
+          echo "Docker Desktop is running."
+
+      - name: Clean up stale Docker state
+        continue-on-error: true
+        run: |
+          for project in $(docker compose ls -q 2>/dev/null); do
+            docker compose -p "$project" down --remove-orphans 2>/dev/null || true
+          done
+          docker container prune -f 2>/dev/null || true
+          docker network prune -f 2>/dev/null || true
 
       - id: image
         uses: ./.github/actions/download-image
@@ -113,8 +108,31 @@ jobs:
         run: |
           pkill -f "bash $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python-docker-macos.sh" || true
 
+      - name: Clean up Docker artifacts
+        if: always()
+        continue-on-error: true
+        env:
+          JOB_ID: ${{ github.run_id }}-${{ github.job }}-${{ github.run_attempt }}
+        run: |
+          # Remove JOB_ID-suffixed containers created by the test script
+          for prefix in flaskApp mongo keploy; do
+            ids=$(docker ps -aq --filter "name=${prefix}_${JOB_ID}" 2>/dev/null || true)
+            if [ -n "$ids" ]; then
+              docker rm -f $ids 2>/dev/null || true
+            fi
+          done
+          # Remove any containers still attached to keploy-network
+          ids=$(docker ps -aq --filter "network=keploy-network" 2>/dev/null || true)
+          if [ -n "$ids" ]; then
+            docker rm -f $ids 2>/dev/null || true
+          fi
+          docker network rm keploy-network 2>/dev/null || true
+          pkill -9 -f 'keploy' 2>/dev/null || true
+
       - name: Clean up git config
         if: always()
         continue-on-error: true
         run: |
-          git config --global --unset url."git@github.com:".insteadOf
+          git config --global --unset-all url."git@github.com:".insteadOf 2>/dev/null || true
+          git config --global --unset-all url."ssh://git@github.com/".insteadOf 2>/dev/null || true
+          git config --global --unset-all core.sshCommand 2>/dev/null || true
