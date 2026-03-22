@@ -114,7 +114,7 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 
 	if err := hook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
 		close(startDone)
-		pm.logger.Error("Ingress hook failed to start",
+		pm.logger.Error("Ingress hook failed to start; verify hook configuration/permissions and required kernel features, or disable the custom ingress hook",
 			zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
 		pm.mu.Lock()
 		delete(pm.active, origAppPort)
@@ -139,7 +139,8 @@ func (pm *IngressProxyManager) StopAll() {
 
 	for p, s := range stops {
 		if err := s(); err != nil {
-			pm.logger.Warn("Failed to stop ingress proxy", zap.Uint16("port", p), zap.Error(err))
+			pm.logger.Error("Failed to stop ingress proxy; verify ingress hook stop implementation and permissions, then restart the agent if needed",
+				zap.Uint16("port", p), zap.Error(err))
 		}
 	}
 }
