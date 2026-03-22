@@ -89,21 +89,7 @@ func ShouldReexecWithSudo() bool {
 	return IsDockerCmd(cmdType)
 }
 
-// isCloudReplayCmd checks if the args contain the "cloud replay" subcommand.
+// isCloudReplayCmd checks if the args represent the "keploy cloud replay" subcommand.
 func isCloudReplayCmd(args []string) bool {
-	foundCloud := false
-	for _, arg := range args[1:] {
-		// Skip flags and their values
-		if len(arg) > 0 && arg[0] == '-' {
-			continue
-		}
-		if !foundCloud {
-			if arg == "cloud" {
-				foundCloud = true
-			}
-		} else {
-			return arg == "replay"
-		}
-	}
-	return false
+	return len(args) >= 3 && args[1] == "cloud" && args[2] == "replay"
 }
