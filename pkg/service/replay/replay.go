@@ -61,39 +61,22 @@ func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, b
 	}
 }
 
-func isTerminalTestSetStatus(status models.TestSetStatus) bool {
-	switch status {
+func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
+	switch current {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
-		return true
-	default:
-		return false
-	}
-}
-
-func resolveTerminalTestSetStatus(current, derived models.TestSetStatus) (models.TestSetStatus, bool) {
-	if isTerminalTestSetStatus(current) {
 		return current, true
 	}
-	if isTerminalTestSetStatus(derived) {
+	switch derived {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
 		return derived, true
 	}
-	return "", false
-}
-
-func resolveDockerComposeShutdownStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
-	if resolvedStatus, ok := resolveTerminalTestSetStatus(current, derived); ok {
-		return resolvedStatus, true
-	}
-	if cmdType != utils.DockerCompose || err == nil {
-		return "", false
-	}
-	if isDockerComposeShutdownError(err) || isMissingTestCaseResultsError(err) {
+	if cmdType == utils.DockerCompose && isDockerComposeReplayShutdown(err) {
 		return models.TestSetStatusAppHalted, true
 	}
 	return "", false
 }
 
-func isDockerComposeShutdownError(err error) bool {
+func isDockerComposeReplayShutdown(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -102,14 +85,8 @@ func isDockerComposeShutdownError(err error) bool {
 		strings.Contains(errMsg, "connection reset by peer") ||
 		strings.Contains(errMsg, "broken pipe") ||
 		strings.Contains(errMsg, "server closed") ||
-		strings.Contains(errMsg, "eof")
-}
-
-func isMissingTestCaseResultsError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "found no test results")
+		strings.Contains(errMsg, "eof") ||
+		strings.Contains(errMsg, "found no test results")
 }
 
 type Replayer struct {
@@ -1183,14 +1160,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var consumedMocks []models.MockState
 	consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
-		if resolvedStatus, ok := resolveDockerComposeShutdownStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
 			testSetStatus = resolvedStatus
 			exitLoop = true
-			r.logger.Info("application stopped before initial mock consumption could be collected",
-				zap.String("testSet", testSetID),
-				zap.String("status", string(testSetStatus)),
-				zap.Error(err),
-			)
 		} else {
 			utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 		}
@@ -1316,14 +1288,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
-				if resolvedStatus, ok := resolveDockerComposeShutdownStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
 					testSetStatus = resolvedStatus
-					r.logger.Info("application stopped before mock parameters could be updated",
-						zap.String("testSet", testSetID),
-						zap.String("testCase", testCase.Name),
-						zap.String("status", string(testSetStatus)),
-						zap.Error(err),
-					)
 				} else {
 					utils.LogError(r.logger, err, "failed to update mock parameters on agent")
 				}
@@ -1359,15 +1325,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err != nil {
-					if resolvedStatus, ok := resolveDockerComposeShutdownStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
 						testSetStatus = resolvedStatus
 						exitLoop = true
-						r.logger.Info("application stopped before post-request mock consumption could be collected",
-							zap.String("testSet", testSetID),
-							zap.String("testCase", testCase.Name),
-							zap.String("status", string(testSetStatus)),
-							zap.Error(err),
-						)
 					} else {
 						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 					}
@@ -1657,13 +1617,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
-			if resolvedStatus, ok := resolveDockerComposeShutdownStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
 				testSetStatus = resolvedStatus
-				r.logger.Info("application stopped before testcase results were recorded",
-					zap.String("testSet", testSetID),
-					zap.String("status", string(testSetStatus)),
-					zap.Error(err),
-				)
 			} else {
 				utils.LogError(r.logger, err, "failed to get test case results")
 				testSetStatus = models.TestSetStatusInternalErr
@@ -1702,12 +1657,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
-		if resolvedStatus, ok := resolveDockerComposeShutdownStatus(cmdType, testSetStatus, testSetStatusByErrChan, loopErr); ok {
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, loopErr); ok {
 			testSetStatus = resolvedStatus
 		} else {
 			testSetStatus = models.TestSetStatusInternalErr
 		}
-	} else if resolvedStatus, ok := resolveDockerComposeShutdownStatus(cmdType, testSetStatus, testSetStatusByErrChan, nil); ok {
+	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, nil); ok {
 		testSetStatus = resolvedStatus
 	}
 
