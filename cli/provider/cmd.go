@@ -1357,6 +1357,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil // Or return an error
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
 	}
 
 	return nil

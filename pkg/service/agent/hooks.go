@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -70,4 +71,26 @@ var SetupAgentHook SetupHooks = &SetupHook{}
 
 func RegisterSetupHook(h SetupHooks) {
 	SetupAgentHook = h
+}
+
+func RegisterProxyHook(h coreAgent.AuxiliaryProxyHook) {
+	coreAgent.RegisterProxyHook(h)
+}
+
+func RegisterIncomingProxy(ip coreAgent.IncomingProxy) {
+	coreAgent.RegisterIncomingProxy(ip)
+}
+
+type ExtraPassThroughPortsFn = coreAgent.ExtraPassThroughPortsFn
+
+func RegisterExtraPassThroughPortsHook(h ExtraPassThroughPortsFn) {
+	coreAgent.RegisterExtraPassThroughPortsHook(h)
+}
+
+func RegisterEbpfLoadedHook(h func(getMap func(string) coreAgent.Pinnable) error) {
+	coreAgent.EbpfLoadedHook = h
+}
+
+func SetEbpfProxyPortOverride(port uint32) {
+	coreAgent.EbpfProxyPortOverride = port
 }
