@@ -171,7 +171,7 @@ function Sync-Logs {
 
 # Wait for app readiness
 Write-Host "Waiting for app to respond on $base/hello/keploy …"
-$deadline = (Get-Date).AddMinutes(5)
+$deadline = (Get-Date).AddMinutes(10)  # go run on cold Windows runners can take 5+ minutes to compile
 $ready = $false
 do {
   Sync-Logs -job $recJob # <-- Print Keploy logs here

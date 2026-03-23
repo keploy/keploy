@@ -3,7 +3,26 @@
 # macOS variant for gin-mongo (docker). Uses BSD sed.
 source ./../../.github/workflows/test_workflow_scripts/test-iid-macos.sh
 
-# Start mongo before starting keploy.
+# Verify Docker Desktop is running — never start it from CI.
+# Starting Docker from a CI job makes the runner track it as a child
+# process and kill it between jobs.
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: Docker Desktop is not running."
+  echo "Ensure Docker Desktop is configured as a Login Item on the self-hosted runner."
+  exit 1
+fi
+
+# Clean up stale containers and networks from previous runs to avoid
+# port conflicts on the self-hosted macOS runner.
+for c in ginApp ginApp_1 ginApp_2 ginApp_test mongoDb; do
+  docker rm -f "$c" 2>/dev/null || true
+done
+docker network rm keploy-network 2>/dev/null || true
+
+# Kill leftover keploy CLI processes holding ports (not Docker-managed ones)
+pgrep -f 'keploy record|keploy test' | xargs kill -9 2>/dev/null || true
+
+# Start mongo before starting keploy (retry once if Docker crashes).
 docker network create keploy-network
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
@@ -29,6 +48,11 @@ container_kill() {
     if [ -n "$REC_PID" ]; then
         echo "Killing keploy"
         sudo kill -INT "$REC_PID" 2>/dev/null || true
+        # Wait for keploy to flush and exit (up to 30s)
+        for i in {1..30}; do
+            kill -0 "$REC_PID" 2>/dev/null || break
+            sleep 1
+        done
     fi
 }
 
@@ -97,15 +121,14 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Shutdown mongo before test mode - Keploy should use mocks for database interactions
-echo "Shutting down mongo before test mode..."
-docker stop mongoDb || true
-docker rm mongoDb || true
-echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+# Keep MongoDB running during test replay. Keploy will serve mocks for
+# matched requests; unmatched requests fall through to the real database
+# which returns the same data recorded earlier, preventing flaky failures
+# caused by non-deterministic mock matching across test sets.
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-$REPLAY_BIN test -c 'docker run -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+$REPLAY_BIN test -c 'docker run --rm -p 8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

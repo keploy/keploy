@@ -35,6 +35,14 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		return errors.New("failed to get the error group from the context")
 	}
 
+	// Check if this is post-TLS mode (decrypted data from SSL/GoTLS uprobes).
+	// In this mode the TLS handshake already happened; the uprobe provides
+	// decrypted plaintext starting from HandshakeResponse41.
+	isPostTLS := false
+	if v, ok := ctx.Value(models.PostTLSModeKey).(bool); ok && v {
+		isPostTLS = true
+	}
+
 	g.Go(func() error {
 		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
@@ -51,7 +59,21 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		}
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
+		if isPostTLS {
+			// Post-TLS path: decrypted uprobe data starts after the TLS handshake.
+			// Recover server greeting context from TLSHandshakeStore.
+			err := handlePostTLSRecord(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
+			if err != nil && err != io.EOF {
+				utils.LogError(logger, err, "failed to handle post-TLS MySQL recording; verify PostTLSMode/TLSHandshakeStore wiring and SkipTLSMITM settings")
+				errCh <- err
+			}
+			return nil
+		}
+
 		// handle the initial client-server handshake (connection phase)
+		logger.Debug("Record: entering relay path (non-postTLS) handleInitialHandshake",
+			zap.String("connKey", opts.ConnKey),
+			zap.Bool("skipTLSMITM", opts.SkipTLSMITM))
 		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts)
 		if err != nil {
 			utils.LogError(logger, err, "failed to handle initial handshake")
@@ -63,7 +85,9 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		reqTimestamp := result.reqTimestamp
 		resTimestamp := result.resTimestamp
-		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, resTimestamp, opts)
+		if !result.skipConfigMock {
+			recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp, resTimestamp, opts)
+		}
 
 		// reset the requests and responses
 		requests = []mysql.Request{}
@@ -71,8 +95,14 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		if decodeCtx.UseSSL {
 			if result.tlsClientConn == nil || result.tlsDestConn == nil {
-				utils.LogError(logger, err, "Expected Tls connections are nil", zap.Any("tlsClientConn", result.tlsClientConn), zap.Any("tlsDestConn", result.tlsDestConn))
-				errCh <- errors.New("tls connection is not established")
+				// TLS connections are nil — this is expected in sockmap
+				// mode where the proxy doesn't MITM the TLS session. The pre-TLS
+				// config mock has already been recorded above. Post-TLS command
+				// phase data is captured by SSL/GoTLS uprobes independently.
+				// Also handles the case where the client disconnected before TLS.
+				logger.Debug("TLS connections not established after SSL request; pre-TLS config mock recorded, skipping command phase",
+					zap.Any("tlsClientConn", result.tlsClientConn),
+					zap.Any("tlsDestConn", result.tlsDestConn))
 				return nil
 			}
 			clientConn = result.tlsClientConn
@@ -128,7 +158,19 @@ func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql
 			ResTimestampMock: resTimestampMock,
 		},
 	}
-	mgr := syncMock.Get()
-	mgr.AddMock(mysqlMock)
+	// Send to the mocks channel for YAML output. Use either the direct
+	// mocks channel or syncMock.AddMock, but NOT both — AddMock also sends
+	// to outChan (which is the same channel in the sockmap proxy path),
+	// causing every mock to be written to YAML twice.
+	if mocks != nil {
+		select {
+		case mocks <- mysqlMock:
+		case <-ctx.Done():
+			return
+		}
+	} else {
+		mgr := syncMock.Get()
+		mgr.AddMock(mysqlMock)
+	}
 	return
 }

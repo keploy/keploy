@@ -165,6 +165,7 @@ func init() {
 	gob.Register(&MongoOpMessage{})
 	gob.Register(&MongoOpQuery{})
 	gob.Register(&MongoOpReply{})
+	gob.Register(&MongoOpUnknown{})
 }
 
 // UnmarshalBSON implements bson.Unmarshaler for mongoRequests because of interface typeof field
