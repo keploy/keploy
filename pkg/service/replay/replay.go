@@ -58,17 +58,28 @@ type Replayer struct {
 	afterTestRunCalled bool                 // guards duplicate AfterTestRun calls
 	hookImpl           TestHooks
 
-	completeTestReport   map[string]TestReportVerdict
-	firstRun             bool
-	completeTestReportMu sync.RWMutex
-	totalTests           int
-	totalTestPassed      int
-	totalTestFailed      int
-	totalTestObsolete    int
-	totalTestIgnored     int
-	totalTestTimeTaken   time.Duration
-	failedTCsBySetID     map[string][]string
-	mockMismatchFailures *TestFailureStore
+	completeTestReport    map[string]TestReportVerdict
+	firstRun              bool
+	completeTestReportMu  sync.RWMutex
+	totalTests            int
+	totalTestPassed       int
+	totalTestFailed       int
+	totalTestObsolete     int
+	totalTestIgnored      int
+	totalTestTimeTaken    time.Duration
+	failedTCsBySetID      map[string][]string
+	mockMismatchFailures  *TestFailureStore
+	fallbackDeprecateOnce sync.Once
+}
+
+// GetMockMismatchFailures returns a copy of the accumulated mock mismatch failures.
+func (r *Replayer) GetMockMismatchFailures() []TestFailure {
+	return r.mockMismatchFailures.GetFailures()
+}
+
+// GetTestRunID returns the current test run ID.
+func (r *Replayer) GetTestRunID() string {
+	return r.testRunID
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -530,9 +541,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSets := strings.Join(testSetIDs, ", ")
 			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
 
-			if r.config.Debug {
-				r.mockMismatchFailures.PrintFailuresTable()
-			}
+			r.mockMismatchFailures.PrintFailuresTable()
 		}
 		coverageData := models.TestCoverage{}
 		var err error
@@ -816,14 +825,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
+		if r.config.Test.FallBackOnMiss {
+			r.fallbackDeprecateOnce.Do(func() {
+				r.logger.Info("fallBackOnMiss flag is deprecated and ignored. Replay is now always deterministic. Remove this flag from your config.")
+			})
+		}
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			SQLDelay:       time.Duration(r.config.Test.Delay),
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-			Mocking:        r.config.Test.Mocking,
-			Backdate:       testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:    headerNoiseConfig,
+			Rules:         r.config.BypassRules,
+			MongoPassword: r.config.Test.MongoPassword,
+			SQLDelay:      time.Duration(r.config.Test.Delay),
+			Mocking:       r.config.Test.Mocking,
+			Backdate:      testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:   headerNoiseConfig,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -973,14 +987,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Prepare header noise configuration for mock matching
 		headerNoiseConfig := PrepareHeaderNoiseConfig(r.config.Test.GlobalNoise.Global, r.config.Test.GlobalNoise.Testsets, testSetID)
 
+		if r.config.Test.FallBackOnMiss {
+			r.fallbackDeprecateOnce.Do(func() {
+				r.logger.Info("fallBackOnMiss flag is deprecated and ignored. Replay is now always deterministic. Remove this flag from your config.")
+			})
+		}
+
 		err = r.instrumentation.MockOutgoing(runTestSetCtx, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			SQLDelay:       time.Duration(r.config.Test.Delay),
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-			Mocking:        r.config.Test.Mocking,
-			Backdate:       testCases[0].HTTPReq.Timestamp,
-			NoiseConfig:    headerNoiseConfig,
+			Rules:         r.config.BypassRules,
+			MongoPassword: r.config.Test.MongoPassword,
+			SQLDelay:      time.Duration(r.config.Test.Delay),
+			Mocking:       r.config.Test.Mocking,
+			Backdate:      testCases[0].HTTPReq.Timestamp,
+			NoiseConfig:   headerNoiseConfig,
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
@@ -1046,6 +1065,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 		}
+	}
+
+	if err := r.hookImpl.BeforeTestSetReplay(runTestSetCtx, testSetID); err != nil {
+		utils.LogError(r.logger, err, "BeforeTestSetReplay hook failed; inspect your custom hook implementation or disable it for this test set if this failure is expected",
+			zap.String("testSetID", testSetID),
+		)
 	}
 
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])

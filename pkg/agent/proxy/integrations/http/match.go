@@ -489,3 +489,98 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 	return updated
 }
+
+// buildHTTPMismatchReport finds the closest HTTP mock to the given request
+// and returns a human-readable diff report. If httpMocks is nil, it fetches
+// from mockDb; otherwise it uses the pre-fetched slice to avoid a redundant read.
+func (h *HTTP) buildHTTPMismatchReport(request *http.Request, mockDb integrations.MockMemDb, httpMocks []*models.Mock) *models.MockMismatchReport {
+	if httpMocks == nil {
+		mocks, err := mockDb.GetUnFilteredMocks()
+		if err != nil {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "Failed to read mock database. Check logs for errors and retry.",
+			}
+		}
+		if len(mocks) == 0 {
+			return &models.MockMismatchReport{
+				Protocol:      "HTTP",
+				ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+				NextSteps:     "No HTTP mocks available. Re-record mocks to capture this endpoint.",
+			}
+		}
+		httpMocks = FilterHTTPMocks(mocks)
+	}
+	if len(httpMocks) == 0 {
+		return &models.MockMismatchReport{
+			Protocol:      "HTTP",
+			ActualSummary: fmt.Sprintf("%s %s", request.Method, request.URL.Path),
+			NextSteps:     "No HTTP mocks available. Re-record mocks to capture this endpoint.",
+		}
+	}
+
+	// Find closest mock: first try same-method mocks (cheap filter), then fall back to all.
+	actualKey := request.Method + " " + request.URL.Path
+	bestDist := -1
+	var closestMock *models.Mock
+	// Two-pass: first same method only, then all if no match found
+	for pass := 0; pass < 2; pass++ {
+		for _, mock := range httpMocks {
+			if mock.Spec.HTTPReq == nil {
+				continue
+			}
+			if pass == 0 && string(mock.Spec.HTTPReq.Method) != request.Method {
+				continue
+			}
+			// Parse mock URL to extract just the path (mocks store full URL strings)
+			mockPath := mock.Spec.HTTPReq.URL
+			if parsed, err := url.Parse(mock.Spec.HTTPReq.URL); err == nil {
+				mockPath = parsed.Path
+			}
+			mockKey := string(mock.Spec.HTTPReq.Method) + " " + mockPath
+			dist := levenshtein.ComputeDistance(actualKey, mockKey)
+			if bestDist < 0 || dist < bestDist {
+				bestDist = dist
+				closestMock = mock
+			}
+		}
+		if closestMock != nil {
+			break
+		}
+	}
+	if closestMock == nil || closestMock.Spec.HTTPReq == nil {
+		return &models.MockMismatchReport{
+			Protocol:      "HTTP",
+			ActualSummary: actualKey,
+			NextSteps:     "Re-record mocks if the API endpoint or request format has changed.",
+		}
+	}
+
+	// Build diff details
+	var diffs []string
+	mockReq := closestMock.Spec.HTTPReq
+	if string(mockReq.Method) != request.Method {
+		diffs = append(diffs, fmt.Sprintf("method: %q vs %q", request.Method, mockReq.Method))
+	}
+	mockPath := mockReq.URL
+	if parsed, err := url.Parse(mockReq.URL); err == nil {
+		mockPath = parsed.Path
+	}
+	if mockPath != request.URL.Path {
+		diffs = append(diffs, fmt.Sprintf("path: %q vs %q", request.URL.Path, mockPath))
+	}
+
+	diff := strings.Join(diffs, "; ")
+	if diff == "" {
+		diff = "method and path match but headers or body differ"
+	}
+
+	return &models.MockMismatchReport{
+		Protocol:      "HTTP",
+		ActualSummary: actualKey,
+		ClosestMock:   closestMock.Name,
+		Diff:          diff,
+		NextSteps:     "Re-record mocks if the API endpoint or request format has changed.",
+	}
+}

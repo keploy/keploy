@@ -691,6 +691,7 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 			return validatedJSON, err
 		}
 	}
+
 	validatedJSON.expected = expected
 	validatedJSON.actual = actual
 	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {

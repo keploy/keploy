@@ -34,6 +34,10 @@ const (
 	defaultTimeoutForDockerQuery = 1 * time.Minute
 )
 
+// ComposeServiceHook is called after the keploy-agent Docker Compose service
+// node is built, allowing downstream callers to mutate it.
+var ComposeServiceHook func(serviceNode *yaml.Node)
+
 type Impl struct {
 	nativeDockerClient.APIClient
 	timeoutForDockerQuery time.Duration
@@ -510,9 +514,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 
 	// Generate ports
-	ports := []string{
-		fmt.Sprintf("%d:%d", opts.AgentPort, opts.AgentPort),
-		fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort),
+	var ports []string
+	if opts.AgentPort != 0 {
+		ports = append(ports, fmt.Sprintf("%d:%d", opts.AgentPort, opts.AgentPort))
+	}
+	if opts.ProxyPort != 0 {
+		ports = append(ports, fmt.Sprintf("%d:%d", opts.ProxyPort, opts.ProxyPort))
 	}
 
 	ports = append(ports, opts.AppPorts...)
@@ -572,6 +579,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 
 	idc.logger.Debug("Generating agent service with command", zap.Strings("command", command))
 
+	capAdd := []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "BPF"},
+		{Kind: yaml.ScalarNode, Value: "PERFMON"},
+		{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
+		{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
+		{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
+		{Kind: yaml.ScalarNode, Value: "SYS_NICE"},
+	}
+
 	// Create the service YAML node structure
 	serviceNode := &yaml.Node{
 		Kind: yaml.MappingNode,
@@ -584,17 +600,10 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "container_name"},
 			{Kind: yaml.ScalarNode, Value: opts.KeployContainer},
 
-			// cap_add — with security explanation comments in the generated YAML
-			{Kind: yaml.ScalarNode, Value: "cap_add", HeadComment: "These capabilities are scoped to the container's own isolated network namespace\n" +
-				"and do NOT grant access to the host's network, interfaces, or firewall.\n" +
-				"The container runs in its own network namespace — no host access is possible."},
-			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "BPF"},
-				{Kind: yaml.ScalarNode, Value: "PERFMON"},
-				{Kind: yaml.ScalarNode, Value: "NET_ADMIN", LineComment: "required for network traffic capture (scoped to container's own namespace)"},
-				{Kind: yaml.ScalarNode, Value: "SYS_RESOURCE"},
-				{Kind: yaml.ScalarNode, Value: "SYS_PTRACE"},
-			}},
+			// cap_add — these privileges are required for eBPF interception.
+			{Kind: yaml.ScalarNode, Value: "cap_add", HeadComment: "Capabilities required by keploy-agent for eBPF interception.\n" +
+				"Review and allow only what your security policy permits."},
+			{Kind: yaml.SequenceNode, Content: capAdd},
 		},
 	}
 
@@ -798,6 +807,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		} else {
 			idc.logger.Warn("Failed to get current working directory for pprof mount", zap.Error(err))
 		}
+	}
+
+	// Allow callers to mutate the fully-built service node. This runs last
+	// so the hook can see and modify all fields including volumes.
+	if ComposeServiceHook != nil {
+		ComposeServiceHook(serviceNode)
 	}
 
 	return serviceNode, nil

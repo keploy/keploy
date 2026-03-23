@@ -162,7 +162,7 @@ docker stop $DB_CONTAINER >/dev/null 2>&1 || true
 test_container="${APP_CONTAINER}_test_1"
 echo "Starting test mode..."
 "$REPLAY_BIN" test \
-  -c "docker run -p $APP_PORT:$APP_PORT --net keploy-network --name $test_container $APP_IMAGE" \
+  -c "docker run --rm -p $APP_PORT:$APP_PORT --net keploy-network --name $test_container $APP_IMAGE" \
   --container-name "$test_container" \
   --apiTimeout 60 \
   --delay 12 \
