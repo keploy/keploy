@@ -49,14 +49,14 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		unfiltered = NewTreeDb(customComparator)
 	}
 	return &MockManager{
-		filtered:         filtered,
-		unfiltered:       unfiltered,
-		filteredByKind:   make(map[models.Kind]*TreeDb),
-		unfilteredByKind: make(map[models.Kind]*TreeDb),
+		filtered:            filtered,
+		unfiltered:          unfiltered,
+		filteredByKind:      make(map[models.Kind]*TreeDb),
+		unfilteredByKind:    make(map[models.Kind]*TreeDb),
 		statelessFiltered:   make(map[models.Kind]map[string][]*models.Mock),
 		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
-		revByKind:        make(map[models.Kind]*uint64),
-		logger:           logger,
+		revByKind:           make(map[models.Kind]*uint64),
+		logger:              logger,
 	}
 }
 

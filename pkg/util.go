@@ -1163,8 +1163,8 @@ func filterByMapping(_ context.Context, logger *zap.Logger, m []*models.Mock, mo
 	isNonKeploy := false
 	for _, mock := range m {
 		if mock == nil {
-            continue
-        }
+			continue
+		}
 		p := mock.DeepCopy()
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
