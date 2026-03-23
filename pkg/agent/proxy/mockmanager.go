@@ -60,16 +60,6 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	}
 }
 
-func getStatelessKey(mock *models.Mock) string {
-	switch mock.Kind {
-	case models.DNS:
-		if mock.Spec.DNSReq != nil {
-			return strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
-		}
-	}
-	return mock.Name
-}
-
 func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered, unfiltered []*models.Mock) {
 	if kind == models.DNS {
 		key = strings.ToLower(dns.Fqdn(key))
@@ -87,10 +77,6 @@ func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered,
 		}
 	}
 	return
-}
-
-func (m *MockManager) GetStatelessDNSMocks(name string) (filtered, unfiltered []*models.Mock) {
-	return m.GetStatelessMocks(models.DNS, name)
 }
 
 // ---------- revision helpers ----------
@@ -242,7 +228,10 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		if newStateless[k] == nil {
 			newStateless[k] = make(map[string][]*models.Mock)
 		}
-		key := getStatelessKey(mock)
+		key := mock.Name
+		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
+			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
+		}
 		newStateless[k][key] = append(newStateless[k][key], mock)
 	}
 	if maxSortOrder > 0 {
@@ -283,7 +272,10 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		if newStateless[k] == nil {
 			newStateless[k] = make(map[string][]*models.Mock)
 		}
-		key := getStatelessKey(mock)
+		key := mock.Name
+		if mock.Kind == models.DNS && mock.Spec.DNSReq != nil {
+			key = strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
+		}
 		newStateless[k][key] = append(newStateless[k][key], mock)
 	}
 	if maxSortOrder > 0 {
