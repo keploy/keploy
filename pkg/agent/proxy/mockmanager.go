@@ -221,8 +221,6 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.filtered.deleteAll()
 	newFiltered := NewTreeDb(customComparator)
 	newFilteredByKind := make(map[models.Kind]*TreeDb)
 	newLookup := make(map[models.Kind]map[string][]*models.Mock)
@@ -269,8 +267,6 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	// legacy rebuild
-	m.unfiltered.deleteAll()
 	newUnFiltered := NewTreeDb(customComparator)
 	newUnFilteredByKind := make(map[models.Kind]*TreeDb)
 	newLookup := make(map[models.Kind]map[string][]*models.Mock)
