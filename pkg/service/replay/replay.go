@@ -359,13 +359,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
 				testSetResult = false
-				abortTestRun = true
+				r.logger.Warn("application halted during test set, continuing to next test set", zap.String("testSet", testSet))
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
 				abortTestRun = true
 			case models.TestSetStatusFaultUserApp:
 				testSetResult = false
-				abortTestRun = true
+				r.logger.Warn("application faulted during test set, continuing to next test set", zap.String("testSet", testSet))
 			case models.TestSetStatusUserAbort:
 				return nil
 			case models.TestSetStatusFailed:
@@ -607,6 +607,21 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
+// writeFailureReport inserts a zero-test report for a test set that failed before any test cases ran.
+// It is used by early-return paths in RunTestSet so that Start() always has a report to read.
+func (r *Replayer) writeFailureReport(ctx context.Context, testRunID, testSetID string, status models.TestSetStatus, startTime time.Time) {
+	report := &models.TestReport{
+		Version:   models.GetVersion(),
+		TestSet:   testSetID,
+		Status:    string(status),
+		TimeTaken: time.Since(startTime).String(),
+		CmdUsed:   r.config.Test.CmdUsed,
+	}
+	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
+		utils.LogError(r.logger, err, "failed to insert failure report for test set", zap.String("testSet", testSetID))
+	}
+}
+
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
@@ -635,7 +650,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+		utils.LogError(r.logger, err, "failed to get test cases, skipping test set", zap.String("testSet", testSetID))
+		r.writeFailureReport(runTestSetCtx, testRunID, testSetID, models.TestSetStatusFailed, startTime)
+		return models.TestSetStatusFailed, nil
 	}
 
 	// Extract host domains from test cases for telemetry (HTTP and gRPC only)
@@ -801,7 +818,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Parent context cancelled (user pressed Ctrl+C)
 			return models.TestSetStatusUserAbort, runTestSetCtx.Err()
 		case <-agentCtx.Done():
-			return models.TestSetStatusFailed, fmt.Errorf("keploy-agent did not become ready in time")
+			utils.LogError(r.logger, nil, "keploy-agent did not become ready in time, skipping test set", zap.String("testSet", testSetID))
+			r.writeFailureReport(context.WithoutCancel(runTestSetCtx), testRunID, testSetID, models.TestSetStatusAppHalted, startTime)
+			return models.TestSetStatusAppHalted, nil
 		case <-agentReadyCh:
 		}
 
@@ -827,9 +846,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
-				utils.LogError(r.logger, err, "failed to mock outgoing")
+				utils.LogError(r.logger, err, "failed to mock outgoing, skipping test set", zap.String("testSet", testSetID))
 			}
-			return models.TestSetStatusFailed, err
+			r.writeFailureReport(context.WithoutCancel(runTestSetCtx), testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 
 		useMappingBased, expectedTestMockMappings = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
@@ -861,7 +881,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Get all mocks for mapping-based filtering
 		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
-			return models.TestSetStatusFailed, err
+			utils.LogError(r.logger, err, "failed to get mocks, skipping test set", zap.String("testSet", testSetID))
+			r.writeFailureReport(context.WithoutCancel(runTestSetCtx), testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
@@ -880,8 +902,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to store mocks on agent")
-			return models.TestSetStatusFailed, err
+			utils.LogError(r.logger, err, "failed to store mocks on agent, skipping test set", zap.String("testSet", testSetID))
+			r.writeFailureReport(context.WithoutCancel(runTestSetCtx), testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 
 		if !isMappingEnabled {
@@ -891,7 +914,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {
-			return models.TestSetStatusFailed, err
+			utils.LogError(r.logger, err, "failed to send mock filter params to agent, skipping test set", zap.String("testSet", testSetID))
+			r.writeFailureReport(context.WithoutCancel(runTestSetCtx), testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
@@ -938,7 +963,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Get all mocks for mapping-based filtering
 		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
-			return models.TestSetStatusFailed, err
+			utils.LogError(r.logger, err, "failed to get mocks, skipping test set", zap.String("testSet", testSetID))
+			r.writeFailureReport(runTestSetCtx, testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
@@ -951,8 +978,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		err = r.instrumentation.StoreMocks(ctx, filteredMocks, unfilteredMocks)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to store mocks on agent")
-			return models.TestSetStatusFailed, err
+			utils.LogError(r.logger, err, "failed to store mocks on agent, skipping test set", zap.String("testSet", testSetID))
+			r.writeFailureReport(runTestSetCtx, testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 		if r.firstRun {
 			err = r.hookImpl.BeforeTestRun(ctx, testRunID)
@@ -984,15 +1012,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		})
 		if err != nil {
 			if ctx.Err() != context.Canceled {
-				utils.LogError(r.logger, err, "failed to mock outgoing")
+				utils.LogError(r.logger, err, "failed to mock outgoing, skipping test set", zap.String("testSet", testSetID))
 			}
-			return models.TestSetStatusFailed, err
+			r.writeFailureReport(runTestSetCtx, testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
 		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 		if err != nil {
-			return models.TestSetStatusFailed, err
+			utils.LogError(r.logger, err, "failed to send mock filter params to agent, skipping test set", zap.String("testSet", testSetID))
+			r.writeFailureReport(runTestSetCtx, testRunID, testSetID, models.TestSetStatusFailed, startTime)
+			return models.TestSetStatusFailed, nil
 		}
 
 		if r.instrument {
