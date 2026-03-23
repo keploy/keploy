@@ -989,14 +989,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		if utils.CmdType(c.cfg.CommandType) == utils.DockerCompose && c.cfg.ContainerName == "" {
-			utils.LogError(c.logger, nil, "container name not found for docker compose command", zap.String("cmd", c.cfg.Command))
-			c.logger.Info(
-				"To fix this, rerun Keploy with --container-name set to the target Docker Compose service name (or its container_name if defined)",
-				zap.String("example", fmt.Sprintf(`keploy record -c %q --container-name <service-name>`, c.cfg.Command)),
-			)
-			return errors.New("missing required --container-name flag or containerName in config file for docker compose")
-		}
+	if utils.CmdType(c.cfg.CommandType) == utils.DockerCompose && c.cfg.ContainerName == "" {
+		utils.LogError(c.logger, nil, "container name not found for docker compose command. "+
+			"To fix this, rerun Keploy with --container-name set to the target Docker Compose service name (or its container_name if defined)",
+			zap.String("cmd", c.cfg.Command),
+			zap.String("example", fmt.Sprintf(`keploy record -c %q --container-name <service-name>`, c.cfg.Command)),
+		)
+		return errors.New("missing required --container-name flag or containerName in config file for docker compose")
+	}
 
 		absPath, err := utils.GetAbsPath(c.cfg.Path)
 		if err != nil {
