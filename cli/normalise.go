@@ -21,7 +21,7 @@ func Normalize(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 		Short:   "Normalize Keploy",
 		Example: "keploy normalize  --test-run testrun --tests test-set-1:test-case-1 test-case-2,test-set-2:test-case-1 test-case-2 ",
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd)
+			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())

@@ -25,9 +25,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		zap.String("name", tc.Name))
 
 	doc := &yaml.NetworkTrafficDoc{
-		Version: tc.Version,
-		Kind:    tc.Kind,
-		Name:    tc.Name,
+		Version:     tc.Version,
+		Kind:        tc.Kind,
+		Name:        tc.Name,
+		LastUpdated: tc.LastUpdated,
 	}
 
 	var noise map[string][]string
@@ -294,12 +295,13 @@ func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string)
 
 func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.TestCase, error) {
 	tc := &models.TestCase{
-		Version:    yamlTestcase.Version,
-		Kind:       yamlTestcase.Kind,
-		Name:       yamlTestcase.Name,
-		Curl:       yamlTestcase.Curl,
-		Noise:      make(map[string][]string),
-		Assertions: make(map[models.AssertionType]interface{}),
+		Version:     yamlTestcase.Version,
+		Kind:        yamlTestcase.Kind,
+		Name:        yamlTestcase.Name,
+		Curl:        yamlTestcase.Curl,
+		LastUpdated: yamlTestcase.LastUpdated,
+		Noise:       make(map[string][]string),
+		Assertions:  make(map[models.AssertionType]interface{}),
 	}
 
 	switch tc.Kind {
