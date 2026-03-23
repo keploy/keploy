@@ -11,7 +11,6 @@ import (
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/miekg/dns"
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -307,59 +306,19 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 		return dnsCacheEntry{}, false
 	}
 
-	const maxRetries = 3
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Add small backoff between retries to reduce contention
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*5) * time.Millisecond)
-		}
-
-		filteredMocks, unfilteredMocks := mgr.GetDNSMocks(question.Name)
-		if len(filteredMocks) == 0 && len(unfilteredMocks) == 0 {
-			return dnsCacheEntry{}, false
-		}
-
-		if matchedMock, resp := findDNSMock(filteredMocks, question, p.logger); matchedMock != nil {
-			if p.updateDNSMock(mgr, matchedMock) {
-				return resp, true
-			}
-			p.logger.Debug("DNS mock update failed (filtered), retrying",
-				zap.String("mockName", matchedMock.Name),
-				zap.Int("attempt", attempt+1),
-				zap.Int("maxRetries", maxRetries),
-			)
-			if attempt == maxRetries-1 {
-				p.logger.Warn("DNS mock update exhausted retries, returning matched response to avoid DNS timeout",
-					zap.String("mockName", matchedMock.Name),
-					zap.String("query", question.Name),
-					zap.Int("attempts", maxRetries),
-				)
-				return resp, true
-			}
-			continue
-		}
-
-		if matchedMock, resp := findDNSMock(unfilteredMocks, question, p.logger); matchedMock != nil {
-			if p.updateDNSMock(mgr, matchedMock) {
-				return resp, true
-			}
-			p.logger.Debug("DNS mock update failed (unfiltered), retrying",
-				zap.String("mockName", matchedMock.Name),
-				zap.Int("attempt", attempt+1),
-				zap.Int("maxRetries", maxRetries),
-			)
-			if attempt == maxRetries-1 {
-				p.logger.Warn("DNS mock update exhausted retries, returning matched response to avoid DNS timeout",
-					zap.String("mockName", matchedMock.Name),
-					zap.String("query", question.Name),
-					zap.Int("attempts", maxRetries),
-				)
-				return resp, true
-			}
-			continue
-		}
-
+	// DNS mocks are stateless config mocks — no need to consume or
+	// bump SortOrder. Just find and return the matching response.
+	filteredMocks, unfilteredMocks := mgr.GetDNSMocks(question.Name)
+	if len(filteredMocks) == 0 && len(unfilteredMocks) == 0 {
 		return dnsCacheEntry{}, false
+	}
+
+	if _, resp := findDNSMock(filteredMocks, question, p.logger); resp.Msg != nil {
+		return resp, true
+	}
+
+	if _, resp := findDNSMock(unfilteredMocks, question, p.logger); resp.Msg != nil {
+		return resp, true
 	}
 
 	return dnsCacheEntry{}, false
@@ -444,55 +403,6 @@ func encodeDNSRRs(rrs []dns.RR) []string {
 		encoded = append(encoded, rr.String())
 	}
 	return encoded
-}
-
-func (p *Proxy) updateDNSMock(mgr *MockManager, matchedMock *models.Mock) bool {
-	if mgr == nil || matchedMock == nil {
-		return false
-	}
-	// Avoid copying structs that embed locks; construct old/new mock keys explicitly.
-	id, isFiltered, sortOrder := matchedMock.TestModeInfo.ID, matchedMock.TestModeInfo.IsFiltered, matchedMock.TestModeInfo.SortOrder
-
-	// Log the update attempt for debugging
-	p.logger.Debug("Attempting DNS mock update",
-		zap.String("mockName", matchedMock.Name),
-		zap.Int("id", id),
-		zap.Bool("isFiltered", isFiltered),
-		zap.Int64("sortOrder", sortOrder),
-	)
-
-	originalMatchedMock := &models.Mock{
-		Name: matchedMock.Name,
-		Kind: matchedMock.Kind,
-		TestModeInfo: models.TestModeInfo{
-			ID:         id,
-			IsFiltered: isFiltered,
-			SortOrder:  sortOrder,
-		},
-	}
-
-	updatedMock := &models.Mock{
-		Version:      matchedMock.Version,
-		Name:         matchedMock.Name,
-		Kind:         matchedMock.Kind,
-		Spec:         matchedMock.Spec,
-		ConnectionID: matchedMock.ConnectionID,
-		TestModeInfo: models.TestModeInfo{
-			ID:         id,
-			IsFiltered: false,
-			SortOrder:  pkg.GetNextSortNum(),
-		},
-	}
-
-	result := mgr.UpdateUnFilteredMock(originalMatchedMock, updatedMock)
-	if !result {
-		p.logger.Debug("DNS mock update failed - mock not found with expected key",
-			zap.String("mockName", matchedMock.Name),
-			zap.Int("expectedID", id),
-			zap.Int64("expectedSortOrder", sortOrder),
-		)
-	}
-	return result
 }
 
 // generateDNSDedupeKey creates a unique key for DNS mock deduplication.

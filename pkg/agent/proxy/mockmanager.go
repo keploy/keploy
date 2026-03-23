@@ -37,8 +37,8 @@ type MockManager struct {
 	consumedMocks sync.Map
 
 	// Optimized lookup maps
-	lookupFiltered   map[models.Kind]map[string][]*models.Mock
-	lookupUnfiltered map[models.Kind]map[string][]*models.Mock
+	statelessFiltered   map[models.Kind]map[string][]*models.Mock
+	statelessUnfiltered map[models.Kind]map[string][]*models.Mock
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
@@ -53,8 +53,8 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		unfiltered:       unfiltered,
 		filteredByKind:   make(map[models.Kind]*TreeDb),
 		unfilteredByKind: make(map[models.Kind]*TreeDb),
-		lookupFiltered:   make(map[models.Kind]map[string][]*models.Mock),
-		lookupUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
+		statelessFiltered:   make(map[models.Kind]map[string][]*models.Mock),
+		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
 		revByKind:        make(map[models.Kind]*uint64),
 		logger:           logger,
 	}
@@ -66,10 +66,6 @@ func getLookupKey(mock *models.Mock) string {
 		if mock.Spec.DNSReq != nil {
 			return strings.ToLower(dns.Fqdn(mock.Spec.DNSReq.Name))
 		}
-	case models.HTTP:
-		if mock.Spec.HTTPReq != nil {
-			return string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
-		}
 	}
 	return mock.Name
 }
@@ -80,12 +76,12 @@ func (m *MockManager) GetMocks(kind models.Kind, key string) (filtered, unfilter
 	}
 	m.treesMu.RLock()
 	defer m.treesMu.RUnlock()
-	if km, ok := m.lookupFiltered[kind]; ok {
+	if km, ok := m.statelessFiltered[kind]; ok {
 		if list := km[key]; len(list) > 0 {
 			filtered = append([]*models.Mock(nil), list...)
 		}
 	}
-	if km, ok := m.lookupUnfiltered[kind]; ok {
+	if km, ok := m.statelessUnfiltered[kind]; ok {
 		if list := km[key]; len(list) > 0 {
 			unfiltered = append([]*models.Mock(nil), list...)
 		}
@@ -223,7 +219,7 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	newFiltered := NewTreeDb(customComparator)
 	newFilteredByKind := make(map[models.Kind]*TreeDb)
-	newLookup := make(map[models.Kind]map[string][]*models.Mock)
+	newStateless := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
 	for index, mock := range mocks {
@@ -243,22 +239,17 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
-		if newLookup[k] == nil {
-			newLookup[k] = make(map[string][]*models.Mock)
+		if newStateless[k] == nil {
+			newStateless[k] = make(map[string][]*models.Mock)
 		}
 		key := getLookupKey(mock)
-		newLookup[k][key] = append(newLookup[k][key], mock)
-	}
-	for _, km := range newLookup {
-		for _, mockSlice := range km {
-			sortMocksByOrder(mockSlice)
-		}
+		newStateless[k][key] = append(newStateless[k][key], mock)
 	}
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 	m.treesMu.Lock()
-	m.filtered, m.filteredByKind, m.lookupFiltered = newFiltered, newFilteredByKind, newLookup
+	m.filtered, m.filteredByKind, m.statelessFiltered = newFiltered, newFilteredByKind, newStateless
 	m.treesMu.Unlock()
 	for k := range touched {
 		m.bumpRevisionKind(k)
@@ -269,7 +260,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	newUnFiltered := NewTreeDb(customComparator)
 	newUnFilteredByKind := make(map[models.Kind]*TreeDb)
-	newLookup := make(map[models.Kind]map[string][]*models.Mock)
+	newStateless := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
 	for index, mock := range mocks {
@@ -289,76 +280,22 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
-		if newLookup[k] == nil {
-			newLookup[k] = make(map[string][]*models.Mock)
+		if newStateless[k] == nil {
+			newStateless[k] = make(map[string][]*models.Mock)
 		}
 		key := getLookupKey(mock)
-		newLookup[k][key] = append(newLookup[k][key], mock)
-	}
-	for _, km := range newLookup {
-		for _, mockSlice := range km {
-			sortMocksByOrder(mockSlice)
-		}
+		newStateless[k][key] = append(newStateless[k][key], mock)
 	}
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 	m.treesMu.Lock()
-	m.unfiltered, m.unfilteredByKind, m.lookupUnfiltered = newUnFiltered, newUnFilteredByKind, newLookup
+	m.unfiltered, m.unfilteredByKind, m.statelessUnfiltered = newUnFiltered, newUnFilteredByKind, newStateless
 	m.treesMu.Unlock()
 	for k := range touched {
 		m.bumpRevisionKind(k)
 	}
 	m.bumpRevisionAll()
-}
-
-func (m *MockManager) syncLookup(mock *models.Mock, isFiltered, remove bool) {
-	if mock == nil {
-		return
-	}
-	key, k := getLookupKey(mock), mock.Kind
-	m.treesMu.Lock()
-	defer m.treesMu.Unlock()
-
-	target := m.lookupUnfiltered
-	if isFiltered {
-		target = m.lookupFiltered
-	}
-	if target[k] == nil {
-		target[k] = make(map[string][]*models.Mock)
-	}
-
-	list := target[k][key]
-	if remove {
-		for i, item := range list {
-			if item.Name == mock.Name && item.TestModeInfo.ID == mock.TestModeInfo.ID {
-				newList := append([]*models.Mock(nil), list[:i]...)
-				newList = append(newList, list[i+1:]...)
-				list = newList
-				break
-			}
-		}
-	} else {
-		newList := append([]*models.Mock(nil), list...)
-		newList = append(newList, mock)
-		sortMocksByOrder(newList)
-		list = newList
-	}
-
-	if len(list) == 0 {
-		delete(target[k], key)
-	} else {
-		target[k][key] = list
-	}
-}
-
-func sortMocksByOrder(list []*models.Mock) {
-	sort.SliceStable(list, func(i, j int) bool {
-		if list[i].TestModeInfo.SortOrder != list[j].TestModeInfo.SortOrder {
-			return list[i].TestModeInfo.SortOrder < list[j].TestModeInfo.SortOrder
-		}
-		return list[i].TestModeInfo.ID < list[j].TestModeInfo.ID
-	})
 }
 
 // ---------- point updates / deletes (keep per-kind in sync) ----------
@@ -441,8 +378,6 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	}
 	if updatedGlobal {
 		m.bumpRevisionAll()
-		m.syncLookup(old, false, true)
-		m.syncLookup(new, false, false)
 	}
 	return updatedGlobal
 }
@@ -456,9 +391,6 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	m.treesMu.Lock()
 	deletedKind := flt.delete(mock.TestModeInfo)
 	m.treesMu.Unlock()
-	if deletedGlobal {
-		m.syncLookup(&mock, true, true)
-	}
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
@@ -494,9 +426,6 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	m.treesMu.Lock()
 	deletedKind := unf.delete(mock.TestModeInfo)
 	m.treesMu.Unlock()
-	if deletedGlobal {
-		m.syncLookup(&mock, false, true)
-	}
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
