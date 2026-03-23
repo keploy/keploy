@@ -308,7 +308,7 @@ func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool
 
 	// DNS mocks are stateless config mocks — no need to consume or
 	// bump SortOrder. Just find and return the matching response.
-	filteredMocks, unfilteredMocks := mgr.GetDNSMocks(question.Name)
+	filteredMocks, unfilteredMocks := mgr.GetStatelessDNSMocks(question.Name)
 	if len(filteredMocks) == 0 && len(unfilteredMocks) == 0 {
 		return dnsCacheEntry{}, false
 	}
