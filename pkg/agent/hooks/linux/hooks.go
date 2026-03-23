@@ -155,8 +155,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	//getting all the ebpf maps with proper synchronization
 	h.objectsMutex.Lock()
-	h.clientRegistrationMap = objs.KeployClientRegistrationMap
-	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	h.clientRegistrationMap = objs.M_1773927248001
+	h.agentRegistartionMap = objs.M_1773927248002
 	h.objects = objs
 	h.objectsMutex.Unlock()
 	// ---------------
@@ -170,6 +170,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.objects = objs
+
+	// If an eBPF loaded hook is registered, provide a lookup so it can
+	// access the maps it needs.
+	if agent.EbpfLoadedHook != nil {
+		if err := agent.EbpfLoadedHook(objs.lookupMap); err != nil {
+			utils.LogError(h.logger, err, "EbpfLoadedHook failed; verify hook configuration/capabilities or disable the hook if not required")
+			return err
+		}
+	}
 
 	// Get the first-mounted cgroupv2 path.
 	cGroupPath, err := agent.DetectCgroupPath(h.logger)
@@ -317,7 +326,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if err != nil {
 		h.logger.Debug("Failed to register Client")
 	}
-	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts)
+	proxyInfo, err := h.GetProxyInfo(ctx, setupOpts, opts)
 	if err != nil {
 		return err
 	}
@@ -417,6 +426,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	}
 	h.logger.Debug("eBPF resources released successfully...")
+
 }
 
 func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
@@ -435,29 +445,50 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 	}
 
 	ports := agent.GetPortToSendToKernel(ctx, rules)
+
+	if agent.ExtraPassThroughPortsHook != nil {
+		ports = append(ports, agent.ExtraPassThroughPortsHook()...)
+	}
+
 	for i := 0; i < 10; i++ {
 		if len(ports) <= i {
 			clientInfo.PassThroughPorts[i] = -1
 			continue
 		}
-		// Copy the port, casting from uint32 to int32
-		clientInfo.PassThroughPorts[i] = int32(rules[i].Port)
+		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
 
 	return h.SendClientInfo(clientInfo)
 }
 
-func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent) (structs.ProxyInfo, error) {
+func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {
+	port := opts.ProxyPort
+	if cfg.Port != 0 {
+		port = cfg.Port
+	}
+
 	if !opts.IsDocker {
 		proxyIP, err := IPv4ToUint32("127.0.0.1")
 		if err != nil {
 			return structs.ProxyInfo{}, err
 		}
+
+		// Keep non-docker behavior backward-compatible with main by default:
+		// do not redirect generic IPv6 traffic to proxy unless an explicit
+		// proxy-port override is configured.
+		var proxyIPv6 [4]uint32
+		if cfg.Port != 0 {
+			proxyIPv6, err = ToIPv4MappedIPv6("127.0.0.1")
+			if err != nil {
+				return structs.ProxyInfo{}, err
+			}
+		}
+
 		proxyInfo := structs.ProxyInfo{
 			IP4:  proxyIP,
-			IP6:  [4]uint32{0, 0, 0, 0},
-			Port: opts.ProxyPort,
+			IP6:  proxyIPv6,
+			Port: port,
 		}
 
 		return proxyInfo, nil
@@ -473,18 +504,17 @@ func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent) (structs.Pr
 
 	var ipv6 [4]uint32
 	if opts.IsDocker {
-		ipv6, err := ToIPv4MappedIPv6(AgentIP)
+		ipv6, err = ToIPv4MappedIPv6(AgentIP)
 		if err != nil {
 			return structs.ProxyInfo{}, fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
 		}
 		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", AgentIP, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-
 	}
 
 	proxyInfo := structs.ProxyInfo{
 		IP4:  ipv4,
 		IP6:  ipv6,
-		Port: opts.ProxyPort,
+		Port: port,
 	}
 
 	return proxyInfo, nil

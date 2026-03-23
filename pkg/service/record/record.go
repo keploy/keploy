@@ -311,7 +311,13 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 				insertMockErrChan <- err
 			} else {
 				if tempID != "" && mock.Name != "" {
-					correlationMap.Store(tempID, models.MockEntry{Name: mock.Name, Kind: string(mock.GetKind()), Timestamp: mock.Spec.ReqTimestampMock.Unix()})
+					correlationMap.Store(tempID, models.MockEntry{
+						Name:             mock.Name,
+						Kind:             string(mock.GetKind()),
+						Timestamp:        mock.Spec.ReqTimestampMock.Unix(),
+						ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+					})
 				}
 				mockCountMap[mock.GetKind()]++
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
@@ -489,10 +495,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
 	}
 
 	outgoingStream, err := r.instrumentation.GetOutgoing(mockCtx, models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
-		MongoPassword:  r.config.Test.MongoPassword,
-		TLSPrivateKey:  tlsPrivateKey,
-		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		Rules:         r.config.BypassRules,
+		MongoPassword: r.config.Test.MongoPassword,
+		TLSPrivateKey: tlsPrivateKey,
 	})
 	if err != nil {
 

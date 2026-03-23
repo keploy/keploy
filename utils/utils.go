@@ -542,6 +542,33 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
+// ExtractCommandFromArgs parses os.Args to find the value of -c or --command flag.
+// Returns empty string if not found.
+func ExtractCommandFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		// Check for -c or --command
+		if arg == "-c" || arg == "--command" {
+			// Next argument is the command value
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+
+		// Check for -c=value or --command=value format
+		if len(arg) > 3 && arg[:3] == "-c=" {
+			return arg[3:]
+		}
+		if len(arg) > 10 && arg[:10] == "--command=" {
+			return arg[10:]
+		}
+	}
+	return ""
+}
+
+// FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
 func FindDockerCmd(cmd string) CmdType {
 	if cmd == "" {
 		return Empty
@@ -1154,15 +1181,16 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
 		return false
 	}
-	if err := f.Close(); err != nil {
-		LogError(logger, err, "failed to close file", zap.String("file", filePath))
-	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		}
+	}()
 
 	// Check for section names typical to Go binaries
 	sections := []string{".go.buildinfo", ".gopclntab"}
 	for _, section := range sections {
 		if sect := f.Section(section); sect != nil {
-			fmt.Println(section)
 			return true
 		}
 	}

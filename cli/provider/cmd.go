@@ -80,7 +80,7 @@ Docker
 	Test:
 	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 10 --buildDelay 60
 
-Note: Keploy will automatically prompt for sudo password when elevated privileges are required for eBPF operations.
+Note: On Linux, Keploy may prompt for sudo password when elevated privileges are required for eBPF operations.
 `
 
 var ExampleOneClickInstall = `
@@ -277,6 +277,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
+		cmd.Flags().String("format", "text", "Output format for test report (text or junit)")
 	case "sanitize":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -356,7 +357,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("skip-coverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
 			cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
-			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "[DEPRECATED] This flag is ignored. Replay is now always deterministic.")
+			_ = cmd.Flags().MarkDeprecated("fallBack-on-miss", "replay is now always deterministic; this flag is ignored")
 			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
@@ -769,6 +771,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		c.cfg.Report.TestCaseIDs = cleaned
+
+		format, err := cmd.Flags().GetString("format")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the format flag")
+			return errors.New("failed to get the format flag")
+		}
+		format = strings.ToLower(strings.TrimSpace(format))
+		if format == "" {
+			format = "text"
+		}
+		switch format {
+		case "text", "junit":
+			// valid
+		default:
+			return fmt.Errorf("invalid --format value %q: allowed values are 'text' and 'junit'", format)
+		}
+		c.cfg.Report.Format = format
 
 	case "sanitize":
 		path, err := cmd.Flags().GetString("path")
@@ -1336,6 +1355,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil // Or return an error
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
 	}
 
 	return nil
