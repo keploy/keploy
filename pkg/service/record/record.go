@@ -606,19 +606,19 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, opts StartOptions) (
 	}
 
 	// INCOMING
-	incomingStream, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
-	if err != nil {
-		if ctx.Err() != nil || utils.IsShutdownError(err) {
-			r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
-			// Close channels to prevent callers from hanging when ranging over them
-			close(incomingChan)
-			close(outgoingChan)
-			return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
-		}
-		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
-	}
-
 	if incomingEnabled {
+		incomingStream, err := r.instrumentation.GetIncoming(ctx, incomingOpts)
+		if err != nil {
+			if ctx.Err() != nil || utils.IsShutdownError(err) {
+				r.logger.Debug("Context cancelled or shutdown error while getting incoming test cases")
+				// Close channels to prevent callers from hanging when ranging over them
+				close(incomingChan)
+				close(outgoingChan)
+				return FrameChan{Incoming: incomingChan, Outgoing: outgoingChan}, nil
+			}
+			return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
+		}
+
 		g.Go(func() error {
 			defer close(incomingChan)
 			for {
