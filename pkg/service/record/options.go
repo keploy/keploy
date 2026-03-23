@@ -24,8 +24,10 @@ type StartOptions struct {
 	RootMocksUntilSession bool
 	WriteTestSetConfig    bool
 	IgnoreAppError        bool
-	MockDB                MockDB
-	OnMock                func(*models.Mock) error
+	// SkipIngress skips attaching eBPF ingress bind hooks so the app's listening port is not intercepted.
+	SkipIngress bool
+	MockDB      MockDB
+	OnMock      func(*models.Mock) error
 }
 
 // StartResult summarizes the recording session.

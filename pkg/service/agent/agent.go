@@ -74,6 +74,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		IsDocker:      a.config.Agent.IsDocker,
 		EnableTesting: a.config.Agent.EnableTesting,
 		Rules:         rules,
+		SkipIngress:   a.config.Agent.SkipIngress,
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -255,10 +256,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, agent.HookCfg{
-		Pid:      0,
-		IsDocker: opts.IsDocker,
-		Mode:     opts.Mode,
-		Rules:    opts.Rules,
+		Pid:         0,
+		IsDocker:    opts.IsDocker,
+		Mode:        opts.Mode,
+		Rules:       opts.Rules,
+		SkipIngress: opts.SkipIngress,
 	}, a.config.Agent)
 
 	if err != nil {

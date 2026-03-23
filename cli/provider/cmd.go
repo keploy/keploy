@@ -358,6 +358,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().Bool("skip-ingress", c.cfg.Agent.SkipIngress, "Skip attaching ingress bind hooks (used in sandbox record mode)")
 
 	case "serve":
 		if isMCPStdioCommand(cmd) {
@@ -1459,6 +1460,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil // Or return an error
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
+
+		skipIngress, err := cmd.Flags().GetBool("skip-ingress")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get skip-ingress flag")
+			return nil
+		}
+		c.cfg.Agent.SkipIngress = skipIngress
 	}
 
 	return nil

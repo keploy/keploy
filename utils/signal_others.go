@@ -17,8 +17,53 @@ import (
 
 	"github.com/creack/pty"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
+
+func pickAnyTTYFile() *os.File {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return os.Stdin
+	}
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		return os.Stdout
+	}
+	if term.IsTerminal(int(os.Stderr.Fd())) {
+		return os.Stderr
+	}
+	return nil
+}
+
+// makeRawInputOnly sets the terminal to a mode suitable for PTY interaction:
+// - Disables local echo (ECHO) - the PTY slave controls echo
+// - Disables canonical mode (ICANON) - send chars immediately without line buffering
+// - Keeps ISIG enabled - so Ctrl+C generates SIGINT properly
+// - Keeps output processing (OPOST) enabled - so \n is converted to \r\n
+// This is different from term.MakeRaw() which disables ALL processing including ISIG.
+func makeRawInputOnly(fd int) (*term.State, error) {
+	oldState, err := term.GetState(fd)
+	if err != nil {
+		return nil, err
+	}
+
+	termios, err := unix.IoctlGetTermios(fd, ioctlReadTermios)
+	if err != nil {
+		return nil, err
+	}
+
+	termios.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.IEXTEN
+	termios.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON
+	termios.Cflag &^= unix.CSIZE | unix.PARENB
+	termios.Cflag |= unix.CS8
+	termios.Cc[unix.VMIN] = 1
+	termios.Cc[unix.VTIME] = 0
+
+	if err := unix.IoctlSetTermios(fd, ioctlWriteTermios, termios); err != nil {
+		return nil, err
+	}
+
+	return oldState, nil
+}
 
 func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	err := syscall.Kill(pid, sig)
@@ -48,18 +93,27 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 
 	// Check if the command is docker-compose related and output is a TTY
 	cmdType := FindDockerCmd(userCmd)
-	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	hasTTY := pickAnyTTYFile() != nil
 	stdoutWriter := io.Writer(os.Stdout)
 	stderrWriter := io.Writer(os.Stderr)
 	if IsMCPStdio() {
 		stdoutWriter = os.Stderr
 	}
 
+	// Use PTY when running with any terminal attached. We run user commands in a separate
+	// process group (Setpgid: true) so we can signal/cleanup the process tree without
+	// impacting the Keploy parent. Some CLIs (notably npm/playwright) still open/read
+	// /dev/tty even when stdin is /dev/null, and the Linux TTY layer will stop a
+	// background process group with SIGTTIN/SIGTTOU. A PTY gives the command its own
+	// controlling terminal and prevents job-control stops.
+	usePTY := hasTTY && !IsMCPStdio()
+
 	// Use PTY for Docker Compose when running in a TTY to avoid SIGTTOU/SIGTTIN issues
 	// Docker Compose needs to read terminal size for progress bars, but Setpgid: true
 	// puts it in a background process group which causes the OS to pause it.
 	// A PTY gives Docker Compose its own terminal to work with.
-	if cmdType == DockerCompose && isTTY {
+	if cmdType == DockerCompose && stdoutIsTTY {
 		// If running in MCP mode, we cannot use PTY effectively because io.Copy to stdout
 		// interferes with the JSON-RPC protocol. Instead, we pipe logs to a file.
 		if IsMCPStdio() {
@@ -88,28 +142,37 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 			logger.Debug("Output is a TTY (Docker Compose -> Logs to file)")
 			logger.Info("Docker compose logs are being written to file", zap.String("path", logFilePath))
 			logger.Info("You can view live logs using tail -f", zap.String("command", "tail -f "+logFilePath))
-		} else {
+		} else if usePTY {
 			// For PTY, we use Setsid to create a new session instead of Setpgid
 			// This allows the PTY to become the controlling terminal
 			cmd.SysProcAttr = &syscall.SysProcAttr{
 				Setsid: true,
 			}
-			logger.Debug("Output is a TTY (Docker Compose -> PTY)")
-			return executeWithPTY(ctx, logger, cmd)
+			logger.Debug("TTY detected (Docker Compose -> PTY)")
+			return executeWithPTY(ctx, logger, cmd, stdoutWriter)
 		}
-	} else {
-		// For non-PTY execution, use Setpgid for process group management
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setpgid: true,
-		}
-
-		if cmdType == DockerCompose {
-			logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
-		}
-		// Set the output of the command to stdout/stderr
-		cmd.Stdout = stdoutWriter
-		cmd.Stderr = stderrWriter
 	}
+
+	if usePTY {
+		// For PTY, we use Setsid to create a new session instead of Setpgid.
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setsid: true,
+		}
+		logger.Debug("TTY detected (Command -> PTY)")
+		return executeWithPTY(ctx, logger, cmd, stdoutWriter)
+	}
+
+	// For non-PTY execution, use Setpgid for process group management
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	if cmdType == DockerCompose {
+		logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
+	}
+	// Set the output of the command to stdout/stderr
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
 	err := cmd.Start()
@@ -129,7 +192,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 // This is necessary for Docker Compose when Setpgid is true, as Docker Compose
 // tries to read terminal size for rendering progress bars. Without a PTY,
 // the OS would pause the background process with SIGTTOU/SIGTTIN.
-func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdError {
+func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, output io.Writer) CmdError {
 	// Start the command with a PTY
 	// pty.Start creates a PTY pair, assigns the slave PTY to cmd's stdin/stdout/stderr,
 	// and starts the command
@@ -141,37 +204,116 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 
 	logger.Info("Starting Application:", zap.String("executing_cmd", cmd.String()))
 
+	// If we are attached to an interactive terminal, switch the parent terminal to an
+	// input-only raw-ish mode so secrets (sudo passwords) are not echoed locally.
+	var oldTermState *term.State
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if st, err := makeRawInputOnly(int(os.Stdin.Fd())); err != nil {
+			logger.Debug("failed to set terminal mode", zap.Error(err))
+		} else {
+			oldTermState = st
+		}
+	}
+
 	// Handle terminal resize - propagate size changes from real terminal to PTY
+	ttyFile := pickAnyTTYFile()
 	resizeCh := make(chan os.Signal, 1)
 	signal.Notify(resizeCh, syscall.SIGWINCH)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for range resizeCh {
-			if resizeErr := pty.InheritSize(os.Stdin, ptmx); resizeErr != nil {
-				// We might get an error if the PTY is closed while we try to resize it.
-				// This is expected during shutdown.
-				if !isClosedPTYError(resizeErr) {
-					logger.Debug("failed to resize PTY", zap.Error(resizeErr))
+	if ttyFile != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range resizeCh {
+				if resizeErr := pty.InheritSize(ttyFile, ptmx); resizeErr != nil {
+					// We might get an error if the PTY is closed while we try to resize it.
+					// This is expected during shutdown.
+					if !isClosedPTYError(resizeErr) {
+						logger.Debug("failed to resize PTY", zap.Error(resizeErr))
+					}
 				}
 			}
-		}
-	}()
-	// Trigger initial resize
-	resizeCh <- syscall.SIGWINCH
+		}()
+		// Trigger initial resize
+		resizeCh <- syscall.SIGWINCH
+	}
+
+	// Forward stdin to PTY so interactive prompts (sudo, etc.) work. Use poll + a done
+	// signal so we don't leak goroutines that keep competing to read from os.Stdin.
+	stdinDone := make(chan struct{})
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		go func() {
+			defer func() {
+				// best effort: if we exit early, make sure we don't keep the loop alive
+				select {
+				case <-stdinDone:
+				default:
+					close(stdinDone)
+				}
+			}()
+			fd := int32(os.Stdin.Fd())
+			buf := make([]byte, 1024)
+			for {
+				select {
+				case <-stdinDone:
+					return
+				default:
+				}
+
+				pfds := []unix.PollFd{{Fd: fd, Events: unix.POLLIN}}
+				n, err := unix.Poll(pfds, 100) // ms
+				if err != nil {
+					if err == unix.EINTR {
+						continue
+					}
+					return
+				}
+				if n == 0 {
+					continue
+				}
+				revents := pfds[0].Revents
+				if revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) == 0 {
+					continue
+				}
+
+				nr, rerr := os.Stdin.Read(buf)
+				if nr > 0 {
+					if _, werr := ptmx.Write(buf[:nr]); werr != nil {
+						return
+					}
+				}
+				if rerr != nil {
+					return
+				}
+			}
+		}()
+	} else {
+		close(stdinDone)
+	}
 
 	// Copy PTY output to real stdout
 	// This goroutine will exit when ptmx is closed after cmd.Wait() returns
 	outputDone := make(chan struct{})
 	var copyErr error
 	go func() {
-		_, copyErr = io.Copy(os.Stdout, ptmx)
+		_, copyErr = io.Copy(output, ptmx)
 		close(outputDone)
 	}()
 
 	// Wait for the command to finish
 	cmdErr := cmd.Wait()
+
+	// Stop stdin forwarder and restore terminal state before other cleanup.
+	select {
+	case <-stdinDone:
+	default:
+		close(stdinDone)
+	}
+	if oldTermState != nil {
+		if restoreErr := term.Restore(int(os.Stdin.Fd()), oldTermState); restoreErr != nil {
+			logger.Debug("failed to restore terminal state", zap.Error(restoreErr))
+		}
+	}
 
 	// Stop listening for resize signals first, then drain any pending signals
 	// before closing the channel to avoid potential write to closed channel

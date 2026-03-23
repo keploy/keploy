@@ -2,6 +2,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -327,6 +328,8 @@ func (h *HTTP) chunkedResponse(ctx context.Context, finalResp *[]byte, clientCon
 	var encoder *json.Encoder
 	var chunkCount int
 	var streamPath string
+	endMarker := []byte("0\r\n\r\n")
+	var tail []byte // used only for stream-mode end-marker detection (we don't buffer full response)
 
 	if isStream {
 		configPath := opts.ConfigPath
@@ -411,7 +414,21 @@ ReadLoop:
 				break ReadLoop
 			}
 
-			if string(resp) == "0\r\n\r\n" {
+			// Chunked bodies end with a 0-size chunk ("0\r\n\r\n"). The final read from the
+			// socket often contains trailing body bytes plus the terminator, so checking for
+			// full equality is brittle and can deadlock the conn. Check the accumulated tail.
+			if isStream {
+				tail = append(tail, resp...)
+				if len(tail) > len(endMarker) {
+					tail = tail[len(tail)-len(endMarker):]
+				}
+				if bytes.HasSuffix(tail, endMarker) {
+					break ReadLoop
+				}
+				continue
+			}
+
+			if len(*finalResp) >= len(endMarker) && bytes.HasSuffix(*finalResp, endMarker) {
 				break ReadLoop
 			}
 		}

@@ -100,6 +100,7 @@ func (r *recorder) Record(ctx context.Context, opts models.RecordOptions) (*mode
 		RootMocksUntilSession: true,
 		WriteTestSetConfig:    false,
 		IgnoreAppError:        true,
+		SkipIngress:           true,
 		MockDB:                db,
 		OnMock: func(mock *models.Mock) error {
 			collector.addMock(mock)

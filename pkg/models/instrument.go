@@ -33,6 +33,7 @@ type HookOptions struct {
 	IsDocker      bool
 	ProxyPort     uint32
 	ServerPort    uint32
+	SkipIngress   bool // skip attaching ingress bind hooks (e.g. sandbox record)
 }
 
 type IngressEvent struct {
@@ -95,6 +96,7 @@ type SetupOptions struct {
 	ConfigPath        string
 	Path              string
 	ExtraArgs         []string
+	SkipIngress       bool
 }
 
 type RunOptions struct {

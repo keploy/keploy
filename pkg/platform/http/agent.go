@@ -898,6 +898,9 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		// Join them with a comma and add as a single argument
 		args = append(args, "--pass-through-ports", strings.Join(portStrings, ","))
 	}
+	if opts.SkipIngress {
+		args = append(args, "--skip-ingress")
+	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
@@ -912,10 +915,19 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If cached, we can use sudo -n (non-interactive) and skip PTY
 	sudoCached := utils.AreSudoCredentialsCached()
 
-	// Check if we need PTY for interactive input (e.g., sudo password)
-	// Skip PTY if credentials are already cached - use non-interactive sudo instead
+	// If sudo is going to prompt, prefer caching credentials in the main terminal first.
+	// Rationale: starting the agent under a PTY spawns a long-lived goroutine that copies
+	// os.Stdin into the agent PTY. If the user command is also run under a PTY (needed to
+	// avoid SIGTTIN for background pgrps), multiple PTY sessions race to read from the same
+	// os.Stdin and user input can be "stolen" (e.g., a sudo prompt inside the user command).
+	// By caching credentials first, we can run the agent with `sudo -n` and avoid PTY here.
 	if agentUtils.NeedsPTY() && !sudoCached {
-		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
+		if err := utils.CacheSudoCredentials(ctx, a.logger); err != nil {
+			// Fallback to the previous behavior (PTY) in case sudo caching fails for any reason.
+			a.logger.Debug("failed to cache sudo credentials; falling back to PTY agent start", zap.Error(err))
+			return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
+		}
+		sudoCached = utils.AreSudoCredentialsCached()
 	}
 
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)

@@ -274,7 +274,7 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: commandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, Path: r.config.Path})
+	err := r.instrumentation.Setup(setupCtx, command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: commandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, Path: r.config.Path, SkipIngress: opts.SkipIngress})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error

@@ -189,7 +189,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	}
 	h.sockops = sockops
 
-	if opts.Mode == models.MODE_RECORD {
+	if opts.Mode == models.MODE_RECORD && !opts.SkipIngress {
 
 		h.BindEvents = objs.BindEvents
 		cg4, err := link.AttachCgroup(link.CgroupOptions{
