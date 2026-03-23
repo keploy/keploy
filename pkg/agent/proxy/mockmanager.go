@@ -221,25 +221,27 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 // ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
-	newAll := NewTreeDb(customComparator)
-	newByKind := make(map[models.Kind]*TreeDb)
+	// legacy rebuild
+	m.filtered.deleteAll()
+	newFiltered := NewTreeDb(customComparator)
+	newFilteredByKind := make(map[models.Kind]*TreeDb)
 	newLookup := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
-	for i, mock := range mocks {
+	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
-			mock.TestModeInfo.SortOrder = int64(i) + 1
+			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
 		if mock.TestModeInfo.SortOrder > maxSortOrder {
 			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
-		mock.TestModeInfo.ID = i
-		newAll.insert(mock.TestModeInfo, mock)
+		mock.TestModeInfo.ID = index
+		newFiltered.insert(mock.TestModeInfo, mock)
 		k := mock.Kind
-		td := newByKind[k]
+		td := newFilteredByKind[k]
 		if td == nil {
 			td = NewTreeDb(customComparator)
-			newByKind[k] = td
+			newFilteredByKind[k] = td
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
@@ -250,15 +252,15 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		newLookup[k][key] = append(newLookup[k][key], mock)
 	}
 	for _, km := range newLookup {
-		for _, slice := range km {
-			sortMocksByOrder(slice)
+		for _, mockSlice := range km {
+			sortMocksByOrder(mockSlice)
 		}
 	}
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 	m.treesMu.Lock()
-	m.filtered, m.filteredByKind, m.lookupFiltered = newAll, newByKind, newLookup
+	m.filtered, m.filteredByKind, m.lookupFiltered = newFiltered, newFilteredByKind, newLookup
 	m.treesMu.Unlock()
 	for k := range touched {
 		m.bumpRevisionKind(k)
@@ -267,25 +269,27 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
-	newAll := NewTreeDb(customComparator)
-	newByKind := make(map[models.Kind]*TreeDb)
+	// legacy rebuild
+	m.unfiltered.deleteAll()
+	newUnFiltered := NewTreeDb(customComparator)
+	newUnFilteredByKind := make(map[models.Kind]*TreeDb)
 	newLookup := make(map[models.Kind]map[string][]*models.Mock)
 	touched := map[models.Kind]struct{}{}
 	var maxSortOrder int64
-	for i, mock := range mocks {
+	for index, mock := range mocks {
 		if mock.TestModeInfo.SortOrder == 0 {
-			mock.TestModeInfo.SortOrder = int64(i) + 1
+			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
 		if mock.TestModeInfo.SortOrder > maxSortOrder {
 			maxSortOrder = mock.TestModeInfo.SortOrder
 		}
-		mock.TestModeInfo.ID = i
-		newAll.insert(mock.TestModeInfo, mock)
+		mock.TestModeInfo.ID = index
+		newUnFiltered.insert(mock.TestModeInfo, mock)
 		k := mock.Kind
-		td := newByKind[k]
+		td := newUnFilteredByKind[k]
 		if td == nil {
 			td = NewTreeDb(customComparator)
-			newByKind[k] = td
+			newUnFilteredByKind[k] = td
 		}
 		td.insert(mock.TestModeInfo, mock)
 		touched[k] = struct{}{}
@@ -296,15 +300,15 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		newLookup[k][key] = append(newLookup[k][key], mock)
 	}
 	for _, km := range newLookup {
-		for _, slice := range km {
-			sortMocksByOrder(slice)
+		for _, mockSlice := range km {
+			sortMocksByOrder(mockSlice)
 		}
 	}
 	if maxSortOrder > 0 {
 		pkg.UpdateSortCounterIfHigher(maxSortOrder)
 	}
 	m.treesMu.Lock()
-	m.unfiltered, m.unfilteredByKind, m.lookupUnfiltered = newAll, newByKind, newLookup
+	m.unfiltered, m.unfilteredByKind, m.lookupUnfiltered = newUnFiltered, newUnFilteredByKind, newLookup
 	m.treesMu.Unlock()
 	for k := range touched {
 		m.bumpRevisionKind(k)
