@@ -351,6 +351,9 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	}
 
 	if r.config.Report.ReportPath != "" {
+		if r.config.Report.Format == "junit" {
+			return fmt.Errorf("--format junit is not supported with --report-path; use the database-backed report path instead")
+		}
 		// File mode (single test-set file)
 		return r.generateReportFromFile(ctx, r.config.Report.ReportPath)
 	}
@@ -377,6 +380,21 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			r.logger.Warn("No test sets found for report generation")
 			return nil
 		}
+	}
+
+	if r.config.Report.Format == "junit" {
+		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to collect reports for JUnit output: %w", err)
+		}
+		if len(r.config.Report.TestCaseIDs) > 0 {
+			for name, rep := range reports {
+				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
+				rep.Total = len(rep.Tests)
+				reports[name] = rep
+			}
+		}
+		return r.generateJUnit(reports)
 	}
 
 	if r.config.Report.Summary {
@@ -630,10 +648,7 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 func (r *Report) printFailedTestReports(ctx context.Context, failedTests []models.TestResult) error {
 	if r.config.Report.ShowFullBody {
 
-		workers := runtime.GOMAXPROCS(0)
-		if workers < 2 {
-			workers = 2
-		}
+		workers := max(runtime.GOMAXPROCS(0), 2)
 		sem := make(chan struct{}, workers)
 		results := make([]item, len(failedTests))
 		var wg sync.WaitGroup
@@ -677,10 +692,7 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 		return nil
 	}
 
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 2 {
-		workers = 2
-	}
+	workers := max(runtime.GOMAXPROCS(0), 2)
 	sem := make(chan struct{}, workers)
 	results := make([]item, len(failedTests))
 	var wg sync.WaitGroup

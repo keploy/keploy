@@ -5,8 +5,9 @@ release:
   prerelease: auto
   # Optional but useful; avoids accumulating duplicate draft releases.
   mode: replace
-  # You probably want published releases rather than drafts.
+  # Release is published but not marked as latest until binaries and Docker image are ready.
   draft: false
+  make_latest: false
 
 archives:
   - id: default
@@ -27,7 +28,7 @@ builds:
       - -s -w -X main.dsn={{.Env.SENTRY_DSN_BINARY}}
       - -s -w -X main.version={{.Version}}
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
-      - -s -w -X main.gitHubClientID={{.Env.GITTHUB_APP_CLIENT_ID}}
+      - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
     env:
       - CGO_ENABLED=0
     goos:
@@ -50,7 +51,7 @@ builds:
       - -s -w -X main.dsn={{.Env.SENTRY_DSN_BINARY}}
       - -s -w -X main.version={{.Version}}
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
-      - -s -w -X main.gitHubClientID={{.Env.GITTHUB_APP_CLIENT_ID}}
+      - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
     env:
       - CGO_ENABLED=1
       - CC=x86_64-w64-mingw32-gcc

@@ -136,6 +136,11 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, firs
 	return nil
 }
 
+func (h *Hooks) BeforeTestSetReplay(ctx context.Context, testSetID string) error {
+	h.logger.Debug("BeforeTestSetReplay hook executed", zap.String("testSetID", testSetID))
+	return nil
+}
+
 func (h *Hooks) BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error {
 	h.logger.Debug("BeforeTestResult called")
 	return nil

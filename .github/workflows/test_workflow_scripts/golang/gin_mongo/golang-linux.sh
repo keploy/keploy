@@ -72,13 +72,18 @@ send_request(){
       --url 'http://localhost:8080/verify-email?email=admin@yahoo.com' \
       --header 'Accept: application/json'
 
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    # Wait for keploy to record the tcs and mocks.
     sleep 10
     REC_PID="$(pgrep -n -f 'keploy record' || true)"
     echo "$REC_PID Keploy PID"
     echo "Killing keploy"
     if [ -n "$REC_PID" ]; then
         sudo kill -INT "$REC_PID" 2>/dev/null || true
+        # Wait for keploy to flush and exit (up to 30s)
+        for i in {1..30}; do
+            kill -0 "$REC_PID" 2>/dev/null || break
+            sleep 1
+        done
     else
         echo "No keploy process found to kill."
     fi
@@ -109,11 +114,10 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Shutdown mongo before test mode - Keploy should use mocks for database interactions
-echo "Shutting down mongo before test mode..."
-docker stop mongoDb || true
-docker rm mongoDb || true
-echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+# Keep MongoDB running during test replay. Keploy will serve mocks for
+# matched requests; unmatched requests fall through to the real database
+# which returns the same data recorded earlier, preventing flaky failures
+# caused by non-deterministic mock matching across test sets.
 
 # Start the gin-mongo app in test mode.
 "$REPLAY_BIN" test -c "./ginApp" --delay 7   2>&1 | tee test_logs.txt
