@@ -55,41 +55,47 @@ func Sandbox(ctx context.Context, logger *zap.Logger, cfg *config.Config, servic
 
 func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:          "record",
-		Short:        "record outgoing calls as sandboxes",
-		Example:      `keploy sandbox record -c "go test -v" --tag "v3.3.0" --location "./sandboxes" --name "main_test"`,
+		Use:   "record",
+		Short: "record outgoing calls as sandboxes",
+		Example: `  # Local-only recording (no cloud, no auth required):
+  keploy sandbox record -c "npx playwright test" --name "e2e"
+
+  # With cloud sync (requires KEPLOY_API_KEY or login):
+  keploy sandbox record -c "go test -v" --tag "v3.3.0" --name "main_test"`,
 		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Tag flag is mandatory for sandbox record.
 			tagInput, err := cmd.Flags().GetString("tag")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get tag flag")
 				return errors.New("failed to get tag flag")
 			}
 			tagInput = strings.TrimSpace(tagInput)
-			if tagInput == "" {
-				logger.Error("--tag flag is mandatory for sandbox record (format: <tag>, e.g. v1.0.0)")
-				return errors.New("--tag flag is mandatory for sandbox record")
-			}
 
-			tag, err := sandbox.ParseTag(tagInput)
-			if err != nil {
-				utils.LogError(logger, err, "invalid --tag value", zap.String("tag", tagInput))
-				return fmt.Errorf("invalid --tag value: %w", err)
-			}
+			// When --tag is provided, authenticate and build cloud ref.
+			// When --tag is omitted, record locally without cloud integration.
+			var ref string
+			if tagInput != "" {
+				tag, err := sandbox.ParseTag(tagInput)
+				if err != nil {
+					utils.LogError(logger, err, "invalid --tag value", zap.String("tag", tagInput))
+					return fmt.Errorf("invalid --tag value: %w", err)
+				}
 
-			jwtToken, err := getSandboxJWTTokenFunc(ctx, logger, cfg)
-			if err != nil {
-				utils.LogError(logger, err, "failed to authenticate user for sandbox record")
-				return fmt.Errorf("failed to authenticate user for sandbox record: %w", err)
-			}
+				jwtToken, err := getSandboxJWTTokenFunc(ctx, logger, cfg)
+				if err != nil {
+					utils.LogError(logger, err, "failed to authenticate user for sandbox record")
+					return fmt.Errorf("failed to authenticate user for sandbox record: %w", err)
+				}
 
-			ref, err := buildSandboxRefFromTag(logger, cfg, tag, jwtToken)
-			if err != nil {
-				return fmt.Errorf("failed to infer sandbox ref from --tag: %w", err)
+				ref, err = buildSandboxRefFromTag(logger, cfg, tag, jwtToken)
+				if err != nil {
+					return fmt.Errorf("failed to infer sandbox ref from --tag: %w", err)
+				}
+			} else {
+				logger.Info("No --tag provided, recording locally without cloud sync")
 			}
 
 			recordSvc, err := serviceFactory.GetService(ctx, "record")
@@ -141,15 +147,17 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				zap.Int("exitCode", result.AppExitCode),
 			)
 
-			// Always overwrite the sandbox ref in keploy.yml during mock recording.
-			cfg.Sandbox.Ref = ref
-			if err := updateSandboxRefInConfig(cfg, ref); err != nil {
-				utils.LogError(logger, err, "failed to update sandbox ref in config")
-				return nil
+			// Only write sandbox ref to keploy.yml when --tag was provided (cloud mode).
+			if ref != "" {
+				cfg.Sandbox.Ref = ref
+				if err := updateSandboxRefInConfig(cfg, ref); err != nil {
+					utils.LogError(logger, err, "failed to update sandbox ref in config")
+					return nil
+				}
+				logger.Info("Updated sandbox ref in config",
+					zap.String("ref", ref),
+				)
 			}
-			logger.Info("Updated sandbox ref in config",
-				zap.String("ref", ref),
-			)
 
 			return nil
 		},
@@ -160,32 +168,29 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 
 func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:          "replay",
-		Short:        "replay recorded sandboxes during testing",
-		Example:      `keploy sandbox replay -c "go test -v" --location "./sandboxes" --name "main_test"`,
+		Use:   "replay",
+		Short: "replay recorded sandboxes during testing",
+		Example: `  # Local-only replay (no cloud sync):
+  keploy sandbox replay -c "npx playwright test" --local --name "e2e"
+
+  # With cloud sync (reads ref from keploy.yml):
+  keploy sandbox replay -c "go test -v" --name "main_test"`,
 		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Step 1: Read sandbox ref from config. No --tag flag for replay.
-			refInConfig := strings.TrimSpace(cfg.Sandbox.Ref)
-			if refInConfig == "" {
-				return errors.New("sandbox ref not found in config (keploy.yml). Run 'keploy sandbox record --tag <tag>' first")
-			}
-
-			ref := refInConfig
-			if _, _, _, err := sandbox.ParseRef(ref); err != nil {
-				return fmt.Errorf("invalid sandbox ref in config (expected <company>/<service>:<tag>): %w", err)
-			}
-
-			logger.Info("Found sandbox reference in config", zap.String("value", refInConfig))
-
 			localOnly, err := cmd.Flags().GetBool("local")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get local flag")
 				return errors.New("failed to get local flag")
 			}
+
+			// Step 1: Determine sandbox ref.
+			// In local-only mode, ref is optional (just replay whatever .sb.yaml files exist).
+			// In cloud mode, ref is required for sync.
+			refInConfig := strings.TrimSpace(cfg.Sandbox.Ref)
+			ref := refInConfig
 
 			shouldUploadAfterReplay := false
 			var sbSvc sandbox.Service
@@ -194,34 +199,43 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				basePath = "."
 			}
 
-			// Step 2: Sync from cloud if API server is configured.
+			// Step 2: Sync from cloud if not local-only and ref + API server are configured.
 			if localOnly {
-				logger.Info("Local-only sandbox replay enabled, skipping cloud sync")
-			} else if cfg.APIServerURL != "" {
-				jwtToken, err := getSandboxJWTTokenFunc(ctx, logger, cfg)
-				if err != nil {
-					utils.LogError(logger, err, "failed to authenticate user for sandbox replay")
-					return fmt.Errorf("failed to authenticate user for sandbox replay: %w", err)
+				logger.Info("Local-only sandbox replay, skipping cloud sync")
+			} else if ref == "" {
+				logger.Info("No sandbox ref in config, using local sandbox files only")
+			} else {
+				if _, _, _, err := sandbox.ParseRef(ref); err != nil {
+					return fmt.Errorf("invalid sandbox ref in config (expected <company>/<service>:<tag>): %w", err)
 				}
+				logger.Info("Found sandbox reference in config", zap.String("value", refInConfig))
 
-				sbSvc = newSandboxServiceFunc(cfg.APIServerURL, jwtToken, logger)
+				if cfg.APIServerURL != "" {
+					jwtToken, err := getSandboxJWTTokenFunc(ctx, logger, cfg)
+					if err != nil {
+						utils.LogError(logger, err, "failed to authenticate user for sandbox replay")
+						return fmt.Errorf("failed to authenticate user for sandbox replay: %w", err)
+					}
 
-				err = sbSvc.Sync(ctx, ref, basePath)
-				if err != nil {
-					if errors.Is(err, sandbox.ErrManifestNotFound) {
-						shouldUploadAfterReplay = true
-						logger.Info("sandbox manifest not found in cloud, proceeding with local sandbox replay",
-							zap.String("ref", ref),
-						)
+					sbSvc = newSandboxServiceFunc(cfg.APIServerURL, jwtToken, logger)
+
+					err = sbSvc.Sync(ctx, ref, basePath)
+					if err != nil {
+						if errors.Is(err, sandbox.ErrManifestNotFound) {
+							shouldUploadAfterReplay = true
+							logger.Info("sandbox manifest not found in cloud, proceeding with local sandbox replay",
+								zap.String("ref", ref),
+							)
+						} else {
+							utils.LogError(logger, err, "failed to sync sandbox from cloud")
+							return fmt.Errorf("sandbox sync failed: %w", err)
+						}
 					} else {
-						utils.LogError(logger, err, "failed to sync sandbox from cloud")
-						return fmt.Errorf("sandbox sync failed: %w", err)
+						logger.Info("Sandbox synced from cloud", zap.String("ref", ref))
 					}
 				} else {
-					logger.Info("Sandbox synced from cloud", zap.String("ref", ref))
+					logger.Info("No API server URL configured, using local sandbox files only")
 				}
-			} else {
-				logger.Info("No API server URL configured, using local sandbox files only")
 			}
 
 			// Step 3: Proceed with normal mock replay.
@@ -274,7 +288,7 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				return errors.New("sandbox replay failed: tests did not pass")
 			}
 
-			if shouldUploadAfterReplay {
+			if shouldUploadAfterReplay && sbSvc != nil && ref != "" {
 				logger.Info("Uploading sandbox to cloud after successful local replay",
 					zap.String("ref", ref),
 				)
