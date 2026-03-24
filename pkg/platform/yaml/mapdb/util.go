@@ -27,12 +27,11 @@ func DecodeMapping(yamlData []byte, logger *zap.Logger) (*models.Mapping, error)
 	return &mapping, nil
 }
 
-// GetMappings converts models.Mapping to map[string][]string
-func GetMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]string {
-	testMockMappings := make(map[string][]string)
+func GetMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]models.MockEntry {
+	testMockMappings := make(map[string][]models.MockEntry)
 
-	for _, test := range mapping.Tests {
-		testMockMappings[test.ID] = test.Mocks.ToSlice()
+	for _, test := range mapping.TestCases {
+		testMockMappings[test.ID] = test.Mocks
 	}
 
 	logger.Debug("Converted mapping to test-mock mappings",
@@ -42,8 +41,8 @@ func GetMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]strin
 	return testMockMappings
 }
 
-// CreateMappings converts map[string][]string to models.Mapping
-func CreateMappingStructure(testSetID string, testMockMappings map[string][]string, logger *zap.Logger) *models.Mapping {
+// CreateMappingStructure converts map[string][]models.MockEntry to models.Mapping
+func CreateMappingStructure(testSetID string, testMockMappings map[string][]models.MockEntry, logger *zap.Logger) *models.Mapping {
 	mapping := &models.Mapping{
 		Version:   string(models.V1Beta1),
 		Kind:      models.MappingKind,
@@ -51,12 +50,12 @@ func CreateMappingStructure(testSetID string, testMockMappings map[string][]stri
 	}
 
 	// Convert the map to the structured format
-	for testName, mockNames := range testMockMappings {
-		test := models.Test{
+	for testName, mockEntries := range testMockMappings {
+		test := models.MappedTestCase{
 			ID:    testName,
-			Mocks: models.FromSlice(mockNames),
+			Mocks: mockEntries,
 		}
-		mapping.Tests = append(mapping.Tests, test)
+		mapping.TestCases = append(mapping.TestCases, test)
 	}
 
 	return mapping

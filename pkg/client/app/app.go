@@ -39,6 +39,7 @@ type App struct {
 	opts            models.SetupOptions
 	container       string
 	keployContainer string
+	composeFile     string // path to the temp compose file (set during SetupCompose)
 	EnableTesting   bool
 	Mode            models.Mode
 }
@@ -197,6 +198,7 @@ func (a *App) SetupCompose(extraArgs []string) error {
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
 	}
+	a.composeFile = newPath
 	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
 	// Now replace the running command to run the docker-compose-tmp.yaml file instead of user docker compose file.
@@ -256,8 +258,29 @@ func (a *App) waitTillExit() {
 	}
 }
 
+// composeDown runs docker compose down to remove all containers and networks
+// created by the compose stack. Without this, stopped containers retain
+// references to image layers; a subsequent docker image prune can delete
+// those layers and corrupt Docker Desktop's overlayfs snapshots.
+func (a *App) composeDown() {
+	if a.composeFile == "" {
+		return
+	}
+	a.logger.Debug("Running docker compose down to clean up containers and networks",
+		zap.String("composeFile", a.composeFile))
+	downCmd := exec.Command("docker", "compose", "-f", a.composeFile, "down")
+	if output, err := downCmd.CombinedOutput(); err != nil {
+		a.logger.Debug("docker compose down finished with error (may be expected if containers already removed)",
+			zap.Error(err), zap.String("output", string(output)))
+	}
+}
+
 func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
+
+	if a.kind == utils.DockerCompose {
+		defer a.composeDown()
+	}
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
@@ -269,6 +292,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				if err != nil {
+					warning := fmt.Sprintf("error sending SIGINT: %s", err)
+					a.logger.Warn(warning)
+				}
 				gracePeriod := 5
 				for i := 0; i < gracePeriod; i++ {
 					time.Sleep(1 * time.Second)
@@ -294,7 +321,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 				// "SIGKILL" string is standard for Docker API to force kill
 				err = a.docker.ContainerKill(context.Background(), a.container, "SIGKILL")
-
+				if err != nil {
+					warning := fmt.Sprintf("error killing container: %s", err)
+					a.logger.Warn(warning)
+				}
 				// Clean up the CLI process as well
 				err = utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				return err

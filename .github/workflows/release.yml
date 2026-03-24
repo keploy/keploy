@@ -18,7 +18,7 @@ jobs:
 #      - name: Set up Go
 #        uses: actions/setup-go@v2
 #        with:
-#          go-version: "1.20"
+#          go-version-file: go.mod
 
 #      - name: Checkout UI
 #        uses: actions/checkout@v4
@@ -56,10 +56,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ">=1.23"
 
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
@@ -107,5 +103,97 @@ jobs:
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
-          GITTHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+          GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
           SERVER_URL: https://api.keploy.io
+
+  build-docker:
+    needs: build-go
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.10.1
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v3.12.0
+
+      - name: Log into registry ghcr.io
+        uses: docker/login-action@v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+
+      - name: Set version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Prepare Dockerfile for Release Build
+        run: |
+          cp Dockerfile Dockerfile.release
+          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan -t ed25519,ecdsa,rsa github.com >> ~\/.ssh\/known_hosts 2>\/dev\/null' ./Dockerfile.release
+          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile.release
+          sed -i '/RUN --mount=type=ssh go mod download/i ENV GOPRIVATE=github.com/keploy/*' ./Dockerfile.release
+
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@v6.19.2
+        with:
+          context: .
+          file: ./Dockerfile.release
+          ssh: default
+          platforms: linux/amd64, linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SENTRY_DSN_DOCKER=${{ secrets.SENTRY_DSN_DOCKER }}
+            VERSION=${{ env.VERSION }}
+            SERVER_URL=https://api.keploy.io
+            GITHUB_APP_CLIENT_ID=${{ secrets.CLIENT_ID_GITHUB_APP }}
+
+      - name: Sign the published Docker image
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}
+
+  mark-latest:
+    needs: [build-go, build-docker]
+    runs-on: ubuntu-latest
+    # Only mark stable releases (no pre-release suffix like -beta1, -rc1) as latest
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - name: Mark release as latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IS_PRERELEASE=$(gh release view "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --json isPrerelease --jq '.isPrerelease')
+          if [ "$IS_PRERELEASE" = "false" ]; then
+            gh release edit "${{ github.ref_name }}" \
+              --repo "${{ github.repository }}" \
+              --latest
+          else
+            echo "Skipping: ${{ github.ref_name }} is a pre-release"
+          fi

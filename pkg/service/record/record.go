@@ -274,7 +274,7 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	err := r.instrumentation.Setup(setupCtx, command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: commandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, Path: r.config.Path, SkipIngress: opts.SkipIngress})
+	err := r.instrumentation.Setup(setupCtx, command, models.SetupOptions{Container: r.config.ContainerName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: commandType, EnableTesting: false, GlobalPassthrough: r.config.Record.GlobalPassthrough, BuildDelay: r.config.BuildDelay, PassThroughPorts: passPortsUint, ConfigPath: r.config.ConfigPath, Path: r.config.Path, SkipIngress: opts.SkipIngress, EnableSampling: r.config.Record.EnableSampling})
 
 	if err != nil {
 		// If context was cancelled (user pressed Ctrl+C), return gracefully without error
@@ -432,7 +432,13 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 
 				// Correlation tracking
 				if tempID != "" && mock.Name != "" {
-					correlationMap.Store(tempID, mock.Name)
+					correlationMap.Store(tempID, models.MockEntry{
+						Name:             mock.Name,
+						Kind:             string(mock.GetKind()),
+						Timestamp:        mock.Spec.ReqTimestampMock.Unix(),
+						ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
+						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
+					})
 				}
 
 				if opts.OnMock != nil {
@@ -459,16 +465,17 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	// Mapping correlation goroutine
 	errGrp.Go(func() error {
 		for mapping := range frames.Mappings {
-			var realMockNames []string
+			var realMockEntries []models.MockEntry
 
 			for _, tempID := range mapping.MockIDs {
-				var realName string
+
+				var realEntry models.MockEntry
 				found := false
 
 				// Simple retry loop (fast spin) to wait for the Mock Loop
 				for i := 0; i < 50; i++ { // Wait up to ~500ms
 					if val, ok := correlationMap.Load(tempID); ok {
-						realName = val.(string)
+						realEntry = val.(models.MockEntry)
 						found = true
 						break
 					}
@@ -476,7 +483,7 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 				}
 
 				if found {
-					realMockNames = append(realMockNames, realName)
+					realMockEntries = append(realMockEntries, realEntry)
 					correlationMap.Delete(tempID)
 				} else {
 					r.logger.Warn("Failed to correlate mock mapping",
@@ -486,8 +493,8 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 			}
 
 			// Write to mappings.yaml
-			if len(realMockNames) > 0 {
-				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockNames)
+			if len(realMockEntries) > 0 {
+				err := r.mappingDb.Upsert(ctx, newTestSetID, mapping.TestName, realMockEntries)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to save mapping")
 				}

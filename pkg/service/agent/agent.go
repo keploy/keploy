@@ -13,7 +13,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
-	"go.keploy.io/server/v3/pkg/agent"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
@@ -29,11 +29,11 @@ type ClientMockStorage struct {
 }
 
 type Agent struct {
-	logger       *zap.Logger
-	agent.Proxy                 // embedding the Proxy interface to transfer the proxy methods to the core object
-	agent.Hooks                 // embedding the Hooks interface to transfer the hooks methods to the core object
-	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
-	agent.IncomingProxy
+	logger          *zap.Logger
+	coreAgent.Proxy                // embedding the Proxy interface to transfer the proxy methods to the core object
+	coreAgent.Hooks                // embedding the Hooks interface to transfer the hooks methods to the core object
+	dockerClient    kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
+	coreAgent.IncomingProxy
 	proxyStarted bool
 	config       *config.Config
 	// activeClients sync.Map
@@ -42,8 +42,8 @@ type Agent struct {
 	Ip          string
 }
 
-func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker.Client, ip agent.IncomingProxy, config *config.Config) *Agent {
-	return &Agent{
+func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
+	instrumentation := &Agent{
 		logger:        logger,
 		Hooks:         hook,
 		Proxy:         proxy,
@@ -51,6 +51,11 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, client kdocker
 		dockerClient:  client,
 		config:        config,
 	}
+	if coreAgent.ProxyHook != nil && proxy != nil {
+		proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
+	}
+	coreAgent.RegisterIncomingProxy(ip)
+	return instrumentation
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
@@ -255,13 +260,18 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 	})
 
 	// load hooks if the mode changes ..
-	err := a.Hooks.Load(hookCtx, agent.HookCfg{
+	hookCfg := coreAgent.HookCfg{
 		Pid:         0,
 		IsDocker:    opts.IsDocker,
 		Mode:        opts.Mode,
 		Rules:       opts.Rules,
 		SkipIngress: opts.SkipIngress,
-	}, a.config.Agent)
+	}
+
+	if coreAgent.EbpfProxyPortOverride != 0 {
+		hookCfg.Port = coreAgent.EbpfProxyPortOverride
+	}
+	err := a.Hooks.Load(hookCtx, hookCfg, a.config.Agent)
 
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to load hooks")
@@ -283,7 +293,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 		utils.LogError(a.logger, err, "failed to get container IP")
 		return hookErr
 	}
-	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
+	if coreAgent.ProxyHook != nil {
+		a.Proxy.SetAuxiliaryHook(coreAgent.ProxyHook)
+	}
+
+	err = a.Proxy.StartProxy(proxyCtx, coreAgent.ProxyOptions{
 		DNSIPv4Addr: DNSIPv4,
 		//DnsIPv6Addr: ""
 	})

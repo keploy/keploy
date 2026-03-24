@@ -74,7 +74,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
-	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time) error
 	GetMocks(ctx context.Context, testSetID string) ([]*models.Mock, error)
 	GetAllMockSetIDs(ctx context.Context) ([]string, error)
 }
@@ -104,9 +104,13 @@ type Telemetry interface {
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error)
 	GetConsumedMocks(ctx context.Context) ([]models.MockState, error)
+	// GetNoisyTestCaseNames returns test case names that were reclassified as noisy
+	// for the provided test set during BeforeTestResult processing.
+	GetNoisyTestCaseNames(testSetID string) []string
 	BeforeTestRun(ctx context.Context, testRunID string) error
 	BeforeTestSetCompose(ctx context.Context, testRunID string, firstRun bool) error
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
+	BeforeTestSetReplay(ctx context.Context, testSetID string) error
 	BeforeTestResult(ctx context.Context, testRunID string, testSetID string, testCaseResults []models.TestResult) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
@@ -123,5 +127,5 @@ type InstrumentState struct {
 
 type MappingDB interface {
 	Insert(ctx context.Context, mapping *models.Mapping) error
-	Get(ctx context.Context, testSetID string) (map[string][]string, bool, error)
+	Get(ctx context.Context, testSetID string) (map[string][]models.MockEntry, bool, error)
 }

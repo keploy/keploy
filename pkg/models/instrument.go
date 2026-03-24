@@ -12,10 +12,11 @@ type BypassRule struct {
 }
 
 type Filter struct {
-	BypassRule `mapstructure:",squash"`
-	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
-	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
-	MatchType  MatchType         `json:"matchType"`
+	BypassRule   `mapstructure:",squash"`
+	URLMethods   []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
+	Headers      map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
+	MatchType    MatchType         `json:"matchType" yaml:"matchType" mapstructure:"matchType"`
+	FilterPolicy FilterPolicy      `json:"filterPolicy" yaml:"filterPolicy" mapstructure:"filterPolicy"`
 }
 
 type MatchType string
@@ -23,6 +24,13 @@ type MatchType string
 const (
 	OR  MatchType = "OR"
 	AND MatchType = "AND"
+)
+
+type FilterPolicy string
+
+const (
+	Include FilterPolicy = "include"
+	Exclude FilterPolicy = "exclude"
 )
 
 type HookOptions struct {
@@ -58,6 +66,8 @@ type OutgoingOptions struct {
 	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
 	Name           string                         // Name of the session
 	ConfigPath     string                         // path to the config file (used to resolve relative paths for assets/streams)
+	SkipTLSMITM    bool
+	ConnKey        string // connection-level key for TLSHandshakeStore correlation
 }
 
 type ConditionalDstCfg struct {
@@ -97,6 +107,7 @@ type SetupOptions struct {
 	Path              string
 	ExtraArgs         []string
 	SkipIngress       bool
+	EnableSampling    int
 }
 
 type RunOptions struct {
