@@ -93,6 +93,18 @@ type Proxy struct {
 	auxiliaryHook agent.AuxiliaryProxyHook
 }
 
+// isLoopbackAddr returns true if the address (host:port) points to a loopback interface.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	// Handle IPv6 bracket notation
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // isNetworkClosedErr checks if the error is due to a closed network connection.
 // This includes broken pipe, connection reset by peer, and use of closed network connection errors.
 // These errors are expected during graceful shutdown and should not be logged as errors.
@@ -531,6 +543,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+	}
+
+	// Passthrough connections to loopback addresses (127.0.0.1, ::1).
+	// This is critical for Playwright/browser testing: Chrome's DevTools Protocol
+	// connections and Next.js dev server page loads are loopback connections that
+	// must not be intercepted or mocked.
+	if isLoopbackAddr(dstAddr) {
+		_, err = util.PassThrough(ctx, p.logger, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, nil)
+		if err != nil && !isNetworkClosedErr(err) {
+			p.logger.Debug("loopback passthrough finished", zap.String("dstAddr", dstAddr), zap.Error(err))
+		}
+		return nil
 	}
 
 	// This is used to handle the parser errors
