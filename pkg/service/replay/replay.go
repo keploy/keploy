@@ -50,14 +50,18 @@ func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool
 
 func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, bool) {
 	switch appErr.AppErrorType {
+	case "":
+		return "", false
+	case models.ErrCtxCanceled:
+		return "", false
 	case models.ErrCommandError:
 		return models.TestSetStatusFaultUserApp, true
-	case models.ErrUnExpected, models.ErrAppStopped:
+	case models.ErrUnExpected, models.ErrAppStopped, models.ErrTestBinStopped:
 		return models.TestSetStatusAppHalted, true
 	case models.ErrInternal:
 		return models.TestSetStatusInternalErr, true
 	default:
-		return "", false
+		return models.TestSetStatusAppHalted, true
 	}
 }
 
@@ -800,6 +804,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
+	var testSetStatusByErrChanMu sync.RWMutex
+	setErrStatus := func(status models.TestSetStatus) {
+		testSetStatusByErrChanMu.Lock()
+		testSetStatusByErrChan = status
+		testSetStatusByErrChanMu.Unlock()
+	}
+	getErrStatus := func() models.TestSetStatus {
+		testSetStatusByErrChanMu.RLock()
+		defer testSetStatusByErrChanMu.RUnlock()
+		return testSetStatusByErrChan
+	}
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -817,7 +832,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					AppCommand: conf.AppCommand,
 				})
 				if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
-					testSetStatusByErrChan = mappedStatus
+					setErrStatus(mappedStatus)
 				}
 				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
 					return nil
@@ -833,13 +848,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			select {
 			case err := <-appErrChan:
 				if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
-					testSetStatusByErrChan = mappedStatus
+					setErrStatus(mappedStatus)
 				} else if err.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
 				utils.LogError(r.logger, err, "application failed to run")
 			case <-runTestSetCtx.Done():
-				testSetStatusByErrChan = models.TestSetStatusUserAbort
+				setErrStatus(models.TestSetStatusUserAbort)
 			}
 			exitLoopChan <- true
 			runTestSetCtxCancel()
@@ -1069,7 +1084,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						AppCommand: conf.AppCommand,
 					})
 					if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
-						testSetStatusByErrChan = mappedStatus
+						setErrStatus(mappedStatus)
 					}
 					if appErr.AppErrorType == models.ErrCtxCanceled {
 						return nil
@@ -1085,13 +1100,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				select {
 				case err := <-appErrChan:
 					if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
-						testSetStatusByErrChan = mappedStatus
+						setErrStatus(mappedStatus)
 					} else if err.AppErrorType == models.ErrCtxCanceled {
 						return nil
 					}
 					utils.LogError(r.logger, err, "application failed to run")
 				case <-runTestSetCtx.Done():
-					testSetStatusByErrChan = models.TestSetStatusUserAbort
+					setErrStatus(models.TestSetStatusUserAbort)
 				}
 				exitLoopChan <- true
 				runTestSetCtxCancel()
@@ -1160,7 +1175,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var consumedMocks []models.MockState
 	consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
-		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 			testSetStatus = resolvedStatus
 			exitLoop = true
 		} else {
@@ -1258,7 +1273,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Checking for errors in the mocking and application
 			select {
 			case <-exitLoopChan:
-				testSetStatus = testSetStatusByErrChan
+				testSetStatus = getErrStatus()
 				exitLoop = true
 			default:
 			}
@@ -1288,7 +1303,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
-				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 					testSetStatus = resolvedStatus
 				} else {
 					utils.LogError(r.logger, err, "failed to update mock parameters on agent")
@@ -1325,7 +1340,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err != nil {
-					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 						testSetStatus = resolvedStatus
 						exitLoop = true
 					} else {
@@ -1617,7 +1632,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
-			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, err); ok {
+			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 				testSetStatus = resolvedStatus
 			} else {
 				utils.LogError(r.logger, err, "failed to get test case results")
@@ -1657,12 +1672,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
-		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, loopErr); ok {
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), loopErr); ok {
 			testSetStatus = resolvedStatus
 		} else {
 			testSetStatus = models.TestSetStatusInternalErr
 		}
-	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, testSetStatusByErrChan, nil); ok {
+	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); ok {
 		testSetStatus = resolvedStatus
 	}
 
