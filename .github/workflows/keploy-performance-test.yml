@@ -14,9 +14,14 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: keploy-performance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   performance-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     
     services:
       mysql:
@@ -26,7 +31,7 @@ jobs:
           MYSQL_DATABASE: petclinic
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -ppetclinic" --health-interval=10s --health-timeout=5s --health-retries=5
 
     steps:
       - name: Checkout Keploy (current branch with scripts)

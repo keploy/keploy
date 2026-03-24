@@ -211,14 +211,27 @@ for i in $(seq 1 $NUM_RUNS); do
                 # Check one more time with a small wait in case it just started
                 sleep 2
                 if ! ps -p "$kp_pid" > /dev/null; then
-                    echo -e "${RED}❌ ERROR: Keploy process (PID: $kp_pid) is NOT running!${NC}" | tee -a "$output_file"
+                    echo -e "${RED}❌ ERROR: Keploy process (PID: $kp_pid) is NOT running. Ensure Keploy is started and reachable, then re-run these performance tests.${NC}" | tee -a "$output_file"
                     run_results[$i]="FAIL"
+                    p50_values[$i]="N/A"
+                    p90_values[$i]="N/A"
+                    p99_values[$i]="N/A"
+                    rps_values[$i]="N/A"
+                    error_rate_values[$i]="N/A"
                     ((failed_runs++))
                     continue
                 fi
             fi
         else
-            echo -e "${YELLOW}⚠️ WARNING: Keploy PID file not found, skipping process check${NC}"
+            echo -e "${RED}❌ ERROR: Keploy PID file '${KEPLOY_PID_FILE}' not found. Ensure Keploy is started and writing this file before running tests, or set CHECK_KEPLOY=false to skip Keploy validation.${NC}" | tee -a "$output_file"
+            run_results[$i]="FAIL"
+            p50_values[$i]="N/A"
+            p90_values[$i]="N/A"
+            p99_values[$i]="N/A"
+            rps_values[$i]="N/A"
+            error_rate_values[$i]="N/A"
+            ((failed_runs++))
+            continue
         fi
     fi
     
@@ -282,28 +295,37 @@ for i in $(seq 1 $NUM_RUNS); do
     else
         echo -e "  Run $i: ${RED}FAILED${NC}"
     fi
-    echo "    P50: ${p50_values[$i]}ms"
-    echo "    P90: ${p90_values[$i]}ms"
-    echo "    P99: ${p99_values[$i]}ms"
-    echo "    RPS: ${rps_values[$i]}"
-    echo "    Error Rate: ${error_rate_values[$i]}%"
+    p50_display="${p50_values[$i]}"; [[ "$p50_display" != "N/A" ]] && p50_display+="ms"
+    p90_display="${p90_values[$i]}"; [[ "$p90_display" != "N/A" ]] && p90_display+="ms"
+    p99_display="${p99_values[$i]}"; [[ "$p99_display" != "N/A" ]] && p99_display+="ms"
+    rps_display="${rps_values[$i]}"
+    err_display="${error_rate_values[$i]}"; [[ "$err_display" != "N/A" ]] && err_display+="%"
+    echo "    P50: $p50_display"
+    echo "    P90: $p90_display"
+    echo "    P99: $p99_display"
+    echo "    RPS: $rps_display"
+    echo "    Error Rate: $err_display"
 done
 
 echo ""
 echo "Aggregate Statistics:"
 
-# Calculate averages
-avg_p50=$(printf '%s\n' "${p50_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
-avg_p90=$(printf '%s\n' "${p90_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
-avg_p99=$(printf '%s\n' "${p99_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
-avg_rps=$(printf '%s\n' "${rps_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
-avg_error_rate=$(printf '%s\n' "${error_rate_values[@]}" | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
+# Calculate averages over successful runs only (skip "N/A" placeholders from skipped runs)
+avg_p50=$(printf '%s\n' "${p50_values[@]}" | awk '$1 != "N/A" {sum+=$1; n++} END {if (n>0) print sum/n; else print "N/A"}')
+avg_p90=$(printf '%s\n' "${p90_values[@]}" | awk '$1 != "N/A" {sum+=$1; n++} END {if (n>0) print sum/n; else print "N/A"}')
+avg_p99=$(printf '%s\n' "${p99_values[@]}" | awk '$1 != "N/A" {sum+=$1; n++} END {if (n>0) print sum/n; else print "N/A"}')
+avg_rps=$(printf '%s\n' "${rps_values[@]}" | awk '$1 != "N/A" {sum+=$1; n++} END {if (n>0) print sum/n; else print "N/A"}')
+avg_error_rate=$(printf '%s\n' "${error_rate_values[@]}" | awk '$1 != "N/A" {sum+=$1; n++} END {if (n>0) print sum/n; else print "N/A"}')
 
-echo "  Average P50: ${avg_p50}ms"
-echo "  Average P90: ${avg_p90}ms"
-echo "  Average P99: ${avg_p99}ms"
+avg_p50_display="$avg_p50"; [[ "$avg_p50_display" != "N/A" ]] && avg_p50_display+="ms"
+avg_p90_display="$avg_p90"; [[ "$avg_p90_display" != "N/A" ]] && avg_p90_display+="ms"
+avg_p99_display="$avg_p99"; [[ "$avg_p99_display" != "N/A" ]] && avg_p99_display+="ms"
+avg_err_display="$avg_error_rate"; [[ "$avg_err_display" != "N/A" ]] && avg_err_display+="%"
+echo "  Average P50: $avg_p50_display"
+echo "  Average P90: $avg_p90_display"
+echo "  Average P99: $avg_p99_display"
 echo "  Average RPS: ${avg_rps}"
-echo "  Average Error Rate: ${avg_error_rate}%"
+echo "  Average Error Rate: $avg_err_display"
 
 echo ""
 echo "========================================="

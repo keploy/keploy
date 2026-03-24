@@ -6,7 +6,7 @@ echo "📝 Creating k6 load test script..."
 
 cat > load-test.js << 'EOF'
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 
 export const options = {
   scenarios: {

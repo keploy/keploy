@@ -4,7 +4,7 @@
 echo "📝 Keploy recorded test cases:"
 
 if [ -d "keploy-tests" ]; then
-  TEST_COUNT=$(find keploy-tests -name "*.yaml" -type f | wc -l)
+  TEST_COUNT=$(find keploy-tests -path "*/test-set-*/tests/*.yaml" -type f | wc -l)
   echo "$TEST_COUNT test cases found"
   
   if [ -d "keploy-tests/keploy/test-set-0/tests/" ]; then
