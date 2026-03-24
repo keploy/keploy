@@ -67,6 +67,16 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Read command directly from flag — cfg.Command may be cleared by
+			// viper unmarshalling between PreRunE and RunE.
+			appCommand, _ := cmd.Flags().GetString("command")
+			if appCommand == "" {
+				appCommand = cfg.Command
+			}
+			if appCommand == "" {
+				return errors.New("missing required -c flag: specify the command to run")
+			}
+
 			tagInput, err := cmd.Flags().GetString("tag")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get tag flag")
@@ -98,11 +108,17 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				logger.Info("No --tag provided, recording locally without cloud sync")
 			}
 
+			// Restore command into cfg before GetService — needed by downstream services.
+			cfg.Command = appCommand
+
 			recordSvc, err := serviceFactory.GetService(ctx, "record")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get record service")
 				return nil
 			}
+
+			// Re-set after GetService in case it was cleared again.
+			cfg.Command = appCommand
 
 			runner, ok := recordSvc.(mockrecord.RecordRunner)
 			if !ok {
@@ -117,6 +133,12 @@ func SandboxRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 				utils.LogError(logger, err, "failed to get name flag")
 				return errors.New("failed to get name flag")
 			}
+
+			logger.Debug("sandbox record: invoking recorder.Record",
+				zap.String("cfg.Command", cfg.Command),
+				zap.String("cfg.Path", cfg.Path),
+				zap.String("name", name),
+			)
 
 			result, err := recorder.Record(ctx, models.RecordOptions{
 				Command:   cfg.Command,
@@ -180,6 +202,16 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Read command directly from flag — cfg.Command may be cleared.
+			appCommand, _ := cmd.Flags().GetString("command")
+			if appCommand == "" {
+				appCommand = cfg.Command
+			}
+			if appCommand == "" {
+				return errors.New("missing required -c flag: specify the command to run")
+			}
+			cfg.Command = appCommand
+
 			localOnly, err := cmd.Flags().GetBool("local")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get local flag")
@@ -239,11 +271,15 @@ func SandboxReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, 
 			}
 
 			// Step 3: Proceed with normal mock replay.
+			cfg.Command = appCommand
+
 			replaySvc, err := serviceFactory.GetService(ctx, "test")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get replay service")
 				return nil
 			}
+
+			cfg.Command = appCommand
 
 			runtime, ok := replaySvc.(mockreplay.Runtime)
 			if !ok {
