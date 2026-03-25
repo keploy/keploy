@@ -224,10 +224,7 @@ func schemaMatchRecursive(expected, actual interface{}, path string, logger *zap
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
 
-		minLen := expSlice.Len()
-		if actSlice.Len() < minLen {
-			minLen = actSlice.Len()
-		}
+		minLen := min(actSlice.Len(), expSlice.Len())
 
 		for i := 0; i < minLen; i++ {
 			vExp := expSlice.Index(i).Interface()
