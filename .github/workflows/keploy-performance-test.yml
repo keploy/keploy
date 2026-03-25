@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       keploy_repo:
-        description: 'Keploy repository to test (e.g., keploy/keploy or keploy/enterprise)'
+        description: 'Keploy repository to test (e.g., keploy/keploy)'
         required: false
         default: 'keploy/keploy'
       keploy_branch:
@@ -94,25 +94,10 @@ jobs:
             BUILD_DIR="keploy"
             echo "Building from current branch: keploy/"
           fi
-          
+
           cd "$BUILD_DIR"
-          
-          # Detect project structure and build accordingly
-          if [ -f "main.go" ]; then
-            # Standard keploy/keploy structure
-            echo "Building from root main.go..."
-            go build -o keploy main.go
-          elif [ -f "cmd/enterprise/main.go" ]; then
-            # Enterprise repo structure
-            echo "Building from cmd/enterprise/main.go..."
-            cd cmd/enterprise
-            go build -o ../../keploy main.go
-            cd ../..
-          else
-            echo "Error: Could not find main.go"
-            exit 1
-          fi
-          
+          go build -o keploy main.go
+
           # Move binary to keploy directory if built elsewhere
           if [ "$BUILD_DIR" != "keploy" ]; then
             cp keploy ../keploy/keploy
