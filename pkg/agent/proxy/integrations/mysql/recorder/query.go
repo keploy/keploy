@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
@@ -68,6 +69,24 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				continue
 			}
 
+			// Unknown/unrecognized packet types (e.g. "0x12") are produced by
+			// decodePacket's default case when the first payload byte doesn't
+			// match any known MySQL command. This typically happens in the
+			// post-TLS uprobe path when the capture starts mid-stream on an
+			// existing connection and the data is misaligned. Treating these
+			// as no-response commands prevents the parser from trying to read
+			// a response that doesn't exist, which would desync the streams
+			// and cascade into errors like "expected TextResultSet, got
+			// *mysql.QueryPacket".
+			if strings.HasPrefix(commandPkt.Header.Type, "0x") {
+				logger.Debug("Skipping unknown command packet to avoid stream desync",
+					zap.String("type", commandPkt.Header.Type))
+				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp, time.Now(), opts)
+				requests = []mysql.Request{}
+				responses = []mysql.Response{}
+				continue
+			}
+
 			commandRespPkt, resTimestamp, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
 			if err != nil {
 				if err == io.EOF && commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
@@ -109,6 +128,11 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		return nil, time.Time{}, err
 	}
 
+	// Snapshot the previous lastOp for diagnostics. If decode sees stale
+	// state and parses a response as a command packet, we include this in
+	// logs to explain the desync path.
+	prevLastOp, _ := decodeCtx.LastOp.Load(clientConn)
+
 	//decode the command response packet
 	commandRespPkt, err := wire.DecodePayload(ctx, logger, commandResp, clientConn, decodeCtx)
 	if err != nil {
@@ -127,6 +151,24 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 	lastOp, ok := decodeCtx.LastOp.Load(clientConn)
 	if !ok {
 		return nil, time.Time{}, fmt.Errorf("failed to get the last operation from the context while handling the query response")
+	}
+
+	// Guard: if the response was decoded as a command packet (e.g.
+	// *mysql.QueryPacket) instead of a response type, the data streams are
+	// desynchronized — typically because DecodePayload's lastOp was stale and
+	// the response went through decodePacket instead of
+	// handleQueryStmtResponse. Return the raw packet as-is rather than
+	// cascading into handleTextResultSet which would fail with a type
+	// assertion error and kill the parser pipeline.
+	if isCommandPacket(commandRespPkt.Message) {
+		logger.Debug("Response decoded as command packet — stream desync detected, returning raw response",
+			zap.String("responseType", commandRespPkt.Header.Type),
+			zap.String("prevLastOp", fmt.Sprintf("%#x", prevLastOp)),
+			zap.String("lastOp", fmt.Sprintf("%#x", lastOp)))
+		// Reset lastOp so the next iteration starts clean.
+		decodeCtx.LastOp.Store(clientConn, wire.RESET)
+		resTimestamp := time.Now()
+		return commandRespPkt, resTimestamp, nil
 	}
 
 	var queryResponsePkt *mysql.PacketBundle
@@ -555,4 +597,28 @@ rowLoop:
 
 	return binaryResultSetPkt, nil
 
+}
+
+// isCommandPacket returns true if the decoded message is a client command type
+// rather than a server response type. This is used to detect stream desync
+// where DecodePayload misidentifies a server response as a client command.
+func isCommandPacket(msg interface{}) bool {
+	switch msg.(type) {
+	case *mysql.QueryPacket,
+		*mysql.StmtPreparePacket,
+		*mysql.StmtExecutePacket,
+		*mysql.StmtClosePacket,
+		*mysql.StmtResetPacket,
+		*mysql.StmtSendLongDataPacket,
+		*mysql.QuitPacket,
+		*mysql.InitDBPacket,
+		*mysql.PingPacket,
+		*mysql.StatisticsPacket,
+		*mysql.DebugPacket,
+		*mysql.ChangeUserPacket,
+		*mysql.ResetConnectionPacket:
+		return true
+	default:
+		return false
+	}
 }
