@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       keploy_repo:
-        description: 'Keploy repository to test (e.g., keploy/keploy)'
+        description: 'Keploy repository for performance testing'
         required: false
         default: 'keploy/keploy'
       keploy_branch:
-        description: 'Keploy branch to test'
+        description: 'Keploy branch for performance testing'
         required: false
         default: 'main'
   pull_request:
