@@ -37,6 +37,76 @@ import (
 
 const UNKNOWN_TEST = "UNKNOWN_TEST"
 
+func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
+		return cmdType != utils.DockerCompose
+	case models.TestSetStatusInternalErr:
+		return true
+	default:
+		return false
+	}
+}
+
+func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, bool) {
+	switch appErr.AppErrorType {
+	case "":
+		return "", false
+	case models.ErrCtxCanceled:
+		return "", false
+	case models.ErrCommandError:
+		return models.TestSetStatusFaultUserApp, true
+	case models.ErrUnExpected, models.ErrAppStopped, models.ErrTestBinStopped:
+		return models.TestSetStatusAppHalted, true
+	case models.ErrInternal:
+		return models.TestSetStatusInternalErr, true
+	default:
+		return models.TestSetStatusAppHalted, true
+	}
+}
+
+func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
+	switch current {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
+		return current, true
+	}
+	switch derived {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
+		return derived, true
+	}
+	if cmdType == utils.DockerCompose && isDockerComposeReplayShutdown(err) {
+		return models.TestSetStatusAppHalted, true
+	}
+	return "", false
+}
+
+func isDockerComposeReplayShutdown(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "connection reset by peer") ||
+		strings.Contains(errMsg, "broken pipe") ||
+		strings.Contains(errMsg, "server closed") ||
+		strings.Contains(errMsg, "eof") ||
+		strings.Contains(errMsg, "found no test results")
+}
+
+func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult) string {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
+		if len(testCaseResults) == 0 {
+			return "application startup failed"
+		}
+		return "application stopped during replay"
+	case models.TestSetStatusInternalErr:
+		return "replay failed with an internal error"
+	default:
+		return ""
+	}
+}
+
 type Replayer struct {
 	logger             *zap.Logger
 	testDB             TestDB
@@ -294,6 +364,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+	cmdType := utils.CmdType(r.config.CommandType)
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
 	r.firstRun = true
@@ -370,13 +441,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
 				testSetResult = false
-				abortTestRun = true
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
-				abortTestRun = true
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusFaultUserApp:
 				testSetResult = false
-				abortTestRun = true
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusUserAbort:
 				return nil
 			case models.TestSetStatusFailed:
@@ -747,6 +818,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
+	var testSetStatusByErrChanMu sync.RWMutex
+	var lastAppErr models.AppError
+	setErrStatus := func(status models.TestSetStatus) {
+		testSetStatusByErrChanMu.Lock()
+		testSetStatusByErrChan = status
+		testSetStatusByErrChanMu.Unlock()
+	}
+	setLastAppErr := func(appErr models.AppError) {
+		testSetStatusByErrChanMu.Lock()
+		lastAppErr = appErr
+		testSetStatusByErrChanMu.Unlock()
+	}
+	getErrStatus := func() models.TestSetStatus {
+		testSetStatusByErrChanMu.RLock()
+		defer testSetStatusByErrChanMu.RUnlock()
+		return testSetStatusByErrChan
+	}
+	getLastAppErr := func() models.AppError {
+		testSetStatusByErrChanMu.RLock()
+		defer testSetStatusByErrChanMu.RUnlock()
+		return lastAppErr
+	}
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -763,6 +856,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 					AppCommand: conf.AppCommand,
 				})
+				if appErr != (models.AppError{}) {
+					setLastAppErr(appErr)
+				}
+				if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
+					setErrStatus(mappedStatus)
+				}
 				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
 					return nil
 				}
@@ -776,23 +875,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			defer utils.Recover(r.logger)
 			select {
 			case err := <-appErrChan:
-				switch err.AppErrorType {
-				case models.ErrCommandError:
-					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
-				case models.ErrUnExpected:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrAppStopped:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrCtxCanceled:
+				setLastAppErr(err)
+				if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
+					setErrStatus(mappedStatus)
+				} else if err.AppErrorType == models.ErrCtxCanceled {
 					return nil
-				case models.ErrInternal:
-					testSetStatusByErrChan = models.TestSetStatusInternalErr
-				default:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
 				}
 				utils.LogError(r.logger, err, "application failed to run")
 			case <-runTestSetCtx.Done():
-				testSetStatusByErrChan = models.TestSetStatusUserAbort
+				setErrStatus(models.TestSetStatusUserAbort)
 			}
 			exitLoopChan <- true
 			runTestSetCtxCancel()
@@ -1021,6 +1112,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
+					if appErr != (models.AppError{}) {
+						setLastAppErr(appErr)
+					}
+					if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
+						setErrStatus(mappedStatus)
+					}
 					if appErr.AppErrorType == models.ErrCtxCanceled {
 						return nil
 					}
@@ -1034,23 +1131,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				defer utils.Recover(r.logger)
 				select {
 				case err := <-appErrChan:
-					switch err.AppErrorType {
-					case models.ErrCommandError:
-						testSetStatusByErrChan = models.TestSetStatusFaultUserApp
-					case models.ErrUnExpected:
-						testSetStatusByErrChan = models.TestSetStatusAppHalted
-					case models.ErrAppStopped:
-						testSetStatusByErrChan = models.TestSetStatusAppHalted
-					case models.ErrCtxCanceled:
+					setLastAppErr(err)
+					if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
+						setErrStatus(mappedStatus)
+					} else if err.AppErrorType == models.ErrCtxCanceled {
 						return nil
-					case models.ErrInternal:
-						testSetStatusByErrChan = models.TestSetStatusInternalErr
-					default:
-						testSetStatusByErrChan = models.TestSetStatusAppHalted
 					}
 					utils.LogError(r.logger, err, "application failed to run")
 				case <-runTestSetCtx.Done():
-					testSetStatusByErrChan = models.TestSetStatusUserAbort
+					setErrStatus(models.TestSetStatusUserAbort)
 				}
 				exitLoopChan <- true
 				runTestSetCtxCancel()
@@ -1119,7 +1208,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var consumedMocks []models.MockState
 	consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+			testSetStatus = resolvedStatus
+			exitLoop = true
+		} else {
+			utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+		}
 	}
 	r.logger.Debug("consumed mocks during initial setup",
 		zap.String("testSetID", testSetID),
@@ -1212,7 +1306,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Checking for errors in the mocking and application
 			select {
 			case <-exitLoopChan:
-				testSetStatus = testSetStatusByErrChan
+				testSetStatus = getErrStatus()
 				exitLoop = true
 			default:
 			}
@@ -1242,7 +1336,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+					testSetStatus = resolvedStatus
+				} else {
+					utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+				}
 				break
 			}
 
@@ -1275,7 +1373,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err != nil {
-					utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+						testSetStatus = resolvedStatus
+						exitLoop = true
+					} else {
+						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+					}
 				}
 				r.logger.Debug("consumed mocks after test case simulation",
 					zap.String("testSetID", testSetID),
@@ -1562,8 +1665,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
-			utils.LogError(r.logger, err, "failed to get test case results")
-			testSetStatus = models.TestSetStatusInternalErr
+			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+				testSetStatus = resolvedStatus
+			} else {
+				utils.LogError(r.logger, err, "failed to get test case results")
+				testSetStatus = models.TestSetStatusInternalErr
+			}
 		}
 	}
 
@@ -1598,31 +1705,37 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
-		testSetStatus = models.TestSetStatusInternalErr
-	} else {
-		// Checking for errors in the mocking and application
-		select {
-		case <-exitLoopChan:
-			testSetStatus = testSetStatusByErrChan
-		default:
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), loopErr); ok {
+			testSetStatus = resolvedStatus
+		} else {
+			testSetStatus = models.TestSetStatusInternalErr
 		}
+	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); ok {
+		testSetStatus = resolvedStatus
 	}
 
+	appFailure := getLastAppErr()
+	appLogs := appFailure.AppLogs
+	if appLogs == "" && testSetStatus == models.TestSetStatusAppHalted {
+		appLogs = r.instrumentation.GetRecentAppLogs(context.Background())
+	}
 	testReport = &models.TestReport{
-		Version:    models.GetVersion(),
-		TestSet:    testSetID,
-		Status:     string(testSetStatus),
-		Total:      testCasesCount,
-		Success:    success,
-		Failure:    failure,
-		Obsolete:   obsolete,
-		Ignored:    ignored,
-		Tests:      testCaseResults,
-		TimeTaken:  timeTaken.String(),
-		HighRisk:   riskHigh,
-		MediumRisk: riskMed,
-		LowRisk:    riskLow,
-		CmdUsed:    r.config.Test.CmdUsed,
+		Version:       models.GetVersion(),
+		TestSet:       testSetID,
+		Status:        string(testSetStatus),
+		Total:         testCasesCount,
+		Success:       success,
+		Failure:       failure,
+		Obsolete:      obsolete,
+		Ignored:       ignored,
+		Tests:         testCaseResults,
+		TimeTaken:     timeTaken.String(),
+		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults),
+		AppLogs:       appLogs,
+		HighRisk:      riskHigh,
+		MediumRisk:    riskMed,
+		LowRisk:       riskLow,
+		CmdUsed:       r.config.Test.CmdUsed,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled

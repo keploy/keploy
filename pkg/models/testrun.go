@@ -2,25 +2,30 @@ package models
 
 import (
 	"errors"
+	"strings"
+
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 type TestReport struct {
-	Version    Version      `json:"version" yaml:"version"`
-	Name       string       `json:"name" yaml:"name"`
-	Status     string       `json:"status" yaml:"status"`
-	Success    int          `json:"success" yaml:"success"`
-	Failure    int          `json:"failure" yaml:"failure"`
-	Obsolete   int          `json:"obsolete,omitempty" yaml:"obsolete,omitempty"`
-	HighRisk   int          `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
-	MediumRisk int          `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
-	LowRisk    int          `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
-	Ignored    int          `json:"ignored" yaml:"ignored"`
-	Total      int          `json:"total" yaml:"total"`
-	Tests      []TestResult `json:"tests" yaml:"tests,omitempty"`
-	TestSet    string       `json:"testSet" yaml:"test_set"`
-	CreatedAt  int64        `json:"created_at" yaml:"created_at"`
-	TimeTaken  string       `json:"time_taken" yaml:"time_taken"`
-	CmdUsed    string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
+	Version       Version      `json:"version" yaml:"version"`
+	Name          string       `json:"name" yaml:"name"`
+	Status        string       `json:"status" yaml:"status"`
+	FailureReason string       `json:"failureReason,omitempty" yaml:"failure_reason,omitempty"`
+	Success       int          `json:"success" yaml:"success"`
+	Failure       int          `json:"failure" yaml:"failure"`
+	Obsolete      int          `json:"obsolete,omitempty" yaml:"obsolete,omitempty"`
+	HighRisk      int          `json:"high_risk,omitempty" yaml:"high-risk,omitempty"`
+	MediumRisk    int          `json:"medium_risk,omitempty" yaml:"medium-risk,omitempty"`
+	LowRisk       int          `json:"low_risk,omitempty" yaml:"low-risk,omitempty"`
+	Ignored       int          `json:"ignored" yaml:"ignored"`
+	Total         int          `json:"total" yaml:"total"`
+	Tests         []TestResult `json:"tests" yaml:"tests,omitempty"`
+	TestSet       string       `json:"testSet" yaml:"test_set"`
+	CreatedAt     int64        `json:"created_at" yaml:"created_at"`
+	TimeTaken     string       `json:"time_taken" yaml:"time_taken"`
+	CmdUsed       string       `json:"cmdUsed,omitempty" yaml:"cmdUsed,omitempty"`
+	AppLogs       string       `json:"appLogs,omitempty" yaml:"app_logs,omitempty"`
 }
 
 type TestCoverage struct {
@@ -36,6 +41,27 @@ type Loc struct {
 
 func (tr *TestReport) GetKind() string {
 	return "TestReport"
+}
+
+func (tr TestReport) MarshalYAML() (interface{}, error) {
+	type alias TestReport
+
+	node := &yamlLib.Node{}
+	if err := node.Encode(alias(tr)); err != nil {
+		return nil, err
+	}
+
+	if node.Kind == yamlLib.MappingNode {
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			key := node.Content[i]
+			value := node.Content[i+1]
+			if key.Value == "app_logs" && value.Kind == yamlLib.ScalarNode && strings.Contains(value.Value, "\n") {
+				value.Style = yamlLib.LiteralStyle
+			}
+		}
+	}
+
+	return node, nil
 }
 
 type TestResult struct {
