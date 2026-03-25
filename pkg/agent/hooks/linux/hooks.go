@@ -107,6 +107,16 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
+	// Log kernel version from inside container for diagnostics
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err == nil {
+		release := string(utsname.Release[:])
+		if idx := strings.IndexByte(release, 0); idx != -1 {
+			release = release[:idx]
+		}
+		h.logger.Info("Keploy agent container kernel version", zap.String("kernel", release))
+	}
+
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
