@@ -165,6 +165,66 @@ jobs:
           $script = Join-Path $Env:GITHUB_WORKSPACE '.github/scripts/windows/ensure-docker.ps1'
           if (Test-Path $script) { & $script } else { Write-Error "Required helper script not found: $script"; exit 1 }
 
+      - name: Check Docker and WSL Environment
+        shell: pwsh
+        run: |
+          Write-Host "=========================================="
+          Write-Host "Docker and WSL Environment Diagnostics"
+          Write-Host "=========================================="
+          
+          Write-Host "
+=== WSL Version ==="
+          try {
+            wsl --version
+          } catch {
+            Write-Host "WSL version command failed: $_"
+          }
+          
+          Write-Host "
+=== Docker Version ==="
+          try {
+            docker version
+          } catch {
+            Write-Host "Docker version command failed: $_"
+          }
+          
+          Write-Host "
+=== Docker Info ==="
+          try {
+            docker info | Select-String -Pattern "Kernel Version|Operating System|OSType|Architecture|Server Version"
+          } catch {
+            Write-Host "Docker info command failed: $_"
+          }
+          
+          Write-Host "
+=== Checking cgroupsv2 Support ==="
+          try {
+            docker run --rm spurin/wsl-cgroupsv2:latest
+          } catch {
+            Write-Host "cgroupsv2 check failed: $_"
+          }
+          
+          Write-Host "
+=== Kernel Version in Container ==="
+          try {
+            docker run --rm alpine uname -a
+          } catch {
+            Write-Host "Kernel version check failed: $_"
+          }
+          
+          Write-Host "
+=== WSL Config File ==="
+          $wslConfigPath = "$env:USERPROFILE\.wslconfig"
+          if (Test-Path $wslConfigPath) {
+            Write-Host "WSL config exists at: $wslConfigPath"
+            Get-Content $wslConfigPath
+          } else {
+            Write-Host "No .wslconfig file found at: $wslConfigPath"
+          }
+          
+          Write-Host "
+=========================================="
+
       - name: Wait for Docker to be ready
         shell: powershell
         run: |
@@ -268,3 +328,4 @@ jobs:
             fi
           done
           echo "All jobs passed."
+
