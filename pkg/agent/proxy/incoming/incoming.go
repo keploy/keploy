@@ -8,7 +8,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -48,8 +47,6 @@ type IngressProxyManager struct {
 
 	ingressHook IngressHook
 }
-
-var ingressConnectionSeq uint64
 
 func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyManager {
 	pm := &IngressProxyManager{
@@ -271,19 +268,12 @@ const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
-	connID := atomic.AddUint64(&ingressConnectionSeq, 1)
 	connLogger := logger.With(
-		zap.Uint64("ingress_conn_id", connID),
 		zap.String("client_addr", clientConn.RemoteAddr().String()),
 		zap.String("proxy_addr", clientConn.LocalAddr().String()),
 		zap.String("upstream_fallback_addr", newAppAddr),
 		zap.Uint16("orig_app_port", appPort),
 	)
-	connStart := time.Now()
-	defer func() {
-		connLogger.Debug("Ingress connection closed", zap.Duration("connection_duration", time.Since(connStart)))
-	}()
-	connLogger.Debug("Accepted ingress connection")
 
 	preface, err := util.ReadInitialBuf(ctx, connLogger, clientConn)
 	if err != nil {
@@ -293,10 +283,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		}
 		return
 	}
-	connLogger.Debug("Read initial ingress bytes", zap.Int("preface_bytes", len(preface)))
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
-		connLogger.Debug("Detected HTTP/2 connection")
-
 		// Get the actual destination for gRPC on Windows
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, connLogger)
 
@@ -311,10 +298,6 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 			// Destination was dynamically resolved (Windows) — extract port from resolved address
 			actualPort = extractPortFromAddr(finalAppAddr, appPort)
 		}
-		connLogger.Debug("Resolved ingress HTTP/2 destination",
-			zap.String("final_app_addr", finalAppAddr),
-			zap.Uint16("actual_app_port", actualPort),
-		)
 
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
@@ -326,7 +309,6 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		}
 		grpc.RecordIncoming(ctx, connLogger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
-		connLogger.Debug("Detected HTTP/1.x connection")
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, connLogger, t, sem, appPort)
 	}
 }

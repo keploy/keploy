@@ -35,7 +35,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		select {
 		case pm.samplingSem <- struct{}{}:
 			acquiredLock = true
-			logger.Debug("Acquired 1 of 5 sampling slots for capture")
 		case <-ctx.Done():
 			return
 		default:
@@ -43,7 +42,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			// We do not block. We set acquiredLock to false.
 			// This connection will be proxied normally and marked closed, but WILL NOT be captured.
 			acquiredLock = false
-			logger.Debug("Sampling limit reached (5/5). Ignoring request for capture.")
 		}
 	}
 
@@ -56,7 +54,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				} else if pm.sampling && pm.samplingSem != nil {
 					<-pm.samplingSem
 				}
-				logger.Debug("Lock released")
 			})
 		}
 	}
@@ -77,20 +74,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Destination was dynamically resolved (Windows) — extract port from resolved address
 		actualPort = extractPortFromAddr(finalAppAddr, appPort)
 	}
-	sessionStart := time.Now()
 	requestSeq := 0
-	logger.Debug("Starting HTTP/1 ingress proxy session",
-		zap.String("resolved_app_addr", finalAppAddr),
-		zap.String("fallback_app_addr", newAppAddr),
-		zap.Uint16("actual_app_port", actualPort),
-		zap.Bool("synchronous_mode", pm.synchronous),
-	)
-	defer func() {
-		logger.Debug("HTTP/1 ingress proxy session finished",
-			zap.Int("requests_seen", requestSeq),
-			zap.Duration("session_duration", time.Since(sessionStart)),
-		)
-	}()
 
 	// Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
@@ -109,7 +93,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 	for {
 		requestSeq++
-		requestReadStart := time.Now()
 		exchangeLogger := logger.With(zap.Int("ingress_request_seq", requestSeq))
 
 		req, err := http.ReadRequest(clientReader)
@@ -122,20 +105,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		reqTimestamp := time.Now()
-		reqStreaming, reqStreamingReasons := requestLooksStreaming(req)
-		exchangeLogger.Debug("Ingress HTTP request received",
-			zap.String("method", req.Method),
-			zap.String("url", req.URL.String()),
-			zap.String("host", req.Host),
-			zap.String("proto", req.Proto),
-			zap.Int64("content_length", req.ContentLength),
-			zap.Strings("transfer_encoding", req.TransferEncoding),
-			zap.String("content_type", req.Header.Get("Content-Type")),
-			zap.String("accept", req.Header.Get("Accept")),
-			zap.Bool("looks_streaming", reqStreaming),
-			zap.Strings("streaming_reasons", reqStreamingReasons),
-			zap.Duration("request_header_read_duration", reqTimestamp.Sub(requestReadStart)),
-		)
 
 		var chunked bool = false
 
@@ -169,7 +138,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
 
-		requestForwardStart := time.Now()
 		if err := req.Write(upConn); err != nil {
 			exchangeLogger.Error("Failed to forward request to upstream",
 				zap.Error(err),
@@ -180,11 +148,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		req.Body.Close() // Close explicitly to avoid defer leak in loop.
-		exchangeLogger.Debug("Forwarded request upstream",
-			zap.Duration("forward_request_duration", time.Since(requestForwardStart)),
-			zap.Int64("request_bytes_seen", reqCapture.Total()),
-			zap.Bool("request_capture_truncated", reqCapture.Truncated()),
-		)
 
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
@@ -195,21 +158,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			)
 			return
 		}
-
-		respHeaderReadAt := time.Now()
-		respStreaming, respStreamingReasons := responseLooksStreaming(resp)
-		exchangeLogger.Debug("Received upstream response headers",
-			zap.Int("status_code", resp.StatusCode),
-			zap.String("status", resp.Status),
-			zap.String("proto", resp.Proto),
-			zap.Int64("content_length", resp.ContentLength),
-			zap.Strings("transfer_encoding", resp.TransferEncoding),
-			zap.String("content_type", resp.Header.Get("Content-Type")),
-			zap.String("x_accel_buffering", resp.Header.Get("X-Accel-Buffering")),
-			zap.Bool("looks_streaming", respStreaming),
-			zap.Strings("streaming_reasons", respStreamingReasons),
-			zap.Duration("upstream_header_latency", respHeaderReadAt.Sub(reqTimestamp)),
-		)
 
 		// Response modifications for sync/sampling modes.
 		if forceCloseMode {
@@ -236,26 +184,17 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
 
-		responseForwardStart := time.Now()
 		if err := resp.Write(clientConn); err != nil {
 			exchangeLogger.Error("Failed to forward response to client",
 				zap.Error(err),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Bool("response_capture_truncated", respCapture.Truncated()),
-				zap.Duration("response_forward_duration", time.Since(responseForwardStart)),
 				zap.Duration("exchange_duration", time.Since(reqTimestamp)),
 			)
 			resp.Body.Close()
 			return
 		}
 		resp.Body.Close() // Close explicitly.
-		exchangeLogger.Debug("Forwarded response to client",
-			zap.Int("status_code", resp.StatusCode),
-			zap.Duration("response_forward_duration", time.Since(responseForwardStart)),
-			zap.Duration("exchange_duration", time.Since(reqTimestamp)),
-			zap.Int64("response_bytes_seen", respCapture.Total()),
-			zap.Bool("response_capture_truncated", respCapture.Truncated()),
-		)
 
 		shouldCapture := true
 		if forceCloseMode {
@@ -339,14 +278,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			)
 			return
 		}
-		exchangeLogger.Debug("Dispatching captured HTTP testcase",
-			zap.String("method", parsedHTTPReq.Method),
-			zap.String("url", parsedHTTPReq.URL.String()),
-			zap.Int("status_code", parsedHTTPRes.StatusCode),
-			zap.Int64("request_bytes_seen", reqCapture.Total()),
-			zap.Int64("response_bytes_seen", respCapture.Total()),
-			zap.Duration("request_to_response_header_latency", respTimestamp.Sub(reqTimestamp)),
-		)
 
 		go func() {
 			defer parsedHTTPReq.Body.Close()
@@ -358,44 +289,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 	}
-}
-
-func requestLooksStreaming(req *http.Request) (bool, []string) {
-	var reasons []string
-	if req.ContentLength == -1 {
-		reasons = append(reasons, "content-length=-1")
-	}
-	if isChunked(req.TransferEncoding) {
-		reasons = append(reasons, "transfer-encoding=chunked")
-	}
-	contentType := strings.ToLower(req.Header.Get("Content-Type"))
-	switch {
-	case strings.Contains(contentType, "text/event-stream"):
-		reasons = append(reasons, "content-type=text/event-stream")
-	case strings.Contains(contentType, "application/x-ndjson"), strings.Contains(contentType, "application/ndjson"):
-		reasons = append(reasons, "content-type=ndjson")
-	}
-	return len(reasons) > 0, reasons
-}
-
-func responseLooksStreaming(resp *http.Response) (bool, []string) {
-	var reasons []string
-	if resp.ContentLength == -1 {
-		reasons = append(reasons, "content-length=-1")
-	}
-	if isChunked(resp.TransferEncoding) {
-		reasons = append(reasons, "transfer-encoding=chunked")
-	}
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	switch {
-	case strings.Contains(contentType, "text/event-stream"):
-		reasons = append(reasons, "content-type=text/event-stream")
-	case strings.Contains(contentType, "application/x-ndjson"), strings.Contains(contentType, "application/ndjson"):
-		reasons = append(reasons, "content-type=ndjson")
-	case strings.Contains(contentType, "application/octet-stream") && resp.ContentLength == -1:
-		reasons = append(reasons, "content-type=octet-stream-without-content-length")
-	}
-	return len(reasons) > 0, reasons
 }
 
 func isChunked(te []string) bool {
