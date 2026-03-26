@@ -1297,11 +1297,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 			mockSetMismatch := false
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
-				expectedMockNames := make([]string, len(expectedMocks))
-				for i, m := range expectedMocks {
-					expectedMockNames[i] = m.Name
+				// Filter out DNS mocks from comparison since DNS resolution order is non-deterministic
+				expectedMockNames := make([]string, 0, len(expectedMocks))
+				for _, m := range expectedMocks {
+					if m.Kind != string(models.DNS) {
+						expectedMockNames = append(expectedMockNames, m.Name)
+					}
 				}
-				mockSetMismatch = !isMockSubset(mockNames, expectedMockNames)
+				nonDNSMockNames := make([]string, 0, len(consumedMocks))
+				for _, m := range consumedMocks {
+					if m.Kind != models.DNS {
+						nonDNSMockNames = append(nonDNSMockNames, m.Name)
+					}
+				}
+				mockSetMismatch = !isMockSubset(nonDNSMockNames, expectedMockNames)
 			}
 
 			emitFailureLogs := !mockSetMismatch
@@ -1419,19 +1428,32 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Any("mocks", consumedMocks))
 
 			if mockSetMismatch {
+				// Filter DNS mocks from reporting names since they are excluded from comparison
+				filteredExpectedNames := make([]string, 0, len(expectedMocks))
+				for _, m := range expectedMocks {
+					if m.Kind != string(models.DNS) {
+						filteredExpectedNames = append(filteredExpectedNames, m.Name)
+					}
+				}
+				filteredMockNames := make([]string, 0, len(consumedMocks))
+				for _, m := range consumedMocks {
+					if m.Kind != models.DNS {
+						filteredMockNames = append(filteredMockNames, m.Name)
+					}
+				}
 				if testPass {
 					r.logger.Debug("mock mapping mismatch ignored because testcase passed",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", expectedNames),
-						zap.Strings("actualMocks", mockNames))
+						zap.Strings("expectedMocks", filteredExpectedNames),
+						zap.Strings("actualMocks", filteredMockNames))
 				} else {
 					r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
-						zap.Strings("expectedMocks", expectedNames),
-						zap.Strings("actualMocks", mockNames))
-					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, expectedNames, mockNames)
+						zap.Strings("expectedMocks", filteredExpectedNames),
+						zap.Strings("actualMocks", filteredMockNames))
+					r.mockMismatchFailures.AddFailure(testSetID, testCase.Name, filteredExpectedNames, filteredMockNames)
 				}
 			}
 
