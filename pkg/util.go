@@ -444,17 +444,10 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		}
 	}
 
-	// Determine which URL/port to use for test execution.
-	// Priority logic (refined):
-	// 1. Check replaceWith against the ORIGINAL test case URL.
-	//    If a match is found, apply it.
-	//    CRITICAL: If the replacement VALUE itself contains a port, treat it as the final authority (skip AppPort/ConfigPort).
-	//    If the replacement value is just a host, continue to apply AppPort/ConfigPort logic.
-	// 2. ConfigHost (if provided) overrides host (ONLY if replaceWith didn't match)
-	// 3. AppPort (if present) overrides port
-	// 4. ConfigPort (if present) overrides port
-
-	// Step 1: Resolve the target URL/Authority using the helper
+	// Resolve the execution target using ResolveTestTarget's precedence:
+	// app_port < config port < replaceWith URL replacements
+	// (explicit replacement port short-circuits lower-priority port overrides)
+	// < replaceWith port mappings.
 	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err

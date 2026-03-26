@@ -1073,6 +1073,7 @@ func TestResolveTestTarget(t *testing.T) {
 		name            string
 		originalTarget  string
 		urlReplacements map[string]string
+		portMappings    map[uint32]uint32
 		configHost      string
 		appPort         uint16
 		configPort      uint32
@@ -1124,6 +1125,24 @@ func TestResolveTestTarget(t *testing.T) {
 			configPort:      9090,
 			isHTTP:          true,
 			expectedTarget:  "http://new-host:9090/api",
+		},
+		{
+			name:            "HTTP_PortMappingOverridesReplacementPort",
+			originalTarget:  "http://example.com/api",
+			urlReplacements: map[string]string{"example.com": "localhost:3000"},
+			portMappings:    map[uint32]uint32{3000: 4000},
+			configPort:      9090, // Still ignored by replacement-with-port before mapping.
+			isHTTP:          true,
+			expectedTarget:  "http://localhost:4000/api",
+		},
+		{
+			name:           "HTTP_PortMappingOverridesConfigAndAppPort",
+			originalTarget: "http://example.com/api",
+			appPort:        8080,
+			configPort:     9090,
+			portMappings:   map[uint32]uint32{9090: 7070},
+			isHTTP:         true,
+			expectedTarget: "http://example.com:7070/api",
 		},
 		{
 			name:           "HTTPS_DefaultPort",
@@ -1189,11 +1208,19 @@ func TestResolveTestTarget(t *testing.T) {
 			isHTTP:         false,
 			expectedTarget: "[::1]:9090",
 		},
+		{
+			name:           "GRPC_PortMappingOverridesConfigPort",
+			originalTarget: "example.com:50051",
+			configPort:     50052,
+			portMappings:   map[uint32]uint32{50052: 50053},
+			isHTTP:         false,
+			expectedTarget: "example.com:50053",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, nil, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
+			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, tt.portMappings, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
