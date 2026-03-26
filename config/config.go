@@ -187,8 +187,8 @@ type ReplaceWith struct {
 }
 
 type ReplaceWithMap struct {
-	URL  map[string]string   `json:"url" yaml:"url" mapstructure:"url"`
-	Port map[uint32]uint32   `json:"port" yaml:"port" mapstructure:"port"`
+	URL  map[string]string `json:"url" yaml:"url" mapstructure:"url"`
+	Port map[uint32]uint32 `json:"port" yaml:"port" mapstructure:"port"`
 }
 
 // ProtocolSettings holds per-protocol configuration. Add new fields here
