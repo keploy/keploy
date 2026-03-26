@@ -297,4 +297,12 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd samples-go/${{ matrix.app.path }}
-          $REPLAY_BIN test --port 8000 --api-timeout 200 --delay 30
+          $REPLAY_BIN test --port 8000 --sse-port 8047 --api-timeout 200 --delay 30
+
+      - name: Test port mapping (http-sse only)
+        if: matrix.app.name == 'http-sse'
+        env:
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/${{ matrix.app.path }}
+          SKIP_PING_SERVER=1 $REPLAY_BIN test --test-sets port-mapping-test --api-timeout 200 --delay 30
