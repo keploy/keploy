@@ -1452,6 +1452,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				filteredMockNames := make([]string, 0, len(consumedMocks))
 				for _, m := range consumedMocks {
+					if m.Kind == models.DNS {
+						r.logger.Debug("ignoring DNS mock in mismatch reporting",
+							zap.String("testcase", testCase.Name),
+							zap.String("testset", testSetID),
+							zap.String("mockName", m.Name))
+					}
 					if m.Kind != models.DNS {
 						filteredMockNames = append(filteredMockNames, m.Name)
 					}
