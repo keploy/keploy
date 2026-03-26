@@ -27,6 +27,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	ptls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/client/app"
+	"go.keploy.io/server/v3/pkg/logging"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
@@ -145,7 +146,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 						utils.LogError(a.logger, err, "failed to decode metadata json")
 						continue
 					}
-					a.logger.Debug("Received test case metadata", incomingTestCaseSummary(tc)...)
+					a.logger.Debug("Received test case metadata", logging.TestCaseSummary(&tc)...)
 
 					if tc.HasBinaryFile {
 						pendingTestCase = &tc
@@ -255,34 +256,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 
 	a.logger.Debug("Successfully connected to incoming test cases stream.")
 	return tcChan, nil
-}
-
-func incomingTestCaseSummary(tc models.TestCase) []zap.Field {
-	fields := []zap.Field{
-		zap.String("kind", tc.GetKind()),
-		zap.String("name", tc.Name),
-		zap.Bool("has_binary_file", tc.HasBinaryFile),
-		zap.Uint16("app_port", tc.AppPort),
-		zap.Int("mock_count", len(tc.Mocks)),
-	}
-
-	if tc.HTTPReq.Method != "" {
-		fields = append(fields,
-			zap.String("http_method", string(tc.HTTPReq.Method)),
-			zap.String("http_url", tc.HTTPReq.URL),
-			zap.Int("request_body_bytes", len(tc.HTTPReq.Body)),
-		)
-	}
-
-	if tc.HTTPResp.StatusCode != 0 {
-		fields = append(fields,
-			zap.Int("http_status_code", tc.HTTPResp.StatusCode),
-			zap.Int("response_body_bytes", len(tc.HTTPResp.Body)),
-			zap.String("response_content_type", tc.HTTPResp.Header["Content-Type"]),
-		)
-	}
-
-	return fields
 }
 
 func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {

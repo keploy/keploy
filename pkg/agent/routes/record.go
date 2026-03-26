@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
+	"go.keploy.io/server/v3/pkg/logging"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -223,7 +224,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 			// Stream each test case as JSON
-			a.logger.Debug("Sending test case", debugTestCaseSummary(t)...)
+			a.logger.Debug("Sending test case", logging.TestCaseSummary(t)...)
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
 			header.Set("Content-Disposition", `form-data; name="metadata"`)
@@ -296,38 +297,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush() // Immediately send data to the client
 		}
 	}
-}
-
-func debugTestCaseSummary(tc *models.TestCase) []zap.Field {
-	if tc == nil {
-		return []zap.Field{zap.Bool("test_case_nil", true)}
-	}
-
-	fields := []zap.Field{
-		zap.String("kind", tc.GetKind()),
-		zap.String("name", tc.Name),
-		zap.Bool("has_binary_file", tc.HasBinaryFile),
-		zap.Uint16("app_port", tc.AppPort),
-		zap.Int("mock_count", len(tc.Mocks)),
-	}
-
-	if tc.HTTPReq.Method != "" {
-		fields = append(fields,
-			zap.String("http_method", string(tc.HTTPReq.Method)),
-			zap.String("http_url", tc.HTTPReq.URL),
-			zap.Int("request_body_bytes", len(tc.HTTPReq.Body)),
-		)
-	}
-
-	if tc.HTTPResp.StatusCode != 0 {
-		fields = append(fields,
-			zap.Int("http_status_code", tc.HTTPResp.StatusCode),
-			zap.Int("response_body_bytes", len(tc.HTTPResp.Body)),
-			zap.String("response_content_type", tc.HTTPResp.Header["Content-Type"]),
-		)
-	}
-
-	return fields
 }
 
 func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {

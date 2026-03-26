@@ -100,7 +100,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			if errors.Is(err, io.EOF) {
 				exchangeLogger.Debug("Client closed the keep-alive connection.", zap.String("client", clientConn.RemoteAddr().String()))
 			} else {
-				exchangeLogger.Warn("Failed to read client request", zap.Error(err))
+				exchangeLogger.Debug("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.", zap.Error(err))
 			}
 			return
 		}
@@ -139,7 +139,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := req.Write(upConn); err != nil {
-			exchangeLogger.Error("Failed to forward request to upstream",
+			exchangeLogger.Error("Failed to forward request to upstream. Verify the upstream application is running and reachable at the resolved address.",
 				zap.Error(err),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Bool("request_capture_truncated", reqCapture.Truncated()),
@@ -151,7 +151,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			exchangeLogger.Error("Failed to read upstream response",
+			exchangeLogger.Error("Failed to read upstream response. Check upstream application health and network connectivity.",
 				zap.Error(err),
 				zap.Duration("time_since_request_received", time.Since(reqTimestamp)),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -185,7 +185,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := resp.Write(clientConn); err != nil {
-			exchangeLogger.Error("Failed to forward response to client",
+			exchangeLogger.Error("Failed to forward response to client. The client may have closed the connection before the response was fully written.",
 				zap.Error(err),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Bool("response_capture_truncated", respCapture.Truncated()),
@@ -240,7 +240,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		reqData, err := dumpCapturedRequest(req, reqCapture.Bytes())
 		if err != nil {
-			exchangeLogger.Error("Failed to dump captured request",
+			exchangeLogger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
 				zap.Error(err),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int("captured_request_bytes", len(reqCapture.Bytes())),
@@ -250,7 +250,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 		if err != nil {
-			exchangeLogger.Error("Failed to parse captured request for testcase",
+			exchangeLogger.Error("Failed to parse captured request for testcase. Verify the client is sending valid HTTP if this persists.",
 				zap.Error(err),
 				zap.Int("captured_request_dump_bytes", len(reqData)),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -260,7 +260,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respCapture.Bytes())
 		if err != nil {
-			exchangeLogger.Error("Failed to dump captured response",
+			exchangeLogger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
 				zap.Error(err),
 				zap.Int("status_code", resp.StatusCode),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
@@ -270,7 +270,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
 		if err != nil {
-			exchangeLogger.Error("Failed to parse captured response for testcase",
+			exchangeLogger.Error("Failed to parse captured response for testcase. Verify the upstream application is returning valid HTTP if this persists.",
 				zap.Error(err),
 				zap.Int("captured_response_dump_bytes", len(respData)),
 				zap.Int64("response_bytes_seen", respCapture.Total()),

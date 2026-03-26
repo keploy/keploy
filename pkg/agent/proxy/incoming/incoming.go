@@ -301,8 +301,8 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
-			connLogger.Error("Failed to connect to upstream gRPC server",
-				zap.String("Final_App_Address", finalAppAddr),
+			connLogger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				zap.String("final_app_addr", finalAppAddr),
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
