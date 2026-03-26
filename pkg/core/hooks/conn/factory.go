@@ -70,12 +70,13 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					factory.logger.Debug("Processing HTTP2/gRPC request",
 						zap.Any("connection_id", connID))
 
-					// Get timestamps from the stream
-					CaptureGRPC(ctx, factory.logger, t, stream)
+					// Get timestamps from the stream and server port
+					serverPort := tracker.GetServerPort()
+					CaptureGRPC(ctx, factory.logger, t, stream, serverPort)
 				}
 			} else {
 				// Handle HTTP1 requests
-				ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.isHTTP1Complete()
+				ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest, serverPort := tracker.isHTTP1Complete()
 				if ok {
 
 					if len(requestBuf) == 0 || len(responseBuf) == 0 {
@@ -103,7 +104,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 						factory.logger.Debug("Base path is not set, proceeding with request capture",
 							zap.String("basePath", basePath),
 						)
-						Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+						Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts, serverPort)
 						continue
 					}
 
@@ -128,7 +129,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 						zap.String("path", parsedHTTPReq.URL.Path),
 					)
 
-					Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+					Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts, serverPort)
 				} else if tracker.IsInactive(factory.inactivityThreshold) {
 					trackersToDelete = append(trackersToDelete, connID)
 				}

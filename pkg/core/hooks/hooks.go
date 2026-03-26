@@ -107,6 +107,7 @@ type Hooks struct {
 	cgBind4           link.Link
 	cgBind6           link.Link
 	bindEnter         link.Link
+	bindExit          link.Link
 	BindEvents        *ebpf.Map
 }
 
@@ -242,30 +243,58 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 			return err
 		}
 
-		if opts.Mode != models.MODE_TEST && opts.BigPayload {
-
+		// Attach bind kprobes for recording the app port (needed for all record modes)
+		// Note: These are non-critical hooks - if they fail, we continue without app_port tracking
+		if opts.Mode != models.MODE_TEST {
 			switch runtime.GOARCH {
 			case "amd64":
 				// Attach the kprobe for bind syscall entry on x86
 				h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
 				if err != nil {
-					utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
-					return err
+					h.logger.Warn("failed to attach bind entry kprobe (app_port tracking will be disabled)", zap.Error(err))
+					// Continue without bind hooks - app_port will be 0, but functionality remains intact
+				} else {
+					// Attach the kretprobe for bind syscall exit on x86
+					h.bindExit, err = link.Kretprobe("__x64_sys_bind", objs.HandleBindExitX86, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+					if err != nil {
+						h.logger.Warn("failed to attach bind exit kretprobe (app_port tracking will be disabled)", zap.Error(err))
+						// Clean up entry hook if exit hook failed
+						if h.bindEnter != nil {
+							_ = h.bindEnter.Close()
+							h.bindEnter = nil
+						}
+					} else {
+						h.logger.Debug("bind hooks attached successfully for app_port tracking")
+					}
 				}
 			case "arm64":
 				// Attach the kprobe for bind syscall entry on arm64
 				h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
 				if err != nil {
-					utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
-					return err
+					h.logger.Warn("failed to attach bind entry kprobe (app_port tracking will be disabled)", zap.Error(err))
+					// Continue without bind hooks - app_port will be 0, but functionality remains intact
+				} else {
+					// Attach the kretprobe for bind syscall exit on arm64
+					h.bindExit, err = link.Kretprobe("__arm64_sys_bind", objs.HandleBindExitArm, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
+					if err != nil {
+						h.logger.Warn("failed to attach bind exit kretprobe (app_port tracking will be disabled)", zap.Error(err))
+						// Clean up entry hook if exit hook failed
+						if h.bindEnter != nil {
+							_ = h.bindEnter.Close()
+							h.bindEnter = nil
+						}
+					} else {
+						h.logger.Debug("bind hooks attached successfully for app_port tracking")
+					}
 				}
-
 			default:
-				err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
-				utils.LogError(h.logger, err, "failed to attach bind hooks")
-				return err
+				h.logger.Warn("unsupported architecture for bind hooks, app_port tracking will be disabled", zap.String("arch", runtime.GOARCH))
+				// Continue without bind hooks - not a fatal error
 			}
+		}
 
+		// BigPayload mode: attach cgroup hooks for port redirection
+		if opts.Mode != models.MODE_TEST && opts.BigPayload {
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
 				Path:    cGroupPath,
@@ -768,6 +797,21 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 		utils.LogError(h.logger, err, "failed to close the connectRet")
 	}
 
+	// Close bind kprobes (attached for all record modes)
+	if opts.Mode != models.MODE_TEST {
+		if h.bindEnter != nil {
+			if err := h.bindEnter.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
+			}
+		}
+		if h.bindExit != nil {
+			if err := h.bindExit.Close(); err != nil {
+				utils.LogError(h.logger, err, "failed to close the bind exit kretprobe")
+			}
+		}
+	}
+
+	// Close cgroup bind hooks (BigPayload mode only)
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		if h.cgBind4 != nil {
 			if err := h.cgBind4.Close(); err != nil {
@@ -777,11 +821,6 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 		if h.cgBind6 != nil {
 			if err := h.cgBind6.Close(); err != nil {
 				utils.LogError(h.logger, err, "failed to close the cgBind6")
-			}
-		}
-		if h.bindEnter != nil {
-			if err := h.bindEnter.Close(); err != nil {
-				utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
 			}
 		}
 	}

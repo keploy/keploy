@@ -66,6 +66,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			Request:  tc.HTTPReq,
 			Response: tc.HTTPResp,
 			Created:  tc.Created,
+			AppPort:  tc.AppPort,
 			// need to check here for type here as well as push in other custom assertions
 			Assertions: func() map[models.AssertionType]interface{} {
 				a := map[models.AssertionType]interface{}{}
@@ -104,6 +105,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			GrpcReq:  tc.GrpcReq,
 			GrpcResp: tc.GrpcResp,
 			Created:  tc.Created,
+			AppPort:  tc.AppPort,
 			// need to check here for type here as well as push in other custom assertions
 			Assertions: func() map[models.AssertionType]interface{} {
 				a := map[models.AssertionType]interface{}{}
@@ -316,6 +318,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.HTTPReq = httpSpec.Request
 		tc.HTTPResp = httpSpec.Response
 		tc.Description = httpSpec.Metadata["description"]
+		tc.AppPort = httpSpec.AppPort
 
 		// single map-based loop for all assertions
 		for key, raw := range httpSpec.Assertions {
@@ -352,6 +355,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
+		tc.AppPort = grpcSpec.AppPort
 
 		for key, raw := range grpcSpec.Assertions {
 			tc.Assertions[key] = raw

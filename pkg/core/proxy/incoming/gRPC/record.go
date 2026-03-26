@@ -263,7 +263,13 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 		GRPCReq:  grpcReq,
 		GRPCResp: grpcResp,
 	}
-	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream)
+
+	// Extract server port from the destination connection
+	var serverPort uint16
+	if addr, ok := p.destConn.RemoteAddr().(*net.TCPAddr); ok {
+		serverPort = uint16(addr.Port)
+	}
+	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, serverPort)
 
 	if s, ok := status.FromError(respErr); ok && respErr != nil {
 		return s.Err()

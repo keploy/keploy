@@ -56,6 +56,8 @@ type bpfSpecs struct {
 type bpfProgramSpecs struct {
 	HandleBindEnterArm               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_arm"`
 	HandleBindEnterX86               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_x86"`
+	HandleBindExitArm                *ebpf.ProgramSpec `ebpf:"handle_bind_exit_arm"`
+	HandleBindExitX86                *ebpf.ProgramSpec `ebpf:"handle_bind_exit_x86"`
 	K_bind4                          *ebpf.ProgramSpec `ebpf:"k_bind4"`
 	K_bind6                          *ebpf.ProgramSpec `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.ProgramSpec `ebpf:"k_connect4"`
@@ -97,6 +99,7 @@ type bpfProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
 	ActiveAcceptArgsMap         *ebpf.MapSpec `ebpf:"active_accept_args_map"`
+	ActiveBindArgsMap           *ebpf.MapSpec `ebpf:"active_bind_args_map"`
 	ActiveCloseArgsMap          *ebpf.MapSpec `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap           *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.MapSpec `ebpf:"active_write_args_map"`
@@ -112,6 +115,7 @@ type bpfMapSpecs struct {
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	ListenFdToPortMap           *ebpf.MapSpec `ebpf:"listen_fd_to_port_map"`
 	OutgoingConnCheckMap        *ebpf.MapSpec `ebpf:"outgoing_conn_check_map"`
 	OutgoingConnectArgsMap      *ebpf.MapSpec `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
@@ -149,6 +153,7 @@ func (o *bpfObjects) Close() error {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
 	ActiveAcceptArgsMap         *ebpf.Map `ebpf:"active_accept_args_map"`
+	ActiveBindArgsMap           *ebpf.Map `ebpf:"active_bind_args_map"`
 	ActiveCloseArgsMap          *ebpf.Map `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap           *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.Map `ebpf:"active_write_args_map"`
@@ -164,6 +169,7 @@ type bpfMaps struct {
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	ListenFdToPortMap           *ebpf.Map `ebpf:"listen_fd_to_port_map"`
 	OutgoingConnCheckMap        *ebpf.Map `ebpf:"outgoing_conn_check_map"`
 	OutgoingConnectArgsMap      *ebpf.Map `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
@@ -177,6 +183,7 @@ type bpfMaps struct {
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.ActiveAcceptArgsMap,
+		m.ActiveBindArgsMap,
 		m.ActiveCloseArgsMap,
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
@@ -192,6 +199,7 @@ func (m *bpfMaps) Close() error {
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.ListenFdToPortMap,
 		m.OutgoingConnCheckMap,
 		m.OutgoingConnectArgsMap,
 		m.RedirectProxyMap,
@@ -215,6 +223,8 @@ type bpfVariables struct {
 type bpfPrograms struct {
 	HandleBindEnterArm               *ebpf.Program `ebpf:"handle_bind_enter_arm"`
 	HandleBindEnterX86               *ebpf.Program `ebpf:"handle_bind_enter_x86"`
+	HandleBindExitArm                *ebpf.Program `ebpf:"handle_bind_exit_arm"`
+	HandleBindExitX86                *ebpf.Program `ebpf:"handle_bind_exit_x86"`
 	K_bind4                          *ebpf.Program `ebpf:"k_bind4"`
 	K_bind6                          *ebpf.Program `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.Program `ebpf:"k_connect4"`
@@ -255,6 +265,8 @@ func (p *bpfPrograms) Close() error {
 	return _BpfClose(
 		p.HandleBindEnterArm,
 		p.HandleBindEnterX86,
+		p.HandleBindExitArm,
+		p.HandleBindExitX86,
 		p.K_bind4,
 		p.K_bind6,
 		p.K_connect4,
