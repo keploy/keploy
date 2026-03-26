@@ -16,7 +16,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
-	"go.keploy.io/server/v3/pkg/logging"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
@@ -224,7 +223,6 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 			// Stream each test case as JSON
-			a.logger.Debug("Sending test case", logging.TestCaseSummary(t)...)
 			// 1. Write metadata (JSON)
 			header := textproto.MIMEHeader{}
 			header.Set("Content-Disposition", `form-data; name="metadata"`)

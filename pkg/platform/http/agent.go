@@ -27,7 +27,6 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	ptls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/client/app"
-	"go.keploy.io/server/v3/pkg/logging"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
@@ -146,8 +145,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 						utils.LogError(a.logger, err, "failed to decode metadata json")
 						continue
 					}
-					a.logger.Debug("Received test case metadata", logging.TestCaseSummary(&tc)...)
-
 					if tc.HasBinaryFile {
 						pendingTestCase = &tc
 					} else {
@@ -1258,7 +1255,6 @@ func (a *AgentClient) getApp() (*app.App, error) {
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions) error {
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
-		Debug:          a.conf.Debug,
 	}, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
