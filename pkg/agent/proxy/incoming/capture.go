@@ -5,11 +5,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httputil"
+
+	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 )
+
+const maxHTTPCombinedCaptureBytes = hooksUtils.MaxTestCaseSize
 
 // Per-body capture limit is half the combined 5MB testcase budget so that
 // request + response together stay within the budget enforced downstream.
-const maxHTTPBodyCaptureBytes = 5 * 1024 * 1024 / 2
+const maxHTTPBodyCaptureBytes = maxHTTPCombinedCaptureBytes / 2
 
 type captureBuffer struct {
 	buf       bytes.Buffer
@@ -112,4 +116,21 @@ func dumpCapturedResponse(resp *http.Response, req *http.Request, body []byte) (
 		respCopy.Body = io.NopCloser(bytes.NewReader(body))
 	}
 	return httputil.DumpResponse(respCopy, true)
+}
+
+func capturedExchangeSize(req *http.Request, resp *http.Response, reqBody, respBody []byte) (int, error) {
+	reqCopy := cloneRequestForCapture(req)
+	reqHeaderDump, err := httputil.DumpRequest(reqCopy, false)
+	if err != nil {
+		return 0, err
+	}
+
+	respCopy := cloneResponseForCapture(resp)
+	respCopy.Request = req
+	respHeaderDump, err := httputil.DumpResponse(respCopy, false)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(reqHeaderDump) + len(reqBody) + len(respHeaderDump) + len(respBody), nil
 }

@@ -89,6 +89,42 @@ func GetNextSortNum() int64 {
 	return atomic.AddInt64(&SortCounter, 1)
 }
 
+func cloneStringAnyMap(src map[string]interface{}) map[string]interface{} {
+	if len(src) == 0 {
+		return map[string]interface{}{}
+	}
+
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func snapshotTemplateState() (map[string]interface{}, map[string]interface{}) {
+	templateValuesMu.RLock()
+	defer templateValuesMu.RUnlock()
+
+	return cloneStringAnyMap(utils.TemplatizedValues), cloneStringAnyMap(utils.SecretValues)
+}
+
+func buildTemplateDataSnapshot() map[string]interface{} {
+	templatedValues, secretValues := snapshotTemplateState()
+	if len(templatedValues) == 0 && len(secretValues) == 0 {
+		return map[string]interface{}{}
+	}
+
+	templateData := make(map[string]interface{}, len(templatedValues)+1)
+	for k, v := range templatedValues {
+		templateData[k] = v
+	}
+	if len(secretValues) > 0 {
+		templateData["secret"] = secretValues
+	}
+
+	return templateData
+}
+
 func UpdateSortCounterIfHigher(val int64) {
 	for {
 		curr := atomic.LoadInt64(&SortCounter)
@@ -203,11 +239,11 @@ func IsTime(stringDate string) bool {
 }
 
 type SimulationConfig struct {
-	APITimeout         uint64
-	RequestTimeout     time.Duration
-	ConfigPort         uint32
-	KeployPath         string
-	ConfigHost         string
+	APITimeout      uint64
+	RequestTimeout  time.Duration
+	ConfigPort      uint32
+	KeployPath      string
+	ConfigHost      string
 	URLReplacements map[string]string
 }
 
@@ -231,26 +267,13 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	// TODO: adjust this logic in the render function in order to remove the redundant code.
 	// Convert testcase to string and render template values before simulation.
-	templateValuesMu.RLock()
-	hasTemplateOrSecretValues := len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0
-	templateValuesMu.RUnlock()
-	if hasTemplateOrSecretValues {
+	templateData := buildTemplateDataSnapshot()
+	if len(templateData) > 0 {
 		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
 			return nil, err
 		}
-
-		// Build the template data
-		templateValuesMu.RLock()
-		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
-		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
-		}
-		if len(utils.SecretValues) > 0 {
-			templateData["secret"] = utils.SecretValues
-		}
-		templateValuesMu.RUnlock()
 
 		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
 		// ignoring LaTeX/HTML like {{\pi}}.
@@ -563,15 +586,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
-	templateValuesMu.Lock()
-	defer templateValuesMu.Unlock()
+	if len(respBody) > 0 {
+		templateValuesMu.Lock()
+		defer templateValuesMu.Unlock()
+		prevTemplatedValues := cloneStringAnyMap(utils.TemplatizedValues)
+		if len(prevTemplatedValues) > 0 {
+			logger.Debug("Received response from user app", zap.Any("response", resp))
 
-	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
-		logger.Debug("Received response from user app", zap.Any("response", resp))
-
-		updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
-		if updated {
-			logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
+			updated := updateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues, prevTemplatedValues)
+			if updated {
+				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
+			}
 		}
 	}
 	return resp, errHTTPReq
@@ -1821,15 +1846,16 @@ func looksBinary(s string) bool {
 	return false
 }
 
-// UpdateTemplateValuesFromHTTPResp checks the HTTP response body and the previous templatized response body
-// it updates the template values if it finds any changes in the response body's fields which were previously templatized
-func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, resp models.HTTPResp, prevTemplatedValues map[string]interface{}) bool {
+// updateTemplateValuesFromHTTPResp checks the HTTP response body and the previous
+// templatized response body and updates the template values that are currently held
+// under templateValuesMu.
+func updateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, resp models.HTTPResp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
 	// We derive template keys directly from the templated response body & headers by
 	// scanning for placeholder patterns like {{key}} (go text/template simple identifiers)
 	// and then recursively locating the same JSON path in the new response to fetch
 	// the concrete value. This avoids relying on updateTemplatesFromJSON and gives
 	// deterministic path-based updates.
-	if len(utils.TemplatizedValues) == 0 { // nothing to update
+	if len(currentTemplatedValues) == 0 { // nothing to update
 		logger.Debug("no templatized values present, nothing to update")
 		return false
 	}
@@ -1850,7 +1876,7 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 	if templatedIsJSON && actualIsJSON {
 		if err := json.Unmarshal([]byte(sanitizedTemplatedBody), &templatedParsed); err == nil {
 			if err2 := json.Unmarshal([]byte(resp.Body), &actualParsed); err2 == nil {
-				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, prevTemplatedValues) {
+				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, currentTemplatedValues, prevTemplatedValues) {
 					changed = true
 				}
 			}
@@ -1863,8 +1889,8 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 
 // traverseAndUpdateTemplates walks the templated JSON tree in lock-step with the actual JSON.
 // Whenever it finds a string containing a placeholder, it extracts the template key(s) and updates
-// utils.TemplatizedValues with the concrete value from the actual JSON at the same path.
-func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode interface{}, path string, placeholderRe *regexp.Regexp, prevTemplatedValues map[string]interface{}) bool {
+// the current template values with the concrete value from the actual JSON at the same path.
+func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode interface{}, path string, placeholderRe *regexp.Regexp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
 	changed := false
 	switch t := templatedNode.(type) {
 	case map[string]interface{}:
@@ -1874,7 +1900,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 			if path != "" {
 				p = path + "." + k
 			}
-			if traverseAndUpdateTemplates(logger, v, actMap[k], p, placeholderRe, prevTemplatedValues) {
+			if traverseAndUpdateTemplates(logger, v, actMap[k], p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
 				changed = true
 			}
 		}
@@ -1889,7 +1915,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 			if path == "" {
 				p = fmt.Sprintf("[%d]", i)
 			}
-			if traverseAndUpdateTemplates(logger, v, actElem, p, placeholderRe, prevTemplatedValues) {
+			if traverseAndUpdateTemplates(logger, v, actElem, p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
 				changed = true
 			}
 		}
@@ -1912,7 +1938,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 				continue
 			}
 			key := keys[0]
-			if _, ok := utils.TemplatizedValues[key]; !ok {
+			if _, ok := currentTemplatedValues[key]; !ok {
 				continue
 			}
 			prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
@@ -1924,7 +1950,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 				continue
 			}
 			logger.Debug("updating template value from JSON path", zap.String("key", key), zap.String("path", path), zap.String("old_value", prevStr), zap.String("new_value", concrete))
-			utils.TemplatizedValues[key] = concrete
+			currentTemplatedValues[key] = concrete
 			changed = true
 		}
 	default:
@@ -1938,8 +1964,10 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 // a concrete "expected" testcase (for example expected responses) before
 // the test is executed and templates may get updated by the runtime.
 func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) {
+	templatedValues, secretValues := snapshotTemplateState()
+
 	// If there are no templated or secret values, just return a deep copy
-	if len(utils.TemplatizedValues) == 0 && len(utils.SecretValues) == 0 {
+	if len(templatedValues) == 0 && len(secretValues) == 0 {
 		copy := *tc
 		return &copy, nil
 	}
@@ -1961,11 +1989,11 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	}
 
 	data := make(map[string]interface{})
-	for k, v := range utils.TemplatizedValues {
+	for k, v := range templatedValues {
 		data[k] = v
 	}
-	if len(utils.SecretValues) > 0 {
-		data["secret"] = utils.SecretValues
+	if len(secretValues) > 0 {
+		data["secret"] = secretValues
 	}
 
 	var output bytes.Buffer
@@ -1989,9 +2017,11 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 		return noise
 	}
 
+	templatedValues, _ := snapshotTemplateState()
+
 	// headers: if a header value contains a templated value, mark header.<name>
 	for hk, hv := range resp.Header {
-		for _, v := range utils.TemplatizedValues {
+		for _, v := range templatedValues {
 			if v == nil {
 				continue
 			}
@@ -2011,7 +2041,7 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 	var parsed interface{}
 	if json.Valid([]byte(resp.Body)) {
 		if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
-			for _, v := range utils.TemplatizedValues {
+			for _, v := range templatedValues {
 				if v == nil {
 					continue
 				}
@@ -2032,7 +2062,7 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 		}
 	} else {
 		// non-json body: if any templated literal present, mark the full body as noisy
-		for _, v := range utils.TemplatizedValues {
+		for _, v := range templatedValues {
 			if v == nil {
 				continue
 			}

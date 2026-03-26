@@ -222,6 +222,34 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			continue
 		}
 
+		exchangeCaptureSize, err := capturedExchangeSize(req, resp, reqCapture.Bytes(), respCapture.Bytes())
+		if err != nil {
+			logger.Error("Failed to estimate combined captured exchange size. This indicates an internal capture error; report it if it persists.",
+				zap.Error(err),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+		if exchangeCaptureSize > maxHTTPCombinedCaptureBytes {
+			logger.Debug("Skipping HTTP capture because combined request and response exceeded capture budget",
+				zap.Int("capture_budget_bytes", maxHTTPCombinedCaptureBytes),
+				zap.Int("captured_exchange_bytes", exchangeCaptureSize),
+				zap.Int64("request_bytes_seen", reqCapture.Total()),
+				zap.Int64("response_bytes_seen", respCapture.Total()),
+				zap.String("url", req.URL.String()),
+				zap.String("method", req.Method),
+				zap.Int("status_code", resp.StatusCode),
+			)
+			if forceCloseMode {
+				return
+			}
+			continue
+		}
+
 		// Capture parsing is best-effort: the exchange has already been proxied
 		// successfully, so parse failures should not terminate the connection.
 		reqData, err := dumpCapturedRequest(req, reqCapture.Bytes())
