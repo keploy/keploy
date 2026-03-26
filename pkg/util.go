@@ -883,12 +883,7 @@ func IsSSERequest(tc *models.TestCase) bool {
 	if tc == nil || tc.Kind != models.HTTP {
 		return false
 	}
-	respCT := getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
-	if hasSSEContentType(respCT) {
-		return true
-	}
-	acceptHeader := getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept")
-	return hasSSEContentType(acceptHeader)
+	return isSSETestCase(tc, nil)
 }
 
 func boundaryFromContentTypeHeader(contentType string) string {
@@ -2890,7 +2885,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 
 		if configPort > 0 {
 			if appPort > 0 && uint32(appPort) != configPort {
-				logger.Info("Config port overrides recorded app_port",
+				logger.Debug("Config port overrides recorded app_port",
 					zap.Uint32("config_port", configPort),
 					zap.Uint16("recorded_app_port", appPort))
 			}

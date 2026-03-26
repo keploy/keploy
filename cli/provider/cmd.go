@@ -1121,7 +1121,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 				ssePort, err := cmd.Flags().GetUint32("sse-port")
 				if err != nil {
-					errMsg := "failed to get the provided ssePort"
+					errMsg := "failed to read --sse-port flag; ensure the value is a valid port number"
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}

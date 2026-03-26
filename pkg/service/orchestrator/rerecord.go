@@ -413,7 +413,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		if o.config.ReRecord.SSEPort != 0 && tc.Kind == models.HTTP && pkg.IsSSERequest(tc) {
 			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.SSEPort)))
 			if err != nil {
-				utils.LogError(o.logger, err, "failed to replace SSE port to provided SSE port by the user")
+				utils.LogError(o.logger, err, "failed to replace SSE port in URL — verify the URL format and that --sse-port value is a valid port number")
 				break
 			}
 		}
