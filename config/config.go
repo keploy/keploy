@@ -198,7 +198,9 @@ type ProtocolSettings struct {
 }
 
 // ProtocolConfig maps protocol names (e.g. "http", "sse", "grpc") to their
-// settings. New protocols can be added in the config file without code changes.
+// settings. The map schema allows additional protocol names in the config
+// without schema changes, but only protocols recognized by the application
+// are currently used by the replay and protocol-handling logic.
 type ProtocolConfig map[string]ProtocolSettings
 
 type SelectedTests struct {
