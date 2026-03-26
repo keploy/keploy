@@ -336,6 +336,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
+		cmd.Flags().Uint32("sse-port", c.cfg.Test.SSEPort, "Custom SSE port to replace the actual port in the SSE testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
@@ -409,6 +410,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"path":                  "path",
 		"port":                  "port",
 		"grpcPort":              "grpc-port",
+		"ssePort":               "sse-port",
 		"proxyPort":             "proxy-port",
 		"incomingProxyPort":     "incoming-proxy-port",
 		"dnsPort":               "dns-port",
@@ -1116,6 +1118,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 				c.cfg.ReRecord.GRPCPort = grpcPort
+
+				ssePort, err := cmd.Flags().GetUint32("sse-port")
+				if err != nil {
+					errMsg := "failed to get the provided ssePort"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.SSEPort = ssePort
 
 				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
 				if err != nil {

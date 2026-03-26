@@ -1193,7 +1193,7 @@ func TestResolveTestTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
+			got, err := ResolveTestTarget(tt.originalTarget, tt.urlReplacements, nil, tt.configHost, tt.appPort, tt.configPort, tt.isHTTP, logger)
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -1208,7 +1208,7 @@ func TestResolveTestTarget_EdgeCases(t *testing.T) {
 	logger := zap.NewNop()
 
 	t.Run("HTTP_InvalidURL", func(t *testing.T) {
-		_, err := ResolveTestTarget("http://[::1]:namedport", nil, "", 0, 0, true, logger)
+		_, err := ResolveTestTarget("http://[::1]:namedport", nil, nil, "", 0, 0, true, logger)
 		assert.Error(t, err)
 	})
 

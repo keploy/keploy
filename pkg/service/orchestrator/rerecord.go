@@ -410,6 +410,14 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			}
 		}
 
+		if o.config.ReRecord.SSEPort != 0 && tc.Kind == models.HTTP && pkg.IsSSERequest(tc) {
+			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.SSEPort)))
+			if err != nil {
+				utils.LogError(o.logger, err, "failed to replace SSE port to provided SSE port by the user")
+				break
+			}
+		}
+
 		if o.config.ReRecord.GRPCPort != 0 && tc.Kind == models.GRPC_EXPORT {
 			tc.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcPort(tc.GrpcReq.Headers.PseudoHeaders[":authority"], strconv.Itoa(int(o.config.ReRecord.GRPCPort)))
 			if err != nil {
