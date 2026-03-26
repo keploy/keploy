@@ -115,6 +115,18 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		}
 		h.logger.Info("Keploy agent container kernel version", zap.String("kernel", release))
 	}
+	// Check container distribution
+	if data, err := os.ReadFile("/etc/os-release"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				distro := strings.TrimPrefix(line, "PRETTY_NAME=")
+				distro = strings.Trim(distro, "\"")
+				h.logger.Info("Container distribution", zap.String("distro", distro))
+				break
+			}
+		}
+	}
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		// On some environments (e.g., Docker Desktop for Windows), the memcg accounting probe
