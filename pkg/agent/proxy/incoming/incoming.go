@@ -268,24 +268,18 @@ const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, sem chan struct{}, appPort uint16) {
 	defer clientConn.Close()
-	connLogger := logger.With(
-		zap.String("client_addr", clientConn.RemoteAddr().String()),
-		zap.String("proxy_addr", clientConn.LocalAddr().String()),
-		zap.String("upstream_fallback_addr", newAppAddr),
-		zap.Uint16("orig_app_port", appPort),
-	)
 
-	preface, err := util.ReadInitialBuf(ctx, connLogger, clientConn)
+	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
 		//if not EOF then log
 		if err != io.EOF {
-			utils.LogError(connLogger, err, "error reading initial bytes from client connection")
+			utils.LogError(logger, err, "error reading initial bytes from client connection")
 		}
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		// Get the actual destination for gRPC on Windows
-		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, connLogger)
+		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
 		// Determine the correct port for the test case:
 		// On Windows, getActualDestination resolves the real destination dynamically,
@@ -301,15 +295,15 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 		upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 		if err != nil {
-			connLogger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				zap.String("final_app_addr", finalAppAddr),
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
 		}
-		grpc.RecordIncoming(ctx, connLogger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr)
 	} else {
-		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, connLogger, t, sem, appPort)
+		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
 }
 

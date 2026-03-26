@@ -74,12 +74,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Destination was dynamically resolved (Windows) — extract port from resolved address
 		actualPort = extractPortFromAddr(finalAppAddr, appPort)
 	}
-	requestSeq := 0
 
 	// Dial Upstream
 	upConn, err := net.DialTimeout("tcp4", finalAppAddr, 3*time.Second)
 	if err != nil {
-		logger.Warn("Failed to dial upstream app port", zap.String("Final_App_Port", finalAppAddr), zap.Error(err))
+		logger.Error("Failed to connect to upstream application. Verify the application is listening on the resolved address.",
+			zap.String("final_app_addr", finalAppAddr),
+			zap.Error(err),
+		)
 		return
 	}
 	defer upConn.Close()
@@ -92,15 +94,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	forceCloseMode := pm.synchronous || pm.sampling
 
 	for {
-		requestSeq++
-		exchangeLogger := logger.With(zap.Int("ingress_request_seq", requestSeq))
-
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				exchangeLogger.Debug("Client closed the keep-alive connection.", zap.String("client", clientConn.RemoteAddr().String()))
-			} else {
-				exchangeLogger.Debug("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.", zap.Error(err))
+			if !errors.Is(err, io.EOF) {
+				logger.Debug("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.", zap.Error(err))
 			}
 			return
 		}
@@ -111,13 +108,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Request modifications for sync/sampling modes.
 		if forceCloseMode {
 			if req.ContentLength == -1 || isChunked(req.TransferEncoding) {
-				exchangeLogger.Debug("Detected request body that may stream in force-close mode. Releasing lock.",
-					zap.Bool("synchronous_mode", pm.synchronous),
-					zap.Bool("sampling_mode", pm.sampling),
-					zap.Bool("acquired_lock", acquiredLock),
-					zap.Int64("content_length", req.ContentLength),
-					zap.Strings("transfer_encoding", req.TransferEncoding),
-				)
 				releaseLock()
 				chunked = true
 			} else if pm.synchronous && acquiredLock {
@@ -139,7 +129,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := req.Write(upConn); err != nil {
-			exchangeLogger.Error("Failed to forward request to upstream. Verify the upstream application is running and reachable at the resolved address.",
+			logger.Error("Failed to forward request to upstream. Verify the upstream application is running and reachable at the resolved address.",
 				zap.Error(err),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Bool("request_capture_truncated", reqCapture.Truncated()),
@@ -151,7 +141,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
-			exchangeLogger.Error("Failed to read upstream response. Check upstream application health and network connectivity.",
+			logger.Error("Failed to read upstream response. Check upstream application health and network connectivity.",
 				zap.Error(err),
 				zap.Duration("time_since_request_received", time.Since(reqTimestamp)),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -162,14 +152,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Response modifications for sync/sampling modes.
 		if forceCloseMode {
 			if resp.ContentLength == -1 || isChunked(resp.TransferEncoding) {
-				exchangeLogger.Debug("Detected response body that may stream in force-close mode. Releasing lock.",
-					zap.Bool("synchronous_mode", pm.synchronous),
-					zap.Bool("sampling_mode", pm.sampling),
-					zap.Bool("acquired_lock", acquiredLock),
-					zap.Int64("content_length", resp.ContentLength),
-					zap.Strings("transfer_encoding", resp.TransferEncoding),
-					zap.String("content_type", resp.Header.Get("Content-Type")),
-				)
 				releaseLock()
 				chunked = true
 			}
@@ -185,7 +167,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := resp.Write(clientConn); err != nil {
-			exchangeLogger.Error("Failed to forward response to client. The client may have closed the connection before the response was fully written.",
+			logger.Error("Failed to forward response to client. The client may have closed the connection before the response was fully written.",
 				zap.Error(err),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Bool("response_capture_truncated", respCapture.Truncated()),
@@ -200,7 +182,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if forceCloseMode {
 			if chunked {
 				shouldCapture = false
-				exchangeLogger.Debug("Skipping testcase capture for force-close streaming exchange",
+				logger.Debug("Skipping testcase capture for streaming exchange",
 					zap.Bool("synchronous_mode", pm.synchronous),
 					zap.Bool("sampling_mode", pm.sampling),
 					zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -208,15 +190,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				)
 			} else if pm.sampling && !acquiredLock {
 				shouldCapture = false
-				exchangeLogger.Debug("Skipping testcase capture because no sampling slot was acquired",
-					zap.Int64("request_bytes_seen", reqCapture.Total()),
-					zap.Int64("response_bytes_seen", respCapture.Total()),
-				)
 			}
 		}
 
 		if reqCapture.Truncated() || respCapture.Truncated() {
-			exchangeLogger.Debug("Skipping HTTP capture because body exceeded capture budget while streaming",
+			logger.Debug("Skipping HTTP capture because body exceeded capture budget while streaming",
 				zap.Int("capture_budget_bytes", maxHTTPBodyCaptureBytes),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
@@ -240,7 +218,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		reqData, err := dumpCapturedRequest(req, reqCapture.Bytes())
 		if err != nil {
-			exchangeLogger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
+			logger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
 				zap.Error(err),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int("captured_request_bytes", len(reqCapture.Bytes())),
@@ -250,7 +228,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
 		if err != nil {
-			exchangeLogger.Error("Failed to parse captured request for testcase. Verify the client is sending valid HTTP if this persists.",
+			logger.Error("Failed to parse captured request for testcase. Verify the client is sending valid HTTP if this persists.",
 				zap.Error(err),
 				zap.Int("captured_request_dump_bytes", len(reqData)),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
@@ -260,7 +238,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respCapture.Bytes())
 		if err != nil {
-			exchangeLogger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
+			logger.Error("Failed to dump captured response. This indicates an internal capture error; report it if it persists.",
 				zap.Error(err),
 				zap.Int("status_code", resp.StatusCode),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
@@ -270,7 +248,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
 		if err != nil {
-			exchangeLogger.Error("Failed to parse captured response for testcase. Verify the upstream application is returning valid HTTP if this persists.",
+			logger.Error("Failed to parse captured response for testcase. Verify the upstream application is returning valid HTTP if this persists.",
 				zap.Error(err),
 				zap.Int("captured_response_dump_bytes", len(respData)),
 				zap.Int64("response_bytes_seen", respCapture.Total()),
@@ -282,7 +260,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		go func() {
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(ctx, exchangeLogger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
+			hooksUtils.CaptureHook(ctx, logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestamp, respTimestamp, pm.incomingOpts, pm.synchronous, actualPort)
 		}()
 
 		if forceCloseMode {
