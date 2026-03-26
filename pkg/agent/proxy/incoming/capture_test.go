@@ -18,6 +18,7 @@ type scriptedReadCloser struct {
 type readStep struct {
 	data  string
 	delay time.Duration
+	wait  <-chan struct{}
 }
 
 func (s *scriptedReadCloser) Read(p []byte) (int, error) {
@@ -26,6 +27,9 @@ func (s *scriptedReadCloser) Read(p []byte) (int, error) {
 	}
 	step := s.steps[s.idx]
 	s.idx++
+	if step.wait != nil {
+		<-step.wait
+	}
 	if step.delay > 0 {
 		time.Sleep(step.delay)
 	}
@@ -66,6 +70,7 @@ func TestResponseCaptureStreamsToClient(t *testing.T) {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
 
+	secondChunkRelease := make(chan struct{})
 	resp := &http.Response{
 		Status:        "200 OK",
 		StatusCode:    http.StatusOK,
@@ -76,7 +81,7 @@ func TestResponseCaptureStreamsToClient(t *testing.T) {
 		Body: &scriptedReadCloser{
 			steps: []readStep{
 				{data: "A"},
-				{data: "B", delay: 200 * time.Millisecond},
+				{data: "B", wait: secondChunkRelease},
 			},
 		},
 		Request: req,
@@ -97,6 +102,9 @@ func TestResponseCaptureStreamsToClient(t *testing.T) {
 	// Read past the HTTP headers (up through "\r\n\r\n") to reach the body.
 	headerBuf := make([]byte, 0, 512)
 	oneByte := make([]byte, 1)
+	if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline(header) error = %v", err)
+	}
 	for {
 		if _, err := clientConn.Read(oneByte); err != nil {
 			t.Fatalf("Read(header) error = %v", err)
@@ -107,18 +115,26 @@ func TestResponseCaptureStreamsToClient(t *testing.T) {
 		}
 	}
 
-	// Now read the first body byte — it should arrive quickly (before the 200ms delayed chunk).
+	// Read the first body byte before releasing the second chunk. If body streaming were buffered
+	// until the full response was available, this read would time out while the second chunk remains blocked.
 	firstBodyByte := make([]byte, 1)
-	start := time.Now()
-	if err := clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-		t.Fatalf("SetReadDeadline() error = %v", err)
+	if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline(body) error = %v", err)
 	}
 	if _, err := clientConn.Read(firstBodyByte); err != nil {
-		t.Fatalf("Read(body) error = %v", err)
+		t.Fatalf("Read(body) error = %v; ensure the response writer is streaming body data before the next chunk is released", err)
 	}
-	if elapsed := time.Since(start); elapsed >= 100*time.Millisecond {
-		t.Fatalf("first body byte arrived after %s, expected streaming before 100ms", elapsed)
+	if got := string(firstBodyByte); got != "A" {
+		t.Fatalf("first body byte = %q, want %q", got, "A")
 	}
+
+	select {
+	case err := <-writeDone:
+		t.Fatalf("resp.Write() completed before releasing the second chunk: %v", err)
+	default:
+	}
+
+	close(secondChunkRelease)
 
 	if err := clientConn.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatalf("SetReadDeadline(reset) error = %v", err)
