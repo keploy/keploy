@@ -162,8 +162,10 @@ func GetReqMeta(req *http.Request) map[string]string {
 
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
 	passThrough := false
+	logger.Debug("checking if request is passthrough", zap.String("host", req.Host), zap.String("url", req.URL.String()), zap.Uint("destPort", destPort))
 
 	for _, bypass := range opts.Rules {
+		logger.Debug("checking bypass rule", zap.Any("rule", bypass))
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
 			if err != nil {
@@ -171,6 +173,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 				continue
 			}
 			passThrough = regex.MatchString(req.Host)
+			logger.Debug("host match result", zap.String("host", req.Host), zap.String("regex", bypass.Host), zap.Bool("matched", passThrough))
 			if !passThrough {
 				continue
 			}
@@ -182,6 +185,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 				continue
 			}
 			passThrough = regex.MatchString(req.URL.String())
+			logger.Debug("path match result", zap.String("path", req.URL.String()), zap.String("regex", bypass.Path), zap.Bool("matched", passThrough))
 			if !passThrough {
 				continue
 			}
@@ -189,11 +193,15 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 
 		if passThrough {
 			if bypass.Port == 0 || bypass.Port == destPort {
+				logger.Debug("request matched bypass rule", zap.Any("rule", bypass))
 				return true
 			}
+			logger.Debug("port mismatch for bypass rule", zap.Uint("destPort", destPort), zap.Uint("rulePort", bypass.Port))
 			passThrough = false
+
 		}
 	}
+	logger.Debug("request is not passthrough")
 
 	return passThrough
 }
