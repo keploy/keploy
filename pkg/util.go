@@ -208,8 +208,7 @@ type SimulationConfig struct {
 	ConfigPort         uint32
 	KeployPath         string
 	ConfigHost         string
-	URLReplacements    map[string]string
-	StreamingBodyNoise map[string][]string
+	URLReplacements map[string]string
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
@@ -1055,16 +1054,16 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 
 		actualQueue = append(actualQueue, line)
 		expected := expectedQueue[nextExpected]
-		if len(line) != len(expected) {
+		if line != expected {
 			logger.Debug("plain-text stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.Int("expected_size", len(expected)),
-				zap.Int("actual_size", len(line)))
+				zap.String("expected", expected),
+				zap.String("actual", line))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
 				ActualFrame:   line,
-				Reason:        fmt.Sprintf("size mismatch: expected %d bytes, got %d bytes", len(expected), len(line)),
+				Reason:        fmt.Sprintf("content mismatch at frame %d", nextExpected),
 			}
 			return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
 		}
@@ -1098,16 +1097,24 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 }
 
 func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
-	expectedSize := len([]byte(expectedResp.Body))
-	if structuredSize, ok := expectedStructuredRawSize(expectedResp.StreamBody); ok {
-		expectedSize = structuredSize
-	}
+	expectedBytes := expectedBinaryBytes(expectedResp)
+	expectedSize := len(expectedBytes)
 	actualSize := 0
+	contentMatch := true
 	buffer := make([]byte, 32*1024)
 
 	for {
 		n, err := stream.Read(buffer)
 		if n > 0 {
+			if contentMatch && actualSize < expectedSize {
+				end := actualSize + n
+				if end > expectedSize {
+					end = expectedSize
+				}
+				if !bytes.Equal(buffer[:end-actualSize], expectedBytes[actualSize:end]) {
+					contentMatch = false
+				}
+			}
 			actualSize += n
 			if actualSize >= expectedSize {
 				if actualSize > expectedSize {
@@ -1139,7 +1146,35 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 		return false, strconv.Itoa(actualSize), mismatchInfo, nil
 	}
 
+	if !contentMatch {
+		logger.Debug("binary stream content mismatch",
+			zap.Int("size", actualSize))
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    0,
+			ExpectedFrame: fmt.Sprintf("%d bytes", expectedSize),
+			ActualFrame:   fmt.Sprintf("%d bytes (content differs)", actualSize),
+			Reason:        fmt.Sprintf("content mismatch at %d bytes", actualSize),
+		}
+		return false, strconv.Itoa(actualSize), mismatchInfo, nil
+	}
+
 	return true, strconv.Itoa(actualSize), nil, nil
+}
+
+func expectedBinaryBytes(expectedResp models.HTTPResp) []byte {
+	if len(expectedResp.StreamBody) > 0 {
+		var buf bytes.Buffer
+		for _, chunk := range expectedResp.StreamBody {
+			raw, ok := streamChunkFieldValue(chunk, "raw")
+			if ok {
+				buf.WriteString(raw)
+			}
+		}
+		if buf.Len() > 0 {
+			return buf.Bytes()
+		}
+	}
+	return []byte(expectedResp.Body)
 }
 
 func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
@@ -1350,19 +1385,14 @@ func compareSSEFields(expectedFields, actualFields []sseField, jsonNoiseKeys map
 				continue
 			}
 
-			if detectScalarType(eVal) != detectScalarType(aVal) {
-				return false, "data-type mismatch"
-			}
-			if len(eVal) != len(aVal) {
-				return false, "data-size mismatch"
+			if eVal != aVal {
+				return false, "data-value mismatch"
 			}
 			continue
 		}
 
-		eType := detectScalarType(strings.TrimSpace(e.value))
-		aType := detectScalarType(strings.TrimSpace(a.value))
-		if eType != aType {
-			return false, "field-type mismatch"
+		if strings.TrimSpace(e.value) != strings.TrimSpace(a.value) {
+			return false, "field-value mismatch"
 		}
 	}
 
@@ -1640,8 +1670,8 @@ func compareMultipartPart(expected multipartPartPayload, actual multipartPartPay
 		return true, ""
 	}
 
-	if len(expected.body) != len(actual.body) {
-		return false, "body-size mismatch"
+	if !bytes.Equal(expected.body, actual.body) {
+		return false, "body mismatch"
 	}
 	return true, ""
 }

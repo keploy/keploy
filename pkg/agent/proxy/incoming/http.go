@@ -123,8 +123,12 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Header.Set("Connection", "close")
 		}
 
+		// Determine whether capture is already known to be disabled for this exchange.
+		// Skip tee/buffering to avoid overhead when capture will be skipped anyway.
+		captureEligible := !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
+
 		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
-		if req.Body != nil && req.Body != http.NoBody {
+		if captureEligible && req.Body != nil && req.Body != http.NoBody {
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
 
@@ -161,8 +165,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		respTimestamp := time.Now()
+		// Re-evaluate capture eligibility after response headers (chunked may have changed).
+		captureEligible = !(forceCloseMode && chunked) && (!pm.sampling || acquiredLock)
 		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
-		if resp.Body != nil && resp.Body != http.NoBody {
+		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
 
@@ -216,6 +222,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			continue
 		}
 
+		// Capture parsing is best-effort: the exchange has already been proxied
+		// successfully, so parse failures should not terminate the connection.
 		reqData, err := dumpCapturedRequest(req, reqCapture.Bytes())
 		if err != nil {
 			logger.Error("Failed to dump captured request. This indicates an internal capture error; report it if it persists.",
@@ -223,7 +231,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 				zap.Int("captured_request_bytes", len(reqCapture.Bytes())),
 			)
-			return
+			if forceCloseMode {
+				return
+			}
+			continue
 		}
 
 		parsedHTTPReq, err := pkg.ParseHTTPRequest(reqData)
@@ -233,7 +244,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int("captured_request_dump_bytes", len(reqData)),
 				zap.Int64("request_bytes_seen", reqCapture.Total()),
 			)
-			return
+			if forceCloseMode {
+				return
+			}
+			continue
 		}
 
 		respData, err := dumpCapturedResponse(resp, parsedHTTPReq, respCapture.Bytes())
@@ -244,7 +258,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Int("captured_response_bytes", len(respCapture.Bytes())),
 			)
-			return
+			if forceCloseMode {
+				return
+			}
+			continue
 		}
 		parsedHTTPRes, err := pkg.ParseHTTPResponse(respData, parsedHTTPReq)
 		if err != nil {
@@ -254,7 +271,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Int("status_code", resp.StatusCode),
 			)
-			return
+			if forceCloseMode {
+				return
+			}
+			continue
 		}
 
 		go func() {

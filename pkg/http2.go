@@ -467,7 +467,10 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 	}
 	// Render any template values in the test case before simulation
-	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
+	templateValuesMu.RLock()
+	hasTemplateOrSecretValues := len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0
+	templateValuesMu.RUnlock()
+	if hasTemplateOrSecretValues {
 		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
@@ -475,6 +478,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 
 		// Build the template data
+		templateValuesMu.RLock()
 		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
 		for k, v := range utils.TemplatizedValues {
 			templateData[k] = v
@@ -482,6 +486,7 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		if len(utils.SecretValues) > 0 {
 			templateData["secret"] = utils.SecretValues
 		}
+		templateValuesMu.RUnlock()
 
 		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
 		// ignoring LaTeX/HTML like {{\pi}}.

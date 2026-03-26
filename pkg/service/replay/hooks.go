@@ -63,15 +63,6 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 	switch tc.Kind {
 	case models.HTTP:
-		noiseConfig := h.cfg.Test.GlobalNoise.Global
-		if tsNoise, ok := h.cfg.Test.GlobalNoise.Testsets[testSetID]; ok {
-			noiseConfig = LeftJoinNoise(h.cfg.Test.GlobalNoise.Global, tsNoise)
-		}
-		streamBodyNoise := map[string][]string{}
-		if bodyNoise, ok := noiseConfig["body"]; ok {
-			streamBodyNoise = cloneNoiseMap(bodyNoise)
-		}
-
 		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
 			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
 		}
@@ -82,12 +73,11 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		cfg := pkg.SimulationConfig{
-			APITimeout:         h.cfg.Test.APITimeout,
-			ConfigPort:         h.cfg.Test.Port,
-			KeployPath:         h.cfg.Path,
-			ConfigHost:         hostToUse,
-			URLReplacements:    urlReplacements,
-			StreamingBodyNoise: streamBodyNoise,
+			APITimeout:      h.cfg.Test.APITimeout,
+			ConfigPort:      h.cfg.Test.Port,
+			KeployPath:      h.cfg.Path,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
 		}
 
 		// Check if this is a streaming test case

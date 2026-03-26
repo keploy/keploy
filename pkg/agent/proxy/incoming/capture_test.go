@@ -94,16 +94,30 @@ func TestResponseCaptureStreamsToClient(t *testing.T) {
 		_ = serverConn.Close()
 	}()
 
-	firstByte := make([]byte, 1)
+	// Read past the HTTP headers (up through "\r\n\r\n") to reach the body.
+	headerBuf := make([]byte, 0, 512)
+	oneByte := make([]byte, 1)
+	for {
+		if _, err := clientConn.Read(oneByte); err != nil {
+			t.Fatalf("Read(header) error = %v", err)
+		}
+		headerBuf = append(headerBuf, oneByte[0])
+		if len(headerBuf) >= 4 && string(headerBuf[len(headerBuf)-4:]) == "\r\n\r\n" {
+			break
+		}
+	}
+
+	// Now read the first body byte — it should arrive quickly (before the 200ms delayed chunk).
+	firstBodyByte := make([]byte, 1)
 	start := time.Now()
 	if err := clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
 		t.Fatalf("SetReadDeadline() error = %v", err)
 	}
-	if _, err := clientConn.Read(firstByte); err != nil {
-		t.Fatalf("Read() error = %v", err)
+	if _, err := clientConn.Read(firstBodyByte); err != nil {
+		t.Fatalf("Read(body) error = %v", err)
 	}
 	if elapsed := time.Since(start); elapsed >= 100*time.Millisecond {
-		t.Fatalf("first response byte arrived after %s, expected streaming before 100ms", elapsed)
+		t.Fatalf("first body byte arrived after %s, expected streaming before 100ms", elapsed)
 	}
 
 	if err := clientConn.SetReadDeadline(time.Time{}); err != nil {

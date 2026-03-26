@@ -7,8 +7,9 @@ import (
 	"net/http/httputil"
 )
 
-// Keep capture buffering aligned with the existing 5MB testcase budget.
-const maxHTTPBodyCaptureBytes = 5 * 1024 * 1024
+// Per-body capture limit is half the combined 5MB testcase budget so that
+// request + response together stay within the budget enforced downstream.
+const maxHTTPBodyCaptureBytes = 5 * 1024 * 1024 / 2
 
 type captureBuffer struct {
 	buf       bytes.Buffer
