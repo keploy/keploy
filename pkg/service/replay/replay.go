@@ -755,6 +755,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var isMappingEnabled bool
 	isMappingEnabled = !r.config.DisableMapping
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
+	// Map mock name to Kind for DNS filtering (mappings may have empty Kind)
+	mockKindByName := make(map[string]models.Kind)
 
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
@@ -878,6 +880,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
+		for _, m := range filteredMocks {
+			mockKindByName[m.Name] = m.Kind
+		}
+		for _, m := range unfilteredMocks {
+			mockKindByName[m.Name] = m.Kind
+		}
+
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
 			for _, m := range filteredMocks {
@@ -953,6 +962,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
+		}
+		for _, m := range filteredMocks {
+			mockKindByName[m.Name] = m.Kind
+		}
+		for _, m := range unfilteredMocks {
+			mockKindByName[m.Name] = m.Kind
 		}
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
@@ -1300,7 +1315,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// Filter out DNS mocks from comparison since DNS resolution order is non-deterministic
 				expectedMockNames := make([]string, 0, len(expectedMocks))
 				for _, m := range expectedMocks {
-					if m.Kind != string(models.DNS) {
+					if mockKindByName[m.Name] != models.DNS {
 						expectedMockNames = append(expectedMockNames, m.Name)
 					}
 				}
@@ -1431,7 +1446,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// Filter DNS mocks from reporting names since they are excluded from comparison
 				filteredExpectedNames := make([]string, 0, len(expectedMocks))
 				for _, m := range expectedMocks {
-					if m.Kind != string(models.DNS) {
+					if mockKindByName[m.Name] != models.DNS {
 						filteredExpectedNames = append(filteredExpectedNames, m.Name)
 					}
 				}
