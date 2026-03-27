@@ -880,12 +880,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		for _, m := range filteredMocks {
-			mockKindByName[m.Name] = m.Kind
+		addKinds := func(mocks []*models.Mock) {
+			for _, m := range mocks {
+				mockKindByName[m.Name] = m.Kind
+			}
 		}
-		for _, m := range unfilteredMocks {
-			mockKindByName[m.Name] = m.Kind
-		}
+		addKinds(filteredMocks)
+		addKinds(unfilteredMocks)
 
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
@@ -963,12 +964,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
-		for _, m := range filteredMocks {
-			mockKindByName[m.Name] = m.Kind
+		addKinds := func(mocks []*models.Mock) {
+			for _, m := range mocks {
+				mockKindByName[m.Name] = m.Kind
+			}
 		}
-		for _, m := range unfilteredMocks {
-			mockKindByName[m.Name] = m.Kind
-		}
+		addKinds(filteredMocks)
+		addKinds(unfilteredMocks)
 		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
 		if r.runDomainSet != nil {
 			for _, m := range filteredMocks {
@@ -1315,7 +1317,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// Filter out DNS mocks from comparison since DNS resolution order is non-deterministic
 				expectedMockNames := make([]string, 0, len(expectedMocks))
 				for _, m := range expectedMocks {
-					if mockKindByName[m.Name] != models.DNS {
+					isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+					if !isDNS {
+						if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+							isDNS = true
+						}
+					}
+					if !isDNS {
 						expectedMockNames = append(expectedMockNames, m.Name)
 					}
 				}
@@ -1446,18 +1454,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// Filter DNS mocks from reporting names since they are excluded from comparison
 				filteredExpectedNames := make([]string, 0, len(expectedMocks))
 				for _, m := range expectedMocks {
-					if mockKindByName[m.Name] != models.DNS {
+					if mockKindByName[m.Name] != models.DNS && !strings.EqualFold(m.Kind, string(models.DNS)) {
 						filteredExpectedNames = append(filteredExpectedNames, m.Name)
 					}
 				}
 				filteredMockNames := make([]string, 0, len(consumedMocks))
 				for _, m := range consumedMocks {
-					if m.Kind == models.DNS {
-						r.logger.Debug("ignoring DNS mock in mismatch reporting",
-							zap.String("testcase", testCase.Name),
-							zap.String("testset", testSetID),
-							zap.String("mockName", m.Name))
-					}
 					if m.Kind != models.DNS {
 						filteredMockNames = append(filteredMockNames, m.Name)
 					}
@@ -1469,7 +1471,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.Strings("expectedMocks", filteredExpectedNames),
 						zap.Strings("actualMocks", filteredMockNames))
 				} else {
-					r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete",
+					r.logger.Error("mock mapping mismatch detected; marking testcase as obsolete. Re-record the test case or run with --update-test-mapping to regenerate mappings",
 						zap.String("testcase", testCase.Name),
 						zap.String("testset", testSetID),
 						zap.Strings("expectedMocks", filteredExpectedNames),
