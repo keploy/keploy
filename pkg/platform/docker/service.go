@@ -1,5 +1,5 @@
-// Package docker provides utilities for managing Docker containers and networks
-// used by Keploy for recording and replaying API tests.
+// Utilities for managing Docker containers and networks used by Keploy for
+// recording and replaying API tests.
 package docker
 
 import (
