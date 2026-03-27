@@ -121,7 +121,7 @@ func Merge(srcStr, destStr string) (string, error) {
 
 // Reference: https://github.com/kubernetes-sigs/kustomize/blob/537c4fa5c2bf3292b273876f50c62ce1c81714d7/kyaml/yaml/merge2/merge2.go#L24
 // VisitKeysAsScalars is set to true to enable merging comments.
-// inferAssociativeLists is set to fasle to disable merging associative lists.
+// inferAssociativeLists is set to false to disable merging associative lists.
 func mergeStrings(srcStr, destStr string, infer bool, mergeOptions yaml.MergeOptions) (string, error) {
 	src, err := yaml.Parse(srcStr)
 	if err != nil {
