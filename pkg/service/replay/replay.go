@@ -52,7 +52,7 @@ func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool
 func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, bool) {
 	switch appErr.AppErrorType {
 	case "":
-		return "", false
+		return models.TestSetStatusAppHalted, true
 	case models.ErrCtxCanceled:
 		return "", false
 	case models.ErrCommandError:
@@ -864,7 +864,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
 					setErrStatus(mappedStatus)
 				}
-				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
+				if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
 					return nil
 				}
 				appErrChan <- appErr
@@ -1116,7 +1116,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
 						setErrStatus(mappedStatus)
 					}
-					if appErr.AppErrorType == models.ErrCtxCanceled {
+					if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
 						return nil
 					}
 					appErrChan <- appErr
