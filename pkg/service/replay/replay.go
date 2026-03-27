@@ -97,11 +97,11 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
 		if len(testCaseResults) == 0 {
-			return "application startup failed"
+			return "application startup failed - check application logs above for details"
 		}
-		return "application stopped during replay"
+		return "application stopped during replay - check application logs above for details"
 	case models.TestSetStatusInternalErr:
-		return "replay failed with an internal error"
+		return "replay failed with an internal error - please report this issue if it persists"
 	default:
 		return ""
 	}

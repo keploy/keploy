@@ -332,6 +332,27 @@ func (a *App) logTargetContainer() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	if projectLabel := a.composeProjectLabel(ctx); projectLabel != "" {
+		projectArgs := filters.NewArgs(
+			filters.Arg("label", "com.docker.compose.service="+a.composeService),
+			filters.Arg("label", "com.docker.compose.project="+projectLabel),
+		)
+		containers, err := a.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: projectArgs})
+		if err != nil {
+			a.logger.Debug(
+				"failed to list compose containers for recent app logs using compose project label; falling back to service-only matching",
+				zap.String("service", a.composeService),
+				zap.String("project", projectLabel),
+				zap.Error(err),
+			)
+		} else if len(containers) > 0 {
+			sort.Slice(containers, func(i, j int) bool {
+				return containers[i].Created > containers[j].Created
+			})
+			return containers[0].ID
+		}
+	}
+
 	args := filters.NewArgs(filters.Arg("label", "com.docker.compose.service="+a.composeService))
 	containers, err := a.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
 	if err != nil {
@@ -341,12 +362,33 @@ func (a *App) logTargetContainer() string {
 	if len(containers) == 0 {
 		return a.container
 	}
-
 	sort.Slice(containers, func(i, j int) bool {
 		return containers[i].Created > containers[j].Created
 	})
 
 	return containers[0].ID
+}
+
+func (a *App) composeProjectLabel(ctx context.Context) string {
+	if a.container == "" {
+		return ""
+	}
+
+	containerInfo, err := a.docker.ContainerInspect(ctx, a.container)
+	if err != nil {
+		a.logger.Debug(
+			"failed to inspect compose container for project label when fetching recent app logs; falling back to service-only matching",
+			zap.String("service", a.composeService),
+			zap.String("container", a.container),
+			zap.Error(err),
+		)
+		return ""
+	}
+	if containerInfo.Config == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(containerInfo.Config.Labels["com.docker.compose.project"])
 }
 
 func trimRecentAppLogs(logs string, maxLines int) string {
@@ -467,13 +509,13 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.waitTillExit()
 	}
 
-	appLogs := a.recentAppLogs()
-
 	select {
 	case <-ctx.Done():
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	default:
+		appLogs := a.recentAppLogs()
+
 		if a.Mode == models.MODE_RECORD && a.EnableTesting {
 			a.logger.Info("waiting for some time before returning the error to allow recording of test cases when testing keploy with itself")
 			time.Sleep(3 * time.Second)
