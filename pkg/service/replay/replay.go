@@ -1308,38 +1308,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			expectedMocks, hasExpectedMocks := expectedTestMockMappings[testCase.Name]
 
-			// Helper to filter DNS mocks from expected mapping entries (checks both entry kind and mock DB)
-			nonDNSExpectedNames := func(entries []models.MockEntry) []string {
-				names := make([]string, 0, len(entries))
-				for _, m := range entries {
-					isDNS := strings.EqualFold(m.Kind, string(models.DNS))
-					if !isDNS {
-						if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
-							isDNS = true
-						}
-					}
-					if !isDNS {
-						names = append(names, m.Name)
+			// Compute non-DNS expected and consumed name slices once; reused for subset check and mismatch reporting.
+			filteredExpectedNames := make([]string, 0, len(expectedMocks))
+			for _, m := range expectedMocks {
+				isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+				if !isDNS {
+					if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+						isDNS = true
 					}
 				}
-				return names
+				if !isDNS {
+					filteredExpectedNames = append(filteredExpectedNames, m.Name)
+				}
 			}
 
-			// Helper to filter DNS mocks from consumed mock states
-			nonDNSConsumedNames := func(mocks []models.MockState) []string {
-				names := make([]string, 0, len(mocks))
-				for _, m := range mocks {
-					if m.Kind != models.DNS {
-						names = append(names, m.Name)
-					}
+			filteredMockNames := make([]string, 0, len(consumedMocks))
+			for _, m := range consumedMocks {
+				if m.Kind != models.DNS {
+					filteredMockNames = append(filteredMockNames, m.Name)
 				}
-				return names
 			}
 
 			mockSetMismatch := false
 			if r.instrument && useMappingBased && isMappingEnabled && hasExpectedMocks {
 				// Filter out DNS mocks from comparison since DNS resolution order is non-deterministic
-				mockSetMismatch = !isMockSubset(nonDNSConsumedNames(consumedMocks), nonDNSExpectedNames(expectedMocks))
+				mockSetMismatch = !isMockSubset(filteredMockNames, filteredExpectedNames)
 			}
 
 			emitFailureLogs := !mockSetMismatch
@@ -1457,8 +1450,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.Any("mocks", consumedMocks))
 
 			if mockSetMismatch {
-				filteredExpectedNames := nonDNSExpectedNames(expectedMocks)
-				filteredMockNames := nonDNSConsumedNames(consumedMocks)
 				if testPass {
 					r.logger.Debug("mock mapping mismatch ignored because testcase passed",
 						zap.String("testcase", testCase.Name),
