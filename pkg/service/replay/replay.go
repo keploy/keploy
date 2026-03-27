@@ -97,9 +97,9 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 	switch status {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
 		if len(testCaseResults) == 0 {
-			return "application startup failed - check application logs above for details"
+			return "application startup failed - check application logs in the app_logs field for details and next steps"
 		}
-		return "application stopped during replay - check application logs above for details"
+		return "application stopped during replay - check application logs in the app_logs field for details and next steps"
 	case models.TestSetStatusInternalErr:
 		return "replay failed with an internal error - please report this issue if it persists"
 	default:
@@ -1717,7 +1717,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	appFailure := getLastAppErr()
 	appLogs := appFailure.AppLogs
 	if appLogs == "" && testSetStatus == models.TestSetStatusAppHalted {
-		appLogs = r.instrumentation.GetRecentAppLogs(context.Background())
+		logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
+		defer cancel()
+		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
 	}
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),

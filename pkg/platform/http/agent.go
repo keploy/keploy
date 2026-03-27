@@ -786,14 +786,14 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	}
 }
 
-func (a *AgentClient) GetRecentAppLogs(_ context.Context) string {
+func (a *AgentClient) GetRecentAppLogs(ctx context.Context) string {
 	app, err := a.getApp()
 	if err != nil {
 		a.logger.Debug("failed to get app for recent logs", zap.Error(err))
 		return ""
 	}
 
-	return app.RecentLogs()
+	return app.RecentLogs(ctx)
 }
 
 // startAgent starts the keploy agent process and handles its lifecycle

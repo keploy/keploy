@@ -241,8 +241,8 @@ func (a *App) Run(ctx context.Context) models.AppError {
 	return a.run(ctx)
 }
 
-func (a *App) RecentLogs() string {
-	return a.recentAppLogs()
+func (a *App) RecentLogs(ctx context.Context) string {
+	return a.recentAppLogs(ctx)
 }
 
 func (a *App) waitTillExit() {
@@ -274,14 +274,21 @@ func (a *App) waitTillExit() {
 	}
 }
 
-func (a *App) recentAppLogs() string {
-	logTarget := a.logTargetContainer()
-	if !utils.IsDockerCmd(a.kind) || logTarget == "" {
+func (a *App) recentAppLogs(ctx context.Context) string {
+	if !utils.IsDockerCmd(a.kind) {
 		return ""
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+
+	logTarget := a.logTargetContainer(ctx)
+	if logTarget == "" {
+		return ""
+	}
 
 	logReader, err := a.docker.ContainerLogs(ctx, logTarget, container.LogsOptions{
 		ShowStdout: true,
@@ -321,16 +328,16 @@ func (a *App) recentAppLogs() string {
 	return trimRecentAppLogs(combined, 20)
 }
 
-func (a *App) logTargetContainer() string {
+func (a *App) logTargetContainer(ctx context.Context) string {
 	if !utils.IsDockerCmd(a.kind) {
 		return ""
 	}
 	if a.kind != utils.DockerCompose || a.composeService == "" {
 		return a.container
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	if projectLabel := a.composeProjectLabel(ctx); projectLabel != "" {
 		projectArgs := filters.NewArgs(
@@ -372,6 +379,9 @@ func (a *App) logTargetContainer() string {
 func (a *App) composeProjectLabel(ctx context.Context) string {
 	if a.container == "" {
 		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	containerInfo, err := a.docker.ContainerInspect(ctx, a.container)
@@ -499,7 +509,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
-			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err, AppLogs: a.recentAppLogs()}
+			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err, AppLogs: a.recentAppLogs(ctx)}
 		case utils.Runtime:
 			err = cmdErr.Err
 		}
@@ -514,7 +524,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	default:
-		appLogs := a.recentAppLogs()
+		appLogs := a.recentAppLogs(ctx)
 
 		if a.Mode == models.MODE_RECORD && a.EnableTesting {
 			a.logger.Info("waiting for some time before returning the error to allow recording of test cases when testing keploy with itself")
