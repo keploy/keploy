@@ -135,19 +135,14 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		h.logger.Warn("failed to remove memlock limit, continuing anyway", zap.Error(err))
 	}
 
-	// Load pre-compiled programs and maps into the kernel.
+	/// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	bpfopts := &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
 			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
 			LogSizeStart: 1 * 1024 * 1024,
-			KernelTypes:  nil, // Disable BTF for WSL2 compatibility
-		},
-		Maps: ebpf.MapOptions{
-			PinPath: "", // Ensure maps don't require BTF
 		},
 	}
-
 
 	spec, err := loadBpf()
 	if err != nil {
@@ -155,7 +150,14 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
+	// Strip ALL BTF to support WSL2 kernel limitations
+	// This prevents the "detect support for Map BTF" syscall that fails on WSL2
 	spec.Types = nil
+	for name, m := range spec.Maps {
+		m.Key = nil
+		m.Value = nil
+		spec.Maps[name] = m
+	}
 
 	programs := []struct {
 		name  string
