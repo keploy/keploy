@@ -150,7 +150,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
+	// Strip BTF to support WSL2 kernel limitations
+	for _, m := range spec.Maps {
+		m.BTF = nil
+	}
+	for _, p := range spec.Programs {
+		p.BTF = nil
+	}
 	spec.Types = nil
+
 
 	programs := []struct {
 		name  string
