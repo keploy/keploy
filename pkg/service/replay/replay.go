@@ -1888,7 +1888,7 @@ func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actua
 		return false
 	}
 
-	assessment, _ := matcherUtils.ComputeFailureAssessmentJSON(
+	assessment, assessmentErr := matcherUtils.ComputeFailureAssessmentJSON(
 		tc.HTTPResp.Body,
 		actualResponse.Body,
 		bodyNoiseForTestCase(tc.Noise, noiseConfig),
@@ -1908,9 +1908,12 @@ func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actua
 			fields = append(fields, zap.Strings("assessment_reasons", assessment.Reasons))
 		}
 	}
+	if assessmentErr != nil {
+		fields = append(fields, zap.NamedError("assessment_error", assessmentErr))
+	}
 
-	r.logger.Warn(
-		"Additive response schema change detected. Passing testcase by default because only new response fields were added. Please verify that downstream consumers are not affected by the schema expansion.",
+	r.logger.Info(
+		"Additive response schema change detected. Passing testcase by default because only new response fields were added. Verify downstream consumers are not affected by the schema expansion.",
 		fields...,
 	)
 
