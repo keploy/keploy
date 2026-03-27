@@ -164,6 +164,7 @@ type SimulationConfig struct {
 	KeployPath      string
 	ConfigHost      string
 	URLReplacements map[string]string
+	PortMappings    map[uint32]uint32
 }
 
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, cfg SimulationConfig) (*models.HTTPResp, error) {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
@@ -61,6 +62,20 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 	}
 
+	// Extract port mappings: merge global + per-test-set
+	var portMappings map[uint32]uint32
+	if len(rw.Global.Port) > 0 || len(rw.TestSets) > 0 {
+		portMappings = make(map[uint32]uint32)
+		for k, v := range rw.Global.Port {
+			portMappings[k] = v
+		}
+		if tsRW, ok := rw.TestSets[testSetID]; ok {
+			for k, v := range tsRW.Port {
+				portMappings[k] = v
+			}
+		}
+	}
+
 	switch tc.Kind {
 	case models.HTTP:
 
@@ -74,12 +89,29 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
+
+		// Determine port to use: check if this is an SSE request
+		portToUse := h.cfg.Test.Port
+		if h.isSSERequest(tc) && h.cfg.Test.SSEPort != 0 {
+			portToUse = h.cfg.Test.SSEPort
+		}
+		// Check protocol-specific port override
+		if protoConfig, ok := h.cfg.Test.Protocol["http"]; ok && protoConfig.Port != 0 {
+			portToUse = protoConfig.Port
+		}
+		if h.isSSERequest(tc) {
+			if protoConfig, ok := h.cfg.Test.Protocol["sse"]; ok && protoConfig.Port != 0 {
+				portToUse = protoConfig.Port
+			}
+		}
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
 			APITimeout:      h.cfg.Test.APITimeout,
-			ConfigPort:      h.cfg.Test.Port,
+			ConfigPort:      portToUse,
 			KeployPath:      h.cfg.Path,
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
+			PortMappings:    portMappings,
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
@@ -98,10 +130,18 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
+
+		// Determine port for gRPC
+		grpcPortToUse := h.cfg.Test.GRPCPort
+		if protoConfig, ok := h.cfg.Test.Protocol["grpc"]; ok && protoConfig.Port != 0 {
+			grpcPortToUse = protoConfig.Port
+		}
+
 		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
-			ConfigPort:      h.cfg.Test.GRPCPort,
+			ConfigPort:      grpcPortToUse,
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
+			PortMappings:    portMappings,
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
@@ -374,4 +414,22 @@ func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token str
 	}
 
 	return res.Plan.Type, nil
+}
+
+// isSSERequest checks if the test case is a Server-Sent Events (SSE) request
+// by looking at the Accept header or Content-Type in the response.
+func (h *Hooks) isSSERequest(tc *models.TestCase) bool {
+	// Check Accept header for SSE
+	if accept, ok := tc.HTTPReq.Header["Accept"]; ok {
+		if strings.Contains(accept, "text/event-stream") {
+			return true
+		}
+	}
+	// Check response Content-Type for SSE
+	if contentType, ok := tc.HTTPResp.Header["Content-Type"]; ok {
+		if strings.Contains(contentType, "text/event-stream") {
+			return true
+		}
+	}
+	return false
 }
