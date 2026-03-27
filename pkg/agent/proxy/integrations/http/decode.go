@@ -154,9 +154,24 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.String("diff", report.Diff))
 				}
 
-				// No mock matched — send a 502 so the application gets a
-				// proper HTTP error instead of a silent connection close.
-				noMockBody := "keploy: no matching mock found for this HTTP request\n"
+				// Build a rich 502 body with diagnostics
+				closestInfo := ""
+				diffInfo := ""
+				nextSteps := "Re-record mocks if the API endpoint or request format has changed."
+				if report != nil {
+					if report.ClosestMock != "" {
+						closestInfo = fmt.Sprintf("Closest mock: %s\n", report.ClosestMock)
+					}
+					if report.Diff != "" {
+						diffInfo = fmt.Sprintf("Diff: %s\n", report.Diff)
+					}
+					if report.NextSteps != "" {
+						nextSteps = report.NextSteps
+					}
+				}
+				noMockBody := fmt.Sprintf("keploy: no matching mock found for %s %s\nHost: %s\n%s%sNext steps: %s\n",
+					request.Method, request.URL.String(), request.Host,
+					closestInfo, diffInfo, nextSteps)
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
@@ -170,6 +185,27 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if stub == nil {
 				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- errors.New("matched mock is nil")
+				return
+			}
+
+			// WebSocket upgrade (101 Switching Protocols): serve the
+			// recorded handshake response and return without trying to
+			// read further HTTP on this connection.
+			if stub.Spec.HTTPResp.StatusCode == 101 {
+				h.Logger.Debug("WebSocket 101 mock matched, serving handshake and returning")
+				statusLine := fmt.Sprintf("HTTP/%d.%d 101 Switching Protocols\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor)
+				header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+				var headers string
+				for key, values := range header {
+					for _, value := range values {
+						headers += fmt.Sprintf("%s: %s\r\n", key, value)
+					}
+				}
+				wsResp := statusLine + headers + "\r\n"
+				if _, err := clientConn.Write([]byte(wsResp)); err != nil {
+					h.Logger.Debug("failed to write WebSocket 101 response", zap.Error(err))
+				}
+				errCh <- nil
 				return
 			}
 

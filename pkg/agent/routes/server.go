@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"go.uber.org/zap"
@@ -13,6 +14,7 @@ import (
 
 func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, router http.Handler) {
 	logger.Info("Starting Agent's HTTP server on :", zap.Int("port", port))
+	os.Setenv("KEPLOY_AGENT_PORT", fmt.Sprintf("%d", port))
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

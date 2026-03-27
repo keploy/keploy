@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/agnivade/levenshtein"
@@ -18,6 +19,20 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// builtinNoiseHeaders are headers that vary between record and replay
+// and should always be treated as noise during mock matching.
+var builtinNoiseHeaders = map[string]bool{
+	"range":              true,
+	"if-range":           true,
+	"if-none-match":      true,
+	"if-modified-since":  true,
+	"cache-control":      true,
+	"sec-ch-ua":          true,
+	"sec-ch-ua-mobile":   true,
+	"sec-ch-ua-platform": true,
+	"cookie":             true,
+}
 
 type req struct {
 	method string
@@ -132,13 +147,37 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 	return mockBodyType == reqBodyType
 }
 
+// assetHashPattern matches bundler-generated hashes in asset paths
+// e.g., main-abc123.js, chunk-DEADBEEF.css, index.a1b2c3d4.js
+var assetHashPattern = regexp.MustCompile(`-[0-9a-fA-F]{6,16}\.(js|css|woff2?|png|jpg|jpeg|gif|svg|ico|map)$|\.([0-9a-f]{6,16})\.(js|css|woff2?|png|jpg|jpeg|gif|svg|ico|map)$`)
+
+// normalizeAssetPath strips bundler hashes from asset file paths so that
+// a recorded mock for main-abc123.js matches a replay request for main-def456.js.
+func normalizeAssetPath(p string) string {
+	return assetHashPattern.ReplaceAllStringFunc(p, func(match string) string {
+		// Keep the extension, strip the hash
+		for i := len(match) - 1; i >= 0; i-- {
+			if match[i] == '.' {
+				// Find where the hash starts (after - or .)
+				return match[len(match)-len(match)+i:]
+			}
+		}
+		return match
+	})
+}
+
 func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
 	parsedURL, err := url.Parse(mockURL)
 	if err != nil {
 		return false
 	}
 	h.Logger.Debug("parsed URL", zap.Any("parsed URL", parsedURL.Path), zap.Any("req path", reqPath))
-	return parsedURL.Path == reqPath
+	// Exact match
+	if parsedURL.Path == reqPath {
+		return true
+	}
+	// Fuzzy match: normalize bundler asset hashes
+	return normalizeAssetPath(parsedURL.Path) == normalizeAssetPath(reqPath)
 }
 
 // relaxed header key matcher (presence-only)
@@ -147,6 +186,10 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 		lk := strings.ToLower(k)
 		// Ignore keploy headers
 		if strings.HasPrefix(lk, "keploy") {
+			return true
+		}
+		// Ignore builtin noise headers (vary between record/replay)
+		if builtinNoiseHeaders[lk] {
 			return true
 		}
 		// Ignore headers that are in noise configuration

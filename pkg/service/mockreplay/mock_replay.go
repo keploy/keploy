@@ -163,6 +163,8 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 	}()
 
 	passPortsUint := config.GetByPassPorts(r.cfg)
+	// Add proxy and DNS ports to passthrough to prevent self-interception
+	passPortsUint = append(passPortsUint, uint(r.cfg.ProxyPort), uint(r.cfg.DNSPort))
 	err := instrumentation.Setup(grpCtx, command, models.SetupOptions{
 		Container:         r.cfg.ContainerName,
 		CommandType:       commandType,
@@ -220,11 +222,11 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 	}
 
 	err = instrumentation.MockOutgoing(grpCtx, models.OutgoingOptions{
-		Rules:          r.cfg.BypassRules,
-		MongoPassword:  r.cfg.Test.MongoPassword,
-		SQLDelay:       time.Duration(r.cfg.Test.Delay) * time.Second,
-		FallBackOnMiss: opts.FallBackOnMiss,
-		Mocking:        true,
+		Rules:         r.cfg.BypassRules,
+		MongoPassword: r.cfg.Test.MongoPassword,
+		SQLDelay:      time.Duration(r.cfg.Test.Delay) * time.Second,
+		ReusableMocks: true,
+		Mocking:       true,
 	})
 	if err != nil {
 		return nil, err

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,13 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
+
+// isWebSocketUpgrade returns true if the HTTP response is a 101 Switching Protocols
+// response indicating a WebSocket upgrade.
+func isWebSocketUpgrade(resp []byte) bool {
+	return bytes.HasPrefix(resp, []byte("HTTP/1.1 101 ")) ||
+		bytes.HasPrefix(resp, []byte("HTTP/1.0 101 "))
+}
 
 // encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
 func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
@@ -175,6 +183,34 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			var finalResp []byte
 			finalResp = append(finalResp, resp...)
 			h.Logger.Debug("This is the initial response: " + string(resp))
+
+			// WebSocket upgrade: record the handshake as a mock, then
+			// do bidirectional passthrough for the WebSocket frames.
+			if isWebSocketUpgrade(resp) {
+				h.Logger.Debug("WebSocket upgrade detected, recording handshake and switching to passthrough")
+				wsM := &FinalHTTP{
+					Req:              finalReq,
+					Resp:             resp,
+					ReqTimestampMock: reqTimestampMock,
+					ResTimestampMock: resTimestampMock,
+				}
+				if parseErr := h.parseFinalHTTP(ctx, wsM, destPort, mocks, opts); parseErr != nil {
+					h.Logger.Debug("failed to record WebSocket handshake mock", zap.Error(parseErr))
+				}
+				// Bidirectional passthrough for WebSocket frames
+				done := make(chan struct{}, 2)
+				go func() {
+					io.Copy(destConn, clientConn)
+					done <- struct{}{}
+				}()
+				go func() {
+					io.Copy(clientConn, destConn)
+					done <- struct{}{}
+				}()
+				<-done // wait for one direction to close
+				errCh <- nil
+				return nil
+			}
 
 			var streamRef *models.StreamRef
 			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp, &streamRef, opts)

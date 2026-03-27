@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	cfsslConfig "github.com/cloudflare/cfssl/config"
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
@@ -532,6 +533,10 @@ var SrcPortToDstURL = sync.Map{}
 
 var setLogLevelOnce sync.Once
 
+// certCache caches generated TLS certificates keyed by SNI/host to avoid
+// re-generating a certificate for every connection to the same host.
+var certCache sync.Map
+
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
@@ -556,13 +561,28 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
+	// Handle empty SNI: use IP from RemoteAddr as the host
+	if dstURL == "" {
+		host, _, err := net.SplitHostPort(clientHello.Conn.RemoteAddr().String())
+		if err == nil {
+			dstURL = host
+		}
+		logger.Debug("empty SNI, using IP from RemoteAddr", zap.String("dstURL", dstURL))
+	}
+
 	SrcPortToDstURL.Store(sourcePort, dstURL)
+
+	// Check cert cache before generating a new certificate
+	if cached, ok := certCache.Load(dstURL); ok {
+		logger.Debug("using cached certificate", zap.String("host", dstURL))
+		return cached.(*tls.Certificate), nil
+	}
 
 	serverReq := &csr.CertificateRequest{
 		//Make the name accordng to the ip of the request
-		CN: clientHello.ServerName,
+		CN: dstURL,
 		Hosts: []string{
-			clientHello.ServerName,
+			dstURL,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}
@@ -575,7 +595,16 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	if !ok {
 		return nil, fmt.Errorf("failed to typecast the caPrivKey")
 	}
-	signerd, err := local.NewSigner(cryptoSigner, caCertParsed, signer.DefaultSigAlgo(cryptoSigner), nil)
+
+	// Use a custom signing profile without "key encipherment" to avoid
+	// issues with modern TLS clients that reject RSA key encipherment.
+	signingProfile := &cfsslConfig.Signing{
+		Default: &cfsslConfig.SigningProfile{
+			Usage:  []string{"digital signature", "server auth"},
+			Expiry: 2 * 365 * 24 * time.Hour,
+		},
+	}
+	signerd, err := local.NewSigner(cryptoSigner, caCertParsed, signer.DefaultSigAlgo(cryptoSigner), signingProfile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create signer: %v", err)
 	}
@@ -596,7 +625,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	signReq := signer.SignRequest{
 		Hosts:     serverReq.Hosts,
 		Request:   string(serverCsr),
-		Profile:   "web",
+		Profile:   "default",
 		NotBefore: backdate.AddDate(-1, 0, 0),
 		NotAfter:  time.Now().AddDate(1, 0, 0),
 	}
@@ -613,6 +642,9 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
 	}
+
+	// Cache the certificate for future connections to the same host
+	certCache.Store(dstURL, &serverTLSCert)
 
 	return &serverTLSCert, nil
 }

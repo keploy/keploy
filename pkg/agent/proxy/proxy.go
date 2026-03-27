@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,6 +61,8 @@ type Proxy struct {
 	session     *agent.Session
 	mockManager *MockManager
 
+	passThroughPortSet map[uint32]bool
+
 	synchronous bool
 
 	connMutex *sync.Mutex
@@ -105,6 +108,20 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// isPassThroughPort returns true if the destination address targets a port
+// that is in the passthrough set (proxy port, DNS port, bypass ports).
+func (p *Proxy) isPassThroughPort(addr string) bool {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.ParseUint(portStr, 10, 32)
+	if err != nil {
+		return false
+	}
+	return p.passThroughPortSet[uint32(port)]
+}
+
 // isNetworkClosedErr checks if the error is due to a closed network connection.
 // This includes broken pipe, connection reset by peer, and use of closed network connection errors.
 // These errors are expected during graceful shutdown and should not be logged as errors.
@@ -123,23 +140,32 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
+	// Build the set of ports that should always be passed through
+	ptPorts := make(map[uint32]bool)
+	ptPorts[opts.ProxyPort] = true
+	ptPorts[opts.DNSPort] = true
+	for _, rule := range config.GetByPassPorts(opts) {
+		ptPorts[uint32(rule)] = true
+	}
+
 	proxy := &Proxy{
-		logger:            logger,
-		Port:              opts.ProxyPort,
-		DNSPort:           opts.DNSPort, // default: 26789
-		synchronous:       opts.Agent.Synchronous,
-		IP4:               "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:           &sync.Mutex{},
-		connMutex:         &sync.Mutex{},
-		DestInfo:          info,
-		clientClose:       make(chan bool, 1),
-		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough: opts.Agent.GlobalPassthrough,
-		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
-		IsDocker:          opts.Agent.IsDocker,
-		dnsCache:          newDNSCache(),
-		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		logger:             logger,
+		Port:               opts.ProxyPort,
+		DNSPort:            opts.DNSPort, // default: 26789
+		synchronous:        opts.Agent.Synchronous,
+		IP4:                "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:                "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:            &sync.Mutex{},
+		connMutex:          &sync.Mutex{},
+		DestInfo:           info,
+		clientClose:        make(chan bool, 1),
+		Integrations:       make(map[integrations.IntegrationType]integrations.Integrations),
+		GlobalPassthrough:  opts.Agent.GlobalPassthrough,
+		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:           opts.Agent.IsDocker,
+		dnsCache:           newDNSCache(),
+		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		passThroughPortSet: ptPorts,
 	}
 
 	return proxy
@@ -550,6 +576,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// connections and Next.js dev server page loads are loopback connections that
 	// must not be intercepted or mocked.
 	if isLoopbackAddr(dstAddr) {
+		p.logger.Debug("loopback passthrough", zap.String("dstAddr", dstAddr))
 		_, err = util.PassThrough(ctx, p.logger, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, nil)
 		if err != nil && !isNetworkClosedErr(err) {
 			p.logger.Debug("loopback passthrough finished", zap.String("dstAddr", dstAddr), zap.Error(err))
@@ -679,8 +706,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if isTLS {
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to handle TLS conn")
-			return err
+			p.logger.Debug("TLS handshake failed, dropping connection (non-fatal)",
+				zap.String("dstAddr", dstAddr), zap.Error(err))
+			return nil
 		}
 
 		if isMTLS {
