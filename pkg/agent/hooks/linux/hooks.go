@@ -141,8 +141,13 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		Programs: ebpf.ProgramOptions{
 			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
 			LogSizeStart: 1 * 1024 * 1024,
+			KernelTypes:  nil, // Disable BTF for WSL2 compatibility
+		},
+		Maps: ebpf.MapOptions{
+			PinPath: "", // Ensure maps don't require BTF
 		},
 	}
+
 
 	spec, err := loadBpf()
 	if err != nil {
@@ -150,15 +155,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
-	// Strip BTF to support WSL2 kernel limitations
-	for _, m := range spec.Maps {
-		m.BTF = nil
-	}
-	for _, p := range spec.Programs {
-		p.BTF = nil
-	}
 	spec.Types = nil
-
 
 	programs := []struct {
 		name  string
