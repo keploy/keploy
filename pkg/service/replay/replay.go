@@ -1865,7 +1865,22 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
 	}
 
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	if emitFailureLogs {
+		pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
+		if !pass && r.maybeAutoPassHTTPSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			return true, result
+		}
+		if pass {
+			return pass, result
+		}
+	}
+
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	if !pass && r.maybeAutoPassHTTPSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+		return true, result
+	}
+
+	return pass, result
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
