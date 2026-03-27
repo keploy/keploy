@@ -757,6 +757,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	// Map mock name to Kind for DNS filtering (mappings may have empty Kind)
 	mockKindByName := make(map[string]models.Kind)
+	addKinds := func(mocks []*models.Mock) {
+		for _, m := range mocks {
+			mockKindByName[m.Name] = m.Kind
+		}
+	}
 
 	if r.instrument && cmdType == utils.DockerCompose {
 		if !serveTest {
@@ -880,11 +885,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		addKinds := func(mocks []*models.Mock) {
-			for _, m := range mocks {
-				mockKindByName[m.Name] = m.Kind
-			}
-		}
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
 
@@ -963,11 +963,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return models.TestSetStatusFailed, err
-		}
-		addKinds := func(mocks []*models.Mock) {
-			for _, m := range mocks {
-				mockKindByName[m.Name] = m.Kind
-			}
 		}
 		addKinds(filteredMocks)
 		addKinds(unfilteredMocks)
