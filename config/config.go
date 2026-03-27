@@ -90,7 +90,7 @@ type Record struct {
 	Synchronous       bool            `json:"sync" yaml:"sync" mapstructure:"sync"`
 	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-	TLSPrivateKeyPath string         `json:"tlsPrivateKeyPath,omitempty" yaml:"tlsPrivateKeyPath,omitempty" bson:",omitempty" mapstructure:"tlsPrivateKeyPath"`
+	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath,omitempty" yaml:"tlsPrivateKeyPath,omitempty" bson:",omitempty" mapstructure:"tlsPrivateKeyPath"`
 }
 
 type ReRecord struct {
