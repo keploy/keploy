@@ -46,22 +46,34 @@ func (tr *TestReport) GetKind() string {
 func (tr TestReport) MarshalYAML() (interface{}, error) {
 	type alias TestReport
 
+	report := alias(tr)
+	report.AppLogs = normalizeReportYAMLText(report.AppLogs)
+	report.FailureReason = normalizeReportYAMLText(report.FailureReason)
+	report.CmdUsed = normalizeReportYAMLText(report.CmdUsed)
+
 	node := &yamlLib.Node{}
-	if err := node.Encode(alias(tr)); err != nil {
+	if err := node.Encode(report); err != nil {
 		return nil, err
 	}
 
 	if node.Kind == yamlLib.MappingNode {
 		for i := 0; i < len(node.Content)-1; i += 2 {
-			key := node.Content[i]
 			value := node.Content[i+1]
-			if key.Value == "app_logs" && value.Kind == yamlLib.ScalarNode && strings.Contains(value.Value, "\n") {
+			if value.Kind == yamlLib.ScalarNode && value.Tag == "!!str" && strings.Contains(value.Value, "\n") {
 				value.Style = yamlLib.LiteralStyle
 			}
 		}
 	}
 
 	return node, nil
+}
+
+func normalizeReportYAMLText(value string) string {
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.ReplaceAll(value, "\t", "  ")
 }
 
 type TestResult struct {
