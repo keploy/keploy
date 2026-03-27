@@ -16,7 +16,7 @@ type Filter struct {
 	URLMethods   []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
 	Headers      map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
 	MatchType    MatchType         `json:"matchType" yaml:"matchType" mapstructure:"matchType"`
-	FilterPolicy *FilterPolicy     `json:"filterPolicy,omitempty" yaml:"filterPolicy,omitempty" bson:",omitempty" mapstructure:"filterPolicy"`
+	FilterPolicy FilterPolicy     `json:"filterPolicy,omitempty" yaml:"filterPolicy,omitempty" bson:",omitempty" mapstructure:"filterPolicy"`
 }
 
 type MatchType string
