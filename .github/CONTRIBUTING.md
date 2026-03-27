@@ -69,7 +69,7 @@ To ensure that each change is relevant and properly peer reviewed, please adhere
 This means that if you are outside the Keploy organization, you must fork the repository and create PRs from branches on your own fork.
 The README in GitHub's [first-contributions repo](https://github.com/firstcontributions/first-contributions) provides an example.
 
-## ## How to set up the docs website locally?
+## How to set up the docs website locally?
 
 1. Fork the repository
 
