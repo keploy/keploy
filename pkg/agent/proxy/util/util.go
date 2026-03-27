@@ -252,71 +252,35 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 	return initialBuf, nil
 }
 
-// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
-// It returns the content as a byte array.
-func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+// ReadBytes reads a complete message from the reader.
+// It uses a 32KB buffer and reads until the reader returns less than a full
+// buffer (indicating the message is complete) or an error/EOF occurs.
+// This is the hot path for all proxy I/O — avoid goroutines and sleeps here.
+func ReadBytes(ctx context.Context, _ *zap.Logger, reader io.Reader) ([]byte, error) {
 	var buffer []byte
-	const maxEmptyReads = 5
-	emptyReads := 0
-
-	// Channel to communicate read results
-	readResult := make(chan struct {
-		n   int
-		err error
-		buf []byte
-	})
-
-	g, ctx := errgroup.WithContext(ctx)
-
-	defer func() {
-		err := g.Wait()
-		if err != nil {
-			utils.LogError(logger, err, "failed to read the request message in proxy")
-		}
-		close(readResult)
-	}()
+	buf := make([]byte, 32*1024) // 32KB read buffer (was 1KB — caused 5x proxy overhead)
 
 	for {
-		// Start a goroutine to perform the read operation
-		g.Go(func() error {
-			defer Recover(logger, nil, nil)
-			buf := make([]byte, 1024)
-			n, err := reader.Read(buf)
-			if ctx.Err() != nil {
-				return nil
-			}
-			readResult <- struct {
-				n   int
-				err error
-				buf []byte
-			}{n, err, buf}
-			return nil
-		})
-
-		// Use a select statement to wait for either the read result or context cancellation
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return buffer, ctx.Err()
-		case result := <-readResult:
-			if result.n > 0 {
-				buffer = append(buffer, result.buf[:result.n]...)
-				emptyReads = 0 // Reset the counter because we got some data
-			}
+		}
 
-			if result.err != nil {
-				if result.err == io.EOF {
-					emptyReads++
-					if emptyReads >= maxEmptyReads {
-						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
-					}
-					time.Sleep(time.Millisecond * 100) // Sleep before trying again
-					continue
-				}
-				return buffer, result.err
+		n, err := reader.Read(buf)
+		if n > 0 {
+			buffer = append(buffer, buf[:n]...)
+		}
+
+		if err != nil {
+			if err == io.EOF && len(buffer) > 0 {
+				return buffer, err
 			}
-			if result.n < len(result.buf) {
-				return buffer, nil
-			}
+			return buffer, err
+		}
+
+		// A short read (less than buffer size) means the kernel's socket
+		// buffer is drained — the message is complete for now.
+		if n < len(buf) {
+			return buffer, nil
 		}
 	}
 }
@@ -458,63 +422,36 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		}
 	}
 
-	destBufferChannel := make(chan []byte)
-	clientBufferChannel := make(chan []byte)
-	errChannel := make(chan error, 2)
-	passthroughContext, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// Bidirectional relay using io.Copy — this is the fastest possible
+	// passthrough. Each direction runs in its own goroutine with 32KB
+	// internal buffers (Go's io.Copy default). When either direction
+	// finishes (EOF or error), we cancel the context to tear down the other.
+	relayCtx, relayCancel := context.WithCancel(ctx)
+	errCh := make(chan error, 2)
 
+	// dest → client
 	go func() {
 		defer Recover(logger, clientConn, nil)
-		defer close(destBufferChannel)
-		defer func(destConn net.Conn) {
-			err := destConn.Close()
-			if err != nil {
-				utils.LogError(logger, err, "failed to close the destination connection")
-			}
-		}(destConn)
-
-		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel)
+		_, err := io.Copy(clientConn, destConn)
+		errCh <- err
+		relayCancel()
 	}()
 
+	// client → dest
 	go func() {
 		defer Recover(logger, clientConn, nil)
-		defer close(clientBufferChannel)
-		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel)
+		_, err := io.Copy(destConn, clientConn)
+		errCh <- err
+		relayCancel()
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-
-		case buffer := <-clientBufferChannel:
-			_, err := destConn.Write(buffer)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write subsequent request to destination")
-				return nil, err
-			}
-
-		case buffer := <-destBufferChannel:
-			_, err := clientConn.Write(buffer)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				utils.LogError(logger, err, "failed to write response to the client")
-				return nil, err
-			}
-
-		case err := <-errChannel:
-			// nolint:staticcheck
-			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-				if err == io.EOF {
-					return nil, nil
-				}
-				return nil, err
-			}
-		}
-	}
+	// Wait for context cancellation (either direction finished or parent cancelled)
+	<-relayCtx.Done()
+	destConn.Close()
+	// Drain both goroutines
+	<-errCh
+	<-errCh
+	return nil, nil
 }
 
 // ToIP4AddressStr converts the integer IP4 Address to the octet format

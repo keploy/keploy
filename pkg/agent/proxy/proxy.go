@@ -62,6 +62,7 @@ type Proxy struct {
 	mockManager *MockManager
 
 	passThroughPortSet map[uint32]bool
+	bypassedIPs        map[string]bool // IPs resolved from bypass host rules — skip TLS MITM
 
 	synchronous bool
 
@@ -122,6 +123,17 @@ func (p *Proxy) isPassThroughPort(addr string) bool {
 	return p.passThroughPortSet[uint32(port)]
 }
 
+// isBypassedDest checks if the destination IP:port belongs to a host that is
+// in the bypass rules. Used to skip TLS MITM for third-party services.
+func (p *Proxy) isBypassedDest(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	return p.bypassedIPs[host]
+}
+
 // isNetworkClosedErr checks if the error is due to a closed network connection.
 // This includes broken pipe, connection reset by peer, and use of closed network connection errors.
 // These errors are expected during graceful shutdown and should not be logged as errors.
@@ -148,6 +160,23 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		ptPorts[uint32(rule)] = true
 	}
 
+	// Resolve bypass hostnames to IPs at startup. Connections to these IPs
+	// skip TLS MITM entirely — raw passthrough with zero overhead.
+	bypassIPs := make(map[string]bool)
+	for _, rule := range opts.BypassRules {
+		if rule.Host != "" {
+			ips, err := net.LookupHost(rule.Host)
+			if err != nil {
+				logger.Debug("could not resolve bypass host", zap.String("host", rule.Host), zap.Error(err))
+				continue
+			}
+			for _, ip := range ips {
+				bypassIPs[ip] = true
+				logger.Debug("bypass IP resolved", zap.String("host", rule.Host), zap.String("ip", ip))
+			}
+		}
+	}
+
 	proxy := &Proxy{
 		logger:             logger,
 		Port:               opts.ProxyPort,
@@ -166,6 +195,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		dnsCache:           newDNSCache(),
 		recordedDNSMocks:   newRecordedDNSMocksCache(),
 		passThroughPortSet: ptPorts,
+		bypassedIPs:        bypassIPs,
 	}
 
 	return proxy
@@ -703,6 +733,28 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
+
+	// Fast-path: if the destination is a TLS connection to a bypassed host,
+	// skip the expensive TLS MITM entirely. We attempt a raw TCP passthrough
+	// to the real server with a short timeout. If the destination is unreachable
+	// (e.g., IPv6 on an IPv4-only machine), we drop the connection immediately
+	// instead of waiting for the default dial timeout.
+	if isTLS && p.isBypassedDest(dstAddr) {
+		p.logger.Debug("TLS bypass (bypassed host)", zap.String("dstAddr", dstAddr))
+		dstConn, dialErr := net.DialTimeout("tcp", dstAddr, 2*time.Second)
+		if dialErr != nil {
+			// Destination unreachable — drop silently, Chrome handles gracefully
+			return nil
+		}
+		// Raw bidirectional relay — no TLS MITM, no HTTP parsing
+		go func() {
+			defer dstConn.Close()
+			_, _ = io.Copy(dstConn, srcConn)
+		}()
+		_, _ = io.Copy(srcConn, dstConn)
+		return nil
+	}
+
 	if isTLS {
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
