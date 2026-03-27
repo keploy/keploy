@@ -1,3 +1,5 @@
+// Package yaml provides utilities for reading and writing test cases and mocks
+// in YAML format for Keploy's recording and replay functionality.
 package yaml
 
 import (
