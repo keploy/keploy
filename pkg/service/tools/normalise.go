@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
@@ -13,7 +15,10 @@ import (
 	"go.uber.org/zap"
 )
 
+type lastUpdatedContextKey struct{}
+
 func (t *Tools) Normalize(ctx context.Context) error {
+	ctx = t.addLastUpdatedToContext(ctx)
 
 	var testRun string
 	if t.config.Normalize.TestRun == "" {
@@ -82,7 +87,32 @@ func (t *Tools) Normalize(ctx context.Context) error {
 	return nil
 }
 
+func (t *Tools) addLastUpdatedToContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if t == nil || t.config == nil {
+		return ctx
+	}
+
+	editedBy := strings.TrimSpace(t.config.Normalize.EditedBy)
+	if editedBy == "" {
+		return ctx
+	}
+
+	return context.WithValue(ctx, lastUpdatedContextKey{}, models.LastUpdated{
+		Author:    editedBy,
+		Timestamp: time.Now().UTC(),
+	})
+}
+
 func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	lastUpdated, hasLastUpdated := t.resolveLastUpdated(ctx)
 
 	if len(testCaseResults) == 0 {
 		testReport, err := t.reportDB.GetReport(ctx, testRun, testSetID)
@@ -114,30 +144,37 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 	}
 
 	for _, testCase := range selectedTestCases {
-		if _, ok := testCaseResultMap[testCase.Name]; !ok {
+		testCaseResult, ok := testCaseResultMap[testCase.Name]
+		if !ok {
 			t.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
 			continue
 		}
-		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed || testCaseResultMap[testCase.Name].Status == models.TestStatusObsolete {
+		if testCaseResult.Status == models.TestStatusPassed || testCaseResult.Status == models.TestStatusObsolete {
 			continue
 		}
-		if testCaseResultMap[testCase.Name].FailureInfo.Risk == models.High && !t.config.Normalize.AllowHighRisk {
+		if testCaseResult.FailureInfo.Risk == models.High && !t.config.Normalize.AllowHighRisk {
 			t.logger.Warn(fmt.Sprintf("failed to normalize test case %s due to a high-risk failure. please confirm the schema compatibility with all consumers and then run with --allow-high-risk", testCase.Name))
 			continue
+		}
+		if hasLastUpdated {
+			testCase.LastUpdated = &models.LastUpdated{
+				Author:    lastUpdated.Author,
+				Timestamp: lastUpdated.Timestamp,
+			}
 		}
 		// Handle normalization based on test case kind
 		switch testCase.Kind {
 		case models.HTTP:
 			// Store the original timestamp to preserve it during normalization
 			originalTimestamp := testCase.HTTPResp.Timestamp
-			testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+			testCase.HTTPResp = testCaseResult.Res
 			// Restore the original timestamp after normalization
 			testCase.HTTPResp.Timestamp = originalTimestamp
 
 		case models.GRPC_EXPORT:
 			// Store the original timestamp to preserve it during normalization
 			originalTimestamp := testCase.GrpcResp.Timestamp
-			testCase.GrpcResp = testCaseResultMap[testCase.Name].GrpcRes
+			testCase.GrpcResp = testCaseResult.GrpcRes
 			// Restore the original timestamp after normalization
 			testCase.GrpcResp.Timestamp = originalTimestamp
 		}
@@ -147,4 +184,29 @@ func (t *Tools) NormalizeTestCases(ctx context.Context, testRun string, testSetI
 		}
 	}
 	return nil
+}
+
+func (t *Tools) resolveLastUpdated(ctx context.Context) (models.LastUpdated, bool) {
+	lastUpdated, ok := ctx.Value(lastUpdatedContextKey{}).(models.LastUpdated)
+	if ok {
+		lastUpdated.Author = strings.TrimSpace(lastUpdated.Author)
+		if lastUpdated.Author != "" && !lastUpdated.Timestamp.IsZero() {
+			lastUpdated.Timestamp = lastUpdated.Timestamp.UTC()
+			return lastUpdated, true
+		}
+	}
+
+	if t == nil || t.config == nil {
+		return models.LastUpdated{}, false
+	}
+
+	editedBy := strings.TrimSpace(t.config.Normalize.EditedBy)
+	if editedBy == "" {
+		return models.LastUpdated{}, false
+	}
+
+	return models.LastUpdated{
+		Author:    editedBy,
+		Timestamp: time.Now().UTC(),
+	}, true
 }
