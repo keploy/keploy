@@ -1867,7 +1867,7 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 
 	if emitFailureLogs {
 		pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
-		if !pass && r.maybeAutoPassHTTPSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 			return true, result
 		}
 		if pass {
@@ -1876,11 +1876,164 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	}
 
 	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
-	if !pass && r.maybeAutoPassHTTPSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 		return true, result
 	}
 
 	return pass, result
+}
+
+func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, noiseConfig map[string]map[string][]string, result *models.Result) bool {
+	if !qualifiesForHTTPResponseSchemaAdditionPass(result) {
+		return false
+	}
+
+	assessment, _ := matcherUtils.ComputeFailureAssessmentJSON(
+		tc.HTTPResp.Body,
+		actualResponse.Body,
+		bodyNoiseForTestCase(tc.Noise, noiseConfig),
+		r.config.Test.IgnoreOrdering,
+	)
+
+	fields := []zap.Field{
+		zap.String("protocol", "http"),
+		zap.String("testcase", tc.Name),
+		zap.String("testset", testSetID),
+	}
+	if assessment != nil {
+		if len(assessment.AddedFields) > 0 {
+			fields = append(fields, zap.Strings("added_fields", assessment.AddedFields))
+		}
+		if len(assessment.Reasons) > 0 {
+			fields = append(fields, zap.Strings("assessment_reasons", assessment.Reasons))
+		}
+	}
+
+	r.logger.Warn(
+		"Additive response schema change detected. Passing testcase by default because only new response fields were added. Please verify that downstream consumers are not affected by the schema expansion.",
+		fields...,
+	)
+
+	normalizePassingHTTPResult(result)
+	return true
+}
+
+func qualifiesForHTTPResponseSchemaAdditionPass(result *models.Result) bool {
+	if result == nil {
+		return false
+	}
+
+	switch result.FailureInfo.Risk {
+	case models.Low:
+		return hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded)
+	case models.Medium:
+		return hasOnlySchemaAdditionAndContentLengthDiff(result)
+	default:
+		return false
+	}
+}
+
+func hasOnlyFailureCategories(categories []models.FailureCategory, allowed ...models.FailureCategory) bool {
+	if len(categories) == 0 {
+		return false
+	}
+
+	allowedSet := make(map[models.FailureCategory]struct{}, len(allowed))
+	for _, category := range allowed {
+		allowedSet[category] = struct{}{}
+	}
+
+	for _, category := range categories {
+		if _, ok := allowedSet[category]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func hasOnlySchemaAdditionAndContentLengthDiff(result *models.Result) bool {
+	if !hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded, models.HeaderChanged) {
+		return false
+	}
+
+	hasSchemaAdded := false
+	hasHeaderChanged := false
+	for _, category := range result.FailureInfo.Category {
+		hasSchemaAdded = hasSchemaAdded || category == models.SchemaAdded
+		hasHeaderChanged = hasHeaderChanged || category == models.HeaderChanged
+	}
+
+	return hasSchemaAdded && hasHeaderChanged && hasOnlyContentLengthDiff(result.HeadersResult)
+}
+
+func hasOnlyContentLengthDiff(headers []models.HeaderResult) bool {
+	foundDiff := false
+
+	for _, header := range headers {
+		if header.Normal {
+			continue
+		}
+
+		foundDiff = true
+		key := strings.ToLower(header.Expected.Key)
+		if key == "" {
+			key = strings.ToLower(header.Actual.Key)
+		}
+		if key != "content-length" {
+			return false
+		}
+	}
+
+	return foundDiff
+}
+
+func normalizePassingHTTPResult(result *models.Result) {
+	if result == nil {
+		return
+	}
+
+	result.FailureInfo = models.FailureInfo{}
+	result.StatusCode.Normal = true
+	result.BodySizeResult.Normal = true
+
+	for i := range result.HeadersResult {
+		result.HeadersResult[i].Normal = true
+	}
+	for i := range result.BodyResult {
+		result.BodyResult[i].Normal = true
+	}
+	for i := range result.TrailerResult {
+		result.TrailerResult[i].Normal = true
+	}
+}
+
+func bodyNoiseForTestCase(testCaseNoise map[string][]string, noiseConfig map[string]map[string][]string) map[string][]string {
+	bodyNoise := cloneNoiseMap(noiseConfig["body"])
+
+	for field, regexArr := range testCaseNoise {
+		parts := strings.Split(field, ".")
+		if len(parts) <= 1 || parts[0] != "body" {
+			continue
+		}
+
+		bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = append([]string(nil), regexArr...)
+	}
+
+	return bodyNoise
+}
+
+func cloneNoiseMap(input map[string][]string) map[string][]string {
+	if len(input) == 0 {
+		return map[string][]string{}
+	}
+
+	out := make(map[string][]string, len(input))
+	for key, values := range input {
+		out[key] = append([]string(nil), values...)
+	}
+
+	return out
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
