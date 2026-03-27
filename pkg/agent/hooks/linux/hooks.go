@@ -150,6 +150,8 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 
+	spec.Types = nil
+
 	programs := []struct {
 		name  string
 		pType ebpf.ProgramType
