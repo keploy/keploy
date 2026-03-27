@@ -108,7 +108,7 @@ func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string
 		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
 	}
 
-	if res.StatusCode != 200 || res.StatusCode >= 300 {
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
 		return "", false, "", fmt.Errorf("failed to authenticate: %s", respBody.Error)
 	}
 
