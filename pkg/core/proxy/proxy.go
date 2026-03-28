@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -289,6 +290,36 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	}
 }
 
+// sendHTTPErrorResponse sends an HTTP error response to the client when destination dial fails
+// after reading an HTTP request. This prevents the client from hanging waiting for a response.
+func (p *Proxy) sendHTTPErrorResponse(srcConn net.Conn, initialBuf []byte, logger *zap.Logger, statusCode int, statusText string) {
+	// Double-check that this is actually an HTTP request before sending HTTP response.
+	// This is a safety check to prevent protocol violations with non-HTTP clients.
+	if !util.IsHTTPReq(initialBuf) {
+		previewLen := len(initialBuf)
+		if previewLen > 50 {
+			previewLen = 50
+		}
+		logger.Debug("skipping HTTP error response - not an HTTP request", zap.String("initialBufferPreview", string(initialBuf[:previewLen])))
+		return
+	}
+	
+	errorMsg := fmt.Sprintf("Keploy: Failed to connect to destination server")
+	errResp := fmt.Sprintf("HTTP/1.1 %d %s\r\n"+
+		"Content-Type: text/plain\r\n"+
+		"Connection: close\r\n"+
+		"Content-Length: %d\r\n"+
+		"\r\n"+
+		"%s",
+		statusCode, statusText, len(errorMsg), errorMsg)
+	
+	if _, writeErr := srcConn.Write([]byte(errResp)); writeErr != nil {
+		utils.LogError(logger, writeErr, "failed to write HTTP error response to client")
+	} else {
+		logger.Debug("sent HTTP error response to client", zap.Int("statusCode", statusCode), zap.String("statusText", statusText))
+	}
+}
+
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
@@ -338,11 +369,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	case 4:
 		p.logger.Debug("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
+		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port), zap.String("dstAddr", dstAddr))
 	case 6:
 		p.logger.Debug("the destination is ipv6")
-		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
-		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+		ipv6Str := util.ToIPv6AddressStr(destInfo.IPv6Addr)
+		dstAddr = fmt.Sprintf("[%v]:%v", ipv6Str, destInfo.Port)
+		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.String("IPv6String", ipv6Str), zap.Uint32("DestPort", destInfo.Port), zap.String("dstAddr", dstAddr))
 	}
 
 	// This is used to handle the parser errors
@@ -384,7 +416,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//check for global passthrough in test mode
 	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
-		dstConn, err = net.Dial("tcp", dstAddr)
+		dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
@@ -398,20 +430,63 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return nil
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	// Protocol-based MySQL detection: Connect to destination early and check if server sends MySQL handshake
+	// MySQL server sends the first packet (handshake), so we read from destination to detect it
+	isMySQL := false
+	var mysqlDetectionBuffer []byte
+	var mysqlDetectionConn net.Conn
+
+	if rule.Mode != models.MODE_TEST {
+		// Connect to destination server early for protocol detection
+		mysqlDetectionConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+			return err
+		}
+
+		// Set a short timeout for MySQL detection (MySQL server should send handshake immediately)
+		mysqlDetectionConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+		// Read MySQL packet header (4 bytes) + at least 1 byte of payload for protocol version
+		detectionBuffer := make([]byte, 5)
+		n, err := mysqlDetectionConn.Read(detectionBuffer)
+		if err == nil && n >= 5 {
+			// Check if it's a MySQL handshake packet
+			if mysqlUtils.IsMySQLHandshake(detectionBuffer) {
+				isMySQL = true
+				mysqlDetectionBuffer = detectionBuffer[:n]
+				p.logger.Debug("Detected MySQL protocol from server handshake", zap.String("destination", dstAddr))
+			}
+		}
+
+		// Reset read deadline
+		mysqlDetectionConn.SetReadDeadline(time.Time{})
+
+		if isMySQL {
+			// Use the connection we already established
+			dstConn = mysqlDetectionConn
+			// Replay the detection buffer we read
+			if len(mysqlDetectionBuffer) > 0 {
+				dstConn = &util.Conn{
+					Conn:   dstConn,
+					Reader: io.MultiReader(bytes.NewReader(mysqlDetectionBuffer), dstConn),
+					Logger: p.logger,
+				}
+			}
+		} else {
+			// Not MySQL, close the detection connection and let normal flow handle connection
+			mysqlDetectionConn.Close()
+		}
+	}
+
+	if isMySQL {
+		// Handle MySQL flow
+		dstCfg := &models.ConditionalDstCfg{
+			Port: uint(destInfo.Port),
+		}
+		rule.DstCfg = dstCfg
+
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-
-			dstCfg := &models.ConditionalDstCfg{
-				Port: uint(destInfo.Port),
-			}
-			rule.DstCfg = dstCfg
-
 			// Record the outgoing message into a mock
 			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
@@ -553,6 +628,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				// Note: We don't send HTTP error response here because TLS connections
+				// could be any protocol (HTTPS, database, SSH, etc.), not just HTTP.
+				// Sending HTTP response to non-HTTP clients would cause protocol violations.
 				return err
 			}
 		}
@@ -562,9 +640,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	} else {
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
+			dstConn, err = net.DialTimeout("tcp", dstAddr, 10*time.Second)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				// Only send HTTP error response if we've confirmed this is an HTTP connection.
+				// We've already filtered out database ports and TLS connections, but we still
+				// need to verify the protocol is HTTP before sending HTTP-specific responses.
+				if util.IsHTTPReq(initialBuf) {
+					p.sendHTTPErrorResponse(srcConn, initialBuf, logger, 500, "Internal Server Error")
+				}
 				return err
 			}
 		}

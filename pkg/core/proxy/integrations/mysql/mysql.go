@@ -9,6 +9,7 @@ import (
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/replayer"
 
@@ -35,9 +36,9 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
-func (m *MySQL) MatchType(_ context.Context, _ []byte) bool {
-	//Returning false here because sql parser is using the ports to check if the packet is mysql or not.
-	return false
+func (m *MySQL) MatchType(_ context.Context, reqBuf []byte) bool {
+	// Use protocol-based detection instead of port-based
+	return mysqlUtils.IsMySQLHandshake(reqBuf)
 }
 
 func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
