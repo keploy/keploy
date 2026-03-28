@@ -13,7 +13,6 @@ on:
         required: false
         default: 'ubuntu-latest' # The original GitHub runner
 
-        
 jobs:
   build-and-upload:
     runs-on: ${{ inputs.runner }} 
