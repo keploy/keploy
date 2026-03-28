@@ -156,6 +156,10 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	for name, m := range spec.Maps {
 		m.Key = nil
 		m.Value = nil
+		// Fix .rodata map flags for WSL2 compatibility
+		if name == ".rodata" {
+			m.Flags = 0  // Remove BPF_F_RDONLY_PROG flag
+		}
 		spec.Maps[name] = m
 	}
 
