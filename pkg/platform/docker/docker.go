@@ -478,9 +478,13 @@ func (idc *Impl) generateKeployVolumes() []string {
 			dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
 			if dockerContext != "colima" {
 				// Default Docker context on Windows
+				// Use the "debugfs" named Docker volume (not a host path) because
+				// the WSL2 VM typically doesn't have debugfs mounted at /sys/kernel/debug.
+				// The named volume is created by CreateVolume with
+				// driver options type=debugfs,device=debugfs.
 				volumes = append(volumes,
 					"/sys/fs/cgroup:/sys/fs/cgroup",
-					"/sys/kernel/debug:/sys/kernel/debug:rw",
+					"debugfs:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
 				)
 			} else {
@@ -965,6 +969,17 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 		}
 	}
 	idc.addTopLevelVolume(compose, KeployTLSVolumeName)
+
+	// On Windows (and macOS with default context), the keploy-agent service
+	// uses a named "debugfs" volume instead of a host path bind mount.
+	// Declare it in the top-level volumes section with driver options so
+	// Docker Compose can create it with the debugfs filesystem type.
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		idc.addTopLevelVolumeWithDriverOpts(compose, "debugfs", map[string]string{
+			"type":   "debugfs",
+			"device": "debugfs",
+		})
+	}
 	return nil
 }
 
@@ -1057,6 +1072,46 @@ func (idc *Impl) addTopLevelVolume(compose *Compose, volumeName string) {
 	compose.Volumes.Content = append(compose.Volumes.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
 		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{}}, // {}
+	)
+}
+
+// addTopLevelVolumeWithDriverOpts ensures a named volume is defined at the compose top-level
+// with the specified driver_opts (e.g. type=debugfs, device=debugfs for the debugfs volume).
+func (idc *Impl) addTopLevelVolumeWithDriverOpts(compose *Compose, volumeName string, driverOpts map[string]string) {
+	if compose.Volumes.Kind == 0 {
+		compose.Volumes.Kind = yaml.MappingNode
+		compose.Volumes.Content = []*yaml.Node{}
+	}
+
+	// Check if volume exists; if so, skip
+	for i := 0; i < len(compose.Volumes.Content); i += 2 {
+		if compose.Volumes.Content[i].Value == volumeName {
+			return
+		}
+	}
+
+	// Build driver_opts mapping node
+	driverOptsContent := make([]*yaml.Node, 0, len(driverOpts)*2)
+	for k, v := range driverOpts {
+		driverOptsContent = append(driverOptsContent,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: k},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: v},
+		)
+	}
+
+	volumeConfigNode := &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "driver"},
+			{Kind: yaml.ScalarNode, Value: "local"},
+			{Kind: yaml.ScalarNode, Value: "driver_opts"},
+			{Kind: yaml.MappingNode, Content: driverOptsContent},
+		},
+	}
+
+	compose.Volumes.Content = append(compose.Volumes.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: volumeName},
+		volumeConfigNode,
 	)
 }
 

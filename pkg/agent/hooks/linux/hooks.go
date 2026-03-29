@@ -109,8 +109,11 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
-		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
-		return err
+		// On some environments (e.g., Docker Desktop for Windows with WSL2), the memcg
+		// accounting probe may fail with "function not implemented" even though the kernel
+		// supports eBPF loading. Continue anyway — if eBPF truly can't load,
+		// spec.LoadAndAssign() below will fail with a clear error.
+		h.logger.Warn("failed to remove memlock limit, continuing anyway", zap.Error(err))
 	}
 
 	// Load pre-compiled programs and maps into the kernel.
