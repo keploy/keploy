@@ -1930,12 +1930,40 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 }
 
 func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
-	noiseConfig := r.config.Test.GlobalNoise.Global
+	noiseConfig := deepCopyNoiseConfig(r.config.Test.GlobalNoise.Global)
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
 	}
 
 	return noiseConfig
+}
+
+func deepCopyNoiseConfig(src map[string]map[string][]string) map[string]map[string][]string {
+	if src == nil {
+		return nil
+	}
+
+	dst := make(map[string]map[string][]string, len(src))
+	for key, inner := range src {
+		if inner == nil {
+			dst[key] = nil
+			continue
+		}
+
+		copiedInner := make(map[string][]string, len(inner))
+		for innerKey, values := range inner {
+			if values == nil {
+				copiedInner[innerKey] = nil
+				continue
+			}
+
+			copiedInner[innerKey] = append([]string(nil), values...)
+		}
+
+		dst[key] = copiedInner
+	}
+
+	return dst
 }
 
 func cloneHTTPResp(resp *models.HTTPResp) *models.HTTPResp {
