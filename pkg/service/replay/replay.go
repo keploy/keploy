@@ -1888,16 +1888,21 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
 	noiseConfig := r.httpNoiseConfig(testSetID)
+	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
 		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
 	}
 
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+
+	return pass, result
 }
 
 func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
 	noiseConfig := r.httpNoiseConfig(testSetID)
+	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
 		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
@@ -1906,15 +1911,17 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	if emitFailureLogs {
 		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
 		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return true, result
 		}
 		if pass {
-			normalizeHTTPRespForReport(tc, actualResponse)
+			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 			return pass, result
 		}
 	}
 
 	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
 	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 		return true, result
 	}
@@ -1947,12 +1954,20 @@ func cloneHTTPResp(resp *models.HTTPResp) *models.HTTPResp {
 	return &clone
 }
 
-func normalizeHTTPRespForReport(tc *models.TestCase, actualResponse *models.HTTPResp) {
+func originalHTTPRespBodySize(tc *models.TestCase, actualResponse *models.HTTPResp) int64 {
+	if tc == nil || actualResponse == nil || !tc.HTTPResp.BodySkipped {
+		return 0
+	}
+
+	return int64(len(actualResponse.Body))
+}
+
+func normalizeHTTPRespForReport(tc *models.TestCase, actualResponse *models.HTTPResp, originalBodySize int64) {
 	if tc == nil || actualResponse == nil || !tc.HTTPResp.BodySkipped {
 		return
 	}
 
-	actualResponse.BodySize = int64(len(actualResponse.Body))
+	actualResponse.BodySize = originalBodySize
 	actualResponse.BodySkipped = true
 	actualResponse.Body = ""
 }
