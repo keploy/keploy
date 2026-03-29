@@ -36,6 +36,7 @@ import (
 )
 
 const UNKNOWN_TEST = "UNKNOWN_TEST"
+const applicationFailedToRunLogMessage = "application failed to run; check the application logs for details or verify the app command is correct"
 
 func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
 	switch status {
@@ -51,7 +52,7 @@ func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool
 func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, bool) {
 	switch appErr.AppErrorType {
 	case "":
-		return "", false
+		return models.TestSetStatusAppHalted, true
 	case models.ErrCtxCanceled:
 		return "", false
 	case models.ErrCommandError:
@@ -84,13 +85,42 @@ func isDockerComposeReplayShutdown(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
 	errMsg := strings.ToLower(err.Error())
 	return strings.Contains(errMsg, "connection refused") ||
 		strings.Contains(errMsg, "connection reset by peer") ||
 		strings.Contains(errMsg, "broken pipe") ||
 		strings.Contains(errMsg, "server closed") ||
-		strings.Contains(errMsg, "eof") ||
+		containsStandalonePhrase(errMsg, "unexpected eof") ||
+		containsStandalonePhrase(errMsg, "eof") ||
 		strings.Contains(errMsg, "found no test results")
+}
+
+func containsStandalonePhrase(msg, phrase string) bool {
+	start := 0
+	for {
+		idx := strings.Index(msg[start:], phrase)
+		if idx == -1 {
+			return false
+		}
+		idx += start
+
+		beforeIdx := idx - 1
+		afterIdx := idx + len(phrase)
+		beforeOK := beforeIdx < 0 || !isWordChar(msg[beforeIdx])
+		afterOK := afterIdx >= len(msg) || !isWordChar(msg[afterIdx])
+		if beforeOK && afterOK {
+			return true
+		}
+
+		start = idx + 1
+	}
+}
+
+func isWordChar(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
 }
 
 func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult) string {
@@ -869,7 +899,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
 					setErrStatus(mappedStatus)
 				}
-				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
+				if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
 					return nil
 				}
 				appErrChan <- appErr
@@ -888,7 +918,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				} else if err.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
-				utils.LogError(r.logger, err, "application failed to run")
+				utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 			case <-runTestSetCtx.Done():
 				setErrStatus(models.TestSetStatusUserAbort)
 			}
@@ -1130,7 +1160,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
 						setErrStatus(mappedStatus)
 					}
-					if appErr.AppErrorType == models.ErrCtxCanceled {
+					if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
 						return nil
 					}
 					appErrChan <- appErr
@@ -1149,7 +1179,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					} else if err.AppErrorType == models.ErrCtxCanceled {
 						return nil
 					}
-					utils.LogError(r.logger, err, "application failed to run")
+					utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 				case <-runTestSetCtx.Done():
 					setErrStatus(models.TestSetStatusUserAbort)
 				}
