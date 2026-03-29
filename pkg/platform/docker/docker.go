@@ -974,7 +974,7 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 	// uses a named "debugfs" volume instead of a host path bind mount.
 	// Declare it in the top-level volumes section with driver options so
 	// Docker Compose can create it with the debugfs filesystem type.
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+	if runtime.GOOS == "windows" {
 		idc.addTopLevelVolumeWithDriverOpts(compose, "debugfs", map[string]string{
 			"type":   "debugfs",
 			"device": "debugfs",
