@@ -608,6 +608,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "cap_add", HeadComment: "Capabilities required by keploy-agent for eBPF interception.\n" +
 				"Review and allow only what your security policy permits."},
 			{Kind: yaml.SequenceNode, Content: capAdd},
+
+			// privileged mode is required because Docker's default seccomp profile
+			// blocks the bpf() syscall even with CAP_BPF on some configurations
+			// (e.g., Docker Desktop for Windows CI runners).
+			{Kind: yaml.ScalarNode, Value: "privileged"},
+			{Kind: yaml.ScalarNode, Value: "true"},
 		},
 	}
 
