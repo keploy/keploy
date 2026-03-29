@@ -236,6 +236,7 @@ func (a *Agent) GetConsumedMocks(ctx context.Context) ([]models.MockState, error
 
 // StoreMocks stores the filtered and unfiltered mocks for a client ID
 func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+
 	storage := &ClientMockStorage{
 		filtered:   make([]*models.Mock, len(filtered)),
 		unfiltered: make([]*models.Mock, len(unfiltered)),
@@ -244,6 +245,7 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	// Deep copy the mocks to avoid data races
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
+
 
 	a.clientMocks.Store(uint64(0), storage)
 
