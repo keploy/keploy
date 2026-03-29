@@ -107,9 +107,6 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 		return fmt.Errorf("MockLoader: failed to store mocks: %w", err)
 	}
 
-	fmt.Println("doing this")
-	r.logger.Info("doing this")
-
 	err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), nil, true)
 	if err != nil {
 		return fmt.Errorf("MockLoader: failed to send mock filter params to agent: %w", err)
