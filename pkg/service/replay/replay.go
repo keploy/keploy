@@ -1909,6 +1909,7 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 			return true, result
 		}
 		if pass {
+			normalizeHTTPRespForReport(tc, actualResponse)
 			return pass, result
 		}
 	}
@@ -1944,6 +1945,16 @@ func cloneHTTPResp(resp *models.HTTPResp) *models.HTTPResp {
 	}
 
 	return &clone
+}
+
+func normalizeHTTPRespForReport(tc *models.TestCase, actualResponse *models.HTTPResp) {
+	if tc == nil || actualResponse == nil || !tc.HTTPResp.BodySkipped {
+		return
+	}
+
+	actualResponse.BodySize = int64(len(actualResponse.Body))
+	actualResponse.BodySkipped = true
+	actualResponse.Body = ""
 }
 
 func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, noiseConfig map[string]map[string][]string, result *models.Result) bool {
