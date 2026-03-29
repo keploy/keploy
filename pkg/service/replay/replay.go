@@ -2047,14 +2047,9 @@ func qualifiesForHTTPResponseSchemaAdditionPass(result *models.Result) bool {
 		return false
 	}
 
-	switch result.FailureInfo.Risk {
-	case models.Low:
-		return hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded)
-	case models.Medium:
-		return hasOnlySchemaAdditionAndContentLengthDiff(result)
-	default:
-		return false
-	}
+	return (result.FailureInfo.Risk == models.Low &&
+		hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded)) ||
+		hasOnlySchemaAdditionAndContentLengthDiff(result)
 }
 
 func hasOnlyFailureCategories(categories []models.FailureCategory, allowed ...models.FailureCategory) bool {
