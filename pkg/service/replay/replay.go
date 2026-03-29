@@ -1352,7 +1352,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					continue
 				}
-				testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID, emitFailureLogs)
+				testPass, testResult = r.compareHTTPRespForReplay(testCase, httpResp, testSetID, emitFailureLogs)
 
 			case models.GRPC_EXPORT:
 				grpcResp, ok := resp.(*models.GrpcResp)
@@ -1887,17 +1887,24 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
-	noiseConfig := r.config.Test.GlobalNoise.Global
-	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+	noiseConfig := r.httpNoiseConfig(testSetID)
+
+	if r.config.Test.SchemaMatch {
+		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
 	}
+
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+}
+
+func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
+	noiseConfig := r.httpNoiseConfig(testSetID)
 
 	if r.config.Test.SchemaMatch {
 		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
 	}
 
 	if emitFailureLogs {
-		pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
 		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
 			return true, result
 		}
@@ -1912,6 +1919,31 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	}
 
 	return pass, result
+}
+
+func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
+	noiseConfig := r.config.Test.GlobalNoise.Global
+	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
+		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+	}
+
+	return noiseConfig
+}
+
+func cloneHTTPResp(resp *models.HTTPResp) *models.HTTPResp {
+	if resp == nil {
+		return nil
+	}
+
+	clone := *resp
+	if resp.Header != nil {
+		clone.Header = make(map[string]string, len(resp.Header))
+		for key, value := range resp.Header {
+			clone.Header[key] = value
+		}
+	}
+
+	return &clone
 }
 
 func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, noiseConfig map[string]map[string][]string, result *models.Result) bool {
@@ -2015,6 +2047,9 @@ func hasOnlyContentLengthDiff(headers []models.HeaderResult) bool {
 			key = strings.ToLower(header.Actual.Key)
 		}
 		if key != "content-length" {
+			return false
+		}
+		if len(header.Expected.Value) == 0 || len(header.Actual.Value) == 0 {
 			return false
 		}
 	}
