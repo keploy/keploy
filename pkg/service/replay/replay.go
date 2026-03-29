@@ -1891,7 +1891,9 @@ func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
-		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+		return pass, result
 	}
 
 	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
@@ -1905,7 +1907,9 @@ func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse 
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
-		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+		return pass, result
 	}
 
 	if emitFailureLogs {
