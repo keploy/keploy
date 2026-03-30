@@ -609,11 +609,15 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 				"Review and allow only what your security policy permits."},
 			{Kind: yaml.SequenceNode, Content: capAdd},
 
-			// privileged mode is required because Docker's default seccomp profile
-			// blocks the bpf() syscall even with CAP_BPF on some configurations
-			// (e.g., Docker Desktop for Windows CI runners).
-			{Kind: yaml.ScalarNode, Value: "privileged"},
-			{Kind: yaml.ScalarNode, Value: "true"},
+			// security_opt disables the default seccomp profile which blocks
+			// the bpf() syscall even with CAP_BPF on some Docker Desktop
+			// configurations (e.g., Windows CI runners with Enhanced Container Isolation).
+			// Using seccomp:unconfined instead of privileged:true because
+			// ECI silently blocks privileged containers.
+			{Kind: yaml.ScalarNode, Value: "security_opt"},
+			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
+			}},
 		},
 	}
 
