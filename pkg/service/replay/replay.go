@@ -747,6 +747,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
+	testSetFailureReason string
+	testSetLogs string
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -786,16 +788,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				switch err.AppErrorType {
 				case models.ErrCommandError:
 					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
+					testSetFailureReason = err.Error()
 				case models.ErrUnExpected:
 					testSetStatusByErrChan = models.TestSetStatusAppHalted
+					testSetFailureReason = err.Error()
 				case models.ErrAppStopped:
 					testSetStatusByErrChan = models.TestSetStatusAppHalted
+					testSetFailureReason = err.Error()
 				case models.ErrCtxCanceled:
 					return nil
 				case models.ErrInternal:
 					testSetStatusByErrChan = models.TestSetStatusInternalErr
+					testSetFailureReason = err.Error()
 				default:
 					testSetStatusByErrChan = models.TestSetStatusAppHalted
+					testSetFailureReason = err.Error()
 				}
 				utils.LogError(r.logger, err, "application failed to run")
 			case <-runTestSetCtx.Done():
@@ -1049,16 +1056,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					switch err.AppErrorType {
 					case models.ErrCommandError:
 						testSetStatusByErrChan = models.TestSetStatusFaultUserApp
+						testSetFailureReason = err.Error()
 					case models.ErrUnExpected:
 						testSetStatusByErrChan = models.TestSetStatusAppHalted
+						testSetFailureReason = err.Error()
 					case models.ErrAppStopped:
 						testSetStatusByErrChan = models.TestSetStatusAppHalted
+						testSetFailureReason = err.Error()
 					case models.ErrCtxCanceled:
 						return nil
 					case models.ErrInternal:
 						testSetStatusByErrChan = models.TestSetStatusInternalErr
+						testSetFailureReason = err.Error()
 					default:
 						testSetStatusByErrChan = models.TestSetStatusAppHalted
+						testSetFailureReason = err.Error()
 					}
 					utils.LogError(r.logger, err, "application failed to run")
 				case <-runTestSetCtx.Done():
@@ -1640,20 +1652,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testReport = &models.TestReport{
-		Version:    models.GetVersion(),
-		TestSet:    testSetID,
-		Status:     string(testSetStatus),
-		Total:      testCasesCount,
-		Success:    success,
-		Failure:    failure,
-		Obsolete:   obsolete,
-		Ignored:    ignored,
-		Tests:      testCaseResults,
-		TimeTaken:  timeTaken.String(),
-		HighRisk:   riskHigh,
-		MediumRisk: riskMed,
-		LowRisk:    riskLow,
-		CmdUsed:    r.config.Test.CmdUsed,
+		Version:        models.GetVersion(),
+		TestSet:       testSetID,
+		Status:        string(testSetStatus),
+		Total:        testCasesCount,
+		Success:      success,
+		Failure:      failure,
+		Obsolete:     obsolete,
+		Ignored:      ignored,
+		Tests:        testCaseResults,
+		TimeTaken:    timeTaken.String(),
+		HighRisk:     riskHigh,
+		MediumRisk:   riskMed,
+		LowRisk:      riskLow,
+		CmdUsed:      r.config.Test.CmdUsed,
+		FailureReason: testSetFailureReason,
+		Logs:         testSetLogs,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled

@@ -277,6 +277,17 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	}
 	_ = w.Flush()
 
+	// Show failure reason for test sets that halted or had internal errors
+	for _, rrow := range rows {
+		rep := reports[rrow.name]
+		if rep == nil {
+			continue
+		}
+		if (rep.Status == string(models.TestSetStatusAppHalted) || rep.Status == string(models.TestSetStatusInternalErr)) && rep.FailureReason != "" {
+			fmt.Fprintf(r.out, "\n  WARNING: test set %s halted: %s\n", rrow.name, rep.FailureReason)
+		}
+	}
+
 	fmt.Fprintln(r.out, "\nFAILED TEST CASES:")
 	if failed == 0 {
 		fmt.Fprintln(r.out, "\t(none)")
