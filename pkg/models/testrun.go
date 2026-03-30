@@ -53,6 +53,9 @@ func (tr TestReport) MarshalYAML() (interface{}, error) {
 		return nil, err
 	}
 	sanitizeReportYAMLNode(node)
+	setLiteralStyleForTopLevelField(node, "app_logs")
+	setLiteralStyleForTopLevelField(node, "failure_reason")
+	setLiteralStyleForTopLevelField(node, "cmdUsed")
 
 	return node, nil
 }
@@ -64,14 +67,43 @@ func sanitizeReportYAMLNode(node *yamlLib.Node) {
 
 	if node.Kind == yamlLib.ScalarNode && node.Tag == "!!str" {
 		node.Value = normalizeReportYAMLText(node.Value)
-		if strings.Contains(node.Value, "\n") {
-			node.Style = yamlLib.LiteralStyle
-		}
 	}
 
 	for _, child := range node.Content {
 		sanitizeReportYAMLNode(child)
 	}
+}
+
+func setLiteralStyleForTopLevelField(node *yamlLib.Node, fieldName string) {
+	mapping := findTopLevelMappingNode(node)
+	if mapping == nil {
+		return
+	}
+
+	for i := 0; i < len(mapping.Content)-1; i += 2 {
+		key := mapping.Content[i]
+		value := mapping.Content[i+1]
+		if key.Value != fieldName {
+			continue
+		}
+		if value.Kind == yamlLib.ScalarNode && value.Tag == "!!str" && strings.Contains(value.Value, "\n") {
+			value.Style = yamlLib.LiteralStyle
+		}
+		return
+	}
+}
+
+func findTopLevelMappingNode(node *yamlLib.Node) *yamlLib.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == yamlLib.MappingNode {
+		return node
+	}
+	if len(node.Content) == 0 {
+		return nil
+	}
+	return findTopLevelMappingNode(node.Content[0])
 }
 
 func normalizeReportYAMLText(value string) string {
