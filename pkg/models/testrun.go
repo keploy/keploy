@@ -2,11 +2,6 @@ package models
 
 import (
 	"errors"
-	"strings"
-	"unicode"
-	"unicode/utf8"
-
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 type TestReport struct {
@@ -43,93 +38,6 @@ type Loc struct {
 
 func (tr *TestReport) GetKind() string {
 	return "TestReport"
-}
-
-func (tr TestReport) MarshalYAML() (interface{}, error) {
-	type alias TestReport
-
-	node := &yamlLib.Node{}
-	if err := node.Encode(alias(tr)); err != nil {
-		return nil, err
-	}
-	sanitizeReportYAMLNode(node)
-	setLiteralStyleForTopLevelField(node, "app_logs")
-	setLiteralStyleForTopLevelField(node, "failure_reason")
-	setLiteralStyleForTopLevelField(node, "cmdUsed")
-
-	return node, nil
-}
-
-func sanitizeReportYAMLNode(node *yamlLib.Node) {
-	if node == nil {
-		return
-	}
-
-	if node.Kind == yamlLib.ScalarNode && node.Tag == "!!str" {
-		node.Value = normalizeReportYAMLText(node.Value)
-	}
-
-	for _, child := range node.Content {
-		sanitizeReportYAMLNode(child)
-	}
-}
-
-func setLiteralStyleForTopLevelField(node *yamlLib.Node, fieldName string) {
-	mapping := findTopLevelMappingNode(node)
-	if mapping == nil {
-		return
-	}
-
-	for i := 0; i < len(mapping.Content)-1; i += 2 {
-		key := mapping.Content[i]
-		value := mapping.Content[i+1]
-		if key.Value != fieldName {
-			continue
-		}
-		if value.Kind == yamlLib.ScalarNode && value.Tag == "!!str" && strings.Contains(value.Value, "\n") {
-			value.Style = yamlLib.LiteralStyle
-		}
-		return
-	}
-}
-
-func findTopLevelMappingNode(node *yamlLib.Node) *yamlLib.Node {
-	if node == nil {
-		return nil
-	}
-	if node.Kind == yamlLib.MappingNode {
-		return node
-	}
-	if len(node.Content) == 0 {
-		return nil
-	}
-	return findTopLevelMappingNode(node.Content[0])
-}
-
-func normalizeReportYAMLText(value string) string {
-	if value == "" {
-		return ""
-	}
-
-	value = strings.ToValidUTF8(value, "")
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
-	value = strings.ReplaceAll(value, "\t", "  ")
-
-	var builder strings.Builder
-	builder.Grow(len(value))
-	for _, r := range value {
-		if r == '\n' {
-			builder.WriteRune(r)
-			continue
-		}
-		if r == utf8.RuneError || unicode.IsControl(r) {
-			continue
-		}
-		builder.WriteRune(r)
-	}
-
-	return builder.String()
 }
 
 type TestResult struct {
