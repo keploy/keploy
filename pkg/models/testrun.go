@@ -3,6 +3,8 @@ package models
 import (
 	"errors"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -46,34 +48,56 @@ func (tr *TestReport) GetKind() string {
 func (tr TestReport) MarshalYAML() (interface{}, error) {
 	type alias TestReport
 
-	report := alias(tr)
-	report.AppLogs = normalizeReportYAMLText(report.AppLogs)
-	report.FailureReason = normalizeReportYAMLText(report.FailureReason)
-	report.CmdUsed = normalizeReportYAMLText(report.CmdUsed)
-
 	node := &yamlLib.Node{}
-	if err := node.Encode(report); err != nil {
+	if err := node.Encode(alias(tr)); err != nil {
 		return nil, err
 	}
+	sanitizeReportYAMLNode(node)
 
-	if node.Kind == yamlLib.MappingNode {
-		for i := 0; i < len(node.Content)-1; i += 2 {
-			value := node.Content[i+1]
-			if value.Kind == yamlLib.ScalarNode && value.Tag == "!!str" && strings.Contains(value.Value, "\n") {
-				value.Style = yamlLib.LiteralStyle
-			}
+	return node, nil
+}
+
+func sanitizeReportYAMLNode(node *yamlLib.Node) {
+	if node == nil {
+		return
+	}
+
+	if node.Kind == yamlLib.ScalarNode && node.Tag == "!!str" {
+		node.Value = normalizeReportYAMLText(node.Value)
+		if strings.Contains(node.Value, "\n") {
+			node.Style = yamlLib.LiteralStyle
 		}
 	}
 
-	return node, nil
+	for _, child := range node.Content {
+		sanitizeReportYAMLNode(child)
+	}
 }
 
 func normalizeReportYAMLText(value string) string {
 	if value == "" {
 		return ""
 	}
+
+	value = strings.ToValidUTF8(value, "")
 	value = strings.ReplaceAll(value, "\r\n", "\n")
-	return strings.ReplaceAll(value, "\t", "  ")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	value = strings.ReplaceAll(value, "\t", "  ")
+
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, r := range value {
+		if r == '\n' {
+			builder.WriteRune(r)
+			continue
+		}
+		if r == utf8.RuneError || unicode.IsControl(r) {
+			continue
+		}
+		builder.WriteRune(r)
+	}
+
+	return builder.String()
 }
 
 type TestResult struct {

@@ -338,6 +338,10 @@ func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//If it does, remove it.
 	err = os.Remove(name)
 	if err != nil {
+		if runtime.GOOS == "windows" && strings.Contains(strings.ToLower(err.Error()), "used by another process") {
+			logger.Debug("skipping removal of file still in use during shutdown", zap.String("file", name), zap.Error(err))
+			return nil
+		}
 		LogError(logger, err, "Error removing file")
 		return err
 	}

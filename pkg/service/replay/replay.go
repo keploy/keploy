@@ -137,6 +137,15 @@ func describeTestSetFailure(status models.TestSetStatus, testCaseResults []model
 	}
 }
 
+func shouldIncludeAppLogs(status models.TestSetStatus) bool {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr:
+		return true
+	default:
+		return false
+	}
+}
+
 type Replayer struct {
 	logger             *zap.Logger
 	testDB             TestDB
@@ -1777,7 +1786,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	appFailure := getLastAppErr()
 	appLogs := appFailure.AppLogs
-	if appLogs == "" && testSetStatus == models.TestSetStatusAppHalted {
+	if !shouldIncludeAppLogs(testSetStatus) {
+		appLogs = ""
+	} else if appLogs == "" && testSetStatus == models.TestSetStatusAppHalted {
 		logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
 		defer cancel()
 		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
