@@ -608,16 +608,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 			{Kind: yaml.ScalarNode, Value: "cap_add", HeadComment: "Capabilities required by keploy-agent for eBPF interception.\n" +
 				"Review and allow only what your security policy permits."},
 			{Kind: yaml.SequenceNode, Content: capAdd},
-
-			// security_opt disables the default seccomp profile which blocks
-			// the bpf() syscall even with CAP_BPF on some Docker Desktop
-			// configurations (e.g., Windows CI runners with Enhanced Container Isolation).
-			// Using seccomp:unconfined instead of privileged:true because
-			// ECI silently blocks privileged containers.
-			{Kind: yaml.ScalarNode, Value: "security_opt"},
-			{Kind: yaml.SequenceNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "seccomp:unconfined"},
-			}},
 		},
 	}
 
