@@ -1494,7 +1494,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					continue
 				}
-				testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID, emitFailureLogs)
+				testPass, testResult = r.compareHTTPRespForReplay(testCase, httpResp, testSetID, emitFailureLogs)
 
 			case models.GRPC_EXPORT:
 				grpcResp, ok := resp.(*models.GrpcResp)
@@ -2043,16 +2043,275 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
-	noiseConfig := r.config.Test.GlobalNoise.Global
-	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
-	}
+	noiseConfig := r.httpNoiseConfig(testSetID)
+	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
-		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+		return pass, result
 	}
 
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+
+	return pass, result
+}
+
+func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
+	noiseConfig := r.httpNoiseConfig(testSetID)
+	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
+
+	if r.config.Test.SchemaMatch {
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+		return pass, result
+	}
+
+	if emitFailureLogs {
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
+		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+			return true, result
+		}
+		if pass {
+			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+			return pass, result
+		}
+	}
+
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+		return true, result
+	}
+
+	return pass, result
+}
+
+func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
+	noiseConfig := deepCopyNoiseConfig(r.config.Test.GlobalNoise.Global)
+	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+	}
+
+	return noiseConfig
+}
+
+func deepCopyNoiseConfig(src map[string]map[string][]string) map[string]map[string][]string {
+	if src == nil {
+		return nil
+	}
+
+	dst := make(map[string]map[string][]string, len(src))
+	for key, inner := range src {
+		if inner == nil {
+			dst[key] = nil
+			continue
+		}
+
+		copiedInner := make(map[string][]string, len(inner))
+		for innerKey, values := range inner {
+			if values == nil {
+				copiedInner[innerKey] = nil
+				continue
+			}
+
+			copiedInner[innerKey] = append([]string(nil), values...)
+		}
+
+		dst[key] = copiedInner
+	}
+
+	return dst
+}
+
+func cloneHTTPResp(resp *models.HTTPResp) *models.HTTPResp {
+	if resp == nil {
+		return nil
+	}
+
+	clone := *resp
+	if resp.Header != nil {
+		clone.Header = make(map[string]string, len(resp.Header))
+		for key, value := range resp.Header {
+			clone.Header[key] = value
+		}
+	}
+
+	return &clone
+}
+
+func originalHTTPRespBodySize(tc *models.TestCase, actualResponse *models.HTTPResp) int64 {
+	if tc == nil || actualResponse == nil || !tc.HTTPResp.BodySkipped {
+		return 0
+	}
+
+	return int64(len(actualResponse.Body))
+}
+
+func normalizeHTTPRespForReport(tc *models.TestCase, actualResponse *models.HTTPResp, originalBodySize int64) {
+	if tc == nil || actualResponse == nil || !tc.HTTPResp.BodySkipped {
+		return
+	}
+
+	actualResponse.BodySize = originalBodySize
+	actualResponse.BodySkipped = true
+	actualResponse.Body = ""
+}
+
+func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, noiseConfig map[string]map[string][]string, result *models.Result) bool {
+	if !qualifiesForHTTPResponseSchemaAdditionPass(result) {
+		return false
+	}
+
+	assessment, assessmentErr := matcherUtils.ComputeFailureAssessmentJSON(
+		tc.HTTPResp.Body,
+		actualResponse.Body,
+		bodyNoiseForTestCase(tc.Noise, noiseConfig),
+		r.config.Test.IgnoreOrdering,
+	)
+
+	fields := []zap.Field{
+		zap.String("protocol", "http"),
+		zap.String("testcase", tc.Name),
+		zap.String("testset", testSetID),
+	}
+	if assessment != nil {
+		if len(assessment.AddedFields) > 0 {
+			fields = append(fields, zap.Strings("added_fields", assessment.AddedFields))
+		}
+		if len(assessment.Reasons) > 0 {
+			fields = append(fields, zap.Strings("assessment_reasons", assessment.Reasons))
+		}
+	}
+	if assessmentErr != nil {
+		fields = append(fields, zap.NamedError("assessment_error", assessmentErr))
+	}
+
+	r.logger.Info(
+		"Additive response schema change detected. Passing testcase by default because only new response fields were added. Verify downstream consumers are not affected by the schema expansion.",
+		fields...,
+	)
+
+	normalizePassingHTTPResult(result)
+	return true
+}
+
+func qualifiesForHTTPResponseSchemaAdditionPass(result *models.Result) bool {
+	if result == nil {
+		return false
+	}
+
+	return (result.FailureInfo.Risk == models.Low &&
+		hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded)) ||
+		hasOnlySchemaAdditionAndContentLengthDiff(result)
+}
+
+func hasOnlyFailureCategories(categories []models.FailureCategory, allowed ...models.FailureCategory) bool {
+	if len(categories) == 0 {
+		return false
+	}
+
+	allowedSet := make(map[models.FailureCategory]struct{}, len(allowed))
+	for _, category := range allowed {
+		allowedSet[category] = struct{}{}
+	}
+
+	for _, category := range categories {
+		if _, ok := allowedSet[category]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func hasOnlySchemaAdditionAndContentLengthDiff(result *models.Result) bool {
+	if !hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded, models.HeaderChanged) {
+		return false
+	}
+
+	hasSchemaAdded := false
+	hasHeaderChanged := false
+	for _, category := range result.FailureInfo.Category {
+		hasSchemaAdded = hasSchemaAdded || category == models.SchemaAdded
+		hasHeaderChanged = hasHeaderChanged || category == models.HeaderChanged
+	}
+
+	return hasSchemaAdded && hasHeaderChanged && hasOnlyContentLengthDiff(result.HeadersResult)
+}
+
+func hasOnlyContentLengthDiff(headers []models.HeaderResult) bool {
+	foundDiff := false
+
+	for _, header := range headers {
+		if header.Normal {
+			continue
+		}
+
+		foundDiff = true
+		key := strings.ToLower(header.Expected.Key)
+		if key == "" {
+			key = strings.ToLower(header.Actual.Key)
+		}
+		if key != "content-length" {
+			return false
+		}
+		if len(header.Expected.Value) == 0 || len(header.Actual.Value) == 0 {
+			return false
+		}
+	}
+
+	return foundDiff
+}
+
+func normalizePassingHTTPResult(result *models.Result) {
+	if result == nil {
+		return
+	}
+
+	result.FailureInfo = models.FailureInfo{}
+	result.StatusCode.Normal = true
+	result.BodySizeResult.Normal = true
+
+	for i := range result.HeadersResult {
+		result.HeadersResult[i].Normal = true
+	}
+	for i := range result.BodyResult {
+		result.BodyResult[i].Normal = true
+	}
+	for i := range result.TrailerResult {
+		result.TrailerResult[i].Normal = true
+	}
+}
+
+func bodyNoiseForTestCase(testCaseNoise map[string][]string, noiseConfig map[string]map[string][]string) map[string][]string {
+	bodyNoise := cloneNoiseMap(noiseConfig["body"])
+
+	for field, regexArr := range testCaseNoise {
+		parts := strings.Split(field, ".")
+		if len(parts) <= 1 || parts[0] != "body" {
+			continue
+		}
+
+		bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = append([]string(nil), regexArr...)
+	}
+
+	return bodyNoise
+}
+
+func cloneNoiseMap(input map[string][]string) map[string][]string {
+	if len(input) == 0 {
+		return map[string][]string{}
+	}
+
+	out := make(map[string][]string, len(input))
+	for key, values := range input {
+		out[key] = append([]string(nil), values...)
+	}
+
+	return out
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
