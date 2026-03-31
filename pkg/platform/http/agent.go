@@ -794,14 +794,19 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
 		}
-		appErrCh <- appErr
+		if appErr != (models.AppError{}) {
+			appErrCh <- appErr
+		}
 		return nil
 	})
 
 	select {
 	case <-runAppCtx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
-	case appErr := <-appErrCh:
+	case appErr, ok := <-appErrCh:
+		if !ok {
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+		}
 		return appErr
 	}
 }
