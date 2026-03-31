@@ -123,6 +123,29 @@ func isWordChar(ch byte) bool {
 	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
 }
 
+func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult) string {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
+		if len(testCaseResults) == 0 {
+			return "application startup failed - check application logs in the app_logs field for details and next steps"
+		}
+		return "application stopped during replay - check application logs in the app_logs field for details and next steps"
+	case models.TestSetStatusInternalErr:
+		return "replay failed with an internal error - please report this issue if it persists"
+	default:
+		return ""
+	}
+}
+
+func shouldIncludeAppLogs(status models.TestSetStatus) bool {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr:
+		return true
+	default:
+		return false
+	}
+}
+
 type Replayer struct {
 	logger             *zap.Logger
 	testDB             TestDB
@@ -835,15 +858,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
 	var testSetStatusByErrChanMu sync.RWMutex
+	var lastAppErr models.AppError
 	setErrStatus := func(status models.TestSetStatus) {
 		testSetStatusByErrChanMu.Lock()
 		testSetStatusByErrChan = status
+		testSetStatusByErrChanMu.Unlock()
+	}
+	setLastAppErr := func(appErr models.AppError) {
+		testSetStatusByErrChanMu.Lock()
+		lastAppErr = appErr
 		testSetStatusByErrChanMu.Unlock()
 	}
 	getErrStatus := func() models.TestSetStatus {
 		testSetStatusByErrChanMu.RLock()
 		defer testSetStatusByErrChanMu.RUnlock()
 		return testSetStatusByErrChan
+	}
+	getLastAppErr := func() models.AppError {
+		testSetStatusByErrChanMu.RLock()
+		defer testSetStatusByErrChanMu.RUnlock()
+		return lastAppErr
 	}
 
 	cmdType := utils.CmdType(r.config.CommandType)
@@ -868,6 +902,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 					AppCommand: conf.AppCommand,
 				})
+				if appErr != (models.AppError{}) {
+					setLastAppErr(appErr)
+				}
 				if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
 					setErrStatus(mappedStatus)
 				}
@@ -884,6 +921,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			defer utils.Recover(r.logger)
 			select {
 			case err := <-appErrChan:
+				setLastAppErr(err)
 				if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
 					setErrStatus(mappedStatus)
 				} else if err.AppErrorType == models.ErrCtxCanceled {
@@ -1125,6 +1163,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
+					if appErr != (models.AppError{}) {
+						setLastAppErr(appErr)
+					}
 					if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
 						setErrStatus(mappedStatus)
 					}
@@ -1141,6 +1182,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				defer utils.Recover(r.logger)
 				select {
 				case err := <-appErrChan:
+					setLastAppErr(err)
 					if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
 						setErrStatus(mappedStatus)
 					} else if err.AppErrorType == models.ErrCtxCanceled {
@@ -1742,21 +1784,32 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = resolvedStatus
 	}
 
+	appFailure := getLastAppErr()
+	appLogs := appFailure.AppLogs
+	if !shouldIncludeAppLogs(testSetStatus) {
+		appLogs = ""
+	} else if appLogs == "" && testSetStatus == models.TestSetStatusAppHalted {
+		logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
+		defer cancel()
+		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
+	}
 	testReport = &models.TestReport{
-		Version:    models.GetVersion(),
-		TestSet:    testSetID,
-		Status:     string(testSetStatus),
-		Total:      testCasesCount,
-		Success:    success,
-		Failure:    failure,
-		Obsolete:   obsolete,
-		Ignored:    ignored,
-		Tests:      testCaseResults,
-		TimeTaken:  timeTaken.String(),
-		HighRisk:   riskHigh,
-		MediumRisk: riskMed,
-		LowRisk:    riskLow,
-		CmdUsed:    r.config.Test.CmdUsed,
+		Version:       models.GetVersion(),
+		TestSet:       testSetID,
+		Status:        string(testSetStatus),
+		Total:         testCasesCount,
+		Success:       success,
+		Failure:       failure,
+		Obsolete:      obsolete,
+		Ignored:       ignored,
+		Tests:         testCaseResults,
+		TimeTaken:     timeTaken.String(),
+		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults),
+		AppLogs:       appLogs,
+		HighRisk:      riskHigh,
+		MediumRisk:    riskMed,
+		LowRisk:       riskLow,
+		CmdUsed:       r.config.Test.CmdUsed,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
