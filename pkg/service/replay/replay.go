@@ -2604,18 +2604,7 @@ func bodyNoiseForTestCase(testCaseNoise map[string][]string, noiseConfig map[str
 	return bodyNoise
 }
 
-func cloneNoiseMap(input map[string][]string) map[string][]string {
-	if len(input) == 0 {
-		return map[string][]string{}
-	}
-
-	out := make(map[string][]string, len(input))
-	for key, values := range input {
-		out[key] = append([]string(nil), values...)
-	}
-
-	return out
-}
+// cloneNoiseMap is defined in hooks.go
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global

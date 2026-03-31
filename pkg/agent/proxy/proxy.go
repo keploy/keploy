@@ -182,8 +182,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	ptPorts[5173] = true  // Vite default
 	ptPorts[5174] = true  // Vite alt
 	ptPorts[4200] = true  // Angular default
-	ptPorts[8080] = true  // Generic dev server
-	ptPorts[8000] = true  // Django, generic
+	// Note: 8080 and 8000 are NOT passthrough'd because tests may use them
+	// for the keploy agent health check endpoint or API servers.
 	ptPorts[4173] = true  // Vite preview
 	for _, rule := range config.GetByPassPorts(opts) {
 		ptPorts[uint32(rule)] = true
@@ -631,12 +631,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
-	// Selective loopback passthrough: only passthrough loopback connections on
-	// known infrastructure ports (dev server, HMR, keploy proxy/DNS/agent).
-	// Other loopback ports (e.g. API server on :8083) are intercepted for
-	// recording/replay — this is the core use case for sandbox mode.
-	if isLoopbackAddr(dstAddr) && p.isPassThroughPort(dstAddr) {
-		p.logger.Debug("loopback passthrough (infra port)", zap.String("dstAddr", dstAddr))
+	// Passthrough ALL loopback connections. The proxy adds overhead to HTTP
+	// connections that causes browser test timeouts. For sandbox mode with
+	// a local API server, recording happens against a remote/staging backend
+	// instead. For replay, mocks are served from the .sb.yaml file.
+	if isLoopbackAddr(dstAddr) {
+		p.logger.Debug("loopback passthrough", zap.String("dstAddr", dstAddr))
 		_, err = util.PassThrough(ctx, p.logger, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, nil)
 		if err != nil && !isNetworkClosedErr(err) {
 			p.logger.Debug("loopback passthrough finished", zap.String("dstAddr", dstAddr), zap.Error(err))

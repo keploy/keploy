@@ -18,6 +18,75 @@ import (
 	"go.uber.org/zap"
 )
 
+// knownNoisePatterns lists well-known domains that produce noise traffic during
+// browser testing (analytics, tracking, CDN, fonts, chat widgets). Connections to
+// these hosts bypass TLS MITM during recording and are dropped during replay.
+// The "*." prefix means "any subdomain of".
+var knownNoisePatterns = []string{
+	"*.google-analytics.com",
+	"*.googletagmanager.com",
+	"*.clarity.ms",
+	"*.hotjar.com",
+	"*.stripe.com",
+	"*.stripe.network",
+	"*.facebook.net",
+	"*.doubleclick.net",
+	"*.googlesyndication.com",
+	"fonts.googleapis.com",
+	"fonts.gstatic.com",
+	"*.cdnfonts.com",
+	"cdn.jsdelivr.net",
+	"cdnjs.cloudflare.com",
+	"unpkg.com",
+	"*.sentry.io",
+	"*.chatwoot.io",
+	"*.intercom.io",
+	"*.crisp.chat",
+	"*.tawk.to",
+	"*.segment.io",
+	"*.segment.com",
+	"*.mixpanel.com",
+	"*.amplitude.com",
+	"*.posthog.com",
+	"*.logrocket.com",
+	"*.fullstory.com",
+	"*.mouseflow.com",
+}
+
+// matchesNoisePattern returns true if hostname matches any known noise pattern.
+// Supports exact match and wildcard prefix ("*.example.com" matches "foo.example.com"
+// and "example.com" itself).
+func matchesNoisePattern(hostname string) bool {
+	hostname = strings.TrimSuffix(strings.ToLower(hostname), ".")
+	for _, pattern := range knownNoisePatterns {
+		if strings.HasPrefix(pattern, "*.") {
+			suffix := pattern[1:] // e.g. ".google-analytics.com"
+			base := pattern[2:]   // e.g. "google-analytics.com"
+			if hostname == base || strings.HasSuffix(hostname, suffix) {
+				return true
+			}
+		} else {
+			if hostname == strings.ToLower(pattern) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ClassifyAndBypassHost checks if a hostname matches known noise patterns
+// and adds it to the bypass set if it does.
+func (p *Proxy) ClassifyAndBypassHost(hostname string) {
+	hostname = strings.TrimSuffix(hostname, ".")
+	if matchesNoisePattern(hostname) {
+		p.bypassedHostsMu.Lock()
+		p.bypassedHosts[hostname] = true
+		p.bypassedHostsMu.Unlock()
+		p.logger.Debug("classified host as noise — will bypass TLS MITM",
+			zap.String("hostname", hostname))
+	}
+}
+
 func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	addr := fmt.Sprintf(":%v", p.DNSPort)
 
@@ -301,6 +370,11 @@ func (p *Proxy) defaultDNSResponse(question dns.Question) dnsCacheEntry {
 }
 
 func (p *Proxy) getMockedDNSResponse(question dns.Question) (dnsCacheEntry, bool) {
+	// Classify for noise bypass in test mode too, so handleConnection can
+	// drop connections to noise hosts without TLS MITM.
+	hostname := strings.TrimSuffix(question.Name, ".")
+	p.ClassifyAndBypassHost(hostname)
+
 	mgr := p.getMockManager()
 	if mgr == nil {
 		return dnsCacheEntry{}, false
@@ -481,6 +555,11 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		Msg:          in,
 		FromUpstream: true,
 	}
+
+	// Classify the hostname for noise bypass. This is done regardless of session
+	// state so that the bypass set is populated even if mocks aren't being recorded.
+	hostname := strings.TrimSuffix(question.Name, ".")
+	p.ClassifyAndBypassHost(hostname)
 
 	// If no session, we still return resolved response but skip recording.
 	if session == nil || session.MC == nil {

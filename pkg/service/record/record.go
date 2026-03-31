@@ -268,6 +268,9 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	}
 
 	passPortsUint := config.GetByPassPorts(r.config)
+	// Add common dev server ports to eBPF passthrough so they're never
+	// intercepted during browser test recording.
+	passPortsUint = append(passPortsUint, 3000, 3001, 5173, 5174, 4200, 4173)
 	passPortsUint32 := make([]uint32, len(passPortsUint)) // slice type of uint32
 	for i, port := range passPortsUint {
 		passPortsUint32[i] = uint32(port)

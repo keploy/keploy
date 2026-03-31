@@ -163,8 +163,11 @@ func (r *replayer) runMockReplay(ctx context.Context, command, commandType strin
 	}()
 
 	passPortsUint := config.GetByPassPorts(r.cfg)
-	// Add proxy and DNS ports to passthrough to prevent self-interception
+	// Add infrastructure ports to eBPF passthrough to prevent interception:
+	// - Proxy and DNS ports (self-interception prevention)
+	// - Common dev server ports (must not be intercepted during browser testing)
 	passPortsUint = append(passPortsUint, uint(r.cfg.ProxyPort), uint(r.cfg.DNSPort))
+	passPortsUint = append(passPortsUint, 3000, 3001, 5173, 5174, 4200, 4173)
 	err := instrumentation.Setup(grpCtx, command, models.SetupOptions{
 		Container:         r.cfg.ContainerName,
 		CommandType:       commandType,
