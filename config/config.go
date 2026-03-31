@@ -13,6 +13,12 @@ type MockDownload struct {
 	RegistryIDs []string `json:"registryIds" yaml:"registryIds" mapstructure:"registryIds"`
 }
 
+// Sandbox holds sandbox configuration for cloud-synced mock management.
+type Sandbox struct {
+	// Ref is the sandbox reference in the format <company>/<service>:<tag>.
+	Ref string `json:"ref" yaml:"ref" mapstructure:"ref"`
+}
+
 type Config struct {
 	Path                  string              `json:"path" yaml:"path" mapstructure:"path"`
 	AppName               string              `json:"appName" yaml:"appName" mapstructure:"appName"`
@@ -55,6 +61,7 @@ type Config struct {
 	APIServerURL          string              `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID        string              `json:"-" yaml:"-" mapstructure:"-"`
 	MockDownload          MockDownload        `json:"mockDownload" yaml:"mockDownload" mapstructure:"mockDownload"`
+	Sandbox               Sandbox             `json:"sandbox" yaml:"sandbox" mapstructure:"sandbox"`
 }
 
 type Agent struct {

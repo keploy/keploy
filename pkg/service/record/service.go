@@ -10,7 +10,7 @@ type Instrumentation interface {
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 	GetIncoming(ctx context.Context, opts models.IncomingOptions) (<-chan *models.TestCase, error)
-	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error)
+	GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.MockFrame, error)
 	GetMappings(ctx context.Context, opts models.IncomingOptions) (<-chan models.TestMockMapping, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, opts models.RunOptions) models.AppError
@@ -34,6 +34,7 @@ type TestDB interface {
 
 type MockDB interface {
 	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
+	InsertMockToPath(ctx context.Context, mock *models.Mock, mockFilePath string) error
 	DeleteMocksForSet(ctx context.Context, testSetID string) error
 	GetCurrMockID() int64
 	ResetCounterID()
@@ -58,6 +59,6 @@ type Telemetry interface {
 
 type FrameChan struct {
 	Incoming <-chan *models.TestCase
-	Outgoing <-chan *models.Mock
+	Outgoing <-chan *models.MockFrame
 	Mappings <-chan models.TestMockMapping
 }

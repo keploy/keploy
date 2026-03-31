@@ -19,5 +19,9 @@ type Service interface {
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
+	// StartSandboxScope starts a new recording/replay scope with location+name.
+	StartSandboxScope(ctx context.Context, location, name string) error
+	// GetCurrentScopeFilePath returns the currently active sandbox file path.
+	GetCurrentScopeFilePath(ctx context.Context) string
 	// SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
 }

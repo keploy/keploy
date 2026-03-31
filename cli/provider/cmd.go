@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func LogExample(example string) string {
@@ -156,6 +157,8 @@ type CmdConfigurator struct {
 	cfg    *config.Config
 }
 
+const MCPStdioAnnotationKey = "keploy.io/mcp-stdio"
+
 func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigurator {
 	return &CmdConfigurator{
 		logger: logger,
@@ -163,10 +166,25 @@ func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigura
 	}
 }
 
+func isMCPStdioCommand(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Annotations != nil && cmd.Annotations[MCPStdioAnnotationKey] == "true" {
+		return true
+	}
+	parent := cmd.Parent()
+	return cmd.Name() == "serve" && parent != nil && parent.Name() == "mcp"
+}
+
 func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
-	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if isMCPStdioCommand(cmd) {
+			_, _ = fmt.Fprintln(os.Stderr, "error:", err)
+			return err
+		}
 		PrintLogo(os.Stdout, true)
 		color.Red(fmt.Sprintf("❌ error: %v", err))
 		fmt.Println()
@@ -238,7 +256,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 
-	case "record", "test", "rerecord":
+	case "record", "test", "replay", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
@@ -246,6 +264,33 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("generate", true, "Specify whether to generate schemas for the current service or not")
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
 			return nil
+		}
+		if cmd.Parent() != nil && (cmd.Parent().Name() == "mock" || cmd.Parent().Name() == "sandbox") {
+			if cmd.Name() == "record" {
+				locationDefault := c.cfg.Path
+				if locationDefault == "" {
+					locationDefault = "."
+				}
+				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+				cmd.Flags().String("location", locationDefault, "Location directory to store sandbox files")
+				cmd.Flags().String("name", "keploy", "Sandbox file prefix (final file: <name>.sb.yaml)")
+				cmd.Flags().String("tag", "", "Sandbox tag (format: <semver>, e.g. v1.0.0). Full ref is inferred as <username>/<appName>:<tag>")
+				cmd.Flags().Duration("duration", 0, "Recording duration (e.g., \"60s\")")
+				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
+				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+				return nil
+			}
+			if cmd.Name() == "replay" {
+				cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+				cmd.Flags().String("location", ".", "Location directory to read sandbox files")
+				cmd.Flags().String("name", "keploy", "Sandbox file prefix (final file: <name>.sb.yaml)")
+				cmd.Flags().Bool("local", false, "Local-only sandbox replay mode")
+				cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept outgoing calls")
+				cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+				cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+				return nil
+			}
 		}
 
 		cmd.Flags().Bool("sync", c.cfg.Record.Synchronous, "Synchronous recording of testcases")
@@ -309,11 +354,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("enable-testing", c.cfg.Agent.EnableTesting, "Enable testing keploy with keploy")
 		cmd.Flags().String("mode", string(c.cfg.Agent.Mode), "Mode of operation for Keploy (record or test)")
 		cmd.Flags().Bool("sync", c.cfg.Agent.Synchronous, "Synchronous recording of testcases")
+		cmd.Flags().String("path", c.cfg.Path, "Path to local directory where generated mocks are stored")
 		cmd.Flags().Int("enable-sampling", c.cfg.Agent.EnableSampling, "Enable sampling of testcases recording")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.Agent.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().UintSlice("pass-through-ports", c.cfg.Agent.PassThroughPorts, "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().Bool("skip-ingress", c.cfg.Agent.SkipIngress, "Skip attaching ingress bind hooks (used in sandbox record mode)")
+
+	case "serve":
+		if isMCPStdioCommand(cmd) {
+			return nil
+		}
 
 	default:
 		return errors.New("unknown command name")
@@ -449,6 +501,12 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	if isMCPStdioCommand(cmd) {
+		utils.SetMCPStdio(true)
+		if err := c.configureMCPLogger(zapcore.InfoLevel); err != nil {
+			return err
+		}
+	}
 	err := isCompatible(c.logger)
 	if err != nil {
 		return err
@@ -492,6 +550,16 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 			return err
 		}
 	}
+	return nil
+}
+
+func (c *CmdConfigurator) configureMCPLogger(level zapcore.Level) error {
+	logger, err := log.NewStderrLogger(level)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "failed to initialize stderr logger:", err)
+		return err
+	}
+	*c.logger = *logger
 	return nil
 }
 
@@ -596,18 +664,29 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
-	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" {
-		PrintLogo(os.Stdout, disableAnsi)
-	}
-	if c.cfg.Debug {
-		logger, err := log.ChangeLogLevel(zap.DebugLevel)
-		*c.logger = *logger
-		if err != nil {
-			errMsg := "failed to change log level"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+	isMCP := isMCPStdioCommand(cmd)
+	if isMCP {
+		utils.SetMCPStdio(true)
+		c.cfg.DisableANSI = true
+		models.IsAnsiDisabled = true
+		level := zapcore.InfoLevel
+		if c.cfg.Debug {
+			level = zapcore.DebugLevel
+		}
+		if err := c.configureMCPLogger(level); err != nil {
+			return err
+		}
+	} else {
+		// NOTE: Logo is already printed in PersistentPreRun (root.go),
+		// so we don't print it again here to avoid duplicate logos.
+		if c.cfg.Debug {
+			logger, err := log.ChangeLogLevel(zap.DebugLevel)
+			*c.logger = *logger
+			if err != nil {
+				errMsg := "failed to change log level"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 	}
 
@@ -622,7 +701,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.E2E = true
 	}
 
-	// Add mode to logger for agent command to differentiate agent logs from client logs
 	if cmd.Name() == "agent" {
 		logger, err := log.AddMode(cmd.Name())
 		*c.logger = *logger
@@ -635,7 +713,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing
-		if cmd.Name() != "agent" { // Skip if already added for agent
+		if cmd.Name() != "agent" && !isMCP { // Skip if already added for agent
 			logger, err := log.AddMode(cmd.Name())
 			*c.logger = *logger
 			if err != nil {
@@ -647,7 +725,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.DisableTele = true
 	}
 
-	if c.cfg.DisableANSI {
+	if c.cfg.DisableANSI && !isMCP {
 		logger, err := log.ChangeColorEncoding()
 		models.IsAnsiDisabled = true
 		*c.logger = *logger
@@ -816,7 +894,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
+			testSets, err := cmd.Flags().GetStringSlice("test-sets")
 			if err != nil {
 				errMsg := "failed to get the testsets"
 				utils.LogError(c.logger, err, errMsg)
@@ -885,7 +963,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-	case "record", "test", "rerecord":
+	case "record", "test", "replay", "rerecord":
 
 		if cmd.Name() == "rerecord" {
 			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
@@ -936,6 +1014,79 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
+		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "sandbox" {
+			if c.cfg.Command == "" {
+				return c.noCommandError()
+			}
+
+			if cmd.Name() == "record" {
+				location, err := cmd.Flags().GetString("location")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get location flag")
+					return errors.New("failed to get location flag")
+				}
+				c.cfg.Path, err = utils.GetAbsPath(location)
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get absolute path")
+					return errors.New("failed to get absolute path")
+				}
+
+				duration, err := cmd.Flags().GetDuration("duration")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get duration flag")
+					return errors.New("failed to get duration flag")
+				}
+				c.cfg.Record.RecordTimer = duration
+				return nil
+			}
+
+			if cmd.Name() == "replay" {
+				location, err := cmd.Flags().GetString("location")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get location flag")
+					return errors.New("failed to get location flag")
+				}
+				c.cfg.Path, err = utils.GetAbsPath(location)
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get absolute path")
+					return errors.New("failed to get absolute path")
+				}
+				return nil
+			}
+		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+			if c.cfg.Command == "" {
+				return c.noCommandError()
+			}
+			if cmd.Name() == "record" {
+				if c.cfg.Path == "" {
+					c.cfg.Path = "./keploy"
+				}
+				path, err := cmd.Flags().GetString("path")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get path flag")
+					return errors.New("failed to get path flag")
+				}
+				c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+				duration, err := cmd.Flags().GetDuration("duration")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get duration flag")
+					return errors.New("failed to get duration flag")
+				}
+				c.cfg.Record.RecordTimer = duration
+				return nil
+			}
+			if cmd.Name() == "test" {
+				path, err := cmd.Flags().GetString("path")
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to get path flag")
+					return errors.New("failed to get path flag")
+				}
+				c.cfg.Path = utils.ToAbsPath(c.logger, path)
+				return nil
+			}
 		}
 
 		// set the command type
@@ -1074,13 +1225,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// get disable-mapping flag value
-			disableMapping, err := cmd.Flags().GetBool("disable-mapping")
-			if err != nil {
-				errMsg := "failed to get the disable-mapping flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if cmd.Flags().Changed("disable-mapping") || !viper.IsSet("disableMapping") {
+				disableMapping, err := cmd.Flags().GetBool("disable-mapping")
+				if err != nil {
+					errMsg := "failed to get the disable-mapping flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.DisableMapping = disableMapping
 			}
-			c.cfg.DisableMapping = disableMapping
 
 			retryPassing, err := cmd.Flags().GetBool("retry-passing-test")
 			if err != nil {
@@ -1356,6 +1509,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.PassThroughPorts = passThroughPorts
 
+		skipIngress, err := cmd.Flags().GetBool("skip-ingress")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get skip-ingress flag")
+			return nil
+		}
+		c.cfg.Agent.SkipIngress = skipIngress
 	}
 
 	return nil

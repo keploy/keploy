@@ -1,0 +1,150 @@
+### Inputs / Placeholders
+
+**TEST COMMAND**
+
+* {{test_command}}
+
+**Keploy config file:** support both `keploy.yml` and `keploy.yaml` (prefer whichever exists).
+
+---
+
+### Repo / CI Detection Requirements
+
+* You must determine the default branch automatically by inspecting the repo's default-branch metadata available in the CI environment (or repo settings files if present). **Do NOT use `origin/HEAD` fallback chains or provider API fallbacks.**
+* You must detect which CI/CD platform is used by scanning the repo (e.g., `.github/workflows/*`, `.gitlab-ci.yml`, `Jenkinsfile`, `azure-pipelines.yml`, `.circleci/config.yml`, `bitbucket-pipelines.yml`, etc.).
+* If multiple exist, select the ONE that can implement BOTH pipelines most cleanly (supports: PR triggers, push triggers, conditional steps, and safe "skip bot commit" logic).
+
+---
+
+### Dependency Installation Requirements (must be tool-driven)
+
+* You must use the info **evaluated from** `keploy_dependency_start` tool response to determine:
+
+  * how to setup the runtime/toolchain
+  * which dependencies to install in "minimal deps" vs "full deps" phases
+  * exact commands to run for installs
+    **Do NOT invent dependency commands; derive them from the tool output.**
+* If the tool response provides separate commands, treat them as authoritative:
+
+  * `runtime_setup_commands` (language/toolchain setup)
+  * `minimal_deps_install_commands` (only what's needed to run `{{test_command}}` locally without external services)
+  * `full_deps_install_commands` (everything needed for real outgoing calls during recording)
+* If the tool response does not explicitly separate minimal vs full: infer minimal vs full from the response, and explain the assumption in comments in the pipeline.
+* Install ONLY "minimal dependencies" required for running `{{test_command}}` (exclude external services/clients that are only needed for real outgoing calls, because replay uses sandboxes/mocks).
+* Install "full dependencies" (including those required for outgoing calls) ONLY in the recording phase (Phase B).
+
+---
+
+## Your goal is to create exactly TWO pipelines with the following strict behavior:
+
+* Create exactly TWO separate pipeline files in the repository codebase (no extras). Name them clearly and keep them independent.
+* Do NOT print the full pipeline YAML content as output.
+* The assistant's output should include:
+
+  * the detected CI/CD platform
+  * the exact file paths + filenames created/updated
+  * a short "Required Secrets/Env Vars" section
+* All shell steps must be fail-fast by default (`set -euo pipefail` or CI equivalent), except where explicitly required to "catch failure and continue" (Phase A → Phase B).
+
+---
+
+# PIPELINE 1: Pull Request Validation
+
+**Trigger:** On Pull Request creation or update against the default branch.
+**Purpose:** Fast validation of code changes using existing sandboxes.
+
+**Steps to implement:**
+
+1. Checkout the repository.
+2. Setup runtime/toolchain using ONLY `keploy_dependency_start` evaluated output (`runtime_setup_commands`).
+3. Install minimal dependencies using ONLY `minimal_deps_install_commands` from `keploy_dependency_start`.
+4. Install Keploy using EXACTLY this command:
+   `curl --silent -O -L https://keploy.io/install.sh && source install.sh`
+5. Run Replay Validation:
+   `keploy sandbox replay -c "{{test_command}}"`
+6. Requirement: The pipeline MUST fail immediately if the replay step fails.
+
+---
+
+# PIPELINE 2: Default Branch Push & Conditional Recording
+
+**Trigger:** On push to the default branch.
+**Purpose:** Conditional recording. Only create new sandboxes if existing ones fail validation.
+**Critical Requirement:** You MUST include logic to prevent an infinite CI loop. The workflow must gracefully exit or skip if the commit was made by the CI bot.
+
+**Steps to implement:**
+
+1. Checkout the repository.
+2. Setup runtime/toolchain using ONLY `runtime_setup_commands` from `keploy_dependency_start`.
+3. Install Keploy:
+   `curl --silent -O -L https://keploy.io/install.sh && source install.sh`
+
+---
+
+## Phase A: Try Replay First (Idempotency Check)
+
+1. Install minimal dependencies using ONLY `minimal_deps_install_commands`.
+2. Run:
+   `keploy sandbox replay -c "{{test_command}}"`
+3. If Replay PASSES ✅: exit job successfully (do not record, do not commit).
+4. If Replay FAILS ❌: capture the failure without failing the job, and proceed immediately to Phase B (platform-specific "continue on error" ONLY for this replay step).
+
+---
+
+## Phase B: Record & Update (Runs ONLY if Phase A fails)
+
+1. Install full dependencies using ONLY `full_deps_install_commands` from `keploy_dependency_start`.
+
+2. Increment Tag:
+
+   * Read `sandbox.ref` from `keploy.yml` or `keploy.yaml`
+   * Extract `<company>/<app>:vX.Y.Z`
+   * Bump PATCH only (`vX.Y.Z` → `vX.Y.(Z+1)`)
+   * Store as `NEW_TAG`
+   * Must preserve company/app prefix exactly.
+   * Must validate it is SemVer with leading `v`. If invalid/missing, fail with a clear error.
+
+   Format:
+
+   ```
+   sandbox:
+     ref: <company_name>/<app_name>:<tag>
+   ```
+
+3. Record:
+   `keploy sandbox record -c "{{test_command}}" --tag "$NEW_TAG"`
+
+4. Verify (Replay & Upload):
+   `keploy sandbox replay -c "{{test_command}}"`
+
+   * Crucial: If this verification replay fails, STOP the pipeline immediately ❌. Do not commit.
+
+5. Update & Push (only if verification passes):
+
+   1. Stage the modified Keploy config file (`keploy.yml` or `keploy.yaml`) updated by Keploy record (sandbox.ref bump).
+   2. Configure the Git bot user (or similar).
+   3. Commit with message like:
+      `chore: bump sandbox version to $NEW_TAG`
+      Also ensure it doesn't retrigger this pipeline:
+
+      * include platform-specific skip token if supported
+      * AND job-level skip when commit author/actor is the CI bot
+   4. Push the commit to the default branch.
+
+---
+
+## Output Requirements
+
+1. State which CI/CD platform you detected and why (which file triggered detection).
+2. List the exact two pipeline file paths you created/modified inside the repo.
+3. Output a short "Required Secrets/Env Vars" section at the end detailing any tokens needed for the selected CI/CD platform.
+
+---
+
+## Required Secrets / Env Vars (template to fill based on selected CI)
+
+* CI push token/credential (platform-native token for pushing commits back to default branch)
+* Keploy auth (e.g., `KEPLOY_API_KEY`) if required by your Keploy setup
+* Any repo-specific env vars required to run `{{test_command}}` (ONLY if `keploy_dependency_start` indicates them)
+
+---

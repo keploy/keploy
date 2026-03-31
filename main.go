@@ -50,6 +50,7 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+	isAgent := len(os.Args) > 1 && os.Args[1] == "agent"
 
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
@@ -100,17 +101,26 @@ func start(ctx context.Context) {
 	defer func() {
 		inDocker := os.Getenv("KEPLOY_INDOCKER")
 		if inDocker != "true" {
+			cleanupLogger := logger
+			if stderrLogger, err := log.NewStderrLogger(log.LogCfg.Level.Level()); err == nil {
+				cleanupLogger = stderrLogger
+			} else {
+				cleanupLogger = zap.NewNop()
+			}
 			if utils.LogFile != nil {
 				err := utils.LogFile.Close()
 				if err != nil {
-					utils.LogError(logger, err, "Failed to close Keploy Logs")
+					utils.LogError(cleanupLogger, err, "Failed to close Keploy Logs")
 				}
+				utils.LogFile = nil
 			}
-			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
-				return
-			}
-			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-				return
+			if !isAgent {
+				if err := utils.DeleteFileIfNotExists(cleanupLogger, "keploy-logs.txt"); err != nil {
+					return
+				}
+				if err := utils.DeleteFileIfNotExists(cleanupLogger, "docker-compose-tmp.yaml"); err != nil {
+					return
+				}
 			}
 		}
 	}()
@@ -152,8 +162,8 @@ func start(ctx context.Context) {
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
 			fmt.Println("Run 'keploy --help' for usage.")
-			os.Exit(1)
 		}
+		os.Exit(1)
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)

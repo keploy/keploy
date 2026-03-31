@@ -17,11 +17,12 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	Pid      uint32
-	IsDocker bool
-	Mode     models.Mode
-	Rules    []models.BypassRule
-	Port     uint32
+	Pid         uint32
+	IsDocker    bool
+	Mode        models.Mode
+	Rules       []models.BypassRule
+	Port        uint32
+	SkipIngress bool
 }
 
 type AuxiliaryProxyHook interface {
@@ -40,6 +41,8 @@ type Proxy interface {
 	// SetGracefulShutdown sets a flag to indicate the application is shutting down gracefully.
 	// When this flag is set, connection errors will be logged as debug instead of error.
 	SetGracefulShutdown(ctx context.Context) error
+	StartSandboxScope(ctx context.Context, scopeFilePath string) error
+	GetCurrentScopeFilePath(ctx context.Context) string
 	Mapping(ctx context.Context, mappingCh chan models.TestMockMapping)
 	GetDestInfo() DestInfo
 	GetIntegrations() map[integrations.IntegrationType]integrations.Integrations

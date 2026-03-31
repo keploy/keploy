@@ -1,12 +1,14 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -44,29 +46,22 @@ func (m *mockConn) Read(b []byte) (n int, err error) {
 	return 0, io.EOF
 }
 
-func (m *mockConn) Write(b []byte) (n int, err error) {
-	return len(b), nil
-}
-
+func (m *mockConn) Write(b []byte) (n int, err error) { return len(b), nil }
 func (m *mockConn) Close() error                       { return nil }
 func (m *mockConn) LocalAddr() net.Addr                { return nil }
 func (m *mockConn) RemoteAddr() net.Addr               { return nil }
-func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
-func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
-func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
+func (m *mockConn) SetDeadline(time.Time) error        { return nil }
+func (m *mockConn) SetReadDeadline(time.Time) error    { return nil }
+func (m *mockConn) SetWriteDeadline(time.Time) error   { return nil }
 
 // newTestHTTP creates an HTTP handler with a no-op logger for testing.
-func newTestHTTP() *HTTP {
-	return &HTTP{Logger: zap.NewNop()}
-}
+func newTestHTTP() *HTTP { return &HTTP{Logger: zap.NewNop()} }
 
 // TestChunkedResponseExitsOnEOF tests that chunkedResponse properly exits the loop
-// when it receives EOF with no data. This test will timeout if the break statement
-// only exits the select block instead of the for loop (which is the bug).
+// when it receives EOF with no data.
 func TestChunkedResponseExitsOnEOF(t *testing.T) {
 	h := newTestHTTP()
 
-	// Create mock connections
 	// clientConn receives the proxied response
 	clientConn := &mockConn{}
 	// destConn simulates a server that sends some chunked data then closes
@@ -79,10 +74,10 @@ func TestChunkedResponseExitsOnEOF(t *testing.T) {
 
 	var finalResp []byte
 
-	// This should complete quickly, not timeout
 	done := make(chan error, 1)
 	go func() {
-		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn)
+		var streamRef *models.StreamRef
+		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn, false, &streamRef, models.OutgoingOptions{})
 	}()
 
 	select {
@@ -91,21 +86,18 @@ func TestChunkedResponseExitsOnEOF(t *testing.T) {
 			t.Fatalf("expected no error, got: %v", err)
 		}
 	case <-time.After(testTimeout):
-		t.Fatal("chunkedResponse did not exit in time - the break statement is not exiting the for loop!")
+		t.Fatal("chunkedResponse did not exit in time")
 	}
 }
 
 // TestChunkedResponseEmptyBody tests the specific case where the server closes
-// the connection immediately (no body). This reproduces the bug seen with Playwright
-// where the proxy gets stuck in a loop. Also verifies we don't do excessive reads.
+// the connection immediately (no body). Also verifies we don't do excessive reads.
 func TestChunkedResponseEmptyBody(t *testing.T) {
 	h := newTestHTTP()
 
 	clientConn := &mockConn{}
 	// destConn simulates a server that immediately returns EOF (connection closed)
-	destConn := &mockConn{
-		data: nil, // No data, just EOF
-	}
+	destConn := &mockConn{data: nil}
 
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
@@ -114,7 +106,8 @@ func TestChunkedResponseEmptyBody(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn)
+		var streamRef *models.StreamRef
+		done <- h.chunkedResponse(ctx, &finalResp, clientConn, destConn, false, &streamRef, models.OutgoingOptions{})
 	}()
 
 	select {
@@ -122,13 +115,81 @@ func TestChunkedResponseEmptyBody(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected no error, got: %v", err)
 		}
-		// Verify we didn't do excessive reads (indicates loop not exiting properly)
 		if destConn.readCount > maxAcceptableReads {
-			t.Errorf("Too many reads from destConn: %d (expected <= %d). "+
-				"This suggests the loop is not exiting properly on EOF",
-				destConn.readCount, maxAcceptableReads)
+			t.Errorf("too many reads from destConn: %d (expected <= %d)", destConn.readCount, maxAcceptableReads)
 		}
 	case <-time.After(testTimeout):
 		t.Fatalf("chunkedResponse stuck in loop after %d reads", destConn.readCount)
 	}
 }
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// scriptedReadConn returns the provided chunks (one per Read call) and then returns a timeout.
+// This models a keep-alive socket where no more data arrives after the terminating chunk.
+type scriptedReadConn struct {
+	chunks [][]byte
+	idx    int
+}
+
+func (c *scriptedReadConn) Read(p []byte) (int, error) {
+	if c.idx >= len(c.chunks) {
+		return 0, timeoutErr{}
+	}
+	ch := c.chunks[c.idx]
+	c.idx++
+	if len(ch) > len(p) {
+		copy(p, ch[:len(p)])
+		return len(p), nil
+	}
+	copy(p, ch)
+	return len(ch), nil
+}
+
+func (c *scriptedReadConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *scriptedReadConn) Close() error                { return nil }
+func (c *scriptedReadConn) LocalAddr() net.Addr         { return &net.TCPAddr{} }
+func (c *scriptedReadConn) RemoteAddr() net.Addr        { return &net.TCPAddr{} }
+func (c *scriptedReadConn) SetDeadline(time.Time) error      { return nil }
+func (c *scriptedReadConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *scriptedReadConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestChunkedResponse_EndMarkerNotIsolated_DoesNotOverread(t *testing.T) {
+	h := newTestHTTP()
+
+	// Pretend the response headers were already read and buffered by handleChunkedResponses.
+	finalResp := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+
+	// Last read contains *both* body bytes and the terminating chunk marker. Older code expected
+	// resp == "0\r\n\r\n" and would overread and hit the timeout error.
+	destConn := &scriptedReadConn{
+		chunks: [][]byte{
+			[]byte("5\r\nhello\r\n0\r\n\r\n"),
+		},
+	}
+
+	clientConn := &mockConn{}
+	var streamRef *models.StreamRef
+	err := h.chunkedResponse(context.Background(), &finalResp, clientConn, destConn, false, &streamRef, models.OutgoingOptions{})
+	if err != nil {
+		t.Fatalf("chunkedResponse returned error: %v", err)
+	}
+	if streamRef != nil {
+		t.Fatalf("expected nil streamRef, got: %#v", streamRef)
+	}
+	if !bytes.HasSuffix(finalResp, []byte("0\r\n\r\n")) {
+		t.Fatalf("finalResp does not end with end marker; len=%d tail=%q", len(finalResp), finalResp[max(0, len(finalResp)-32):])
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+

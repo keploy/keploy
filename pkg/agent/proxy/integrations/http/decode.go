@@ -5,12 +5,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -150,9 +154,24 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						zap.String("diff", report.Diff))
 				}
 
-				// No mock matched — send a 502 so the application gets a
-				// proper HTTP error instead of a silent connection close.
-				noMockBody := "keploy: no matching mock found for this HTTP request\n"
+				// Build a rich 502 body with diagnostics
+				closestInfo := ""
+				diffInfo := ""
+				nextSteps := "Re-record mocks if the API endpoint or request format has changed."
+				if report != nil {
+					if report.ClosestMock != "" {
+						closestInfo = fmt.Sprintf("Closest mock: %s\n", report.ClosestMock)
+					}
+					if report.Diff != "" {
+						diffInfo = fmt.Sprintf("Diff: %s\n", report.Diff)
+					}
+					if report.NextSteps != "" {
+						nextSteps = report.NextSteps
+					}
+				}
+				noMockBody := fmt.Sprintf("keploy: no matching mock found for %s %s\nHost: %s\n%s%sNext steps: %s\n",
+					request.Method, request.URL.String(), request.Host,
+					closestInfo, diffInfo, nextSteps)
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
@@ -169,56 +188,158 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
+			// WebSocket upgrade (101 Switching Protocols): serve the
+			// recorded handshake response and return without trying to
+			// read further HTTP on this connection.
+			if stub.Spec.HTTPResp.StatusCode == 101 {
+				h.Logger.Debug("WebSocket 101 mock matched, serving handshake and returning")
+				statusLine := fmt.Sprintf("HTTP/%d.%d 101 Switching Protocols\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor)
+				header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+				var headers string
+				for key, values := range header {
+					for _, value := range values {
+						headers += fmt.Sprintf("%s: %s\r\n", key, value)
+					}
+				}
+				wsResp := statusLine + headers + "\r\n"
+				if _, err := clientConn.Write([]byte(wsResp)); err != nil {
+					h.Logger.Debug("failed to write WebSocket 101 response", zap.Error(err))
+				}
+				errCh <- nil
+				return
+			}
 
-			body := stub.Spec.HTTPResp.Body
-			var respBody string
 			var responseString string
 
-			// Fetching the response headers
-			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
 
-			//Check if the content encoding is present in the header
-			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
+			if stub.Spec.HTTPResp.StreamRef != nil {
+				// Streaming replay
+				header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+				// The raw stream data in the ndjson file contains HTTP chunked
+				// transfer-encoding framing (size\r\ndata\r\n). During recording,
+				// http.ReadResponse strips the Transfer-Encoding header, so we
+				// must add it back for the client's HTTP parser to dechunk correctly.
+				header.Set("Transfer-Encoding", "chunked")
+				var headers string
+				for key, values := range header {
+					for _, value := range values {
+						headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+						headers += headerLine
+					}
+				}
+
+				// Write status line and headers
+				if _, err := clientConn.Write([]byte(statusLine + headers + "\r\n")); err != nil {
+					utils.LogError(h.Logger, err, "failed to write mock headers to client")
 					errCh <- err
 					return
 				}
-				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBody)))
-				respBody = string(compressedBody)
-			} else {
-				respBody = body
-			}
 
-			var headers string
-			for key, values := range header {
-				if key == "Content-Length" {
-					values = []string{strconv.Itoa(len(respBody))}
+				configPath := opts.ConfigPath
+				if configPath == "" {
+					configPath = "."
+				} else if !pUtil.IsDirectoryExist(configPath) {
+					configPath = filepath.Dir(configPath)
 				}
-				for _, value := range values {
-					headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-					headers += headerLine
-				}
-			}
-			responseString = statusLine + headers + "\r\n" + "" + respBody
 
-			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
-
-			_, err = clientConn.Write([]byte(responseString))
-			if err != nil {
-				if ctx.Err() != nil {
+				filePath := filepath.Join(configPath, stub.Spec.HTTPResp.StreamRef.Path)
+				file, err := os.Open(filePath)
+				if err != nil {
+					utils.LogError(h.Logger, err, "failed to open stream file", zap.String("path", filePath))
+					errCh <- err
 					return
 				}
-				utils.LogError(h.Logger, err, "failed to write the mock output to the user application", zap.Any("metadata", utils.GetReqMeta(request)))
-				errCh <- err
-				return
+				defer file.Close()
+
+				decoder := json.NewDecoder(file)
+				var prevTS time.Time
+				firstChunk := true
+
+				for {
+					var chunk models.HTTPStreamChunk
+					if err := decoder.Decode(&chunk); err != nil {
+						if err == io.EOF {
+							break
+						}
+						utils.LogError(h.Logger, err, "failed to decode stream chunk")
+						break
+					}
+
+					if firstChunk {
+						prevTS = chunk.TS
+						firstChunk = false
+					}
+
+					diff := chunk.TS.Sub(prevTS)
+					if diff > 0 {
+						time.Sleep(diff)
+					}
+					prevTS = chunk.TS
+
+					for _, field := range chunk.Data {
+						if field.Key == "raw" {
+							if _, err := clientConn.Write([]byte(field.Value)); err != nil {
+								utils.LogError(h.Logger, err, "failed to write chunk to client")
+								errCh <- err
+								return
+							}
+						}
+					}
+				}
+			} else {
+				// Standard body replay
+				body := stub.Spec.HTTPResp.Body
+				var respBody string
+
+				// Fetching the response headers
+				header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
+
+				//Check if the content encoding is present in the header
+				if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
+					compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
+					if err != nil {
+						utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
+						errCh <- err
+						return
+					}
+					h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBody)))
+					respBody = string(compressedBody)
+				} else {
+					respBody = body
+				}
+
+				var headers string
+				for key, values := range header {
+					if key == "Content-Length" {
+						values = []string{strconv.Itoa(len(respBody))}
+					}
+					for _, value := range values {
+						headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+						headers += headerLine
+					}
+				}
+				responseString = statusLine + headers + "\r\n" + "" + respBody
+
+				h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
+
+				_, err = clientConn.Write([]byte(responseString))
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					utils.LogError(h.Logger, err, "failed to write the mock output to the user application", zap.Any("metadata", utils.GetReqMeta(request)))
+					errCh <- err
+					return
+				}
 			}
 
 			reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
+				if responseString == "" {
+					responseString = "Streaming Response"
+				}
 				h.Logger.Debug("This was the last response from the server:\n" + string(responseString))
 				errCh <- nil
 				return

@@ -338,6 +338,12 @@ func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//If it does, remove it.
 	err = os.Remove(name)
 	if err != nil {
+		if runtime.GOOS == "windows" {
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.Errno(32)) { // ERROR_SHARING_VIOLATION
+				return nil
+			}
+		}
 		LogError(logger, err, "Error removing file")
 		return err
 	}
@@ -1657,6 +1663,48 @@ func GetContainerIPv4() (string, error) {
 	return "", fmt.Errorf("could not find a non-loopback IP for the container")
 }
 
+
+// SetOwnershipToSudoUser changes the ownership of the file/directory at path
+// to the user defined by SUDO_UID/SUDO_GID environment variables.
+//
+// PROBLEM: When Keploy runs with sudo (required for eBPF), any files it creates
+// (like mock files, directories, reports) are owned by root. This prevents the
+// regular user from modifying or deleting them later (e.g., via their IDE or git),
+// causing "permission denied" errors.
+//
+// FIX: We immediately change the ownership of created files to the original
+// user who invoked sudo (captured in SUDO_UID/SUDO_GID). This ensures that
+// even though the process is root, the artifacts belong to the user.
+//
+// WHY NOT JUST RESTORE AT EXIT? (Like standard Keploy):
+// Standard Keploy CLI commands (`keploy record`) run a cleanup step on exit
+// (`RestoreKeployFolderOwnership`) that bulk-fixes the `keploy/` directory.
+// However, the Agent/Mock-Server mode is long-running and creates files
+// dynamically (start-session) often outside the standard `keploy/` path.
+// Waiting for agent exit is insufficient because users may need to access/delete
+// these files immediately while the agent is still running.
+//
+// This is a no-op on Windows or if sudo env vars are missing.
+func SetOwnershipToSudoUser(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	sudoUID := os.Getenv("SUDO_UID")
+	sudoGID := os.Getenv("SUDO_GID")
+	if sudoUID == "" || sudoGID == "" {
+		return nil
+	}
+	uid, err := strconv.Atoi(sudoUID)
+	if err != nil {
+		return nil
+	}
+	gid, err := strconv.Atoi(sudoGID)
+	if err != nil {
+		return nil
+	}
+	return os.Chown(path, uid, gid)
+}
+
 // GetFullCommandUsed returns the full command-line used to run the current process.
 // It reconstructs the command from os.Args, adding quoting for arguments with spaces or quotes.
 func GetFullCommandUsed() string {
@@ -1676,4 +1724,22 @@ func GetFullCommandUsed() string {
 	cmdStr := strings.Join(parts, " ")
 
 	return cmdStr
+}
+
+// BuildSandboxFilePath constructs a sandbox file path from a location and name.
+// It ensures the name has the correct extension and handles default values.
+func BuildSandboxFilePath(location, name string) string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		location = "."
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "keploy"
+	}
+	name = strings.TrimSuffix(name, ".sb.yaml")
+	name = strings.TrimSuffix(name, ".sb.yml")
+
+	return filepath.Clean(filepath.Join(location, name+".sb.yaml"))
 }

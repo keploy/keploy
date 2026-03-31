@@ -54,6 +54,24 @@ type AgentClient struct {
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 }
 
+func appendPassThroughPort(ports []uint, port uint) []uint {
+	for _, p := range ports {
+		if p == port {
+			return ports
+		}
+	}
+	return append(ports, port)
+}
+
+func hasBypassPort(rules []models.BypassRule, port uint) bool {
+	for _, rule := range rules {
+		if rule.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
 // var initStopScript []byte
 
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
@@ -257,7 +275,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, opts models.IncomingOptio
 	return tcChan, nil
 }
 
-func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.MockFrame, error) {
 
 	a.logger.Debug("Connecting to outgoing mocks stream...")
 
@@ -284,7 +302,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	mockChan := make(chan *models.Mock)
+	mockChan := make(chan *models.MockFrame)
 
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -304,22 +322,25 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, opts models.OutgoingOptio
 		decoder := gob.NewDecoder(res.Body)
 
 		for {
-			var mock models.Mock
-			if err := decoder.Decode(&mock); err != nil {
+			var frame models.MockFrame
+			if err := decoder.Decode(&frame); err != nil {
 				if utils.IsShutdownError(err) {
 					// End of the stream or connection closed during shutdown
 					break
 				}
-				utils.LogError(a.logger, err, "failed to decode mock from stream")
+				utils.LogError(a.logger, err, "failed to decode mock frame from stream")
 				break
+			}
+			if frame.Mock == nil {
+				continue
 			}
 
 			select {
 			case <-ctx.Done():
 				// If the context is done, exit the loop
 				return nil
-			case mockChan <- &mock:
-				// Send the decoded mock to the channel
+			case mockChan <- &frame:
+				// Send the decoded frame to the channel
 			}
 		}
 		return nil
@@ -772,8 +793,8 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 		appErr := app.Run(runAppCtx)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
-			appErrCh <- appErr
 		}
+		appErrCh <- appErr
 		return nil
 	})
 
@@ -892,20 +913,36 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 		// Join them with a comma and add as a single argument
 		args = append(args, "--pass-through-ports", strings.Join(portStrings, ","))
 	}
+	if opts.SkipIngress {
+		args = append(args, "--skip-ingress")
+	}
 	a.logger.Debug("Starting native agent with args", zap.Strings("args", args))
 
 	if opts.ConfigPath != "" && opts.ConfigPath != "." {
 		args = append(args, "--config-path", opts.ConfigPath)
 	}
 
+	if opts.Path != "" && opts.Path != "." {
+		args = append(args, "--path", opts.Path)
+	}
+
 	// Check if sudo credentials are already cached (e.g., from permission fix)
 	// If cached, we can use sudo -n (non-interactive) and skip PTY
 	sudoCached := utils.AreSudoCredentialsCached()
 
-	// Check if we need PTY for interactive input (e.g., sudo password)
-	// Skip PTY if credentials are already cached - use non-interactive sudo instead
+	// If sudo is going to prompt, prefer caching credentials in the main terminal first.
+	// Rationale: starting the agent under a PTY spawns a long-lived goroutine that copies
+	// os.Stdin into the agent PTY. If the user command is also run under a PTY (needed to
+	// avoid SIGTTIN for background pgrps), multiple PTY sessions race to read from the same
+	// os.Stdin and user input can be "stolen" (e.g., a sudo prompt inside the user command).
+	// By caching credentials first, we can run the agent with `sudo -n` and avoid PTY here.
 	if agentUtils.NeedsPTY() && !sudoCached {
-		return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
+		if err := utils.CacheSudoCredentials(ctx, a.logger); err != nil {
+			// Fallback to the previous behavior (PTY) in case sudo caching fails for any reason.
+			a.logger.Debug("failed to cache sudo credentials; falling back to PTY agent start", zap.Error(err))
+			return a.startNativeAgentWithPTY(ctx, keployBin, args, grp)
+		}
+		sudoCached = utils.AreSudoCredentialsCached()
 	}
 
 	// Create OS-appropriate command (handles sudo/process-group on Unix; plain on Windows)
@@ -1144,6 +1181,19 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 
+	// Expose the discovered agent endpoint to the child app/test process.
+	// Integration tests can read this before calling /agent/hooks/*
+	//
+	// KEPLOY_AGENT_URI -> full base URI (example: http://localhost:33003/agent)
+	_ = os.Setenv("KEPLOY_AGENT_URI", opts.AgentURI)
+
+	// Always bypass the agent's own HTTP port to avoid proxying control-plane calls.
+	agentPortUint := uint(agentPort)
+	opts.PassThroughPorts = appendPassThroughPort(opts.PassThroughPorts, agentPortUint)
+	if !hasBypassPort(a.conf.BypassRules, agentPortUint) {
+		a.conf.BypassRules = append(a.conf.BypassRules, models.BypassRule{Port: agentPortUint})
+	}
+
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
 		zap.Uint32("proxy-port", proxyPort),
@@ -1308,7 +1358,11 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
+	stdoutWriter := os.Stdout
+	if utils.IsMCPStdio() {
+		stdoutWriter = os.Stderr
+	}
+	cmd.Stdout = stdoutWriter
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {

@@ -158,11 +158,17 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
+			// Best-effort attempt to set ownership of the directory to the sudo user
+			_ = utils.SetOwnershipToSudoUser(filepath.Join(path))
+
 			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
+			// Best-effort attempt to set ownership of the file to the sudo user
+			_ = utils.SetOwnershipToSudoUser(yamlPath)
+
 			err = file.Close()
 			if err != nil {
 				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))

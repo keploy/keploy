@@ -52,6 +52,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Post("/hooks/before-test-run", a.HandleBeforeTestRun)
 		r.Post("/hooks/before-test-set-compose", a.HandleBeforeTestSetCompose)
 		r.Post("/hooks/after-test-run", a.HandleAfterTestRun)
+		r.Post("/sandbox/scope", a.HandleSandboxScope)
 	})
 }
 
@@ -67,6 +68,21 @@ var (
 
 func RegisterHooks(h RouteHook) {
 	ActiveHooks = h
+}
+
+func (a *Agent) HandleSandboxScope(w http.ResponseWriter, r *http.Request) {
+	var req models.SandboxScopeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := a.svc.StartSandboxScope(r.Context(), req.Location, req.Name); err != nil {
+		a.logger.Error("failed to start sandbox scope", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (a *Agent) HandleBeforeTestRun(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +360,11 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if err := enc.Encode(m); err != nil {
+			frame := &models.MockFrame{
+				ScopeFilePath: a.svc.GetCurrentScopeFilePath(r.Context()),
+				Mock:          m,
+			}
+			if err := enc.Encode(frame); err != nil {
 				a.logger.Error("gob encode failed", zap.Error(err))
 				return
 			}

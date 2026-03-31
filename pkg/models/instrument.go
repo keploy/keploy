@@ -41,6 +41,7 @@ type HookOptions struct {
 	IsDocker      bool
 	ProxyPort     uint32
 	ServerPort    uint32
+	SkipIngress   bool // skip attaching ingress bind hooks (e.g. sandbox record)
 }
 
 type IngressEvent struct {
@@ -57,13 +58,17 @@ type OutgoingOptions struct {
 	TLSPrivateKey string
 	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay    time.Duration // This is the same as Application delay.
-	Mocking     bool          // used to enable/disable mocking
-	DstCfg      *ConditionalDstCfg
-	Backdate    time.Time                      // used to set backdate in cacert request
-	NoiseConfig map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
-	SkipTLSMITM bool
-	ConnKey     string // connection-level key for TLSHandshakeStore correlation
+	SQLDelay       time.Duration // This is the same as Application delay.
+	FallBackOnMiss bool          // this enables to pass the request to the actual server if no mock is found during test mode.
+	ReusableMocks  bool          // when true, matched mocks are not consumed and can be reused across requests
+	Mocking        bool          // used to enable/disable mocking
+	DstCfg         *ConditionalDstCfg
+	Backdate       time.Time                      // used to set backdate in cacert request
+	NoiseConfig    map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	Name           string                         // Name of the session
+	ConfigPath     string                         // path to the config file (used to resolve relative paths for assets/streams)
+	SkipTLSMITM    bool
+	ConnKey        string // connection-level key for TLSHandshakeStore correlation
 }
 
 type ConditionalDstCfg struct {
@@ -100,7 +105,9 @@ type SetupOptions struct {
 	BuildDelay        uint64
 	PassThroughPorts  []uint
 	ConfigPath        string
+	Path              string
 	ExtraArgs         []string
+	SkipIngress       bool
 	EnableSampling    int
 }
 

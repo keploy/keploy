@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,6 +61,9 @@ type Proxy struct {
 	session     *agent.Session
 	mockManager *MockManager
 
+	passThroughPortSet map[uint32]bool
+	bypassedIPs        map[string]bool // IPs resolved from bypass host rules — skip TLS MITM
+
 	synchronous bool
 
 	connMutex *sync.Mutex
@@ -93,6 +97,43 @@ type Proxy struct {
 	auxiliaryHook agent.AuxiliaryProxyHook
 }
 
+// isLoopbackAddr returns true if the address (host:port) points to a loopback interface.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	// Handle IPv6 bracket notation
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isPassThroughPort returns true if the destination address targets a port
+// that is in the passthrough set (proxy port, DNS port, bypass ports).
+func (p *Proxy) isPassThroughPort(addr string) bool {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.ParseUint(portStr, 10, 32)
+	if err != nil {
+		return false
+	}
+	return p.passThroughPortSet[uint32(port)]
+}
+
+// isBypassedDest checks if the destination IP:port belongs to a host that is
+// in the bypass rules. Used to skip TLS MITM for third-party services.
+func (p *Proxy) isBypassedDest(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	return p.bypassedIPs[host]
+}
+
 // isNetworkClosedErr checks if the error is due to a closed network connection.
 // This includes broken pipe, connection reset by peer, and use of closed network connection errors.
 // These errors are expected during graceful shutdown and should not be logged as errors.
@@ -111,23 +152,50 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
+	// Build the set of ports that should always be passed through
+	ptPorts := make(map[uint32]bool)
+	ptPorts[opts.ProxyPort] = true
+	ptPorts[opts.DNSPort] = true
+	for _, rule := range config.GetByPassPorts(opts) {
+		ptPorts[uint32(rule)] = true
+	}
+
+	// Resolve bypass hostnames to IPs at startup. Connections to these IPs
+	// skip TLS MITM entirely — raw passthrough with zero overhead.
+	bypassIPs := make(map[string]bool)
+	for _, rule := range opts.BypassRules {
+		if rule.Host != "" {
+			ips, err := net.LookupHost(rule.Host)
+			if err != nil {
+				logger.Debug("could not resolve bypass host", zap.String("host", rule.Host), zap.Error(err))
+				continue
+			}
+			for _, ip := range ips {
+				bypassIPs[ip] = true
+				logger.Debug("bypass IP resolved", zap.String("host", rule.Host), zap.String("ip", ip))
+			}
+		}
+	}
+
 	proxy := &Proxy{
-		logger:            logger,
-		Port:              opts.ProxyPort,
-		DNSPort:           opts.DNSPort, // default: 26789
-		synchronous:       opts.Agent.Synchronous,
-		IP4:               "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:           &sync.Mutex{},
-		connMutex:         &sync.Mutex{},
-		DestInfo:          info,
-		clientClose:       make(chan bool, 1),
-		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
-		GlobalPassthrough: opts.Agent.GlobalPassthrough,
-		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
-		IsDocker:          opts.Agent.IsDocker,
-		dnsCache:          newDNSCache(),
-		recordedDNSMocks:  newRecordedDNSMocksCache(),
+		logger:             logger,
+		Port:               opts.ProxyPort,
+		DNSPort:            opts.DNSPort, // default: 26789
+		synchronous:        opts.Agent.Synchronous,
+		IP4:                "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:                "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:            &sync.Mutex{},
+		connMutex:          &sync.Mutex{},
+		DestInfo:           info,
+		clientClose:        make(chan bool, 1),
+		Integrations:       make(map[integrations.IntegrationType]integrations.Integrations),
+		GlobalPassthrough:  opts.Agent.GlobalPassthrough,
+		errChannel:         make(chan error, 100), // buffered channel to prevent blocking
+		IsDocker:           opts.Agent.IsDocker,
+		dnsCache:           newDNSCache(),
+		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		passThroughPortSet: ptPorts,
+		bypassedIPs:        bypassIPs,
 	}
 
 	return proxy
@@ -183,6 +251,28 @@ func (p *Proxy) SetGracefulShutdown(_ context.Context) error {
 // IsGracefulShutdown returns whether the graceful shutdown flag is set
 func (p *Proxy) IsGracefulShutdown() bool {
 	return p.isGracefulShutdown.Load()
+}
+
+func (p *Proxy) StartSandboxScope(ctx context.Context, scopeFilePath string) error {
+	p.logger.Debug("Updating sandbox scope file path in proxy", zap.String("scopeFilePath", scopeFilePath))
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if p.session == nil {
+		return fmt.Errorf("no active session found")
+	}
+
+	// Update the session's Name (scope file path)
+	p.session.OutgoingOptions.Name = scopeFilePath
+	return nil
+}
+
+func (p *Proxy) GetCurrentScopeFilePath(_ context.Context) string {
+	p.sessionMu.RLock()
+	defer p.sessionMu.RUnlock()
+	if p.session == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.session.OutgoingOptions.Name)
 }
 
 func (p *Proxy) SetAuxiliaryHook(h agent.AuxiliaryProxyHook) {
@@ -511,6 +601,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
+	// Passthrough connections to loopback addresses (127.0.0.1, ::1).
+	// This is critical for Playwright/browser testing: Chrome's DevTools Protocol
+	// connections and Next.js dev server page loads are loopback connections that
+	// must not be intercepted or mocked.
+	if isLoopbackAddr(dstAddr) {
+		p.logger.Debug("loopback passthrough", zap.String("dstAddr", dstAddr))
+		_, err = util.PassThrough(ctx, p.logger, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, nil)
+		if err != nil && !isNetworkClosedErr(err) {
+			p.logger.Debug("loopback passthrough finished", zap.String("dstAddr", dstAddr), zap.Error(err))
+		}
+		return nil
+	}
+
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
@@ -523,7 +626,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if srcConn != nil {
 			err := srcConn.Close()
 			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
+				if !isNetworkClosedErr(err) {
 					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 				}
 			}
@@ -532,9 +635,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if dstConn != nil {
 			err = dstConn.Close()
 			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					// Log other errors
+				if !isNetworkClosedErr(err) {
 					utils.LogError(p.logger, err, "failed to close the destination connection")
 				}
 			}
@@ -632,11 +733,34 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
+
+	// Fast-path: if the destination is a TLS connection to a bypassed host,
+	// skip the expensive TLS MITM entirely. We attempt a raw TCP passthrough
+	// to the real server with a short timeout. If the destination is unreachable
+	// (e.g., IPv6 on an IPv4-only machine), we drop the connection immediately
+	// instead of waiting for the default dial timeout.
+	if isTLS && p.isBypassedDest(dstAddr) {
+		p.logger.Debug("TLS bypass (bypassed host)", zap.String("dstAddr", dstAddr))
+		dstConn, dialErr := net.DialTimeout("tcp", dstAddr, 2*time.Second)
+		if dialErr != nil {
+			// Destination unreachable — drop silently, Chrome handles gracefully
+			return nil
+		}
+		// Raw bidirectional relay — no TLS MITM, no HTTP parsing
+		go func() {
+			defer dstConn.Close()
+			_, _ = io.Copy(dstConn, srcConn)
+		}()
+		_, _ = io.Copy(srcConn, dstConn)
+		return nil
+	}
+
 	if isTLS {
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to handle TLS conn")
-			return err
+			p.logger.Debug("TLS handshake failed, dropping connection (non-fatal)",
+				zap.String("dstAddr", dstAddr), zap.Error(err))
+			return nil
 		}
 
 		if isMTLS {
@@ -850,9 +974,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, outgoingOpts)
 			if err != nil {
-				utils.LogError(logger, err, "failed to record the outgoing message")
+				if isNetworkClosedErr(err) {
+					p.logger.Debug("failed to record the outgoing message (connection closed)", zap.Error(err))
+				} else {
+					utils.LogError(logger, err, "failed to record the outgoing message")
+				}
 				return err
 			}
+			p.logger.Debug("successfully recorded outgoing message", zap.String("ParserType", string(parserType)))
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m, outgoingOpts)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {

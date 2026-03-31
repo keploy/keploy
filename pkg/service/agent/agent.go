@@ -5,13 +5,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -74,6 +79,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		IsDocker:      a.config.Agent.IsDocker,
 		EnableTesting: a.config.Agent.EnableTesting,
 		Rules:         rules,
+		SkipIngress:   a.config.Agent.SkipIngress,
 	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -108,6 +114,80 @@ func (a *Agent) StartIncomingProxy(ctx context.Context, opts models.IncomingOpti
 func (a *Agent) SetGracefulShutdown(ctx context.Context) error {
 	a.logger.Debug("Setting graceful shutdown flag on proxy")
 	return a.Proxy.SetGracefulShutdown(ctx)
+}
+
+// StartSandboxScope starts a new recording/replay scope from location+name.
+func (a *Agent) StartSandboxScope(ctx context.Context, location, name string) error {
+	scopeFilePath := utils.BuildSandboxFilePath(location, name)
+	a.logger.Debug("Starting new sandbox scope", zap.String("scopeFilePath", scopeFilePath))
+
+	mode := models.MODE_RECORD
+	if a.config != nil {
+		mode = a.config.Agent.Mode
+	}
+
+	if mode == models.MODE_TEST {
+		db := mockdb.New(a.logger, "", "")
+		filtered, unfiltered, err := db.LoadMocksFromPath(ctx, scopeFilePath)
+		if err != nil {
+			return err
+		}
+		if err := a.StoreMocks(ctx, filtered, unfiltered); err != nil {
+			return err
+		}
+		beforeTime := time.Now()
+		if err := a.UpdateMockParams(ctx, models.MockFilterParams{
+			AfterTime:  models.BaseTime,
+			BeforeTime: beforeTime,
+		}); err != nil {
+			return err
+		}
+		a.logger.Debug("Loaded sandbox scope", zap.String("scopeFilePath", scopeFilePath), zap.Int("mocksLoaded", len(filtered)+len(unfiltered)))
+	} else {
+		if err := overwriteMockFile(scopeFilePath); err != nil {
+			return err
+		}
+		a.logger.Debug("Prepared sandbox file for scope", zap.String("scopeFilePath", scopeFilePath))
+	}
+
+	if err := a.Proxy.StartSandboxScope(ctx, scopeFilePath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func overwriteMockFile(mockFilePath string) error {
+	mockFilePath = strings.TrimSpace(mockFilePath)
+	if mockFilePath == "" {
+		return errors.New("mock file path cannot be empty")
+	}
+
+	cleanPath := filepath.Clean(mockFilePath)
+	dir := filepath.Dir(cleanPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	// Best-effort attempt to set ownership of the directory to the sudo user
+	// This is necessary because Keploy runs as root (for eBPF) but we want the
+	// user to be able to modify/delete the generated mock directory without sudo.
+	_ = utils.SetOwnershipToSudoUser(dir)
+
+	if err := os.WriteFile(cleanPath, []byte(utils.GetVersionAsComment()), 0o644); err != nil {
+		return err
+	}
+	// Best-effort attempt to set ownership of the file to the sudo user
+	// This ensures the user owns the generated mock file, avoiding "permission denied"
+	// errors when they try to edit or delete it later.
+	_ = utils.SetOwnershipToSudoUser(cleanPath)
+
+	return nil
+}
+
+func (a *Agent) GetCurrentScopeFilePath(ctx context.Context) string {
+	if a.Proxy == nil {
+		return ""
+	}
+	return a.Proxy.GetCurrentScopeFilePath(ctx)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
@@ -181,10 +261,11 @@ func (a *Agent) Hook(ctx context.Context, opts models.HookOptions) error {
 
 	// load hooks if the mode changes ..
 	hookCfg := coreAgent.HookCfg{
-		Pid:      0,
-		IsDocker: opts.IsDocker,
-		Mode:     opts.Mode,
-		Rules:    opts.Rules,
+		Pid:         0,
+		IsDocker:    opts.IsDocker,
+		Mode:        opts.Mode,
+		Rules:       opts.Rules,
+		SkipIngress: opts.SkipIngress,
 	}
 
 	if coreAgent.EbpfProxyPortOverride != 0 {

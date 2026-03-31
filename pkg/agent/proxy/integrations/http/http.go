@@ -43,6 +43,7 @@ type FinalHTTP struct {
 	Resp             []byte
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
+	StreamRef        *models.StreamRef
 }
 
 // MatchType function determines if the outgoing network call is HTTP by comparing the
@@ -151,7 +152,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	//Add the content length to the headers.
 	var respBody []byte
 	//Checking if the body of the response is empty or does not exist.
-	if respParsed.Body != nil { // Read
+	if respParsed.Body != nil && mock.StreamRef == nil { // Read
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -204,6 +205,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 				StatusCode: respParsed.StatusCode,
 				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 				Body:       string(respBody),
+				StreamRef:  mock.StreamRef,
 			},
 			Created: time.Now().Unix(),
 

@@ -19,6 +19,10 @@ func IsTLSHandshake(data []byte) bool {
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
+// lastSNI stores the most recent ServerName seen in GetConfigForClient,
+// used for diagnostic logging on handshake failures.
+var lastSNI string
+
 func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	// 1. Load the Proxy's Signing CA (Used to generate server certs)
 	caPrivKey, err := helpers.ParsePrivateKeyPEM(caPKey)
@@ -34,6 +38,7 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			lastSNI = hello.ServerName
 			// Check if client supports http/1.1
 			clientSupportsHTTP1 := false
 			for _, proto := range hello.SupportedProtos {
@@ -74,7 +79,10 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn, b
 	// Perform the handshake
 	err = tlsConn.Handshake()
 	if err != nil {
-		utils.LogError(logger, err, "failed to complete TLS/mTLS handshake")
+		logger.Debug("TLS handshake failed (non-fatal, may be passthrough traffic)",
+			zap.String("sni", lastSNI),
+			zap.String("remoteAddr", conn.RemoteAddr().String()),
+			zap.Error(err))
 		return nil, false, err
 	}
 
