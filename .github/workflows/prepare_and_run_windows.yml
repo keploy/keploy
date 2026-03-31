@@ -121,7 +121,7 @@ jobs:
 
       - name: Build and push Docker image for PR
         run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker-windows.sh
+          bash ./.github/workflows/test_workflow_scripts/update-docker-ci.sh linux/amd64
 
       - name: Make unique tag for this run
         id: tag
