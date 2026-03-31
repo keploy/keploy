@@ -79,7 +79,7 @@ use_ssh_for_github_and_known_hosts() {
     /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
       if (!injected_before_go_mod) {
         print "ENV GOPRIVATE=github.com/keploy/*"
-        # Using StrictHostKeyChecking=yes as it's more secure, since we already do ssh-keyscan
+        # Using StrictHostKeyChecking=yes as it is more secure, since we already do ssh-keyscan
         print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=yes\""
         if (!injected_after_copy) {
           emit_git_known_hosts_block();
