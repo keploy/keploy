@@ -141,15 +141,8 @@ func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
 // ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
-	m.treesMu.RLock()
-	filtered := m.filtered
-	m.treesMu.RUnlock()
-
 	results := make([]*models.Mock, 0, 64)
-	if filtered == nil {
-		return results, nil
-	}
-	filtered.rangeValues(func(v interface{}) bool {
+	m.filtered.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
@@ -159,15 +152,8 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 }
 
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
-	m.treesMu.RLock()
-	unfiltered := m.unfiltered
-	m.treesMu.RUnlock()
-
 	results := make([]*models.Mock, 0, 128)
-	if unfiltered == nil {
-		return results, nil
-	}
-	unfiltered.rangeValues(func(v interface{}) bool {
+	m.unfiltered.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
 			results = append(results, mock)
 		}
@@ -588,14 +574,7 @@ func (m *MockManager) GetMySQLCounts() (total, config, data int) {
 	}
 
 	// Fallback: legacy scan of the combined tree
-	m.treesMu.RLock()
-	legacyUnfiltered := m.unfiltered
-	m.treesMu.RUnlock()
-	if legacyUnfiltered == nil {
-		return
-	}
-
-	legacyUnfiltered.rangeValues(func(v interface{}) bool {
+	m.unfiltered.rangeValues(func(v interface{}) bool {
 		mock, ok := v.(*models.Mock)
 		if !ok || mock == nil || mock.Kind != models.MySQL {
 			return true
