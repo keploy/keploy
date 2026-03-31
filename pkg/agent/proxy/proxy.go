@@ -64,6 +64,12 @@ type Proxy struct {
 	passThroughPortSet map[uint32]bool
 	bypassedIPs        map[string]bool // IPs resolved from bypass host rules — skip TLS MITM
 
+	// bypassedHosts is populated at DNS resolution time for hosts matching known
+	// noise patterns (analytics, CDN, fonts, widgets). Connections to these hosts
+	// skip TLS MITM during recording and are dropped during replay.
+	bypassedHosts   map[string]bool
+	bypassedHostsMu sync.RWMutex
+
 	synchronous bool
 
 	connMutex *sync.Mutex
@@ -134,6 +140,17 @@ func (p *Proxy) isBypassedDest(addr string) bool {
 	return p.bypassedIPs[host]
 }
 
+// isNoiseHost checks if the hostname was classified as a noise host during DNS
+// resolution (analytics, CDN, fonts, widgets). These hosts bypass TLS MITM.
+func (p *Proxy) isNoiseHost(hostname string) bool {
+	if hostname == "" {
+		return false
+	}
+	p.bypassedHostsMu.RLock()
+	defer p.bypassedHostsMu.RUnlock()
+	return p.bypassedHosts[hostname]
+}
+
 // isNetworkClosedErr checks if the error is due to a closed network connection.
 // This includes broken pipe, connection reset by peer, and use of closed network connection errors.
 // These errors are expected during graceful shutdown and should not be logged as errors.
@@ -152,10 +169,22 @@ func isNetworkClosedErr(err error) bool {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	// Build the set of ports that should always be passed through
+	// Build the set of ports that should always be passed through.
+	// Includes: keploy's own ports, configured bypass ports, and common
+	// dev server ports that must not be intercepted.
 	ptPorts := make(map[uint32]bool)
 	ptPorts[opts.ProxyPort] = true
 	ptPorts[opts.DNSPort] = true
+	// Common frontend dev server ports — these serve the app under test
+	// and must pass through the proxy untouched.
+	ptPorts[3000] = true  // Next.js, React, Vue, Svelte default
+	ptPorts[3001] = true  // Next.js HMR, alt dev port
+	ptPorts[5173] = true  // Vite default
+	ptPorts[5174] = true  // Vite alt
+	ptPorts[4200] = true  // Angular default
+	ptPorts[8080] = true  // Generic dev server
+	ptPorts[8000] = true  // Django, generic
+	ptPorts[4173] = true  // Vite preview
 	for _, rule := range config.GetByPassPorts(opts) {
 		ptPorts[uint32(rule)] = true
 	}
@@ -196,6 +225,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		recordedDNSMocks:   newRecordedDNSMocksCache(),
 		passThroughPortSet: ptPorts,
 		bypassedIPs:        bypassIPs,
+		bypassedHosts:      make(map[string]bool),
 	}
 
 	return proxy
@@ -601,12 +631,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
-	// Passthrough connections to loopback addresses (127.0.0.1, ::1).
-	// This is critical for Playwright/browser testing: Chrome's DevTools Protocol
-	// connections and Next.js dev server page loads are loopback connections that
-	// must not be intercepted or mocked.
-	if isLoopbackAddr(dstAddr) {
-		p.logger.Debug("loopback passthrough", zap.String("dstAddr", dstAddr))
+	// Selective loopback passthrough: only passthrough loopback connections on
+	// known infrastructure ports (dev server, HMR, keploy proxy/DNS/agent).
+	// Other loopback ports (e.g. API server on :8083) are intercepted for
+	// recording/replay — this is the core use case for sandbox mode.
+	if isLoopbackAddr(dstAddr) && p.isPassThroughPort(dstAddr) {
+		p.logger.Debug("loopback passthrough (infra port)", zap.String("dstAddr", dstAddr))
 		_, err = util.PassThrough(ctx, p.logger, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, nil)
 		if err != nil && !isNetworkClosedErr(err) {
 			p.logger.Debug("loopback passthrough finished", zap.String("dstAddr", dstAddr), zap.Error(err))
@@ -723,6 +753,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
+	var clientPeerCert *x509.Certificate
+	var isMTLS bool
+	isTLS := pTls.IsTLSHandshake(testBuffer)
+
+	// Extract SNI from TLS ClientHello for noise-host bypass classification.
+	var sniHostname string
+	if isTLS {
+		if helloData, peekErr := reader.Peek(4096); peekErr == nil || len(helloData) > 5 {
+			sniHostname = pTls.ExtractSNI(helloData)
+		}
+	}
+
 	multiReader := io.MultiReader(reader, srcConn)
 	srcConn = &util.Conn{
 		Conn:   srcConn,
@@ -730,17 +772,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
-	var clientPeerCert *x509.Certificate
-	var isMTLS bool
-	isTLS := pTls.IsTLSHandshake(testBuffer)
-
-	// Fast-path: if the destination is a TLS connection to a bypassed host,
-	// skip the expensive TLS MITM entirely. We attempt a raw TCP passthrough
-	// to the real server with a short timeout. If the destination is unreachable
-	// (e.g., IPv6 on an IPv4-only machine), we drop the connection immediately
-	// instead of waiting for the default dial timeout.
-	if isTLS && p.isBypassedDest(dstAddr) {
-		p.logger.Debug("TLS bypass (bypassed host)", zap.String("dstAddr", dstAddr))
+	// Fast-path: if the destination is a TLS connection to a bypassed host
+	// (either by IP from bypass rules, or by hostname from DNS noise classification),
+	// skip the expensive TLS MITM entirely.
+	if isTLS && (p.isBypassedDest(dstAddr) || p.isNoiseHost(sniHostname)) {
+		if rule.Mode == models.MODE_TEST {
+			// In replay mode there is no real server — just drop the connection.
+			// Chrome handles failed connections to analytics/widget endpoints gracefully.
+			p.logger.Debug("noise host dropped in test mode", zap.String("sni", sniHostname), zap.String("dstAddr", dstAddr))
+			return nil
+		}
+		// Record mode: raw TCP passthrough to real destination with short timeout.
+		p.logger.Debug("TLS bypass (noise/bypassed host)", zap.String("sni", sniHostname), zap.String("dstAddr", dstAddr))
 		dstConn, dialErr := net.DialTimeout("tcp", dstAddr, 2*time.Second)
 		if dialErr != nil {
 			// Destination unreachable — drop silently, Chrome handles gracefully
