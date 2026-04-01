@@ -1,0 +1,89 @@
+package utils
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+)
+
+// ParseEnvFile reads a .env file and returns its contents as a map.
+// It supports:
+//   - KEY=VALUE pairs
+//   - Lines starting with # are treated as comments and skipped
+//   - Empty lines are skipped
+//   - Values may be wrapped in single or double quotes (quotes are stripped)
+//   - Only the first '=' is used as the delimiter; the rest of the line is the value
+func ParseEnvFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open env file %q: %w", path, err)
+	}
+	defer f.Close()
+
+	envMap := make(map[string]string)
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		idx := strings.Index(line, "=")
+		if idx < 0 {
+			// lines without '=' are skipped silently (bare variable exports)
+			continue
+		}
+
+		key := strings.TrimSpace(line[:idx])
+		if key == "" {
+			continue
+		}
+
+		val := line[idx+1:]
+
+		// strip surrounding quotes (single or double)
+		if len(val) >= 2 {
+			if (val[0] == '"' && val[len(val)-1] == '"') ||
+				(val[0] == '\'' && val[len(val)-1] == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+
+		envMap[key] = val
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading env file %q: %w", path, err)
+	}
+
+	return envMap, nil
+}
+
+// ResolveEnvVars merges an env file and an inline env map into a single map.
+// Inline env values take precedence over values from the env file, matching
+// docker-compose semantics.
+func ResolveEnvVars(envMap map[string]string, envFilePath string) (map[string]string, error) {
+	merged := make(map[string]string)
+
+	if envFilePath != "" {
+		fileVars, err := ParseEnvFile(envFilePath)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range fileVars {
+			merged[k] = v
+		}
+	}
+
+	// inline values override file values
+	for k, v := range envMap {
+		merged[k] = v
+	}
+
+	return merged, nil
+}
