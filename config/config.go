@@ -58,7 +58,9 @@ type Config struct {
 	// InMemoryCompose holds docker-compose YAML content in memory to avoid writing
 	// sensitive environment variables (secrets, tokens) to disk. When set, the
 	// compose command uses "-f -" and pipes this content via stdin.
-	InMemoryCompose []byte `json:"-" yaml:"-" mapstructure:"-"`
+	InMemoryCompose []byte            `json:"-" yaml:"-" mapstructure:"-"`
+	Env             map[string]string `json:"env" yaml:"env" mapstructure:"env"`
+	EnvFile         string            `json:"envFile" yaml:"envFile" mapstructure:"envFile"`
 }
 
 type Agent struct {
