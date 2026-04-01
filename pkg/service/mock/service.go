@@ -40,6 +40,7 @@ type Instrumentation interface {
 	// NotifyGracefulShutdown signals the proxy that the session is ending so
 	// connection errors are logged at debug level instead of error level.
 	NotifyGracefulShutdown(ctx context.Context) error
+	MakeAgentReadyForDockerCompose(ctx context.Context) error
 }
 
 // MockDB is the subset of storage operations the mock service needs to read
