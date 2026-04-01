@@ -147,9 +147,13 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 		return fmt.Errorf("invalid command structure: %s", a.cmd)
 	}
 
-	// Append user-defined environment variables
+	// Append user-defined environment variables.
+	// Values are single-quote-wrapped to prevent shell injection when the
+	// command is later executed via sh -c. Any single quotes inside the value
+	// are escaped using the standard '"'"' technique.
 	for k, v := range a.opts.EnvVars {
-		tlsFlags += fmt.Sprintf("-e %s=%s ", k, v)
+		escapedVal := strings.ReplaceAll(v, "'", "'\\''")
+		tlsFlags += fmt.Sprintf("-e %s='%s' ", k, escapedVal)
 	}
 
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
