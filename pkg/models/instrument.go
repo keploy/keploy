@@ -108,6 +108,7 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
+	EnvVars         map[string]string
 }
 
 type RunOptions struct {
