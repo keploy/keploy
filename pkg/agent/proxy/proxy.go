@@ -631,17 +631,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
-	// Passthrough ALL loopback connections. The proxy adds overhead to HTTP
-	// connections that causes browser test timeouts. For sandbox mode with
-	// a local API server, recording happens against a remote/staging backend
-	// instead. For replay, mocks are served from the .sb.yaml file.
+	// Loopback handling: passthrough known infrastructure ports (dev server,
+	// HMR, keploy ports) and intercept everything else (API server).
+	// Non-loopback connections on port 443 bypass via eBPF passthrough.
 	if isLoopbackAddr(dstAddr) {
-		p.logger.Debug("loopback passthrough", zap.String("dstAddr", dstAddr))
-		_, err = util.PassThrough(ctx, p.logger, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, nil)
-		if err != nil && !isNetworkClosedErr(err) {
-			p.logger.Debug("loopback passthrough finished", zap.String("dstAddr", dstAddr), zap.Error(err))
+		if p.isPassThroughPort(dstAddr) {
+			_, err = util.PassThrough(ctx, p.logger, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, nil)
+			if err != nil && !isNetworkClosedErr(err) {
+				p.logger.Debug("loopback passthrough (infra port)", zap.String("dstAddr", dstAddr), zap.Error(err))
+			}
+			return nil
 		}
-		return nil
+		// Non-passthrough loopback port (e.g. API server on :8083) — fall through
+		// to normal record/replay path.
 	}
 
 	// This is used to handle the parser errors
@@ -775,7 +777,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Fast-path: if the destination is a TLS connection to a bypassed host
 	// (either by IP from bypass rules, or by hostname from DNS noise classification),
 	// skip the expensive TLS MITM entirely.
-	if isTLS && (p.isBypassedDest(dstAddr) || p.isNoiseHost(sniHostname)) {
+	if isTLS && (p.isBypassedDest(dstAddr) || p.isNoiseHost(sniHostname) || matchesNoisePattern(sniHostname)) {
 		if rule.Mode == models.MODE_TEST {
 			// In replay mode there is no real server — just drop the connection.
 			// Chrome handles failed connections to analytics/widget endpoints gracefully.
@@ -799,7 +801,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if isTLS {
+		tlsStart := time.Now()
 		srcConn, isMTLS, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+		tlsElapsed := time.Since(tlsStart)
+		if tlsElapsed > 100*time.Millisecond {
+			p.logger.Warn("slow TLS MITM handshake", zap.Duration("elapsed", tlsElapsed), zap.String("sni", sniHostname), zap.String("dstAddr", dstAddr))
+		}
 		if err != nil {
 			p.logger.Debug("TLS handshake failed, dropping connection (non-fatal)",
 				zap.String("dstAddr", dstAddr), zap.Error(err))

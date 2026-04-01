@@ -1199,6 +1199,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		a.conf.BypassRules = append(a.conf.BypassRules, models.BypassRule{Port: agentPortUint})
 	}
 
+	// Export the agent port so the child command (and its children like Playwright/Chrome)
+	// can call the keploy agent API (e.g. scope API) without parsing logs.
+	os.Setenv("KEPLOY_AGENT_PORT", strconv.Itoa(int(agentPort)))
+
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
 		zap.Uint32("proxy-port", proxyPort),

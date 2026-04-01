@@ -209,6 +209,25 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	for _, question := range r.Question {
 		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
 
+		// Handle localhost specially — always resolve to loopback without
+		// upstream DNS. Keploy modifies nsswitch.conf which can break
+		// localhost resolution for child processes (Chrome, Node.js).
+		qname := strings.TrimSuffix(question.Name, ".")
+		if qname == "localhost" {
+			if question.Qtype == dns.TypeA {
+				msg.Answer = append(msg.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+					A:   net.ParseIP("127.0.0.1"),
+				})
+			} else if question.Qtype == dns.TypeAAAA {
+				msg.Answer = append(msg.Answer, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
+					AAAA: net.ParseIP("::1"),
+				})
+			}
+			continue
+		}
+
 		key := generateCacheKey(question.Name, question.Qtype)
 		reqTimestamp := time.Now().UTC()
 

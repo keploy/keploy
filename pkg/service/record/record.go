@@ -270,7 +270,12 @@ func (r *Recorder) StartWithOptions(ctx context.Context, reRecordCfg models.ReRe
 	passPortsUint := config.GetByPassPorts(r.config)
 	// Add common dev server ports to eBPF passthrough so they're never
 	// intercepted during browser test recording.
-	passPortsUint = append(passPortsUint, 3000, 3001, 5173, 5174, 4200, 4173)
+	// Passthrough ports: dev servers + HTTPS (443) to avoid intercepting browser's external TLS.
+	// Only non-443 localhost ports (like 8083 for API) get intercepted.
+	// Bypass external HTTPS (443) to avoid eBPF redirect overhead on Chrome.
+	// Bypass dev server ports to avoid intercepting frontend traffic.
+	// API server ports (8083 etc.) are NOT bypassed — they get recorded.
+	passPortsUint = append(passPortsUint, 443, 3000, 3001, 5173, 5174, 4200, 4173)
 	passPortsUint32 := make([]uint32, len(passPortsUint)) // slice type of uint32
 	for i, port := range passPortsUint {
 		passPortsUint32[i] = uint32(port)
