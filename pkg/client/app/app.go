@@ -147,6 +147,11 @@ func (a *App) modifyDockerRun(_ context.Context) error {
 		return fmt.Errorf("invalid command structure: %s", a.cmd)
 	}
 
+	// Append user-defined environment variables
+	for k, v := range a.opts.EnvVars {
+		tlsFlags += fmt.Sprintf("-e %s=%s ", k, v)
+	}
+
 	injection := fmt.Sprintf("%s %s %s", pidMode, networkMode, tlsFlags)
 
 	// Modify the command to insert the pidMode and environment variables
@@ -597,7 +602,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent, nil)
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent, a.opts.EnvVars)
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
