@@ -35,7 +35,7 @@ type CommonInternalService struct {
 	Instrumentation *http.AgentClient
 }
 
-func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
+func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (any, error) {
 	commonServices, err := GetCommonServices(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
