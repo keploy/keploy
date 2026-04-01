@@ -5,6 +5,7 @@ import "fmt"
 type AppError struct {
 	AppErrorType AppErrorType
 	Err          error
+	AppLogs      string
 }
 
 type AppErrorType string

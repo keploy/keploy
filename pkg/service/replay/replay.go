@@ -36,6 +36,115 @@ import (
 )
 
 const UNKNOWN_TEST = "UNKNOWN_TEST"
+const applicationFailedToRunLogMessage = "application failed to run; check the application logs for details or verify the app command is correct"
+
+func shouldAbortTestRun(status models.TestSetStatus, cmdType utils.CmdType) bool {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
+		return cmdType != utils.DockerCompose
+	case models.TestSetStatusInternalErr:
+		return true
+	default:
+		return false
+	}
+}
+
+func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, bool) {
+	switch appErr.AppErrorType {
+	case "":
+		return models.TestSetStatusAppHalted, true
+	case models.ErrCtxCanceled:
+		return "", false
+	case models.ErrCommandError:
+		return models.TestSetStatusFaultUserApp, true
+	case models.ErrUnExpected, models.ErrAppStopped, models.ErrTestBinStopped:
+		return models.TestSetStatusAppHalted, true
+	case models.ErrInternal:
+		return models.TestSetStatusInternalErr, true
+	default:
+		return models.TestSetStatusAppHalted, true
+	}
+}
+
+func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
+	switch current {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
+		return current, true
+	}
+	switch derived {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
+		return derived, true
+	}
+	if cmdType == utils.DockerCompose && isDockerComposeReplayShutdown(err) {
+		return models.TestSetStatusAppHalted, true
+	}
+	return "", false
+}
+
+func isDockerComposeReplayShutdown(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "connection reset by peer") ||
+		strings.Contains(errMsg, "broken pipe") ||
+		strings.Contains(errMsg, "server closed") ||
+		containsStandalonePhrase(errMsg, "unexpected eof") ||
+		containsStandalonePhrase(errMsg, "eof") ||
+		strings.Contains(errMsg, "found no test results")
+}
+
+func containsStandalonePhrase(msg, phrase string) bool {
+	start := 0
+	for {
+		idx := strings.Index(msg[start:], phrase)
+		if idx == -1 {
+			return false
+		}
+		idx += start
+
+		beforeIdx := idx - 1
+		afterIdx := idx + len(phrase)
+		beforeOK := beforeIdx < 0 || !isWordChar(msg[beforeIdx])
+		afterOK := afterIdx >= len(msg) || !isWordChar(msg[afterIdx])
+		if beforeOK && afterOK {
+			return true
+		}
+
+		start = idx + 1
+	}
+}
+
+func isWordChar(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
+}
+
+func describeTestSetFailure(status models.TestSetStatus, testCaseResults []models.TestResult) string {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp:
+		if len(testCaseResults) == 0 {
+			return "application startup failed - check application logs in the app_logs field for details and next steps"
+		}
+		return "application stopped during replay - check application logs in the app_logs field for details and next steps"
+	case models.TestSetStatusInternalErr:
+		return "replay failed with an internal error - please report this issue if it persists"
+	default:
+		return ""
+	}
+}
+
+func shouldIncludeAppLogs(status models.TestSetStatus) bool {
+	switch status {
+	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr:
+		return true
+	default:
+		return false
+	}
+}
 
 type Replayer struct {
 	logger             *zap.Logger
@@ -294,6 +403,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+	cmdType := utils.CmdType(r.config.CommandType)
 	r.testRunTestSets = testSets
 	r.testRunID = testRunID
 	r.firstRun = true
@@ -370,13 +480,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
 				testSetResult = false
-				abortTestRun = true
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusInternalErr:
 				testSetResult = false
-				abortTestRun = true
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusFaultUserApp:
 				testSetResult = false
-				abortTestRun = true
+				abortTestRun = shouldAbortTestRun(testSetStatus, cmdType)
 			case models.TestSetStatusUserAbort:
 				return nil
 			case models.TestSetStatusFailed:
@@ -747,6 +857,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
+	var testSetStatusByErrChanMu sync.RWMutex
+	var lastAppErr models.AppError
+	setErrStatus := func(status models.TestSetStatus) {
+		testSetStatusByErrChanMu.Lock()
+		testSetStatusByErrChan = status
+		testSetStatusByErrChanMu.Unlock()
+	}
+	setLastAppErr := func(appErr models.AppError) {
+		testSetStatusByErrChanMu.Lock()
+		lastAppErr = appErr
+		testSetStatusByErrChanMu.Unlock()
+	}
+	getErrStatus := func() models.TestSetStatus {
+		testSetStatusByErrChanMu.RLock()
+		defer testSetStatusByErrChanMu.RUnlock()
+		return testSetStatusByErrChan
+	}
+	getLastAppErr := func() models.AppError {
+		testSetStatusByErrChanMu.RLock()
+		defer testSetStatusByErrChanMu.RUnlock()
+		return lastAppErr
+	}
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -770,7 +902,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 					AppCommand: conf.AppCommand,
 				})
-				if (appErr.AppErrorType == models.ErrCtxCanceled || appErr == models.AppError{}) {
+				if appErr != (models.AppError{}) {
+					setLastAppErr(appErr)
+				}
+				if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
+					setErrStatus(mappedStatus)
+				}
+				if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
 					return nil
 				}
 				appErrChan <- appErr
@@ -783,23 +921,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			defer utils.Recover(r.logger)
 			select {
 			case err := <-appErrChan:
-				switch err.AppErrorType {
-				case models.ErrCommandError:
-					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
-				case models.ErrUnExpected:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrAppStopped:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
-				case models.ErrCtxCanceled:
+				setLastAppErr(err)
+				if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
+					setErrStatus(mappedStatus)
+				} else if err.AppErrorType == models.ErrCtxCanceled {
 					return nil
-				case models.ErrInternal:
-					testSetStatusByErrChan = models.TestSetStatusInternalErr
-				default:
-					testSetStatusByErrChan = models.TestSetStatusAppHalted
 				}
-				utils.LogError(r.logger, err, "application failed to run")
+				utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 			case <-runTestSetCtx.Done():
-				testSetStatusByErrChan = models.TestSetStatusUserAbort
+				setErrStatus(models.TestSetStatusUserAbort)
 			}
 			exitLoopChan <- true
 			runTestSetCtxCancel()
@@ -1033,7 +1163,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErr = r.RunApplication(runTestSetCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
-					if appErr.AppErrorType == models.ErrCtxCanceled {
+					if appErr != (models.AppError{}) {
+						setLastAppErr(appErr)
+					}
+					if mappedStatus, ok := mapAppErrorToTestSetStatus(appErr); ok {
+						setErrStatus(mappedStatus)
+					}
+					if appErr.AppErrorType == models.ErrCtxCanceled || appErr == (models.AppError{}) {
 						return nil
 					}
 					appErrChan <- appErr
@@ -1046,23 +1182,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				defer utils.Recover(r.logger)
 				select {
 				case err := <-appErrChan:
-					switch err.AppErrorType {
-					case models.ErrCommandError:
-						testSetStatusByErrChan = models.TestSetStatusFaultUserApp
-					case models.ErrUnExpected:
-						testSetStatusByErrChan = models.TestSetStatusAppHalted
-					case models.ErrAppStopped:
-						testSetStatusByErrChan = models.TestSetStatusAppHalted
-					case models.ErrCtxCanceled:
+					setLastAppErr(err)
+					if mappedStatus, ok := mapAppErrorToTestSetStatus(err); ok {
+						setErrStatus(mappedStatus)
+					} else if err.AppErrorType == models.ErrCtxCanceled {
 						return nil
-					case models.ErrInternal:
-						testSetStatusByErrChan = models.TestSetStatusInternalErr
-					default:
-						testSetStatusByErrChan = models.TestSetStatusAppHalted
 					}
-					utils.LogError(r.logger, err, "application failed to run")
+					utils.LogError(r.logger, err, applicationFailedToRunLogMessage)
 				case <-runTestSetCtx.Done():
-					testSetStatusByErrChan = models.TestSetStatusUserAbort
+					setErrStatus(models.TestSetStatusUserAbort)
 				}
 				exitLoopChan <- true
 				runTestSetCtxCancel()
@@ -1131,7 +1259,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var consumedMocks []models.MockState
 	consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+			testSetStatus = resolvedStatus
+			exitLoop = true
+		} else {
+			utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+		}
 	}
 	r.logger.Debug("consumed mocks during initial setup",
 		zap.String("testSetID", testSetID),
@@ -1224,7 +1357,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Checking for errors in the mocking and application
 			select {
 			case <-exitLoopChan:
-				testSetStatus = testSetStatusByErrChan
+				testSetStatus = getErrStatus()
 				exitLoop = true
 			default:
 			}
@@ -1254,7 +1387,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, useMappingBased)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+					testSetStatus = resolvedStatus
+				} else {
+					utils.LogError(r.logger, err, "failed to update mock parameters on agent")
+				}
 				break
 			}
 
@@ -1287,7 +1424,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err != nil {
-					utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+					if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+						testSetStatus = resolvedStatus
+						exitLoop = true
+					} else {
+						utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+					}
 				}
 				r.logger.Debug("consumed mocks after test case simulation",
 					zap.String("testSetID", testSetID),
@@ -1352,7 +1494,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 					continue
 				}
-				testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID, emitFailureLogs)
+				testPass, testResult = r.compareHTTPRespForReplay(testCase, httpResp, testSetID, emitFailureLogs)
 
 			case models.GRPC_EXPORT:
 				grpcResp, ok := resp.(*models.GrpcResp)
@@ -1593,8 +1735,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
-			utils.LogError(r.logger, err, "failed to get test case results")
-			testSetStatus = models.TestSetStatusInternalErr
+			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
+				testSetStatus = resolvedStatus
+			} else {
+				utils.LogError(r.logger, err, "failed to get test case results")
+				testSetStatus = models.TestSetStatusInternalErr
+			}
 		}
 	}
 
@@ -1629,31 +1775,41 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
-		testSetStatus = models.TestSetStatusInternalErr
-	} else {
-		// Checking for errors in the mocking and application
-		select {
-		case <-exitLoopChan:
-			testSetStatus = testSetStatusByErrChan
-		default:
+		if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), loopErr); ok {
+			testSetStatus = resolvedStatus
+		} else {
+			testSetStatus = models.TestSetStatusInternalErr
 		}
+	} else if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), nil); ok {
+		testSetStatus = resolvedStatus
 	}
 
+	appFailure := getLastAppErr()
+	appLogs := appFailure.AppLogs
+	if !shouldIncludeAppLogs(testSetStatus) {
+		appLogs = ""
+	} else if appLogs == "" && testSetStatus == models.TestSetStatusAppHalted {
+		logCtx, cancel := context.WithTimeout(context.WithoutCancel(runTestSetCtx), 10*time.Second)
+		defer cancel()
+		appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
+	}
 	testReport = &models.TestReport{
-		Version:    models.GetVersion(),
-		TestSet:    testSetID,
-		Status:     string(testSetStatus),
-		Total:      testCasesCount,
-		Success:    success,
-		Failure:    failure,
-		Obsolete:   obsolete,
-		Ignored:    ignored,
-		Tests:      testCaseResults,
-		TimeTaken:  timeTaken.String(),
-		HighRisk:   riskHigh,
-		MediumRisk: riskMed,
-		LowRisk:    riskLow,
-		CmdUsed:    r.config.Test.CmdUsed,
+		Version:       models.GetVersion(),
+		TestSet:       testSetID,
+		Status:        string(testSetStatus),
+		Total:         testCasesCount,
+		Success:       success,
+		Failure:       failure,
+		Obsolete:      obsolete,
+		Ignored:       ignored,
+		Tests:         testCaseResults,
+		TimeTaken:     timeTaken.String(),
+		FailureReason: describeTestSetFailure(testSetStatus, testCaseResults),
+		AppLogs:       appLogs,
+		HighRisk:      riskHigh,
+		MediumRisk:    riskMed,
+		LowRisk:       riskLow,
+		CmdUsed:       r.config.Test.CmdUsed,
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1887,16 +2043,275 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 }
 
 func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
-	noiseConfig := r.config.Test.GlobalNoise.Global
-	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
-	}
+	noiseConfig := r.httpNoiseConfig(testSetID)
+	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.config.Test.SchemaMatch {
-		return httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+		return pass, result
 	}
 
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+
+	return pass, result
+}
+
+func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
+	noiseConfig := r.httpNoiseConfig(testSetID)
+	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
+
+	if r.config.Test.SchemaMatch {
+		pass, result := httpMatcher.MatchSchema(tc, actualResponse, r.logger)
+		normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+		return pass, result
+	}
+
+	if emitFailureLogs {
+		pass, result := httpMatcher.Match(tc, cloneHTTPResp(actualResponse), noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, false)
+		if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+			return true, result
+		}
+		if pass {
+			normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+			return pass, result
+		}
+	}
+
+	pass, result := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.config.Test.CompareAll, r.logger, emitFailureLogs)
+	normalizeHTTPRespForReport(tc, actualResponse, originalBodySize)
+	if !pass && r.autoPassHTTPResponseSchemaAddition(tc, actualResponse, testSetID, noiseConfig, result) {
+		return true, result
+	}
+
+	return pass, result
+}
+
+func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
+	noiseConfig := deepCopyNoiseConfig(r.config.Test.GlobalNoise.Global)
+	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
+		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+	}
+
+	return noiseConfig
+}
+
+func deepCopyNoiseConfig(src map[string]map[string][]string) map[string]map[string][]string {
+	if src == nil {
+		return nil
+	}
+
+	dst := make(map[string]map[string][]string, len(src))
+	for key, inner := range src {
+		if inner == nil {
+			dst[key] = nil
+			continue
+		}
+
+		copiedInner := make(map[string][]string, len(inner))
+		for innerKey, values := range inner {
+			if values == nil {
+				copiedInner[innerKey] = nil
+				continue
+			}
+
+			copiedInner[innerKey] = append([]string(nil), values...)
+		}
+
+		dst[key] = copiedInner
+	}
+
+	return dst
+}
+
+func cloneHTTPResp(resp *models.HTTPResp) *models.HTTPResp {
+	if resp == nil {
+		return nil
+	}
+
+	clone := *resp
+	if resp.Header != nil {
+		clone.Header = make(map[string]string, len(resp.Header))
+		for key, value := range resp.Header {
+			clone.Header[key] = value
+		}
+	}
+
+	return &clone
+}
+
+func originalHTTPRespBodySize(tc *models.TestCase, actualResponse *models.HTTPResp) int64 {
+	if tc == nil || actualResponse == nil || !tc.HTTPResp.BodySkipped {
+		return 0
+	}
+
+	return int64(len(actualResponse.Body))
+}
+
+func normalizeHTTPRespForReport(tc *models.TestCase, actualResponse *models.HTTPResp, originalBodySize int64) {
+	if tc == nil || actualResponse == nil || !tc.HTTPResp.BodySkipped {
+		return
+	}
+
+	actualResponse.BodySize = originalBodySize
+	actualResponse.BodySkipped = true
+	actualResponse.Body = ""
+}
+
+func (r *Replayer) autoPassHTTPResponseSchemaAddition(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, noiseConfig map[string]map[string][]string, result *models.Result) bool {
+	if !qualifiesForHTTPResponseSchemaAdditionPass(result) {
+		return false
+	}
+
+	assessment, assessmentErr := matcherUtils.ComputeFailureAssessmentJSON(
+		tc.HTTPResp.Body,
+		actualResponse.Body,
+		bodyNoiseForTestCase(tc.Noise, noiseConfig),
+		r.config.Test.IgnoreOrdering,
+	)
+
+	fields := []zap.Field{
+		zap.String("protocol", "http"),
+		zap.String("testcase", tc.Name),
+		zap.String("testset", testSetID),
+	}
+	if assessment != nil {
+		if len(assessment.AddedFields) > 0 {
+			fields = append(fields, zap.Strings("added_fields", assessment.AddedFields))
+		}
+		if len(assessment.Reasons) > 0 {
+			fields = append(fields, zap.Strings("assessment_reasons", assessment.Reasons))
+		}
+	}
+	if assessmentErr != nil {
+		fields = append(fields, zap.NamedError("assessment_error", assessmentErr))
+	}
+
+	r.logger.Info(
+		"Additive response schema change detected. Passing testcase by default because only new response fields were added. Verify downstream consumers are not affected by the schema expansion.",
+		fields...,
+	)
+
+	normalizePassingHTTPResult(result)
+	return true
+}
+
+func qualifiesForHTTPResponseSchemaAdditionPass(result *models.Result) bool {
+	if result == nil {
+		return false
+	}
+
+	return (result.FailureInfo.Risk == models.Low &&
+		hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded)) ||
+		hasOnlySchemaAdditionAndContentLengthDiff(result)
+}
+
+func hasOnlyFailureCategories(categories []models.FailureCategory, allowed ...models.FailureCategory) bool {
+	if len(categories) == 0 {
+		return false
+	}
+
+	allowedSet := make(map[models.FailureCategory]struct{}, len(allowed))
+	for _, category := range allowed {
+		allowedSet[category] = struct{}{}
+	}
+
+	for _, category := range categories {
+		if _, ok := allowedSet[category]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func hasOnlySchemaAdditionAndContentLengthDiff(result *models.Result) bool {
+	if !hasOnlyFailureCategories(result.FailureInfo.Category, models.SchemaAdded, models.HeaderChanged) {
+		return false
+	}
+
+	hasSchemaAdded := false
+	hasHeaderChanged := false
+	for _, category := range result.FailureInfo.Category {
+		hasSchemaAdded = hasSchemaAdded || category == models.SchemaAdded
+		hasHeaderChanged = hasHeaderChanged || category == models.HeaderChanged
+	}
+
+	return hasSchemaAdded && hasHeaderChanged && hasOnlyContentLengthDiff(result.HeadersResult)
+}
+
+func hasOnlyContentLengthDiff(headers []models.HeaderResult) bool {
+	foundDiff := false
+
+	for _, header := range headers {
+		if header.Normal {
+			continue
+		}
+
+		foundDiff = true
+		key := strings.ToLower(header.Expected.Key)
+		if key == "" {
+			key = strings.ToLower(header.Actual.Key)
+		}
+		if key != "content-length" {
+			return false
+		}
+		if len(header.Expected.Value) == 0 || len(header.Actual.Value) == 0 {
+			return false
+		}
+	}
+
+	return foundDiff
+}
+
+func normalizePassingHTTPResult(result *models.Result) {
+	if result == nil {
+		return
+	}
+
+	result.FailureInfo = models.FailureInfo{}
+	result.StatusCode.Normal = true
+	result.BodySizeResult.Normal = true
+
+	for i := range result.HeadersResult {
+		result.HeadersResult[i].Normal = true
+	}
+	for i := range result.BodyResult {
+		result.BodyResult[i].Normal = true
+	}
+	for i := range result.TrailerResult {
+		result.TrailerResult[i].Normal = true
+	}
+}
+
+func bodyNoiseForTestCase(testCaseNoise map[string][]string, noiseConfig map[string]map[string][]string) map[string][]string {
+	bodyNoise := cloneNoiseMap(noiseConfig["body"])
+
+	for field, regexArr := range testCaseNoise {
+		parts := strings.Split(field, ".")
+		if len(parts) <= 1 || parts[0] != "body" {
+			continue
+		}
+
+		bodyNoise[strings.ToLower(strings.Join(parts[1:], "."))] = append([]string(nil), regexArr...)
+	}
+
+	return bodyNoise
+}
+
+func cloneNoiseMap(input map[string][]string) map[string][]string {
+	if len(input) == 0 {
+		return map[string][]string{}
+	}
+
+	out := make(map[string][]string, len(input))
+	for key, values := range input {
+		out[key] = append([]string(nil), values...)
+	}
+
+	return out
 }
 
 func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string, emitFailureLogs bool) (bool, *models.Result) {
