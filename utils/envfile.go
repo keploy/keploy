@@ -17,12 +17,15 @@ import (
 func ParseEnvFile(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open env file %q: %w", path, err)
+		return nil, fmt.Errorf("failed to open env file %q: %w. Please verify the file path exists and is readable", path, err)
 	}
 	defer f.Close()
 
 	envMap := make(map[string]string)
 	scanner := bufio.NewScanner(f)
+	// Increase the buffer to support large single-line values (e.g., base64 blobs, certificates).
+	// The default limit (~64KB) causes bufio.ErrTooLong for such values.
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
@@ -58,7 +61,7 @@ func ParseEnvFile(path string) (map[string]string, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading env file %q: %w", path, err)
+		return nil, fmt.Errorf("error reading env file %q: %w. Check if the file is corrupted or has encoding issues", path, err)
 	}
 
 	return envMap, nil
