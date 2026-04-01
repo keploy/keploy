@@ -597,7 +597,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent)
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second, a.composeContent, nil)
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
