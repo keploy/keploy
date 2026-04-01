@@ -91,10 +91,21 @@ wait_for_http() {
 
 check_report_for_risk_profiles() {
     echo "validating the Keploy test report against expected risk profiles and categories"
-    
+
+    local replay_supports_schema_addition_autopass=false
+    case "${REPLAY_BIN:-}" in
+        */build/keploy)
+            replay_supports_schema_addition_autopass=true
+            ;;
+    esac
+
     # Define the expected risk for each API endpoint path
     declare -A expected_risks
-    expected_risks["/users-low-risk"]="LOW"
+    if [ "$replay_supports_schema_addition_autopass" = true ]; then
+        expected_risks["/users-low-risk"]="PASSED"
+    else
+        expected_risks["/users-low-risk"]="LOW"
+    fi
     expected_risks["/users-medium-risk"]="MEDIUM"
     expected_risks["/users-medium-risk-with-addition"]="MEDIUM"
     expected_risks["/users-high-risk-type"]="HIGH"
@@ -109,7 +120,9 @@ check_report_for_risk_profiles() {
 
     # Define the expected categories for each API endpoint path (comma-separated)
     declare -A expected_categories
-    expected_categories["/users-low-risk"]="SCHEMA_ADDED" # Body change is SCHEMA_ADDED, header change is implicit
+    if [ "$replay_supports_schema_addition_autopass" = false ]; then
+        expected_categories["/users-low-risk"]="SCHEMA_ADDED" # Body change is SCHEMA_ADDED, header change is implicit
+    fi
     expected_categories["/users-medium-risk"]="SCHEMA_UNCHANGED"
     expected_categories["/users-medium-risk-with-addition"]="SCHEMA_ADDED"
     expected_categories["/users-high-risk-type"]="SCHEMA_BROKEN"
@@ -132,10 +145,19 @@ check_report_for_risk_profiles() {
 
     # Assert the summary counts
     echo "Asserting summary counts..."
-    [ "$(yq '.failure' "$latest_report")" == "12" ] || { echo "::error::Expected 12 failed tests, found $(yq '.failure' "$latest_report")"; exit 1; }
+    local expected_failure_count="12"
+    local expected_low_risk_count="1"
+    if [ "$replay_supports_schema_addition_autopass" = true ]; then
+        expected_failure_count="11"
+        expected_low_risk_count="0"
+    fi
+
+    [ "$(yq '.failure' "$latest_report")" == "$expected_failure_count" ] || { echo "::error::Expected $expected_failure_count failed tests, found $(yq '.failure' "$latest_report")"; exit 1; }
     [ "$(yq '.high-risk' "$latest_report")" == "7" ] || { echo "::error::Expected 7 high-risk failures, found $(yq '.high-risk' "$latest_report")"; exit 1; }
     [ "$(yq '.medium-risk' "$latest_report")" == "4" ] || { echo "::error::Expected 4 medium-risk failures, found $(yq '.medium-risk' "$latest_report")"; exit 1; }
-    [ "$(yq '.low-risk' "$latest_report")" == "1" ] || { echo "::error::Expected 1 low-risk failures, found $(yq '.low-risk' "$latest_report")"; exit 1; }
+    local actual_low_risk_count
+    actual_low_risk_count=$(yq '.["low-risk"] // 0' "$latest_report")
+    [ "$actual_low_risk_count" == "$expected_low_risk_count" ] || { echo "::error::Expected $expected_low_risk_count low-risk failures, found $actual_low_risk_count"; exit 1; }
     echo "✅ Summary counts are correct."
 
     # Assert each test case individually
