@@ -267,6 +267,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().String("keploy-container", c.cfg.KeployContainer, "Keploy server container name")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+		cmd.Flags().StringToString("env", c.cfg.Env, "Environment variables to pass to the application (e.g., --env DB_HOST=localhost,DB_PORT=5432)")
+		cmd.Flags().String("env-file", c.cfg.EnvFile, "Path to a .env file with environment variables for the application")
 
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
