@@ -112,23 +112,9 @@ func (r *MockLoader) LoadMocks(ctx context.Context, testSetID string, testCaseNa
 		return fmt.Errorf("MockLoader: failed to send mock filter params to agent: %w", err)
 	}
 
-
 	err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 	if err != nil {
 		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
-	}
-
-	// Step 6 – send filter parameters to the agent (mirrors RunTestSet behavior).
-	useMappingBased := len(mocksThatHaveMappings) > 0
-	filterParams := models.MockFilterParams{
-		AfterTime:          models.BaseTime,
-		BeforeTime:         time.Now(),
-		MockMapping:        []string{},
-		UseMappingBased:    useMappingBased,
-		TotalConsumedMocks: map[string]models.MockState{},
-	}
-	if err := r.instrumentation.UpdateMockParams(ctx, filterParams); err != nil {
-		return fmt.Errorf("MockLoader: failed to update mock params on agent: %w", err)
 	}
 
 	r.logger.Info("MockLoader: mocks loaded successfully",
