@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -985,9 +986,15 @@ func (idc *Impl) modifyAppServiceForKeploy(compose *Compose, appContainerName st
 			javaOpts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", trustStorePath)
 			idc.appendServiceEnvVar(serviceContentNode, "JAVA_TOOL_OPTIONS", javaOpts)
 
-			// Inject user-defined environment variables
-			for k, v := range envVars {
-				idc.addServiceEnvVar(serviceContentNode, k, v)
+			// Inject user-defined environment variables.
+			// Sort keys for deterministic YAML output across runs.
+			envKeys := make([]string, 0, len(envVars))
+			for k := range envVars {
+				envKeys = append(envKeys, k)
+			}
+			sort.Strings(envKeys)
+			for _, k := range envKeys {
+				idc.addServiceEnvVar(serviceContentNode, k, envVars[k])
 			}
 
 			// Add PID namespace sharing
