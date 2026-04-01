@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -106,6 +107,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		reqTimestamp := time.Now()
 		var chunked bool = false
+		captureEnabled := !memoryguard.IsRecordingPaused()
 
 		// Request modifications for Sync/Sampling modes
 		if forceCloseMode {
@@ -113,7 +115,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				logger.Debug("Detected chunked request. Releasing lock early.")
 				releaseLock()
 				chunked = true
-			} else if pm.synchronous && acquiredLock {
+			} else if captureEnabled && pm.synchronous && acquiredLock {
 				mgr := syncMock.Get()
 				if !mgr.GetFirstReqSeen() {
 					mgr.SetFirstRequestSignaled()
@@ -126,11 +128,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Header.Set("Connection", "close")
 		}
 
-		reqData, err := httputil.DumpRequest(req, true)
-		if err != nil {
-			logger.Error("Failed to dump request for capturing", zap.Error(err))
-			req.Body.Close()
-			return
+		var reqData []byte
+		if captureEnabled {
+			reqData, err = httputil.DumpRequest(req, true)
+			if err != nil {
+				logger.Error("Failed to dump request for capturing", zap.Error(err))
+				req.Body.Close()
+				return
+			}
 		}
 
 		if err := req.Write(upConn); err != nil {
@@ -160,11 +165,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		respTimestamp := time.Now()
-		respData, err := httputil.DumpResponse(resp, true)
-		if err != nil {
-			logger.Error("Failed to dump response for capturing", zap.Error(err))
-			resp.Body.Close()
-			return
+		var respData []byte
+		if captureEnabled {
+			respData, err = httputil.DumpResponse(resp, true)
+			if err != nil {
+				logger.Error("Failed to dump response for capturing", zap.Error(err))
+				resp.Body.Close()
+				return
+			}
 		}
 
 		if err := resp.Write(clientConn); err != nil {
@@ -175,7 +183,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		resp.Body.Close()
 
 		// Capture Evaluation
-		shouldCapture := true
+		shouldCapture := captureEnabled
 		if forceCloseMode {
 			if chunked {
 				shouldCapture = false

@@ -24,6 +24,7 @@ type SyncMockManager struct {
 	outChan      chan<- *models.Mock
 	mappingChan  chan<- models.TestMockMapping
 	firstReqSeen bool
+	memoryPause  bool
 }
 
 // Global instance is initialized at package load time
@@ -52,6 +53,10 @@ func (m *SyncMockManager) SetMappingChannel(ch chan<- models.TestMockMapping) {
 
 func (m *SyncMockManager) AddMock(mock *models.Mock) {
 	m.mu.Lock()
+	if m.memoryPause {
+		m.mu.Unlock()
+		return
+	}
 
 	// storing startup mocks until first request is seen
 	if !m.firstReqSeen && m.outChan != nil {
@@ -78,6 +83,22 @@ func (m *SyncMockManager) GetFirstReqSeen() bool {
 	defer m.mu.Unlock()
 	return m.firstReqSeen
 }
+
+func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
+	if m == nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.memoryPause = enabled
+	if !enabled {
+		return
+	}
+
+}
+
 func (m *SyncMockManager) ResolveRange(start, end time.Time, testName string, keep bool, mapping bool) {
 	// Collect mocks and mapping data under the lock, then send to channels
 	// AFTER releasing it. Sending while holding mu can deadlock: the channel

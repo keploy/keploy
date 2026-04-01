@@ -13,6 +13,7 @@ import (
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -161,6 +162,7 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 	startTime := time.Now()
 	clientCtx := clientStream.Context()
 	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
+	captureEnabled := !memoryguard.IsRecordingPaused()
 
 	md, _ := metadata.FromIncomingContext(clientCtx)
 	p.logger.Debug("proxying gRPC request for test case capture", zap.String("method", fullMethod))
@@ -207,7 +209,9 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 				destStream.CloseSend()
 				return
 			}
-			reqBuf.Write(reqMsg.data)
+			if captureEnabled {
+				reqBuf.Write(reqMsg.data)
+			}
 			if err := destStream.SendMsg(reqMsg); err != nil {
 				reqErr = err
 				return
@@ -236,7 +240,9 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 			if respErr != nil { // Handles io.EOF and status errors
 				return
 			}
-			respBuf.Write(respMsg.data)
+			if captureEnabled {
+				respBuf.Write(respMsg.data)
+			}
 			if err := clientStream.SendMsg(respMsg); err != nil {
 				respErr = err
 				return
@@ -276,13 +282,15 @@ func (p *grpcTestCaseProxy) handler(_ interface{}, clientStream grpc.ServerStrea
 		}
 	}
 
-	http2Stream := &pkg.HTTP2Stream{
-		ID:       0,
-		GRPCReq:  grpcReq,
-		GRPCResp: grpcResp,
-	}
+	if captureEnabled {
+		http2Stream := &pkg.HTTP2Stream{
+			ID:       0,
+			GRPCReq:  grpcReq,
+			GRPCResp: grpcResp,
+		}
 
-	Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, p.appPort)
+		Utils.CaptureGRPC(p.ctx, p.logger, p.testCases, http2Stream, p.appPort)
+	}
 
 	if s, ok := status.FromError(respErr); ok && respErr != nil {
 		return s.Err()

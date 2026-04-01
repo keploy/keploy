@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -38,6 +39,10 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, appPort uint16) {
+	if memoryguard.IsRecordingPaused() {
+		return
+	}
+
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -379,6 +384,10 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16) {
+	if memoryguard.IsRecordingPaused() {
+		return
+	}
+
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return

@@ -565,6 +565,9 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.BuildDelay > 0 {
 		command = append(command, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
 	}
+	if opts.MemoryLimit > 0 {
+		command = append(command, "--memory-limit", strconv.FormatUint(opts.MemoryLimit, 10))
+	}
 	if models.IsAnsiDisabled {
 		command = append(command, "--disable-ansi")
 	}
