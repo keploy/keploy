@@ -173,10 +173,11 @@ func replaceFile(src, dst string) error {
 	return nil
 }
 
-// UpdateMocks deletes the mocks from the mock file with given names.
+// UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
-// mockNames maps each mock name to its models.MockState, indicating whether the mock
-// has been consumed (and can be pruned) or should be preserved.
+// mockNames is a keep-set keyed by mock name (values carry models.MockState details).
+// Mocks present in mockNames are retained; other mocks may still be retained by
+// timestamp-based exemptions (for replay writes and startup/init traffic).
 func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
