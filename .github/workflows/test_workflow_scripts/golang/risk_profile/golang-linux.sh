@@ -94,7 +94,7 @@ check_report_for_risk_profiles() {
 
     local replay_supports_schema_addition_autopass=false
     case "${REPLAY_BIN:-}" in
-        */build/keploy)
+        */build/keploy|*/latest/keploy)
             replay_supports_schema_addition_autopass=true
             ;;
     esac
