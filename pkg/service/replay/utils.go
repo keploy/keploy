@@ -71,9 +71,11 @@ func CloneGlobalNoise(src config.GlobalNoise) config.GlobalNoise {
 // PrepareHeaderNoiseConfig prepares the header noise configuration for mock matching.
 // It merges global and test-set specific noise, then extracts only the header noise.
 func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
-	noiseConfig := CloneGlobalNoise(globalNoise)
+	var noiseConfig config.GlobalNoise
 	if tsNoise, ok := testSetNoise[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
+	} else {
+		noiseConfig = CloneGlobalNoise(globalNoise)
 	}
 
 	// Extract only header noise for mock matching
@@ -152,7 +154,7 @@ func testCaseRequestTimestamp(tc *models.TestCase) time.Time {
 }
 
 // effectiveStreamMockWindow calculates the effective time window for streaming mocks.
-// It returns the start time (request timestamp) and end time (request timestamp + timeout).
+// It returns the start time (request timestamp) and end time (max(reqTs, respTs) + timeout).
 // The timeout is calculated using pkg.ComputeStreamingTimeoutSeconds which considers the test case's timeout configuration.
 func effectiveStreamMockWindow(tc *models.TestCase, defaultAPITimeout uint64) (time.Time, time.Time) {
 	if tc == nil {
