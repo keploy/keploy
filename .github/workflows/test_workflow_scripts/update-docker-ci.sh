@@ -1,6 +1,9 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Unified CI Docker image build script.
+# Accepts the target platform as the first argument, defaults to linux/amd64 if not specified.
+TARGET_PLATFORM=${1:-"linux/amd64"}
 DOCKERFILE_PATH="./Dockerfile"
 
 # Create a temp file safely and atomically replace the original
@@ -25,12 +28,13 @@ ensure_dockerfile_syntax() {
 add_race_flag() {
   echo "Ensuring -race in go build lines (idempotent)..."
   awk '
-    # If a line starts with RUN go build and does not already contain -race,
-    # insert -race right after `go build`
     BEGIN { OFS="" }
-    /^[[:space:]]*RUN[[:space:]]+go[[:space:]]+build(\>|[[:space:]])/ {
-      if ($0 ~ /(^|\s)-race(\s|$)/) { print; next }
-      sub(/RUN[[:space:]]+go[[:space:]]+build/, "RUN go build -race")
+    # Match any RUN line that eventually invokes `go build`, even if env vars precede it
+    /^[[:space:]]*RUN[[:space:]]+/ && $0 ~ /[[:space:]]go[[:space:]]+build/ {
+      # If -race is already present as a standalone flag, leave the line unchanged.
+      if ($0 ~ /(^|[[:space:]])-race([[:space:]]|$)/) { print; next }
+      # Insert -race immediately after the first `go build` occurrence.
+      sub(/[[:space:]]go[[:space:]]+build/, " go build -race")
       print; next
     }
     { print }
@@ -52,14 +56,6 @@ enable_ssh_mount_for_go_mod() {
 use_ssh_for_github_and_known_hosts() {
   echo "Injecting SSH config, known_hosts, and GOPRIVATE around go mod download (idempotent)..."
 
-  # We’ll inject two things before the first `RUN --mount=type=ssh go mod download`:
-  #   ENV GOPRIVATE=github.com/keploy/*
-  #   ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
-  #   RUN git config ... && mkdir ~/.ssh && ssh-keyscan ...
-  #
-  # And we’ll also try adding the git/ssh known_hosts RUN right after a COPY go.mod go.sum /app line (best-effort).
-  #
-  # Guard with flags to avoid duplicate insertions.
   awk '
     BEGIN {
       OFS="";
@@ -67,12 +63,10 @@ use_ssh_for_github_and_known_hosts() {
       injected_after_copy = 0;
     }
 
-    # Helper patterns
     function emit_git_known_hosts_block() {
       print "RUN git config --global url.\"ssh://git@github.com/\".insteadOf \"https://github.com/\" && mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts"
     }
 
-    # After COPY go.mod go.sum /app
     /^[[:space:]]*COPY[[:space:]]+go\.mod[[:space:]]+go\.sum[[:space:]]+\/app\/?[[:space:]]*$/ {
       print;
       if (!injected_after_copy) {
@@ -82,12 +76,14 @@ use_ssh_for_github_and_known_hosts() {
       next
     }
 
-    # Before the first RUN --mount=type=ssh go mod download
     /^[[:space:]]*RUN[[:space:]]+--mount=type=ssh[[:space:]]+go[[:space:]]+mod[[:space:]]+download[[:space:]]*$/ {
       if (!injected_before_go_mod) {
         print "ENV GOPRIVATE=github.com/keploy/*"
-        print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no\""
-        emit_git_known_hosts_block();
+        # Using StrictHostKeyChecking=yes as it is more secure, since we already do ssh-keyscan
+        print "ENV GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=yes\""
+        if (!injected_after_copy) {
+          emit_git_known_hosts_block();
+        }
         injected_before_go_mod = 1;
       }
       print; next
@@ -98,12 +94,9 @@ use_ssh_for_github_and_known_hosts() {
 }
 
 build_docker_image() {
-  echo "Building Docker image with BuildKit and SSH forwarding..."
-  # Use buildx with --provenance=false to produce a clean single-platform
-  # image. With Docker Desktop's containerd image store (enabled by
-  # default), regular 'docker build' can produce manifests that cause
-  # 'exec format error' when the image is pulled on another machine.
-  docker buildx build --platform linux/arm64 --ssh default \
+  echo "Building Docker image for ${TARGET_PLATFORM} with BuildKit and SSH forwarding..."
+  # Use buildx with --provenance=false to produce a clean single-platform image.
+  docker buildx build --platform "${TARGET_PLATFORM}" --ssh default \
     --provenance=false --load -t ttl.sh/keploy/keploy:1h .
 }
 

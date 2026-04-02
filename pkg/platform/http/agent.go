@@ -766,10 +766,11 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer close(appErrCh)
 		appErr := app.Run(runAppCtx)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
+		}
+		if appErr.AppErrorType != models.ErrCtxCanceled && appErr != (models.AppError{}) {
 			appErrCh <- appErr
 		}
 		return nil
@@ -778,9 +779,22 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	select {
 	case <-runAppCtx.Done():
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
-	case appErr := <-appErrCh:
+	case appErr, ok := <-appErrCh:
+		if !ok {
+			return models.AppError{AppErrorType: models.ErrAppStopped, Err: nil}
+		}
 		return appErr
 	}
+}
+
+func (a *AgentClient) GetRecentAppLogs(ctx context.Context) string {
+	app, err := a.getApp()
+	if err != nil {
+		a.logger.Debug("failed to get app for recent logs", zap.Error(err))
+		return ""
+	}
+
+	return app.RecentLogs(ctx)
 }
 
 // startAgent starts the keploy agent process and handles its lifecycle

@@ -1129,6 +1129,7 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 	expectedSize := len(expectedBytes)
 	actualSize := 0
 	contentMatch := true
+	mismatchOffset := -1
 	buffer := make([]byte, 32*1024)
 
 	for {
@@ -1141,6 +1142,7 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				}
 				if !bytes.Equal(buffer[:end-actualSize], expectedBytes[actualSize:end]) {
 					contentMatch = false
+					mismatchOffset = actualSize
 				}
 			}
 			actualSize += n
@@ -1176,12 +1178,13 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 
 	if !contentMatch {
 		logger.Debug("binary stream content mismatch",
-			zap.Int("size", actualSize))
+			zap.Int("size", actualSize),
+			zap.Int("first_mismatch_offset", mismatchOffset))
 		mismatchInfo := &StreamMismatchInfo{
 			FrameIndex:    0,
 			ExpectedFrame: fmt.Sprintf("%d bytes", expectedSize),
-			ActualFrame:   fmt.Sprintf("%d bytes (content differs)", actualSize),
-			Reason:        fmt.Sprintf("content mismatch at %d bytes", actualSize),
+			ActualFrame:   fmt.Sprintf("%d bytes (content differs starting near byte %d)", actualSize, mismatchOffset),
+			Reason:        fmt.Sprintf("content mismatch starting near byte %d of %d bytes", mismatchOffset, actualSize),
 		}
 		return false, strconv.Itoa(actualSize), mismatchInfo, nil
 	}
