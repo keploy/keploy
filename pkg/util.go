@@ -537,12 +537,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, err
 	}
 
-	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
+	logger.Debug("sending request to user app",
+		zap.String("method", prepared.Request.Method),
+		zap.String("url", prepared.Request.URL.String()))
 
 	// Execute the request
 	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
 	if errHTTPReq != nil {
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app; verify the app is running and reachable on the configured host/port")
 		return nil, errHTTPReq
 	}
 
@@ -612,12 +614,14 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		return nil, err
 	}
 
-	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
+	logger.Debug("sending streaming request to user app",
+		zap.String("method", prepared.Request.Method),
+		zap.String("url", prepared.Request.URL.String()))
 
 	// Execute the request
 	httpResp, errHTTPReq := prepared.Client.Do(prepared.Request)
 	if errHTTPReq != nil {
-		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
+		utils.LogError(logger, errHTTPReq, "failed to send streaming request to app; verify the app is running and reachable, and check --port/--sse-port configuration")
 		return nil, errHTTPReq
 	}
 
