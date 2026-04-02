@@ -89,6 +89,42 @@ func GetNextSortNum() int64 {
 	return atomic.AddInt64(&SortCounter, 1)
 }
 
+func cloneStringAnyMap(src map[string]interface{}) map[string]interface{} {
+	if len(src) == 0 {
+		return map[string]interface{}{}
+	}
+
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func snapshotTemplateState() (map[string]interface{}, map[string]interface{}) {
+	templateValuesMu.RLock()
+	defer templateValuesMu.RUnlock()
+
+	return cloneStringAnyMap(utils.TemplatizedValues), cloneStringAnyMap(utils.SecretValues)
+}
+
+func buildTemplateDataSnapshot() map[string]interface{} {
+	templatedValues, secretValues := snapshotTemplateState()
+	if len(templatedValues) == 0 && len(secretValues) == 0 {
+		return map[string]interface{}{}
+	}
+
+	templateData := make(map[string]interface{}, len(templatedValues)+1)
+	for k, v := range templatedValues {
+		templateData[k] = v
+	}
+	if len(secretValues) > 0 {
+		templateData["secret"] = secretValues
+	}
+
+	return templateData
+}
+
 func UpdateSortCounterIfHigher(val int64) {
 	for {
 		curr := atomic.LoadInt64(&SortCounter)
@@ -203,13 +239,13 @@ func IsTime(stringDate string) bool {
 }
 
 type SimulationConfig struct {
-	APITimeout         uint64
-	RequestTimeout     time.Duration
-	ConfigPort         uint32
-	KeployPath         string
-	ConfigHost         string
-	URLReplacements    map[string]string
-	StreamingBodyNoise map[string][]string
+	APITimeout      uint64
+	RequestTimeout  time.Duration
+	ConfigPort      uint32
+	KeployPath      string
+	ConfigHost      string
+	URLReplacements map[string]string
+	PortMappings    map[uint32]uint32
 }
 
 // preparedHTTPRequest holds the prepared HTTP request and client for execution.
@@ -232,26 +268,13 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 
 	// TODO: adjust this logic in the render function in order to remove the redundant code.
 	// Convert testcase to string and render template values before simulation.
-	templateValuesMu.RLock()
-	hasTemplateOrSecretValues := len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0
-	templateValuesMu.RUnlock()
-	if hasTemplateOrSecretValues {
+	templateData := buildTemplateDataSnapshot()
+	if len(templateData) > 0 {
 		testCaseBytes, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase for templating")
 			return nil, err
 		}
-
-		// Build the template data
-		templateValuesMu.RLock()
-		templateData := make(map[string]interface{}, len(utils.TemplatizedValues)+len(utils.SecretValues))
-		for k, v := range utils.TemplatizedValues {
-			templateData[k] = v
-		}
-		if len(utils.SecretValues) > 0 {
-			templateData["secret"] = utils.SecretValues
-		}
-		templateValuesMu.RUnlock()
 
 		// Render only real Keploy placeholders ({{ .x }}, {{ string .y }}, etc.),
 		// ignoring LaTeX/HTML like {{\pi}}.
@@ -421,18 +444,11 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		}
 	}
 
-	// Determine which URL/port to use for test execution.
-	// Priority logic (refined):
-	// 1. Check replaceWith against the ORIGINAL test case URL.
-	//    If a match is found, apply it.
-	//    CRITICAL: If the replacement VALUE itself contains a port, treat it as the final authority (skip AppPort/ConfigPort).
-	//    If the replacement value is just a host, continue to apply AppPort/ConfigPort logic.
-	// 2. ConfigHost (if provided) overrides host (ONLY if replaceWith didn't match)
-	// 3. AppPort (if present) overrides port
-	// 4. ConfigPort (if present) overrides port
-
-	// Step 1: Resolve the target URL/Authority using the helper
-	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
+	// Resolve the execution target using ResolveTestTarget's precedence:
+	// app_port < config port < replaceWith URL replacements
+	// (explicit replacement port short-circuits lower-priority port overrides)
+	// < replaceWith port mappings.
+	testURL, err := ResolveTestTarget(tc.HTTPReq.URL, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, true, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -564,15 +580,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
-	templateValuesMu.Lock()
-	defer templateValuesMu.Unlock()
+	if len(respBody) > 0 {
+		templateValuesMu.Lock()
+		defer templateValuesMu.Unlock()
+		prevTemplatedValues := cloneStringAnyMap(utils.TemplatizedValues)
+		if len(prevTemplatedValues) > 0 {
+			logger.Debug("Received response from user app", zap.Any("response", resp))
 
-	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
-		logger.Debug("Received response from user app", zap.Any("response", resp))
-
-		updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
-		if updated {
-			logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
+			updated := updateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues, prevTemplatedValues)
+			if updated {
+				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
+			}
 		}
 	}
 	return resp, errHTTPReq
@@ -852,6 +870,15 @@ func hasSSEContentType(value string) bool {
 	return strings.Contains(strings.ToLower(value), "text/event-stream")
 }
 
+// IsSSERequest checks whether a test case targets an SSE endpoint based on
+// the recorded response Content-Type or request Accept header.
+func IsSSERequest(tc *models.TestCase) bool {
+	if tc == nil || tc.Kind != models.HTTP {
+		return false
+	}
+	return isSSETestCase(tc, nil)
+}
+
 func boundaryFromContentTypeHeader(contentType string) string {
 	if contentType == "" {
 		return ""
@@ -1055,16 +1082,16 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 
 		actualQueue = append(actualQueue, line)
 		expected := expectedQueue[nextExpected]
-		if len(line) != len(expected) {
+		if line != expected {
 			logger.Debug("plain-text stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.Int("expected_size", len(expected)),
-				zap.Int("actual_size", len(line)))
+				zap.String("expected", expected),
+				zap.String("actual", line))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
 				ActualFrame:   line,
-				Reason:        fmt.Sprintf("size mismatch: expected %d bytes, got %d bytes", len(expected), len(line)),
+				Reason:        fmt.Sprintf("content mismatch at frame %d", nextExpected),
 			}
 			return false, strings.Join(actualQueue, "\n"), mismatchInfo, nil
 		}
@@ -1098,16 +1125,26 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 }
 
 func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
-	expectedSize := len([]byte(expectedResp.Body))
-	if structuredSize, ok := expectedStructuredRawSize(expectedResp.StreamBody); ok {
-		expectedSize = structuredSize
-	}
+	expectedBytes := expectedBinaryBytes(expectedResp)
+	expectedSize := len(expectedBytes)
 	actualSize := 0
+	contentMatch := true
+	mismatchOffset := -1
 	buffer := make([]byte, 32*1024)
 
 	for {
 		n, err := stream.Read(buffer)
 		if n > 0 {
+			if contentMatch && actualSize < expectedSize {
+				end := actualSize + n
+				if end > expectedSize {
+					end = expectedSize
+				}
+				if !bytes.Equal(buffer[:end-actualSize], expectedBytes[actualSize:end]) {
+					contentMatch = false
+					mismatchOffset = actualSize
+				}
+			}
 			actualSize += n
 			if actualSize >= expectedSize {
 				if actualSize > expectedSize {
@@ -1139,7 +1176,36 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 		return false, strconv.Itoa(actualSize), mismatchInfo, nil
 	}
 
+	if !contentMatch {
+		logger.Debug("binary stream content mismatch",
+			zap.Int("size", actualSize),
+			zap.Int("first_mismatch_offset", mismatchOffset))
+		mismatchInfo := &StreamMismatchInfo{
+			FrameIndex:    0,
+			ExpectedFrame: fmt.Sprintf("%d bytes", expectedSize),
+			ActualFrame:   fmt.Sprintf("%d bytes (content differs starting near byte %d)", actualSize, mismatchOffset),
+			Reason:        fmt.Sprintf("content mismatch starting near byte %d of %d bytes", mismatchOffset, actualSize),
+		}
+		return false, strconv.Itoa(actualSize), mismatchInfo, nil
+	}
+
 	return true, strconv.Itoa(actualSize), nil, nil
+}
+
+func expectedBinaryBytes(expectedResp models.HTTPResp) []byte {
+	if len(expectedResp.StreamBody) > 0 {
+		var buf bytes.Buffer
+		for _, chunk := range expectedResp.StreamBody {
+			raw, ok := streamChunkFieldValue(chunk, "raw")
+			if ok {
+				buf.WriteString(raw)
+			}
+		}
+		if buf.Len() > 0 {
+			return buf.Bytes()
+		}
+	}
+	return []byte(expectedResp.Body)
 }
 
 func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
@@ -1350,19 +1416,14 @@ func compareSSEFields(expectedFields, actualFields []sseField, jsonNoiseKeys map
 				continue
 			}
 
-			if detectScalarType(eVal) != detectScalarType(aVal) {
-				return false, "data-type mismatch"
-			}
-			if len(eVal) != len(aVal) {
-				return false, "data-size mismatch"
+			if eVal != aVal {
+				return false, "data-value mismatch"
 			}
 			continue
 		}
 
-		eType := detectScalarType(strings.TrimSpace(e.value))
-		aType := detectScalarType(strings.TrimSpace(a.value))
-		if eType != aType {
-			return false, "field-type mismatch"
+		if strings.TrimSpace(e.value) != strings.TrimSpace(a.value) {
+			return false, "field-value mismatch"
 		}
 	}
 
@@ -1640,8 +1701,8 @@ func compareMultipartPart(expected multipartPartPayload, actual multipartPartPay
 		return true, ""
 	}
 
-	if len(expected.body) != len(actual.body) {
-		return false, "body-size mismatch"
+	if !bytes.Equal(expected.body, actual.body) {
+		return false, "body mismatch"
 	}
 	return true, ""
 }
@@ -1791,15 +1852,16 @@ func looksBinary(s string) bool {
 	return false
 }
 
-// UpdateTemplateValuesFromHTTPResp checks the HTTP response body and the previous templatized response body
-// it updates the template values if it finds any changes in the response body's fields which were previously templatized
-func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, resp models.HTTPResp, prevTemplatedValues map[string]interface{}) bool {
+// updateTemplateValuesFromHTTPResp checks the HTTP response body and the previous
+// templatized response body and updates the template values that are currently held
+// under templateValuesMu.
+func updateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, resp models.HTTPResp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
 	// We derive template keys directly from the templated response body & headers by
 	// scanning for placeholder patterns like {{key}} (go text/template simple identifiers)
 	// and then recursively locating the same JSON path in the new response to fetch
 	// the concrete value. This avoids relying on updateTemplatesFromJSON and gives
 	// deterministic path-based updates.
-	if len(utils.TemplatizedValues) == 0 { // nothing to update
+	if len(currentTemplatedValues) == 0 { // nothing to update
 		logger.Debug("no templatized values present, nothing to update")
 		return false
 	}
@@ -1820,7 +1882,7 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 	if templatedIsJSON && actualIsJSON {
 		if err := json.Unmarshal([]byte(sanitizedTemplatedBody), &templatedParsed); err == nil {
 			if err2 := json.Unmarshal([]byte(resp.Body), &actualParsed); err2 == nil {
-				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, prevTemplatedValues) {
+				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, currentTemplatedValues, prevTemplatedValues) {
 					changed = true
 				}
 			}
@@ -1833,8 +1895,8 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 
 // traverseAndUpdateTemplates walks the templated JSON tree in lock-step with the actual JSON.
 // Whenever it finds a string containing a placeholder, it extracts the template key(s) and updates
-// utils.TemplatizedValues with the concrete value from the actual JSON at the same path.
-func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode interface{}, path string, placeholderRe *regexp.Regexp, prevTemplatedValues map[string]interface{}) bool {
+// the current template values with the concrete value from the actual JSON at the same path.
+func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode interface{}, path string, placeholderRe *regexp.Regexp, currentTemplatedValues, prevTemplatedValues map[string]interface{}) bool {
 	changed := false
 	switch t := templatedNode.(type) {
 	case map[string]interface{}:
@@ -1844,7 +1906,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 			if path != "" {
 				p = path + "." + k
 			}
-			if traverseAndUpdateTemplates(logger, v, actMap[k], p, placeholderRe, prevTemplatedValues) {
+			if traverseAndUpdateTemplates(logger, v, actMap[k], p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
 				changed = true
 			}
 		}
@@ -1859,7 +1921,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 			if path == "" {
 				p = fmt.Sprintf("[%d]", i)
 			}
-			if traverseAndUpdateTemplates(logger, v, actElem, p, placeholderRe, prevTemplatedValues) {
+			if traverseAndUpdateTemplates(logger, v, actElem, p, placeholderRe, currentTemplatedValues, prevTemplatedValues) {
 				changed = true
 			}
 		}
@@ -1882,7 +1944,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 				continue
 			}
 			key := keys[0]
-			if _, ok := utils.TemplatizedValues[key]; !ok {
+			if _, ok := currentTemplatedValues[key]; !ok {
 				continue
 			}
 			prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
@@ -1894,7 +1956,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 				continue
 			}
 			logger.Debug("updating template value from JSON path", zap.String("key", key), zap.String("path", path), zap.String("old_value", prevStr), zap.String("new_value", concrete))
-			utils.TemplatizedValues[key] = concrete
+			currentTemplatedValues[key] = concrete
 			changed = true
 		}
 	default:
@@ -1908,8 +1970,10 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 // a concrete "expected" testcase (for example expected responses) before
 // the test is executed and templates may get updated by the runtime.
 func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) {
+	templatedValues, secretValues := snapshotTemplateState()
+
 	// If there are no templated or secret values, just return a deep copy
-	if len(utils.TemplatizedValues) == 0 && len(utils.SecretValues) == 0 {
+	if len(templatedValues) == 0 && len(secretValues) == 0 {
 		copy := *tc
 		return &copy, nil
 	}
@@ -1931,11 +1995,11 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 	}
 
 	data := make(map[string]interface{})
-	for k, v := range utils.TemplatizedValues {
+	for k, v := range templatedValues {
 		data[k] = v
 	}
-	if len(utils.SecretValues) > 0 {
-		data["secret"] = utils.SecretValues
+	if len(secretValues) > 0 {
+		data["secret"] = secretValues
 	}
 
 	var output bytes.Buffer
@@ -1959,9 +2023,11 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 		return noise
 	}
 
+	templatedValues, _ := snapshotTemplateState()
+
 	// headers: if a header value contains a templated value, mark header.<name>
 	for hk, hv := range resp.Header {
-		for _, v := range utils.TemplatizedValues {
+		for _, v := range templatedValues {
 			if v == nil {
 				continue
 			}
@@ -1981,7 +2047,7 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 	var parsed interface{}
 	if json.Valid([]byte(resp.Body)) {
 		if err := json.Unmarshal([]byte(resp.Body), &parsed); err == nil {
-			for _, v := range utils.TemplatizedValues {
+			for _, v := range templatedValues {
 				if v == nil {
 					continue
 				}
@@ -2002,7 +2068,7 @@ func DetectNoiseFieldsInResp(resp *models.HTTPResp) map[string][]string {
 		}
 	} else {
 		// non-json body: if any templated literal present, mark the full body as noisy
-		for _, v := range utils.TemplatizedValues {
+		for _, v := range templatedValues {
 			if v == nil {
 				continue
 			}
@@ -2705,19 +2771,17 @@ func hasExplicitPort(hostStr string) bool {
 // ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
 // by applying replacement logic and precedence rules.
 //
-// Priority logic:
-//  1. Check urlReplacements against originalTarget.
-//     If match found, apply it.
-//     CRITICAL: If replacement has explicit port, it is FINAL (skip overrides).
-//  2. ConfigHost (if provided) overrides host (ONLY if replacement didn't match).
-//  3. AppPort (if present) overrides port.
-//  4. ConfigPort (if present) overrides port (takes precedence over AppPort).
-func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
+// Priority logic (lowest → highest):
+//  1. AppPort (recorded port).
+//  2. ConfigPort (top-level port/grpcPort/ssePort combined with protocol overrides).
+//  3. replaceWith URL replacements – if replacement has explicit port, skip steps 1-2.
+//  4. replaceWith port mappings – always applied last, overrides everything.
+func ResolveTestTarget(originalTarget string, urlReplacements map[string]string, portMappings map[uint32]uint32, configHost string, appPort uint16, configPort uint32, isHTTP bool, logger *zap.Logger) (string, error) {
 	finalTarget := originalTarget
 	replacementHasPort := false
 	replacementMatched := false
 
-	// Step 1: Check replaceWith
+	// Step 1: Check replaceWith URL
 	if len(urlReplacements) > 0 {
 		for substr, replacement := range urlReplacements {
 			if strings.Contains(finalTarget, substr) {
@@ -2725,12 +2789,8 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 				finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
 
 				// Check if the replacement value explicitly defines a port.
-				// Heuristic: check if the string contains a port using `hasExplicitPort`.
-				// For HTTP/HTTPS, we usually ignore the scheme part for port detection,
-				// but `hasExplicitPort` expects "host:port".
 				checkStr := replacement
 				if isHTTP {
-					// Strip scheme for port check if present
 					if strings.HasPrefix(replacement, "http://") {
 						checkStr = strings.TrimPrefix(replacement, "http://")
 					} else if strings.HasPrefix(replacement, "https://") {
@@ -2752,13 +2812,13 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		}
 	}
 
-	// If replacement defined a port, we are done
-	if replacementHasPort {
+	// If URL replacement set a port and there are no port mappings, we are done
+	if replacementHasPort && len(portMappings) == 0 {
 		return finalTarget, nil
 	}
 
-	// Step 2a: ConfigHost override (if no replacement match)
-	if !replacementMatched && configHost != "" {
+	// Step 2: ConfigHost override (only if no URL replacement match)
+	if !replacementMatched && !replacementHasPort && configHost != "" {
 		var err error
 		if isHTTP {
 			finalTarget, err = utils.ReplaceHost(finalTarget, configHost)
@@ -2772,10 +2832,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("target", finalTarget))
 	}
 
-	// Step 2b: Port overrides (AppPort / ConfigPort)
-	// We need to parse valid host/port from finalTarget.
-	// For HTTP, it's a URL. For gRPC, it's usually "host:port" or just "host".
-
+	// Parse host and port from finalTarget
 	var host string
 	var port string
 	var scheme string // only for HTTP
@@ -2790,7 +2847,6 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		port = parsedURL.Port()
 		scheme = parsedURL.Scheme
 		if port == "" {
-			// Set default port if missing
 			if scheme == "https" {
 				port = "443"
 			} else {
@@ -2800,49 +2856,55 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 				zap.String("target", finalTarget), zap.String("default_port", port))
 		}
 	} else {
-		// gRPC Authority parsing
 		host = finalTarget
 		if colonIdx := strings.LastIndex(finalTarget, ":"); colonIdx != -1 {
-			// Check if it's not part of IPv6 brackets ??
-			// safest is SplitHostPort if possible, or manual logic
 			h, p, err := net.SplitHostPort(finalTarget)
 			if err == nil {
 				host = h
 				port = p
-			} else {
-				// Fallback or assume it's just host if Split failed or it's just host
-				// If no colon, port is empty
 			}
 		}
 		if port == "" {
 			logger.Debug("Authority has no explicit port, using gRPC default",
 				zap.String("target", finalTarget), zap.String("default_port", "443"))
-			port = "443" // Default for gRPC logic
+			port = "443"
 		}
 	}
 
-	// Apply overrides
-	// AppPort
-	if appPort > 0 {
-		port = fmt.Sprintf("%d", appPort)
-		logger.Debug("Overriding port with app_port",
-			zap.Uint16("app_port", appPort))
+	// Steps 3-4: AppPort/ConfigPort (only if URL replacement didn't set port)
+	if !replacementHasPort {
+		if appPort > 0 {
+			port = fmt.Sprintf("%d", appPort)
+			logger.Debug("Overriding port with app_port",
+				zap.Uint16("app_port", appPort))
+		}
+
+		if configPort > 0 {
+			if appPort > 0 && uint32(appPort) != configPort {
+				logger.Debug("Config port overrides recorded app_port",
+					zap.Uint32("config_port", configPort),
+					zap.Uint16("recorded_app_port", appPort))
+			}
+			port = fmt.Sprintf("%d", configPort)
+		}
 	}
 
-	// ConfigPort (Precedence)
-	if configPort > 0 {
-		if appPort > 0 && uint32(appPort) != configPort {
-			logger.Info("Config port overrides recorded app_port",
-				zap.Uint32("config_port", configPort),
-				zap.Uint16("recorded_app_port", appPort))
+	// Step 5: Port mappings (highest priority, always checked)
+	if len(portMappings) > 0 {
+		currentPort, convErr := strconv.ParseUint(port, 10, 32)
+		if convErr == nil {
+			if mappedPort, ok := portMappings[uint32(currentPort)]; ok {
+				logger.Debug("Applied replaceWith port mapping",
+					zap.Uint32("from", uint32(currentPort)),
+					zap.Uint32("to", mappedPort))
+				port = fmt.Sprintf("%d", mappedPort)
+			}
 		}
-		port = fmt.Sprintf("%d", configPort)
 	}
 
 	// Reassemble
 	if isHTTP {
-		// For URL, we can reconstruct
-		u, _ := url.Parse(finalTarget) // assumed valid from before
+		u, _ := url.Parse(finalTarget)
 		u.Host = net.JoinHostPort(host, port)
 		finalTarget = u.String()
 	} else {

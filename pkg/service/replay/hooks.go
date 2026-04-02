@@ -44,34 +44,12 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
-	// Extract URL replacements: merge global + per-test-set (test-set level overrides global for same key)
-	var urlReplacements map[string]string
-	rw := h.cfg.Test.ReplaceWith
-	if len(rw.Global.URL) > 0 || len(rw.TestSets) > 0 {
-		urlReplacements = make(map[string]string)
-		// Start with global replacements
-		for k, v := range rw.Global.URL {
-			urlReplacements[k] = v
-		}
-		// Override/add with per-test-set replacements
-		if tsRW, ok := rw.TestSets[testSetID]; ok {
-			for k, v := range tsRW.URL {
-				urlReplacements[k] = v
-			}
-		}
-	}
+	// Extract URL replacements and port mappings: merge global + per-test-set
+	// (test-set level overrides global for same key)
+	urlReplacements, portMappings := h.mergeReplaceWith(testSetID)
 
 	switch tc.Kind {
 	case models.HTTP:
-		noiseConfig := h.cfg.Test.GlobalNoise.Global
-		if tsNoise, ok := h.cfg.Test.GlobalNoise.Testsets[testSetID]; ok {
-			noiseConfig = LeftJoinNoise(h.cfg.Test.GlobalNoise.Global, tsNoise)
-		}
-		streamBodyNoise := map[string][]string{}
-		if bodyNoise, ok := noiseConfig["body"]; ok {
-			streamBodyNoise = cloneNoiseMap(bodyNoise)
-		}
-
 		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
 			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
 		}
@@ -81,13 +59,34 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			hostToUse = "localhost"
 		}
 
+		// Compute effective config port:
+		//   1. top-level port (all HTTP)
+		//   2. ssePort overrides for SSE requests
+		//   3. protocol-level port overrides per protocol
+		configPort := h.cfg.Test.Port
+
+		isSSE := pkg.IsSSERequest(tc)
+		if isSSE && h.cfg.Test.SSEPort > 0 {
+			configPort = h.cfg.Test.SSEPort
+		}
+
+		if isSSE {
+			if ps, ok := h.cfg.Test.Protocol["sse"]; ok && ps.Port > 0 {
+				configPort = ps.Port
+			}
+		} else {
+			if ps, ok := h.cfg.Test.Protocol["http"]; ok && ps.Port > 0 {
+				configPort = ps.Port
+			}
+		}
+
 		cfg := pkg.SimulationConfig{
-			APITimeout:         h.cfg.Test.APITimeout,
-			ConfigPort:         h.cfg.Test.Port,
-			KeployPath:         h.cfg.Path,
-			ConfigHost:         hostToUse,
-			URLReplacements:    urlReplacements,
-			StreamingBodyNoise: streamBodyNoise,
+			APITimeout:      h.cfg.Test.APITimeout,
+			ConfigPort:      configPort,
+			KeployPath:      h.cfg.Path,
+			ConfigHost:      hostToUse,
+			URLReplacements: urlReplacements,
+			PortMappings:    portMappings,
 		}
 
 		// Check if this is a streaming test case
@@ -121,10 +120,17 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		if hostToUse == "" {
 			hostToUse = "localhost"
 		}
+
+		configPort := h.cfg.Test.GRPCPort
+		if ps, ok := h.cfg.Test.Protocol["grpc"]; ok && ps.Port > 0 {
+			configPort = ps.Port
+		}
+
 		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
-			ConfigPort:      h.cfg.Test.GRPCPort,
+			ConfigPort:      configPort,
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
+			PortMappings:    portMappings,
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
@@ -137,6 +143,45 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
+}
+
+// mergeReplaceWith extracts and merges URL replacements and port mappings
+// from global and per-test-set replaceWith configuration.
+func (h *Hooks) mergeReplaceWith(testSetID string) (map[string]string, map[uint32]uint32) {
+	rw := h.cfg.Test.ReplaceWith
+	hasData := len(rw.Global.URL) > 0 || len(rw.Global.Port) > 0 || len(rw.TestSets) > 0
+	if !hasData {
+		return nil, nil
+	}
+
+	urlReplacements := make(map[string]string)
+	portMappings := make(map[uint32]uint32)
+
+	// Start with global replacements
+	for k, v := range rw.Global.URL {
+		urlReplacements[k] = v
+	}
+	for k, v := range rw.Global.Port {
+		portMappings[k] = v
+	}
+
+	// Override/add with per-test-set replacements
+	if tsRW, ok := rw.TestSets[testSetID]; ok {
+		for k, v := range tsRW.URL {
+			urlReplacements[k] = v
+		}
+		for k, v := range tsRW.Port {
+			portMappings[k] = v
+		}
+	}
+
+	if len(urlReplacements) == 0 {
+		urlReplacements = nil
+	}
+	if len(portMappings) == 0 {
+		portMappings = nil
+	}
+	return urlReplacements, portMappings
 }
 
 func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
@@ -346,16 +391,6 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 type getPlanRes struct {
 	Plan  models.Plan `json:"plan"`
 	Error string      `json:"error"`
-}
-
-func cloneNoiseMap(input map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(input))
-	for k, v := range input {
-		copied := make([]string, len(v))
-		copy(copied, v)
-		out[k] = copied
-	}
-	return out
 }
 
 func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {
