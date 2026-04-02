@@ -85,7 +85,7 @@ func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 		a.logger.Error("failed to start keploy-agent memory guard", zap.Error(err))
 		return err
 	}
-	
+
 	select {
 	case startCh <- int(a.config.Agent.AgentPort):
 	case <-ctx.Done():
