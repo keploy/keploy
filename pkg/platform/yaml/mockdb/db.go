@@ -173,10 +173,11 @@ func replaceFile(src, dst string) error {
 	return nil
 }
 
-// UpdateMocks deletes the mocks from the mock file with given names
+// UpdateMocks deletes the mocks from the mock file with given names.
 //
-// mockNames is a map which contains the name of the mocks as key and a isConfig boolean as value
-func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time) error {
+// mockNames maps each mock name to its models.MockState, indicating whether the mock
+// has been consumed (and can be pruned) or should be preserved.
+func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState, pruneBefore time.Time, firstTestCaseTime time.Time) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -242,6 +243,16 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		}
 		// Preserve mocks written after replay start.
 		if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.After(pruneBefore) {
+			newMocks = append(newMocks, mock)
+			continue
+		}
+		// Keep startup/init mocks: mocks recorded before the first test case
+		// are connection-level or app-init traffic (DNS, TLS, DB handshake,
+		// config fetch, etc.) that only fires once at app startup. In multi-
+		// test-set replays without app restart, these won't be consumed in
+		// later test-sets but are still needed for future replays.
+		if !firstTestCaseTime.IsZero() && !mock.Spec.ReqTimestampMock.IsZero() &&
+			mock.Spec.ReqTimestampMock.Before(firstTestCaseTime) {
 			newMocks = append(newMocks, mock)
 			continue
 		}
