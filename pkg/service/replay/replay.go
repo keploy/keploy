@@ -1837,7 +1837,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 
 					if streamErr != nil {
-						r.logger.Error("failed to read streaming response", zap.Error(streamErr))
+						r.logger.Error("failed to read streaming response; consider increasing --api-timeout for long-lived streams, verifying upstream connectivity, or re-recording if the stream format changed",
+							zap.Error(streamErr),
+							zap.String("testcase", tc.Name))
 						failure++
 						testSetStatus = models.TestSetStatusFailed
 						testCaseResult := r.CreateFailedTestResult(tc, testSetID, started, streamErr.Error())

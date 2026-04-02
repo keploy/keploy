@@ -1140,9 +1140,15 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				if end > expectedSize {
 					end = expectedSize
 				}
-				if !bytes.Equal(buffer[:end-actualSize], expectedBytes[actualSize:end]) {
+				chunkLen := end - actualSize
+				if !bytes.Equal(buffer[:chunkLen], expectedBytes[actualSize:end]) {
 					contentMatch = false
-					mismatchOffset = actualSize
+					for i := 0; i < chunkLen; i++ {
+						if buffer[i] != expectedBytes[actualSize+i] {
+							mismatchOffset = actualSize + i
+							break
+						}
+					}
 				}
 			}
 			actualSize += n
