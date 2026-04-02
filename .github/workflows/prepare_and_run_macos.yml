@@ -55,7 +55,7 @@ jobs:
           # Log the build platform for debugging
           echo "Build runner arch: $(uname -m)"
           echo "Docker server arch: $(docker version --format '{{.Server.Arch}}')"
-          source ./.github/workflows/test_workflow_scripts/update-docker-mac.sh
+          bash ./.github/workflows/test_workflow_scripts/update-docker-ci.sh linux/arm64
 
       - name: Verify image architecture
         run: |
