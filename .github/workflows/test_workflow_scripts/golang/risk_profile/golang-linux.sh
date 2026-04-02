@@ -92,16 +92,16 @@ wait_for_http() {
 check_report_for_risk_profiles() {
     echo "validating the Keploy test report against expected risk profiles and categories"
 
-    local replay_supports_schema_addition_autopass=false
+    local replay_supports_schema_addition_autopass="false"
     case "${REPLAY_BIN:-}" in
         */build/keploy)
-            replay_supports_schema_addition_autopass=true
+            replay_supports_schema_addition_autopass="true"
             ;;
     esac
 
     # Define the expected risk for each API endpoint path
     declare -A expected_risks
-    if [ "$replay_supports_schema_addition_autopass" = true ]; then
+    if [ "$replay_supports_schema_addition_autopass" = "true" ]; then
         expected_risks["/users-low-risk"]="PASSED"
     else
         expected_risks["/users-low-risk"]="LOW"
@@ -120,7 +120,7 @@ check_report_for_risk_profiles() {
 
     # Define the expected categories for each API endpoint path (comma-separated)
     declare -A expected_categories
-    if [ "$replay_supports_schema_addition_autopass" = false ]; then
+    if [ "$replay_supports_schema_addition_autopass" = "false" ]; then
         expected_categories["/users-low-risk"]="SCHEMA_ADDED" # Body change is SCHEMA_ADDED, header change is implicit
     fi
     expected_categories["/users-medium-risk"]="SCHEMA_UNCHANGED"
@@ -147,7 +147,7 @@ check_report_for_risk_profiles() {
     echo "Asserting summary counts..."
     local expected_failure_count="12"
     local expected_low_risk_count="1"
-    if [ "$replay_supports_schema_addition_autopass" = true ]; then
+    if [ "$replay_supports_schema_addition_autopass" = "true" ]; then
         expected_failure_count="11"
         expected_low_risk_count="0"
     fi
