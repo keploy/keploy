@@ -70,9 +70,12 @@ func CloneGlobalNoise(src config.GlobalNoise) config.GlobalNoise {
 
 // PrepareHeaderNoiseConfig prepares the header noise configuration for mock matching.
 // It merges global and test-set specific noise, then extracts only the header noise.
+// We clone globalNoise (via LeftJoinNoise or CloneGlobalNoise) to avoid mutating the
+// caller's config when test-set noise is merged in.
 func PrepareHeaderNoiseConfig(globalNoise config.GlobalNoise, testSetNoise config.TestsetNoise, testSetID string) map[string]map[string][]string {
 	var noiseConfig config.GlobalNoise
 	if tsNoise, ok := testSetNoise[testSetID]; ok {
+		// LeftJoinNoise already deep-copies globalNoise internally.
 		noiseConfig = LeftJoinNoise(globalNoise, tsNoise)
 	} else {
 		noiseConfig = CloneGlobalNoise(globalNoise)

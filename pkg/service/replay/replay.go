@@ -1754,7 +1754,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			// Mock Window: Calculate the effective mock filter window for streaming
-			// using the request timestamp to the response timestamp plus a timeout buffer.
+			// using the request timestamp as start and max(reqTs, respTs) + timeout as end.
 			streamReqTime, streamRespTime := effectiveStreamMockWindow(tc, r.config.Test.APITimeout)
 			err = r.SendMockFilterParamsToAgent(runTestSetCtx, deferred.expectedMocks, streamReqTime, streamRespTime, totalConsumedMocks, useMappingBased)
 			if err != nil {

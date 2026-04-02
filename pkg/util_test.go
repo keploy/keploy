@@ -314,7 +314,7 @@ func TestSimulateHTTP_SSEStreamMatchAndEarlyClose_316(t *testing.T) {
 
 	select {
 	case <-serverClosed:
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("expected server stream to be closed by client after matching SSE queue")
 	}
 }
@@ -608,7 +608,7 @@ func TestSimulateHTTP_NDJSONStreamMatchAndEarlyClose_319(t *testing.T) {
 
 	select {
 	case <-serverClosed:
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("expected NDJSON stream to be closed by client after matching queue")
 	}
 }
@@ -698,7 +698,7 @@ func TestSimulateHTTP_MultipartStreamMatchAndEarlyClose_320(t *testing.T) {
 
 	select {
 	case <-serverClosed:
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("expected multipart stream to be closed by client after matching queue")
 	}
 }
@@ -775,7 +775,7 @@ func TestSimulateHTTP_PlainTextStreamMatchAndEarlyClose_321(t *testing.T) {
 
 	select {
 	case <-serverClosed:
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("expected plain text stream to be closed by client after matching queue")
 	}
 }

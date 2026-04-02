@@ -261,7 +261,7 @@ func detectStreamBodyKind(headers map[string]string) streamBodyKind {
 //
 // If the YAML node is a sequence, it's a structured streaming body.
 // If it's a scalar, it's a plain string body.
-func decodeStreamBody(node yamlLib.Node, headers map[string]string, respTimestamp time.Time) (string, []HTTPStreamChunk, error) {
+func decodeStreamBody(node yamlLib.Node, headers map[string]string, _ time.Time) (string, []HTTPStreamChunk, error) {
 	if node.Kind == 0 {
 		// Empty body node — nothing to decode.
 		return "", nil, nil
