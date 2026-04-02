@@ -35,9 +35,15 @@ func TestResolveMemoryCurrentPathFromSelfCgroup(t *testing.T) {
 		t.Fatalf("failed to write fake /proc/self/mountinfo: %v", err)
 	}
 
-	actualPath, err := resolveMemoryCurrentPath(cgroupRoot, procSelfCgroup, procMountInfo)
+	procMounts := filepath.Join(t.TempDir(), "mounts")
+	err = os.WriteFile(procMounts, []byte("cgroup2 "+cgroupRoot+" cgroup2 rw 0 0\n"), 0o644)
 	if err != nil {
-		t.Fatalf("resolveMemoryCurrentPath returned error: %v", err)
+		t.Fatalf("failed to write fake /proc/mounts: %v", err)
+	}
+
+	actualPath, _, err := resolveMemoryUsagePath(procMounts, procSelfCgroup, procMountInfo)
+	if err != nil {
+		t.Fatalf("resolveMemoryUsagePath returned error: %v", err)
 	}
 
 	if actualPath != expectedPath {
@@ -75,11 +81,65 @@ func TestResolveMemoryCurrentPathFallsBackToContainerIdentifierSearch(t *testing
 		t.Fatalf("failed to write fake /proc/self/mountinfo: %v", err)
 	}
 
-	actualPath, err := resolveMemoryCurrentPath(cgroupRoot, procSelfCgroup, procMountInfo)
+	procMounts := filepath.Join(t.TempDir(), "mounts")
+	err = os.WriteFile(procMounts, []byte("cgroup2 "+cgroupRoot+" cgroup2 rw 0 0\n"), 0o644)
 	if err != nil {
-		t.Fatalf("resolveMemoryCurrentPath returned error: %v", err)
+		t.Fatalf("failed to write fake /proc/mounts: %v", err)
 	}
 
+	actualPath, _, err := resolveMemoryUsagePath(procMounts, procSelfCgroup, procMountInfo)
+	if err != nil {
+		t.Fatalf("resolveMemoryUsagePath returned error: %v", err)
+	}
+
+	if actualPath != expectedPath {
+		t.Fatalf("expected %s, got %s", expectedPath, actualPath)
+	}
+}
+
+func TestResolveMemoryUsagePathFromSelfCgroupV1(t *testing.T) {
+	t.Parallel()
+
+	cgroupRoot := t.TempDir()
+	memoryMount := filepath.Join(cgroupRoot, "memory")
+	cgroupDir := filepath.Join(memoryMount, "system.slice", "docker-abcdef1234567890.scope")
+	err := os.MkdirAll(cgroupDir, 0o755)
+	if err != nil {
+		t.Fatalf("failed to create fake cgroup v1 dir: %v", err)
+	}
+
+	expectedPath := filepath.Join(cgroupDir, "memory.usage_in_bytes")
+	err = os.WriteFile(expectedPath, []byte("789"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to create fake memory.usage_in_bytes: %v", err)
+	}
+
+	procSelfCgroup := filepath.Join(t.TempDir(), "cgroup")
+	err = os.WriteFile(procSelfCgroup, []byte("8:memory:/system.slice/docker-abcdef1234567890.scope\n"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to write fake /proc/self/cgroup: %v", err)
+	}
+
+	procMountInfo := filepath.Join(t.TempDir(), "mountinfo")
+	err = os.WriteFile(procMountInfo, []byte("36 35 0:32 / "+memoryMount+" rw - cgroup cgroup rw,memory\n"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to write fake /proc/self/mountinfo: %v", err)
+	}
+
+	procMounts := filepath.Join(t.TempDir(), "mounts")
+	err = os.WriteFile(procMounts, []byte("cgroup "+memoryMount+" cgroup rw,memory 0 0\n"), 0o644)
+	if err != nil {
+		t.Fatalf("failed to write fake /proc/mounts: %v", err)
+	}
+
+	actualPath, layout, err := resolveMemoryUsagePath(procMounts, procSelfCgroup, procMountInfo)
+	if err != nil {
+		t.Fatalf("resolveMemoryUsagePath returned error: %v", err)
+	}
+
+	if layout.version != cgroupV1 {
+		t.Fatalf("expected cgroup v1 layout, got v%d", layout.version)
+	}
 	if actualPath != expectedPath {
 		t.Fatalf("expected %s, got %s", expectedPath, actualPath)
 	}

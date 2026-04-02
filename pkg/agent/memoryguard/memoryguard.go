@@ -36,6 +36,19 @@ type guard struct {
 	lastReclaim       time.Time
 }
 
+type cgroupLayout struct {
+	version    int
+	mountPoint string
+	mountRoot  string
+	controller string
+	usageFile  string
+}
+
+const (
+	cgroupV1 = 1
+	cgroupV2 = 2
+)
+
 // LimitBytes validates the configured memory limit in MB and converts it to bytes.
 func LimitBytes(limitMB uint64) (int64, error) {
 	if limitMB == 0 {
@@ -69,14 +82,9 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 		return nil
 	}
 
-	cgroupMountPath, err := detectCgroupMountPath("/proc/mounts")
+	memoryCurrentPath, layout, err := resolveMemoryUsagePath("/proc/mounts", "/proc/self/cgroup", "/proc/self/mountinfo")
 	if err != nil {
-		return fmt.Errorf("failed to detect cgroup v2 mount: %w", err)
-	}
-
-	memoryCurrentPath, err := resolveMemoryCurrentPath(cgroupMountPath, "/proc/self/cgroup", "/proc/self/mountinfo")
-	if err != nil {
-		return fmt.Errorf("failed to resolve container memory.current path: %w", err)
+		return fmt.Errorf("failed to resolve container memory usage path: %w", err)
 	}
 
 	g := &guard{
@@ -88,6 +96,7 @@ func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB
 
 	logger.Info("Enabled keploy-agent memory guard",
 		zap.Uint64("memory_limit_mb", g.memoryLimitMB),
+		zap.Int("cgroup_version", layout.version),
 		zap.String("memory_current_path", g.memoryCurrentPath))
 
 	go g.run(ctx)
@@ -182,59 +191,109 @@ func readMemoryCurrent(path string) (int64, error) {
 	return currentBytes, nil
 }
 
-func detectCgroupMountPath(procMountsPath string) (string, error) {
-	f, err := os.Open(procMountsPath)
+func resolveMemoryUsagePath(procMountsPath, procSelfCgroupPath, procMountInfoPath string) (string, cgroupLayout, error) {
+	layouts, err := detectCgroupLayouts(procMountsPath, procMountInfoPath)
 	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 3 && fields[2] == "cgroup2" {
-			return fields[1], nil
-		}
+		return "", cgroupLayout{}, err
 	}
 
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-
-	return "", fmt.Errorf("cgroup2 not mounted")
-}
-
-func resolveMemoryCurrentPath(cgroupMountPath, procSelfCgroupPath, procMountInfoPath string) (string, error) {
-	cgroupPath, err := readSelfCgroupPath(procSelfCgroupPath)
-	if err == nil && cgroupPath != "" && cgroupPath != "/" {
-		candidate := filepath.Join(cgroupMountPath, strings.TrimPrefix(cgroupPath, "/"), "memory.current")
-		if fileExists(candidate) {
-			return candidate, nil
-		}
-	}
-
-	mountRoot, err := readMountRoot(procMountInfoPath, cgroupMountPath)
-	if err == nil && mountRoot != "" && mountRoot != "/" {
-		candidate := filepath.Join(cgroupMountPath, "memory.current")
-		if fileExists(candidate) {
-			return candidate, nil
+	for _, layout := range layouts {
+		candidate, err := resolveFromSelfCgroup(layout, procSelfCgroupPath)
+		if err == nil {
+			return candidate, layout, nil
 		}
 	}
 
 	identifiers, err := collectContainerIdentifiers(procSelfCgroupPath, procMountInfoPath)
 	if err != nil {
-		return "", err
+		return "", cgroupLayout{}, err
 	}
 
-	candidate, err := findMemoryCurrentByIdentifier(cgroupMountPath, identifiers)
-	if err != nil {
-		return "", err
+	var resolutionErrs []string
+	for _, layout := range layouts {
+		candidate, err := findMemoryUsagePathByIdentifier(layout, identifiers)
+		if err == nil {
+			return candidate, layout, nil
+		}
+		resolutionErrs = append(resolutionErrs, err.Error())
 	}
 
-	return candidate, nil
+	return "", cgroupLayout{}, fmt.Errorf("no container-specific cgroup memory file found (%s)", strings.Join(resolutionErrs, "; "))
 }
 
-func readSelfCgroupPath(procSelfCgroupPath string) (string, error) {
+func detectCgroupLayouts(procMountsPath, procMountInfoPath string) ([]cgroupLayout, error) {
+	mountRoots, err := readMountRoots(procMountInfoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := os.Open(procMountsPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var layouts []cgroupLayout
+	seen := make(map[string]struct{})
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 4 {
+			continue
+		}
+
+		mountPoint := fields[1]
+		fsType := fields[2]
+		options := strings.Split(fields[3], ",")
+
+		switch {
+		case fsType == "cgroup" && hasController(options, "memory"):
+			key := "v1:" + mountPoint
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			layouts = append(layouts, cgroupLayout{
+				version:    cgroupV1,
+				mountPoint: mountPoint,
+				mountRoot:  mountRoots[mountPoint],
+				controller: "memory",
+				usageFile:  "memory.usage_in_bytes",
+			})
+		case fsType == "cgroup2":
+			key := "v2:" + mountPoint
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			layouts = append(layouts, cgroupLayout{
+				version:    cgroupV2,
+				mountPoint: mountPoint,
+				mountRoot:  mountRoots[mountPoint],
+				usageFile:  "memory.current",
+			})
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(layouts) == 0 {
+		return nil, fmt.Errorf("no cgroup v1 memory or cgroup v2 mounts found")
+	}
+
+	sort.SliceStable(layouts, func(i, j int) bool {
+		if layouts[i].version == layouts[j].version {
+			return layouts[i].mountPoint < layouts[j].mountPoint
+		}
+		return layouts[i].version < layouts[j].version
+	})
+
+	return layouts, nil
+}
+
+func readSelfCgroupPath(procSelfCgroupPath string, layout cgroupLayout) (string, error) {
 	data, err := os.ReadFile(procSelfCgroupPath)
 	if err != nil {
 		return "", err
@@ -250,34 +309,54 @@ func readSelfCgroupPath(procSelfCgroupPath string) (string, error) {
 		if len(parts) != 3 {
 			continue
 		}
-		if parts[1] == "" || parts[1] == "memory" {
-			if parts[2] == "" {
-				return "/", nil
+
+		switch layout.version {
+		case cgroupV2:
+			if parts[1] == "" {
+				if parts[2] == "" {
+					return "/", nil
+				}
+				return parts[2], nil
 			}
-			return parts[2], nil
+		case cgroupV1:
+			if hasController(strings.Split(parts[1], ","), layout.controller) {
+				if parts[2] == "" {
+					return "/", nil
+				}
+				return parts[2], nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("container cgroup path not found in %s", procSelfCgroupPath)
+	return "", fmt.Errorf("container cgroup path not found in %s for cgroup v%d", procSelfCgroupPath, layout.version)
 }
 
-func readMountRoot(procMountInfoPath, mountPoint string) (string, error) {
+func readMountRoots(procMountInfoPath string) (map[string]string, error) {
 	data, err := os.ReadFile(procMountInfoPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
+	roots := make(map[string]string)
 	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, " - ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		fields := strings.Fields(parts[0])
 		if len(fields) < 5 {
 			continue
 		}
-		if fields[4] == mountPoint {
-			return fields[3], nil
-		}
+
+		roots[fields[4]] = fields[3]
 	}
 
-	return "", fmt.Errorf("mount point %s not found in %s", mountPoint, procMountInfoPath)
+	return roots, nil
 }
 
 func collectContainerIdentifiers(procSelfCgroupPath, procMountInfoPath string) ([]string, error) {
@@ -344,7 +423,56 @@ func extractHexIdentifiers(value string) []string {
 	return result
 }
 
-func findMemoryCurrentByIdentifier(cgroupMountPath string, identifiers []string) (string, error) {
+func resolveFromSelfCgroup(layout cgroupLayout, procSelfCgroupPath string) (string, error) {
+	cgroupPath, err := readSelfCgroupPath(procSelfCgroupPath, layout)
+	if err != nil {
+		return "", err
+	}
+
+	candidate, ok := buildMountedCgroupPath(layout.mountPoint, layout.mountRoot, cgroupPath, layout.usageFile)
+	if !ok {
+		return "", fmt.Errorf("unable to map cgroup path %q to mount %q", cgroupPath, layout.mountPoint)
+	}
+	if !fileExists(candidate) {
+		return "", fmt.Errorf("cgroup memory file %q not found", candidate)
+	}
+
+	return candidate, nil
+}
+
+func buildMountedCgroupPath(mountPoint, mountRoot, cgroupPath, usageFile string) (string, bool) {
+	cleanMountRoot := filepath.Clean(mountRoot)
+	if cleanMountRoot == "." || cleanMountRoot == "" {
+		cleanMountRoot = "/"
+	}
+
+	cleanCgroupPath := filepath.Clean(cgroupPath)
+	if cleanCgroupPath == "." || cleanCgroupPath == "" {
+		cleanCgroupPath = "/"
+	}
+
+	var relativePath string
+	switch {
+	case cleanMountRoot == "/" && cleanCgroupPath == "/":
+		return "", false
+	case cleanMountRoot == "/":
+		relativePath = strings.TrimPrefix(cleanCgroupPath, "/")
+	case cleanCgroupPath == cleanMountRoot:
+		relativePath = ""
+	case strings.HasPrefix(cleanCgroupPath, cleanMountRoot+"/"):
+		relativePath = strings.TrimPrefix(cleanCgroupPath, cleanMountRoot+"/")
+	default:
+		return "", false
+	}
+
+	if relativePath == "" {
+		return filepath.Join(mountPoint, usageFile), true
+	}
+
+	return filepath.Join(mountPoint, relativePath, usageFile), true
+}
+
+func findMemoryUsagePathByIdentifier(layout cgroupLayout, identifiers []string) (string, error) {
 	type match struct {
 		path  string
 		idLen int
@@ -352,16 +480,16 @@ func findMemoryCurrentByIdentifier(cgroupMountPath string, identifiers []string)
 	}
 
 	best := match{}
-	err := filepath.WalkDir(cgroupMountPath, func(path string, d os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(layout.mountPoint, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if d.IsDir() || d.Name() != "memory.current" {
+		if d.IsDir() || d.Name() != layout.usageFile {
 			return nil
 		}
 
 		dir := filepath.Dir(path)
-		if dir == cgroupMountPath {
+		if dir == layout.mountPoint {
 			return nil
 		}
 
@@ -389,10 +517,19 @@ func findMemoryCurrentByIdentifier(cgroupMountPath string, identifiers []string)
 	}
 
 	if best.path == "" {
-		return "", fmt.Errorf("failed to find container-specific memory.current under %s", cgroupMountPath)
+		return "", fmt.Errorf("failed to find container-specific %s under %s", layout.usageFile, layout.mountPoint)
 	}
 
 	return best.path, nil
+}
+
+func hasController(controllers []string, target string) bool {
+	for _, controller := range controllers {
+		if controller == target {
+			return true
+		}
+	}
+	return false
 }
 
 func fileExists(path string) bool {
