@@ -187,6 +187,16 @@ if ! command -v k6 &> /dev/null; then
     exit 1
 fi
 
+echo ""
+echo "========================================="
+echo "Running Application Warm-up (Results discarded)"
+echo "========================================="
+echo "Executing initial load test to warm up JVM and lazy-loaded components..."
+k6 run load-test.js > /dev/null 2>&1
+echo "Warm-up completed successfully. System is now fast."
+echo "Waiting 5 seconds before starting official recorded runs..."
+sleep 5
+
 for i in $(seq 1 $NUM_RUNS); do
     echo ""
     echo "========================================="
