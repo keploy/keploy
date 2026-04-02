@@ -1220,7 +1220,24 @@ func expectedBinaryBytes(expectedResp models.HTTPResp) []byte {
 
 func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
 	if len(expectedResp.StreamBody) == 0 {
-		return nil
+		// Fall back to parsing Body as SSE frames for legacy test cases
+		// where StreamBody was not populated during YAML deserialization.
+		if expectedResp.Body == "" {
+			return nil
+		}
+		scanner := bufio.NewScanner(strings.NewReader(expectedResp.Body))
+		scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+		scanner.Split(splitSSEFrames)
+		var queue []expectedSSEFrame
+		for scanner.Scan() {
+			frame := strings.Trim(normalizeLineEndings(scanner.Text()), "\n")
+			if strings.TrimSpace(frame) == "" {
+				continue
+			}
+			fields := parseSSEFrame(frame)
+			queue = append(queue, expectedSSEFrame{fields: fields, raw: frame})
+		}
+		return queue
 	}
 	queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
 	for _, chunk := range expectedResp.StreamBody {
@@ -1266,7 +1283,22 @@ func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
 
 func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
 	if len(expectedResp.StreamBody) == 0 {
-		return nil
+		// Fall back to splitting Body by newlines for legacy test cases
+		// where StreamBody was not populated during YAML deserialization.
+		if expectedResp.Body == "" {
+			return nil
+		}
+		var queue []string
+		scanner := bufio.NewScanner(strings.NewReader(expectedResp.Body))
+		scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+		for scanner.Scan() {
+			line := canonicalizer(scanner.Text())
+			if ignoreEmpty && line == "" {
+				continue
+			}
+			queue = append(queue, line)
+		}
+		return queue
 	}
 	queue := make([]string, 0, len(expectedResp.StreamBody))
 	for _, chunk := range expectedResp.StreamBody {
