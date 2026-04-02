@@ -1686,6 +1686,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if testStatus == models.TestStatusFailed && testResult.FailureInfo.Risk != models.None {
 						testCaseResult.FailureInfo.Risk = testResult.FailureInfo.Risk
 						testCaseResult.FailureInfo.Category = testResult.FailureInfo.Category
+						testCaseResult.FailureInfo.Assessment = testResult.FailureInfo.Assessment
+					}
+					if mockSetMismatch && testStatus == models.TestStatusObsolete {
+						expectedMockInfos := make([]models.MockMismatchMock, 0, len(expectedMocks))
+						for _, m := range expectedMocks {
+							isDNS := strings.EqualFold(m.Kind, string(models.DNS))
+							if !isDNS {
+								if kind, ok := mockKindByName[m.Name]; ok && kind == models.DNS {
+									isDNS = true
+								}
+							}
+							if !isDNS {
+								expectedMockInfos = append(expectedMockInfos, models.MockMismatchMock{Name: m.Name, Kind: m.Kind})
+							}
+						}
+						actualMockInfos := make([]models.MockMismatchMock, 0, len(consumedMocks))
+						for _, m := range consumedMocks {
+							if m.Kind != models.DNS {
+								actualMockInfos = append(actualMockInfos, models.MockMismatchMock{Name: m.Name, Kind: string(m.Kind)})
+							}
+						}
+						testCaseResult.FailureInfo.MockMismatch = &models.MockMismatchInfo{
+							ExpectedMocks: expectedMockInfos,
+							ActualMocks:   actualMockInfos,
+						}
 					}
 					finalTestCaseResults[testCase.Name] = testCaseResult
 				} else {
