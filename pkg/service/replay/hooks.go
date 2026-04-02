@@ -338,16 +338,6 @@ type getPlanRes struct {
 	Error string      `json:"error"`
 }
 
-func cloneNoiseMap(input map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(input))
-	for k, v := range input {
-		copied := make([]string, len(v))
-		copy(copied, v)
-		out[k] = copied
-	}
-	return out
-}
-
 func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {
 	logger.Debug("Getting the latest plan", zap.String("serverUrl", serverUrl), zap.String("token", token))
 
