@@ -2870,6 +2870,11 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 				port = p
 			}
 		}
+		// Strip brackets from bare IPv6 addresses (e.g., "[::1]" without a port)
+		// so that net.JoinHostPort does not double-bracket them.
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
 		if port == "" {
 			logger.Debug("Authority has no explicit port, using gRPC default",
 				zap.String("target", finalTarget), zap.String("default_port", "443"))
