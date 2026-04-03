@@ -113,18 +113,22 @@ check_report_for_risk_profiles() {
             if [ -n "$probe_report" ]; then
                 local tests_count
                 tests_count=$(yq '.tests | length' "$probe_report" 2>/dev/null || echo "0")
-                for idx in $(seq 0 $((tests_count - 1))); do
-                    local url_path
-                    url_path=$(yq ".tests[$idx].req.url" "$probe_report" 2>/dev/null | sed 's|http://localhost:8080||')
-                    if [ "$url_path" = "/users-low-risk" ]; then
-                        local status
-                        status=$(yq ".tests[$idx].status" "$probe_report" 2>/dev/null)
-                        if [ "$status" = "PASSED" ]; then
-                            replay_supports_schema_addition_autopass=true
+                # Guard: ensure tests_count is a positive integer before iterating.
+                # seq 0 -1 exits non-zero under set -e and would abort the script.
+                if [[ "$tests_count" =~ ^[0-9]+$ ]] && [[ "$tests_count" -gt 0 ]]; then
+                    for ((idx=0; idx<tests_count; idx++)); do
+                        local url_path
+                        url_path=$(yq ".tests[$idx].req.url" "$probe_report" 2>/dev/null | sed 's|http://localhost:8080||')
+                        if [ "$url_path" = "/users-low-risk" ]; then
+                            local status
+                            status=$(yq ".tests[$idx].status" "$probe_report" 2>/dev/null)
+                            if [ "$status" = "PASSED" ]; then
+                                replay_supports_schema_addition_autopass=true
+                            fi
+                            break
                         fi
-                        break
-                    fi
-                done
+                    done
+                fi
             fi
             ;;
     esac

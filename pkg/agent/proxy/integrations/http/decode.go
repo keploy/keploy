@@ -131,7 +131,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if hn, ok := opts.NoiseConfig["header"]; ok {
 					headerNoise = make(map[string][]string, len(hn))
 					for k, v := range hn {
-						headerNoise[strings.ToLower(k)] = v
+						lk := strings.ToLower(k)
+						if existing, ok := headerNoise[lk]; ok {
+							// Merge value slices on case-variant collision
+							// to keep behaviour deterministic.
+							headerNoise[lk] = append(existing, v...)
+						} else {
+							headerNoise[lk] = v
+						}
 					}
 				}
 			}
