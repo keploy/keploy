@@ -66,9 +66,11 @@ func (u *ConnTLSUpgrader) UpgradeClientTLS(ctx context.Context, backdate time.Ti
 	reader := bufio.NewReader(realConn)
 	testBuffer, err := reader.Peek(5)
 	if err != nil {
-		if err == io.EOF && len(testBuffer) == 0 {
-			u.logger.Debug("UpgradeClientTLS: received EOF during peek, no TLS")
-			// Return the original conn wrapped with the reader to replay any buffered bytes.
+		if err == io.EOF {
+			// EOF with 0 or partial bytes: not TLS. Replay whatever was
+			// buffered so the caller can still read the data.
+			u.logger.Debug("UpgradeClientTLS: received EOF during peek, no TLS",
+				zap.Int("peeked_bytes", len(testBuffer)))
 			safe := NewSafeConnWithReader(*u.srcConn, io.MultiReader(reader, realConn), u.logger)
 			return safe, false, false, nil
 		}
