@@ -20,7 +20,18 @@ import (
 )
 
 // Record records the MySQL traffic between the client and the server.
-func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, tlsUpgrader ...interface{}) error {
+	// Parse variadic args: first TLSUpgrader, then MemoryLimiter (if any).
+	var upgraderArg models.TLSUpgrader
+	var memLimiter *pUtil.MemoryLimiter
+	for _, arg := range tlsUpgrader {
+		switch v := arg.(type) {
+		case models.TLSUpgrader:
+			upgraderArg = v
+		case *pUtil.MemoryLimiter:
+			memLimiter = v
+		}
+	}
 
 	var (
 		requests  []mysql.Request
@@ -74,7 +85,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		logger.Debug("Record: entering relay path (non-postTLS) handleInitialHandshake",
 			zap.String("connKey", opts.ConnKey),
 			zap.Bool("skipTLSMITM", opts.SkipTLSMITM))
-		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts)
+		upgrader := upgraderArg
+		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts, upgrader)
 		if err != nil {
 			utils.LogError(logger, err, "failed to handle initial handshake")
 			errCh <- err
@@ -113,7 +125,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 		// handle the client-server interaction (command phase)
-		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts)
+		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx, opts, memLimiter)
 		if err != nil {
 			if err != io.EOF {
 				utils.LogError(logger, err, "failed to handle client queries")

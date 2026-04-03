@@ -91,6 +91,7 @@ type Record struct {
 	EnableSampling    int             `json:"enableSampling" yaml:"enableSampling"`
 	GlobalPassthrough bool            `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 	TLSPrivateKeyPath string          `json:"tlsPrivateKeyPath" yaml:"tlsPrivateKeyPath" mapstructure:"tlsPrivateKeyPath"`
+	MaxBufferMemoryMB uint64          `json:"maxBufferMemoryMB" yaml:"maxBufferMemoryMB" mapstructure:"maxBufferMemoryMB"`
 }
 
 type ReRecord struct {

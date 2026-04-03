@@ -36,7 +36,7 @@ type handshakeRes struct {
 	skipConfigMock    bool
 }
 
-func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
+func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions, tlsUpgrader models.TLSUpgrader) (handshakeRes, error) {
 	logger.Debug("handleInitialHandshake: entered",
 		zap.String("connKey", opts.ConnKey),
 		zap.Bool("skipTLSMITM", opts.SkipTLSMITM))
@@ -173,9 +173,15 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, nil
 		}
 
-		reader := bufio.NewReader(clientConn)
+		if tlsUpgrader == nil {
+			logger.Debug("TLS upgrade requested but no TLSUpgrader available (sockmap/non-MITM path)")
+			return res, nil
+		}
+
+		// Peek client bytes to detect if a TLS ClientHello follows.
+		peekConn := tlsUpgrader.UnwrapClientForPeek()
+		reader := bufio.NewReader(peekConn)
 		initialData := make([]byte, 5)
-		// reading the initial data from the client connection to determine if the connection is a TLS handshake
 		testBuffer, err := reader.Peek(len(initialData))
 		if err != nil {
 			if err == io.EOF && len(testBuffer) == 0 {
@@ -186,61 +192,40 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, err
 		}
 
-		multiReader := io.MultiReader(reader, clientConn)
-		clientConn = &pUtils.Conn{
-			Conn:   clientConn,
-			Reader: multiReader,
-			Logger: logger,
-		}
-
-		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
-			clientConn, _, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
+			// Upgrade client side via TLSUpgrader (handles MITM, updates proxy refs).
+			clientConn, _, err = tlsUpgrader.UpgradeClientTLS(ctx, opts.Backdate)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err
 			}
-		}
 
-		// upgrade the destConn to TLS if the client connection is upgraded to TLS
-		var tlsDestConn *tls.Conn
-		if isTLS {
-
+			// Upgrade destination side via TLSUpgrader.
 			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 			sourcePort := remoteAddr.Port
 
 			url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
 			if !ok {
-				utils.LogError(logger, err, "failed to fetch the destination url")
-				return res, err
+				return res, fmt.Errorf("failed to fetch destination url for source port %d", sourcePort)
 			}
-
-			//type case the dstUrl to string
 			dstURL, ok := url.(string)
 			if !ok {
-				utils.LogError(logger, err, "failed to type cast the destination url")
-				return res, err
+				return res, fmt.Errorf("failed to type cast destination url for source port %d", sourcePort)
 			}
 
-			addr := fmt.Sprintf("%v:%v", dstURL, opts.DstCfg.Port)
 			tlsConfig := &tls.Config{
 				InsecureSkipVerify: true,
 				ServerName:         dstURL,
 			}
+			logger.Debug("Upgrading the destination connection to TLS", zap.String("ServerName", tlsConfig.ServerName))
 
-			logger.Debug("Upgrading the destination connection to TLS", zap.String("Destination Addr", addr), zap.String("ServerName", tlsConfig.ServerName))
-
-			tlsDestConn = tls.Client(destConn, tlsConfig)
-			err = tlsDestConn.Handshake()
+			destConn, err = tlsUpgrader.UpgradeDestTLS(tlsConfig)
 			if err != nil {
 				utils.LogError(logger, err, "failed to upgrade the destination connection to TLS for mysql")
 				return res, err
 			}
-			logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-
-			// Update the destination connection to TLS connection
-			destConn = tlsDestConn
+			logger.Debug("TLS connection established with the destination server")
 		}
 
 		// Update this tls connection information in the handshake result
