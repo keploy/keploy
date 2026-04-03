@@ -110,19 +110,12 @@ func TestHandleConnectTunnel_RecordMode(t *testing.T) {
 
 func TestHandleConnectTunnel_ProxyRejectsWithError(t *testing.T) {
 	appClient, appServer := net.Pipe()
-	defer appClient.Close()
-	defer appServer.Close()
-
 	proxyClient, proxyServer := net.Pipe()
-	defer proxyClient.Close()
-	defer proxyServer.Close()
 
-	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
 
 	// Simulate proxy responding with 407.
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		reader := bufio.NewReader(proxyClient)
 		for {
 			line, err := reader.ReadString('\n')
@@ -133,19 +126,28 @@ func TestHandleConnectTunnel_ProxyRejectsWithError(t *testing.T) {
 		_, _ = proxyClient.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"))
 	}()
 
-	// Simulate the app.
-	wg.Add(1)
+	// Simulate the app: send CONNECT then continuously drain responses.
 	go func() {
-		defer wg.Done()
 		_, _ = appClient.Write([]byte("CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n"))
-		// Read whatever the proxy sends back (error response forwarding).
-		buf := make([]byte, 256)
-		appClient.Read(buf)
+		buf := make([]byte, 4096)
+		for {
+			if _, err := appClient.Read(buf); err != nil {
+				break
+			}
+		}
 	}()
 
-	_, err := handleConnectTunnel(testLogger(), appServer, proxyServer, false)
-	wg.Wait()
+	go func() {
+		_, err := handleConnectTunnel(testLogger(), appServer, proxyServer, false)
+		errCh <- err
+		// Close connections to unblock goroutines.
+		appServer.Close()
+		appClient.Close()
+		proxyServer.Close()
+		proxyClient.Close()
+	}()
 
+	err := <-errCh
 	if err == nil {
 		t.Fatal("expected error for 407 response, got nil")
 	}
