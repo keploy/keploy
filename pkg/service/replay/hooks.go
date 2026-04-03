@@ -63,22 +63,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		//   1. top-level port (all HTTP)
 		//   2. ssePort overrides for SSE requests
 		//   3. protocol-level port overrides per protocol
-		configPort := h.cfg.Test.Port
-
-		isSSE := pkg.IsSSERequest(tc)
-		if isSSE && h.cfg.Test.SSEPort > 0 {
-			configPort = h.cfg.Test.SSEPort
-		}
-
-		if isSSE {
-			if ps, ok := h.cfg.Test.Protocol["sse"]; ok && ps.Port > 0 {
-				configPort = ps.Port
-			}
-		} else {
-			if ps, ok := h.cfg.Test.Protocol["http"]; ok && ps.Port > 0 {
-				configPort = ps.Port
-			}
-		}
+		configPort := effectiveHTTPConfigPort(tc, h.cfg.Test)
 
 		cfg := pkg.SimulationConfig{
 			APITimeout:      h.cfg.Test.APITimeout,
@@ -143,6 +128,35 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
 
+}
+
+func effectiveHTTPConfigPort(tc *models.TestCase, cfg config.Test) uint32 {
+	configPort := cfg.Port
+
+	// Header-based SSE detection works for actual SSE streams but fails for CORS preflights
+	// (OPTIONS), which usually don't have "text/event-stream" headers.
+	isSSE := pkg.IsSSERequest(tc)
+
+	// If this request was recorded on the configured SSE port, treat it as SSE even if it
+	// doesn't look like SSE based on headers (e.g., OPTIONS preflight).
+	if !isSSE && tc != nil && tc.AppPort > 0 && cfg.SSEPort > 0 && uint32(tc.AppPort) == cfg.SSEPort {
+		isSSE = true
+	}
+
+	if isSSE {
+		if cfg.SSEPort > 0 {
+			configPort = cfg.SSEPort
+		}
+		if ps, ok := cfg.Protocol["sse"]; ok && ps.Port > 0 {
+			configPort = ps.Port
+		}
+	} else {
+		if ps, ok := cfg.Protocol["http"]; ok && ps.Port > 0 {
+			configPort = ps.Port
+		}
+	}
+
+	return configPort
 }
 
 // mergeReplaceWith extracts and merges URL replacements and port mappings
