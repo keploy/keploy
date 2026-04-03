@@ -19,13 +19,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// DefaultFlakyHeaders lists HTTP header keys (lowercased) that are known to
-// change on every request due to cryptographic signatures, timestamps,
-// credential rotation, or per-request identifiers. These are automatically
-// treated as noise during mock matching so that replayed requests can find
-// the correct recorded mock even though these artifacts differ.
-// Users who need strict header matching can disable this with
-// --disableAutoHeaderNoise.
+// flakyHeaders lists HTTP header keys (lowercased) that are known to change
+// on every request due to cryptographic signatures, timestamps, credential
+// rotation, or per-request identifiers. These are automatically treated as
+// noise during mock matching so that replayed requests can find the correct
+// recorded mock even though these artifacts differ. Users who need strict
+// header matching can disable this with --disableAutoHeaderNoise.
 //
 // No single public library maintains such a list. Most recording/replay
 // tools (VCR, WireMock, Hoverfly) avoid the problem by not matching on
@@ -37,7 +36,7 @@ import (
 //   - Tracing/correlation: W3C Trace Context, B3, Datadog, X-Request-Id
 //   - Webhook signatures:  Stripe, GitHub, Slack, Twilio, Shopify
 //   - SDK metadata:        per-call invocation IDs and attempt counters
-var DefaultFlakyHeaders = []string{
+var flakyHeaders = []string{
 	// ── AWS SigV4 & SDK ──────────────────────────────────────────────
 	"authorization",       // signature changes every request (all cloud providers)
 	"x-amz-date",         // signing timestamp
@@ -99,6 +98,14 @@ var DefaultFlakyHeaders = []string{
 
 	// ── GCP trace (legacy) ───────────────────────────────────────────
 	"x-cloud-trace-context",
+}
+
+// defaultFlakyHeaders returns a copy of the built-in flaky header list so
+// callers cannot accidentally mutate the package-level slice.
+func defaultFlakyHeaders() []string {
+	out := make([]string, len(flakyHeaders))
+	copy(out, flakyHeaders)
+	return out
 }
 
 type req struct {

@@ -119,25 +119,31 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				zap.Any("body", string(input.body)),
 				zap.Any("raw", string(input.raw)))
 
-			// Extract header noise from noise configuration
+			// Extract header noise from noise configuration.
+			// We make a shallow copy so that injecting default flaky headers
+			// below does not mutate the shared opts.NoiseConfig map, which
+			// may be accessed concurrently by other outgoing requests.
 			var headerNoise map[string][]string
 			if opts.NoiseConfig != nil {
 				if hn, ok := opts.NoiseConfig["header"]; ok {
-					headerNoise = hn
+					headerNoise = make(map[string][]string, len(hn))
+					for k, v := range hn {
+						headerNoise[k] = v
+					}
 				}
 			}
 
-			// Auto-inject known flaky headers (e.g. AWS SigV4) into the noise
-			// map so they are ignored during mock matching. This prevents
-			// mismatches caused by headers whose values or presence change on
-			// every request due to timestamps, cryptographic signatures, or
-			// credential rotation (e.g. X-Amz-Security-Token from STS/IRSA).
+			// Auto-inject known flaky headers (e.g. AWS SigV4) into the
+			// per-request copy so they are ignored during mock matching.
+			// This prevents mismatches caused by headers whose values or
+			// presence change on every request due to timestamps, signatures,
+			// or credential rotation (e.g. X-Amz-Security-Token from IRSA).
 			// Disable with --disableAutoHeaderNoise for strict matching.
 			if !opts.DisableAutoHeaderNoise {
 				if headerNoise == nil {
 					headerNoise = make(map[string][]string)
 				}
-				for _, hdr := range DefaultFlakyHeaders {
+				for _, hdr := range defaultFlakyHeaders() {
 					if _, exists := headerNoise[hdr]; !exists {
 						headerNoise[hdr] = []string{}
 					}
