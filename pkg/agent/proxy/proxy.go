@@ -862,7 +862,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		serverName := dstURL
 		// If SNI was not captured (e.g., client omitted it after CONNECT),
 		// fall back to the CONNECT target hostname for the TLS handshake.
-		if serverName == "" && connectResult != nil {
+		// Skip IP literals — Go's TLS uses IP SANs, not ServerName for those.
+		if serverName == "" && connectResult != nil && net.ParseIP(connectResult.TargetHost) == nil {
 			serverName = connectResult.TargetHost
 		}
 
@@ -881,7 +882,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		addr := dstAddr
 		if dstURL != "" {
-			addr = fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+			addr = net.JoinHostPort(dstURL, fmt.Sprint(destInfo.Port))
 		}
 
 		if rule.Mode != models.MODE_TEST {
