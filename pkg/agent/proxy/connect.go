@@ -21,12 +21,16 @@ type connectTunnelResult struct {
 	TargetHost string // e.g. "api.example.com"
 	TargetPort string // e.g. "443"
 	TargetAddr string // "host:port"
-	// BufferedReader is the bufio.Reader used to parse the CONNECT request.
-	// It may contain read-ahead bytes (e.g., the TLS ClientHello that the
-	// client sent immediately after the CONNECT headers). Callers MUST use
-	// this reader for subsequent reads from srcConn instead of creating a
-	// new reader, to avoid losing these buffered bytes.
+	// BufferedReader is the bufio.Reader used to parse the CONNECT request
+	// from srcConn. It may contain read-ahead bytes (e.g., the TLS
+	// ClientHello pipelined by the client). Callers MUST use this reader
+	// for subsequent reads from srcConn.
 	BufferedReader *bufio.Reader
+	// DstReader is the bufio.Reader used to parse the corporate proxy's
+	// 200 response on dstConn. It may hold read-ahead bytes from the
+	// server side. Callers should wrap dstConn with this reader before
+	// initiating the TLS handshake. Nil in test mode.
+	DstReader *bufio.Reader
 }
 
 // isConnectRequest checks whether peeked bytes look like an HTTP CONNECT request.
@@ -85,6 +89,7 @@ func handleConnectTunnel(
 		zap.Bool("testMode", isTestMode),
 	)
 
+	var proxyReader *bufio.Reader
 	if isTestMode {
 		if _, err := srcConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 			return nil, fmt.Errorf("failed to send CONNECT 200 to app: %w", err)
@@ -113,7 +118,7 @@ func handleConnectTunnel(
 			return nil, fmt.Errorf("failed to forward CONNECT to proxy: %w", err)
 		}
 
-		proxyReader := bufio.NewReader(dstConn)
+		proxyReader = bufio.NewReader(dstConn)
 		resp, err := http.ReadResponse(proxyReader, req)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CONNECT response from proxy: %w", err)
@@ -148,12 +153,21 @@ func handleConnectTunnel(
 		)
 	}
 
-	return &connectTunnelResult{
+	result := &connectTunnelResult{
 		TargetHost:     host,
 		TargetPort:     port,
 		TargetAddr:     targetAddr,
 		BufferedReader: reader,
-	}, nil
+	}
+
+	// In record mode, the proxyReader (bufio.Reader on dstConn) may have
+	// buffered bytes beyond the 200 response (e.g., server greeting). Wrap
+	// dstConn so those bytes aren't lost during the subsequent TLS handshake.
+	if !isTestMode && dstConn != nil {
+		result.DstReader = proxyReader
+	}
+
+	return result, nil
 }
 
 // stripUtilConn extracts the underlying net.Conn from a util.Conn wrapper.

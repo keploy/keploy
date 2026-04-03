@@ -887,15 +887,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode != models.MODE_TEST {
 			if connectResult != nil && dstConn != nil {
 				// CONNECT tunnel: dstConn is already connected through the
-				// corporate proxy tunnel. Wrap it with TLS.
-				tlsConn := tls.Client(dstConn, cfg)
+				// corporate proxy tunnel. If the proxyReader has buffered
+				// bytes beyond the 200 response, wrap dstConn to preserve them.
+				var tlsTransport net.Conn = dstConn
+				if connectResult.DstReader != nil && connectResult.DstReader.Buffered() > 0 {
+					tlsTransport = &util.Conn{
+						Conn:   dstConn,
+						Reader: connectResult.DstReader,
+						Logger: p.logger,
+					}
+				}
+				tlsConn := tls.Client(tlsTransport, cfg)
 				if err := tlsConn.Handshake(); err != nil {
 					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel",
 						zap.String("target", addr))
 					return err
 				}
 				dstConn = tlsConn
-				p.logger.Debug("TLS over CONNECT tunnel established",
+				logger.Debug("TLS over CONNECT tunnel established",
 					zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol),
 					zap.String("target", addr))
 			} else {
