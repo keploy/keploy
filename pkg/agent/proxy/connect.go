@@ -83,9 +83,10 @@ func handleConnectTunnel(
 		port = "443"
 		targetAddr = net.JoinHostPort(host, port)
 	}
-	// Validate port is numeric and in range.
-	if _, parseErr := strconv.ParseUint(port, 10, 16); parseErr != nil {
-		return nil, fmt.Errorf("invalid port in CONNECT target %q: %w", targetAddr, parseErr)
+	// Validate port is numeric and in valid range (1-65535).
+	portNum, parseErr := strconv.ParseUint(port, 10, 16)
+	if parseErr != nil || portNum == 0 {
+		return nil, fmt.Errorf("invalid port in CONNECT target %q", targetAddr)
 	}
 
 	logger.Debug("CONNECT tunnel detected",
