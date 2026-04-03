@@ -38,22 +38,22 @@ import (
 //   - SDK metadata:        per-call invocation IDs and attempt counters
 var flakyHeaders = []string{
 	// ── AWS SigV4 & SDK ──────────────────────────────────────────────
-	"authorization",       // signature changes every request (all cloud providers)
-	"x-amz-date",         // signing timestamp
-	"x-amz-security-token", // STS/IRSA session token — may appear or disappear
-	"x-amz-content-sha256", // payload hash
-	"x-amz-credential",   // credential scope string
+	"authorization",         // signature changes every request (all cloud providers)
+	"x-amz-date",            // signing timestamp
+	"x-amz-security-token",  // STS/IRSA session token — may appear or disappear
+	"x-amz-content-sha256",  // payload hash
+	"x-amz-credential",      // credential scope string
 	"amz-sdk-invocation-id", // unique per-call UUID from AWS SDK
-	"amz-sdk-request",    // attempt counter (attempt=1; max=3)
+	"amz-sdk-request",       // attempt counter (attempt=1; max=3)
 
 	// ── GCP ──────────────────────────────────────────────────────────
-	"x-goog-api-client", // SDK metadata (version, runtime info)
+	"x-goog-api-client",     // SDK metadata (version, runtime info)
 	"x-goog-request-params", // routing parameters, may change with resource
 
 	// ── Azure ────────────────────────────────────────────────────────
-	"x-ms-date",              // signing timestamp
-	"x-ms-client-request-id", // client-generated UUID per call
-	"x-ms-content-sha256",    // body hash for HMAC auth
+	"x-ms-date",                     // signing timestamp
+	"x-ms-client-request-id",        // client-generated UUID per call
+	"x-ms-content-sha256",           // body hash for HMAC auth
 	"x-ms-return-client-request-id", // echo control flag
 
 	// ── W3C Trace Context / OpenTelemetry ────────────────────────────
@@ -86,9 +86,9 @@ var flakyHeaders = []string{
 	"x-shopify-hmac-sha256",
 	"x-slack-signature",
 	"x-slack-request-timestamp",
-	"webhook-signature",  // Standard Webhooks spec
-	"webhook-timestamp",  // Standard Webhooks spec
-	"webhook-id",         // Standard Webhooks spec
+	"webhook-signature", // Standard Webhooks spec
+	"webhook-timestamp", // Standard Webhooks spec
+	"webhook-id",        // Standard Webhooks spec
 
 	// ── Idempotency / CSRF ───────────────────────────────────────────
 	"idempotency-key",
