@@ -19,7 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, ml *pUtil.MemoryLimiter) error {
 
 	var genericRequests []models.Payload
 
@@ -55,13 +55,13 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	//close(errChan)
 
 	// read requests from client
-	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client, nil)
+	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client, ml)
 	if err != nil {
 		return fmt.Errorf("error reading from client:%v", err)
 	}
 
 	// read responses from destination
-	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination, nil)
+	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination, ml)
 	if err != nil {
 		return fmt.Errorf("error reading from destination:%v", err)
 	}
@@ -205,9 +205,19 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				return nil
 			}
 			if errors.Is(err, pUtil.ErrMemoryLimitExceeded) {
-				logger.Warn("memory limit exceeded, falling back to passthrough for this connection")
-				_, ptErr := pUtil.PassThrough(ctx, logger, clientConn, opts.DstCfg, nil)
-				return ptErr
+				logger.Debug("memory limit exceeded, falling back to passthrough for this connection")
+				// Use bidirectional io.Copy on the existing connections
+				// instead of pUtil.PassThrough which dials a new connection.
+				done := make(chan struct{}, 2)
+				cp := func(dst, src net.Conn) {
+					_, _ = io.Copy(dst, src)
+					done <- struct{}{}
+				}
+				go cp(destConn, clientConn)
+				go cp(clientConn, destConn)
+				<-done
+				<-done
+				return nil
 			}
 			return err
 		}

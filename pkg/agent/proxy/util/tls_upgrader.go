@@ -1,8 +1,10 @@
 package util
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"time"
 
@@ -44,15 +46,54 @@ func NewConnTLSUpgrader(srcConn, dstConn *net.Conn, logger *zap.Logger, handleCl
 	}
 }
 
-// UpgradeClientTLS terminates TLS on the client side. It unwraps the
-// SafeConn, performs the TLS handshake, updates the proxy's reference,
-// and returns a new SafeConn wrapping the TLS connection.
-func (u *ConnTLSUpgrader) UpgradeClientTLS(ctx context.Context, backdate time.Time) (net.Conn, bool, error) {
+// isTLSClientHello checks if the first 5 bytes look like a TLS ClientHello.
+// Inlined here to avoid an import cycle with proxy/tls.
+func isTLSClientHello(data []byte) bool {
+	if len(data) < 5 {
+		return false
+	}
+	return data[0] == 0x16 && data[1] == 0x03 &&
+		(data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
+}
+
+// UpgradeClientTLS peeks the client connection to detect TLS, and if
+// detected, performs the TLS termination. Returns (conn, isTLS, isMTLS, error).
+// If the client is not sending TLS, returns the original conn with isTLS=false.
+func (u *ConnTLSUpgrader) UpgradeClientTLS(ctx context.Context, backdate time.Time) (net.Conn, bool, bool, error) {
 	realConn := unwrapSafe(*u.srcConn)
 
-	tlsConn, isMTLS, err := u.handleClientTLS(ctx, u.logger, realConn, backdate)
+	// Peek 5 bytes to detect TLS ClientHello.
+	reader := bufio.NewReader(realConn)
+	testBuffer, err := reader.Peek(5)
 	if err != nil {
-		return nil, false, err
+		if err == io.EOF && len(testBuffer) == 0 {
+			u.logger.Debug("UpgradeClientTLS: received EOF during peek, no TLS")
+			// Return the original conn wrapped with the reader to replay any buffered bytes.
+			safe := NewSafeConnWithReader(*u.srcConn, io.MultiReader(reader, realConn), u.logger)
+			return safe, false, false, nil
+		}
+		return nil, false, false, err
+	}
+
+	if !isTLSClientHello(testBuffer) {
+		// Not TLS — wrap the connection with a MultiReader so the peeked
+		// bytes are replayed on subsequent reads.
+		safe := NewSafeConnWithReader(*u.srcConn, io.MultiReader(reader, realConn), u.logger)
+		return safe, false, false, nil
+	}
+
+	// TLS detected. The bufio.Reader may have buffered more than 5 bytes.
+	// Create a MultiReader that replays the buffered data before reading
+	// from the raw conn, then perform the TLS handshake on that combined reader.
+	replayConn := &Conn{
+		Conn:   realConn,
+		Reader: io.MultiReader(reader, realConn),
+		Logger: u.logger,
+	}
+
+	tlsConn, isMTLS, err := u.handleClientTLS(ctx, u.logger, replayConn, backdate)
+	if err != nil {
+		return nil, false, false, err
 	}
 
 	// Update proxy's reference so deferred close works on upgraded conn.
@@ -60,7 +101,7 @@ func (u *ConnTLSUpgrader) UpgradeClientTLS(ctx context.Context, backdate time.Ti
 
 	// Return a new SafeConn wrapping the TLS connection.
 	safe := NewSafeConn(tlsConn, u.logger)
-	return safe, isMTLS, nil
+	return safe, true, isMTLS, nil
 }
 
 // UpgradeDestTLS upgrades the destination connection to TLS. It
@@ -79,13 +120,6 @@ func (u *ConnTLSUpgrader) UpgradeDestTLS(cfg *tls.Config) (net.Conn, error) {
 
 	safe := NewSafeConn(tlsConn, u.logger)
 	return safe, nil
-}
-
-// UnwrapClientForPeek returns the real underlying client connection
-// for peeking (TLS detection). The caller must NOT store, close, or
-// write to the returned connection.
-func (u *ConnTLSUpgrader) UnwrapClientForPeek() net.Conn {
-	return unwrapSafe(*u.srcConn)
 }
 
 // unwrapSafe extracts the real net.Conn from a SafeConn wrapper. If

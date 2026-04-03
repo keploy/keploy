@@ -173,7 +173,11 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			}
 
 			// Check memory limit before buffering for recording.
-			if ml != nil && !ml.TryAcquire(int64(len(buffer))) {
+			// Uses IsExceeded() as a pure circuit-breaker check rather than
+			// per-buffer TryAcquire/Release, because there is no clean place
+			// to call Release in the current architecture. TryAcquire/Release
+			// are still available for parsers that want fine-grained tracking.
+			if ml != nil && ml.IsExceeded() {
 				errChannel <- ErrMemoryLimitExceeded
 				return
 			}

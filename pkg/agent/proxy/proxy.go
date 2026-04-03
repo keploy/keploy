@@ -142,8 +142,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 }
 
 // buildRecordSession constructs a RecordSession for a parser in record mode.
-// It wraps src/dst in SafeConn and sets up TLSUpgrader only for parsers that
-// need mid-stream TLS (MySQL, PostgreSQL).
+// It wraps src/dst in SafeConn. The caller (handleConnection) is responsible
+// for creating the TLSUpgrader using pointers to its own srcConn/dstConn
+// variables, so the upgrader updates the correct references on TLS upgrade.
 func (p *Proxy) buildRecordSession(
 	srcConn, dstConn net.Conn,
 	mocks chan<- *models.Mock,
@@ -151,26 +152,20 @@ func (p *Proxy) buildRecordSession(
 	logger *zap.Logger,
 	clientConnID, destConnID int64,
 	opts models.OutgoingOptions,
-	parserType integrations.IntegrationType,
+	tlsUpgrader models.TLSUpgrader,
 ) *integrations.RecordSession {
-	session := &integrations.RecordSession{
+	return &integrations.RecordSession{
 		Ingress:      util.NewSafeConnWithReader(srcConn, srcConn, p.logger),
 		Egress:       util.NewSafeConn(dstConn, p.logger),
 		Mocks:        mocks,
 		ErrGroup:     errGrp,
 		MemLimiter:   p.memLimiter,
+		TLSUpgrader:  tlsUpgrader,
 		Logger:       logger,
 		ClientConnID: fmt.Sprint(clientConnID),
 		DestConnID:   fmt.Sprint(destConnID),
 		Opts:         opts,
 	}
-
-	// Only parsers that do mid-stream TLS get an upgrader.
-	if parserType == integrations.MYSQL || parserType == integrations.POSTGRES_V2 {
-		session.TLSUpgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
-	}
-
-	return session
 }
 
 // getSession returns the current session in a thread-safe manner.
@@ -906,7 +901,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, parserType)
+			// Create TLSUpgrader in handleConnection scope so it holds pointers to
+			// the real srcConn/dstConn variables (not copies in buildRecordSession).
+			var upgrader models.TLSUpgrader
+			if parserType == integrations.MYSQL || parserType == integrations.POSTGRES_V2 {
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, pTls.HandleTLSConnection)
+			}
+			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
@@ -926,7 +927,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			genericSession := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, integrations.GENERIC)
+			genericSession := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, nil)
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, genericSession)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "tls: user canceled") {
 				utils.LogError(logger, err, "failed to record the outgoing message")

@@ -40,6 +40,7 @@ func (m *MySQL) RecordOutgoing(ctx context.Context, session *integrations.Record
 	logger := session.Logger
 
 	err := recorder.Record(ctx, logger, session.Ingress, session.Egress, session.Mocks, session.Opts, session.TLSUpgrader, session.MemLimiter)
+
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
 		return err

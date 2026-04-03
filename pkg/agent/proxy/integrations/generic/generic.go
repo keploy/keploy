@@ -42,7 +42,7 @@ func (g *Generic) RecordOutgoing(ctx context.Context, session *integrations.Reco
 		return err
 	}
 
-	err = encodeGeneric(ctx, logger, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts)
+	err = encodeGeneric(ctx, logger, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts, session.MemLimiter)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the generic message into the yaml")
 		return err
