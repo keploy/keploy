@@ -1,7 +1,6 @@
 package recorder
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -178,29 +177,15 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, nil
 		}
 
-		// Peek client bytes to detect if a TLS ClientHello follows.
-		peekConn := tlsUpgrader.UnwrapClientForPeek()
-		reader := bufio.NewReader(peekConn)
-		initialData := make([]byte, 5)
-		testBuffer, err := reader.Peek(len(initialData))
+		// UpgradeClientTLS peeks the client connection internally to detect
+		// a TLS ClientHello, and if found, performs the TLS termination.
+		upgradedConn, isTLS, _, err := tlsUpgrader.UpgradeClientTLS(ctx, opts.Backdate)
 		if err != nil {
-			if err == io.EOF && len(testBuffer) == 0 {
-				logger.Debug("received EOF, closing conn", zap.Error(err))
-				return res, nil
-			}
-			utils.LogError(logger, err, "failed to peek the mysql request message in proxy")
+			utils.LogError(logger, err, "failed to upgrade client TLS for mysql")
 			return res, err
 		}
-
-		isTLS := pTls.IsTLSHandshake(testBuffer)
+		clientConn = upgradedConn
 		if isTLS {
-			// Upgrade client side via TLSUpgrader (handles MITM, updates proxy refs).
-			clientConn, _, err = tlsUpgrader.UpgradeClientTLS(ctx, opts.Backdate)
-			if err != nil {
-				utils.LogError(logger, err, "failed to handle TLS conn")
-				return res, err
-			}
-
 			// Upgrade destination side via TLSUpgrader.
 			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
 			sourcePort := remoteAddr.Port

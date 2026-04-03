@@ -58,7 +58,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		defer close(errCh)
 		for {
 			if memLimiter != nil && memLimiter.IsExceeded() {
-				h.Logger.Warn("memory limit exceeded, stopping HTTP recording and falling back to passthrough")
+				h.Logger.Debug("memory limit exceeded, stopping HTTP recording and falling back to passthrough")
 				done := make(chan struct{}, 2)
 				cp := func(dst, src net.Conn) {
 					_, _ = io.Copy(dst, src)
@@ -66,6 +66,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				}
 				go cp(destConn, clientConn)
 				go cp(clientConn, destConn)
+				<-done
 				<-done
 				return nil
 			}

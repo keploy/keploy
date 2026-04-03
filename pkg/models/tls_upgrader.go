@@ -18,23 +18,14 @@ import (
 //   - Parsers never touch the raw conn directly
 //   - TLS upgrade logic is centralized in the proxy layer
 type TLSUpgrader interface {
-	// UpgradeClientTLS terminates TLS on the client side of the
-	// connection. It returns a new SafeConn wrapping the TLS
-	// connection, and a boolean indicating whether mutual TLS (mTLS)
-	// was negotiated.
-	UpgradeClientTLS(ctx context.Context, backdate time.Time) (net.Conn, bool, error)
+	// UpgradeClientTLS peeks the client connection to detect TLS,
+	// and if detected, performs the TLS termination. Returns
+	// (conn, isTLS, isMTLS, error). If the client is not sending
+	// TLS, returns the original conn with isTLS=false.
+	UpgradeClientTLS(ctx context.Context, backdate time.Time) (conn net.Conn, isTLS bool, isMTLS bool, err error)
 
 	// UpgradeDestTLS upgrades the destination (server) side of the
 	// connection to TLS using the provided config. It returns a new
 	// SafeConn wrapping the TLS connection.
 	UpgradeDestTLS(cfg *tls.Config) (net.Conn, error)
-
-	// UnwrapClientForPeek returns the underlying client connection
-	// temporarily so the parser can peek bytes to detect whether the
-	// client is actually sending a TLS ClientHello. Both MySQL and
-	// PostgreSQL peek 5 bytes for this purpose.
-	//
-	// The returned conn must NOT be stored, closed, or written to.
-	// It is valid only for the duration of the peek operation.
-	UnwrapClientForPeek() net.Conn
 }

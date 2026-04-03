@@ -30,7 +30,11 @@ type RecordSession struct {
 	Mocks chan<- *models.Mock
 
 	// ErrGroup for managing parser goroutines. Previously passed via
-	// context.Value(models.ErrGroupKey).
+	// context.Value(models.ErrGroupKey). Currently also injected into
+	// the parser context via context.WithValue in proxy.go so that
+	// ReadFromPeer and other utilities can retrieve it. Retained here
+	// as part of the planned migration to pass it explicitly through
+	// RecordSession rather than via context.
 	ErrGroup *errgroup.Group
 
 	// MemLimiter tracks memory usage across all proxy connections.

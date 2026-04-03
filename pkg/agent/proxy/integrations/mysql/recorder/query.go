@@ -32,7 +32,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 	//for keeping conn alive
 	for {
 		if memLimiter != nil && memLimiter.IsExceeded() {
-			logger.Warn("memory limit exceeded, stopping MySQL recording and falling back to passthrough")
+			logger.Debug("memory limit exceeded, stopping MySQL recording and falling back to passthrough")
 			done := make(chan struct{}, 2)
 			cp := func(dst, src net.Conn) {
 				_, _ = io.Copy(dst, src)
@@ -40,6 +40,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			}
 			go cp(destConn, clientConn)
 			go cp(clientConn, destConn)
+			<-done
 			<-done
 			return nil
 		}
