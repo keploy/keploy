@@ -629,6 +629,88 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		Logger: p.logger,
 	}
 
+	// ── CONNECT tunnel handling ──
+	// If the first bytes are an HTTP CONNECT request (app is using a corporate
+	// HTTP proxy), we handle the CONNECT handshake here, then re-enter the
+	// normal TLS MITM + parser flow on the unwrapped tunnel.
+	//
+	// Record mode: forward CONNECT to the real proxy, relay the 200, then MITM.
+	// Test mode:   respond with 200 directly (no external proxy needed).
+	var connectResult *connectTunnelResult
+	if isConnectRequest(testBuffer) {
+		p.logger.Info("Detected HTTP CONNECT request, handling tunnel",
+			zap.Int("sourcePort", sourcePort),
+			zap.String("dstAddr", dstAddr),
+		)
+
+		isTestMode := rule.Mode == models.MODE_TEST
+
+		// In record mode, we need a connection to the corporate proxy.
+		var proxyConn net.Conn
+		if !isTestMode {
+			proxyConn, err = net.Dial("tcp", dstAddr)
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to dial corporate proxy for CONNECT",
+					zap.String("proxy_addr", dstAddr))
+				return err
+			}
+			// Note: we do NOT defer proxyConn.Close() here because we transfer
+			// ownership to dstConn below. dstConn is closed by the caller.
+		}
+
+		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel")
+			return err
+		}
+
+		// The CONNECT handshake is now complete. The app will send the next
+		// bytes (typically a TLS ClientHello) over the same srcConn.
+		// We need to re-peek to detect TLS on the inner connection.
+		//
+		// Also update dstAddr and destInfo to reflect the real target
+		// (e.g., api.example.com:443) instead of the corporate proxy.
+		dstAddr = connectResult.TargetAddr
+		destInfo.Port = 443 // CONNECT targets are almost always TLS on 443
+		if connectResult.TargetPort != "" {
+			portNum := uint32(443)
+			if _, err := fmt.Sscanf(connectResult.TargetPort, "%d", &portNum); err == nil {
+				destInfo.Port = portNum
+			}
+		}
+
+		// Re-peek the next bytes from srcConn to detect TLS on the inner tunnel.
+		innerReader := bufio.NewReader(srcConn)
+		testBuffer, err = innerReader.Peek(5)
+		if err != nil {
+			if err == io.EOF {
+				p.logger.Debug("CONNECT tunnel closed immediately after handshake")
+				return nil
+			}
+			utils.LogError(p.logger, err, "failed to peek inner tunnel data after CONNECT")
+			return err
+		}
+
+		// Re-wrap srcConn with the new reader so peeked bytes aren't lost.
+		srcConn = &util.Conn{
+			Conn:   stripUtilConn(srcConn),
+			Reader: io.MultiReader(innerReader, stripUtilConn(srcConn)),
+			Logger: p.logger,
+		}
+
+		// In record mode, dstConn is now the tunneled connection through the
+		// corporate proxy (the CONNECT tunnel is established, raw bytes flow).
+		// We'll set dstConn = proxyConn so the TLS dial below wraps it.
+		if !isTestMode {
+			dstConn = proxyConn
+		}
+
+		p.logger.Info("CONNECT tunnel established, proceeding with inner connection",
+			zap.String("target", connectResult.TargetAddr),
+			zap.Bool("innerTLS", pTls.IsTLSHandshake(testBuffer)),
+		)
+	}
+
 	var clientPeerCert *x509.Certificate
 	var isMTLS bool
 	isTLS := pTls.IsTLSHandshake(testBuffer)
@@ -789,16 +871,31 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = tls.Dial("tcp", addr, cfg)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
+			if connectResult != nil && dstConn != nil {
+				// CONNECT tunnel: dstConn is already connected through the
+				// corporate proxy tunnel. Wrap it with TLS.
+				tlsConn := tls.Client(dstConn, cfg)
+				if err := tlsConn.Handshake(); err != nil {
+					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel",
+						zap.String("target", addr))
+					return err
+				}
+				dstConn = tlsConn
+				p.logger.Debug("TLS over CONNECT tunnel established",
+					zap.String("protocol", tlsConn.ConnectionState().NegotiatedProtocol),
+					zap.String("target", addr))
+			} else {
+				dstConn, err = tls.Dial("tcp", addr, cfg)
+				if err != nil {
+					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+					return err
+				}
+
+				conn := dstConn.(*tls.Conn)
+				state := conn.ConnectionState()
+
+				p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 			}
-
-			conn := dstConn.(*tls.Conn)
-			state := conn.ConnectionState()
-
-			p.logger.Debug("Negotiated protocol:", zap.String("protocol", state.NegotiatedProtocol))
 		}
 
 		dstCfg.TLSCfg = cfg

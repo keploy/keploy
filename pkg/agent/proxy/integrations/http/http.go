@@ -55,7 +55,8 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("PATCH ")) ||
 		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
 		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
-		bytes.HasPrefix(buf[:], []byte("HEAD "))
+		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
+		bytes.HasPrefix(buf[:], []byte("CONNECT "))
 	h.Logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
 	return isHTTP
 }
