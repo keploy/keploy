@@ -156,8 +156,8 @@ func (p *Proxy) buildRecordSession(
 	tlsUpgrader models.TLSUpgrader,
 ) *integrations.RecordSession {
 	return &integrations.RecordSession{
-		Ingress:      util.NewSafeConnWithReader(srcConn, srcConn, p.logger),
-		Egress:       util.NewSafeConn(dstConn, p.logger),
+		Ingress:      util.NewSafeConnWithReader(srcConn, srcConn, logger),
+		Egress:       util.NewSafeConn(dstConn, logger),
 		Mocks:        mocks,
 		ErrGroup:     errGrp,
 		MemLimiter:   p.memLimiter,
