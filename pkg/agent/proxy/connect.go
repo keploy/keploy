@@ -95,6 +95,10 @@ func handleConnectTunnel(
 		fmt.Fprintf(&connectBuf, "CONNECT %s HTTP/1.1\r\n", targetAddr)
 		fmt.Fprintf(&connectBuf, "Host: %s\r\n", targetAddr)
 		for key, vals := range req.Header {
+			// Skip Host — already written above to avoid duplicates.
+			if key == "Host" {
+				continue
+			}
 			for _, v := range vals {
 				fmt.Fprintf(&connectBuf, "%s: %s\r\n", key, v)
 			}
@@ -112,9 +116,12 @@ func handleConnectTunnel(
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			// Forward the proxy's error response (status + headers) back to
-			// the client so it can handle auth challenges (407 with
-			// Proxy-Authenticate header) or other proxy errors.
+			// Forward the proxy's error response (status + headers) to the
+			// client. Note: multi-round-trip proxy auth (407 → credentials →
+			// retry on the same connection) is not supported because Keploy's
+			// transparent proxy processes each intercepted connection as a
+			// single CONNECT attempt. Clients that need proxy auth should
+			// include credentials in the initial CONNECT request.
 			resp.Body.Close()
 			resp.Body = nil
 			resp.ContentLength = 0
