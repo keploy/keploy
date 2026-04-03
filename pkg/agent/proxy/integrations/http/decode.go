@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -123,12 +124,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// We make a shallow copy so that injecting default flaky headers
 			// below does not mutate the shared opts.NoiseConfig map, which
 			// may be accessed concurrently by other outgoing requests.
+			// Keys are lowercased during copy because HeadersContainKeys
+			// compares against lowercased keys.
 			var headerNoise map[string][]string
 			if opts.NoiseConfig != nil {
 				if hn, ok := opts.NoiseConfig["header"]; ok {
 					headerNoise = make(map[string][]string, len(hn))
 					for k, v := range hn {
-						headerNoise[k] = v
+						headerNoise[strings.ToLower(k)] = v
 					}
 				}
 			}
@@ -143,7 +146,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if headerNoise == nil {
 					headerNoise = make(map[string][]string)
 				}
-				for _, hdr := range defaultFlakyHeaders() {
+				for _, hdr := range flakyHeaders {
 					if _, exists := headerNoise[hdr]; !exists {
 						headerNoise[hdr] = []string{}
 					}

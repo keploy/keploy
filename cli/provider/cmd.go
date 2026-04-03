@@ -1093,7 +1093,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			c.cfg.Test.DisableAutoHeaderNoise, err = cmd.Flags().GetBool("disableAutoHeaderNoise")
 			if err != nil {
-				errMsg := "failed to get the provided disableAutoHeaderNoise"
+				errMsg := "failed to read the --disableAutoHeaderNoise flag; check the flag name with --help and confirm this command supports it"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}

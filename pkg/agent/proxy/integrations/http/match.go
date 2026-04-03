@@ -100,14 +100,6 @@ var flakyHeaders = []string{
 	"x-cloud-trace-context",
 }
 
-// defaultFlakyHeaders returns a copy of the built-in flaky header list so
-// callers cannot accidentally mutate the package-level slice.
-func defaultFlakyHeaders() []string {
-	out := make([]string, len(flakyHeaders))
-	copy(out, flakyHeaders)
-	return out
-}
-
 type req struct {
 	method string
 	url    *url.URL
