@@ -160,7 +160,8 @@ type Test struct {
 	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 	CompareAll          bool                `json:"compareAll" yaml:"compareAll" mapstructure:"compareAll"`
 	SchemaMatch         bool                `json:"schemaMatch" yaml:"schemaMatch" mapstructure:"schemaMatch"`
-	UpdateTestMapping   bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
+	UpdateTestMapping      bool                `json:"updateTestMapping" yaml:"updateTestMapping" mapstructure:"updateTestMapping"`
+	DisableAutoHeaderNoise bool                `json:"disableAutoHeaderNoise" yaml:"disableAutoHeaderNoise" mapstructure:"disableAutoHeaderNoise"` // skip auto-noise for flaky headers (e.g. AWS SigV4)
 	CmdUsed             string              `json:"-" yaml:"-" mapstructure:"-"` // Full command used for the test run (set at runtime)
 }
 

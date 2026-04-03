@@ -61,8 +61,9 @@ type OutgoingOptions struct {
 	Mocking     bool          // used to enable/disable mocking
 	DstCfg      *ConditionalDstCfg
 	Backdate    time.Time                      // used to set backdate in cacert request
-	NoiseConfig map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
-	SkipTLSMITM bool
+	NoiseConfig            map[string]map[string][]string // noise configuration for mock matching (body, header, etc.)
+	DisableAutoHeaderNoise bool                           // when true, skip injecting default flaky headers (e.g. AWS SigV4) into noise
+	SkipTLSMITM            bool
 	ConnKey     string // connection-level key for TLSHandshakeStore correlation
 }
 

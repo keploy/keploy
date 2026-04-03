@@ -371,6 +371,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("compare-all", false, "Compare all response body types including non-JSON (default: false, only JSON bodies are compared)")
 			cmd.Flags().Bool("schema-match", false, "Compare only the schema of the response body")
 			cmd.Flags().Bool("update-test-mapping", c.cfg.Test.UpdateTestMapping, "Update the mapping of testcases")
+			cmd.Flags().Bool("disableAutoHeaderNoise", c.cfg.Test.DisableAutoHeaderNoise, "Disable automatic noise for flaky headers (e.g. AWS SigV4: Authorization, X-Amz-Date, X-Amz-Security-Token) during mock matching")
 		}
 	}
 }
@@ -1132,6 +1133,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.cfg.Test.DisableMockUpload, err = cmd.Flags().GetBool("disableMockUpload")
 				if err != nil {
 					errMsg := "failed to get the provided disableMockUpload"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+
+				c.cfg.Test.DisableAutoHeaderNoise, err = cmd.Flags().GetBool("disableAutoHeaderNoise")
+				if err != nil {
+					errMsg := "failed to get the provided disableAutoHeaderNoise"
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}

@@ -127,6 +127,23 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
+			// Auto-inject known flaky headers (e.g. AWS SigV4) into the noise
+			// map so they are ignored during mock matching. This prevents
+			// mismatches caused by headers whose values or presence change on
+			// every request due to timestamps, cryptographic signatures, or
+			// credential rotation (e.g. X-Amz-Security-Token from STS/IRSA).
+			// Disable with --disableAutoHeaderNoise for strict matching.
+			if !opts.DisableAutoHeaderNoise {
+				if headerNoise == nil {
+					headerNoise = make(map[string][]string)
+				}
+				for _, hdr := range DefaultFlakyHeaders {
+					if _, exists := headerNoise[hdr]; !exists {
+						headerNoise[hdr] = []string{}
+					}
+				}
+			}
+
 			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
 
 			ok, stub, err := h.match(ctx, input, mockDb, headerNoise) // calling match function to match mocks

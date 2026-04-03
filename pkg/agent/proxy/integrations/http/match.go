@@ -19,6 +19,88 @@ import (
 	"go.uber.org/zap"
 )
 
+// DefaultFlakyHeaders lists HTTP header keys (lowercased) that are known to
+// change on every request due to cryptographic signatures, timestamps,
+// credential rotation, or per-request identifiers. These are automatically
+// treated as noise during mock matching so that replayed requests can find
+// the correct recorded mock even though these artifacts differ.
+// Users who need strict header matching can disable this with
+// --disableAutoHeaderNoise.
+//
+// No single public library maintains such a list. Most recording/replay
+// tools (VCR, WireMock, Hoverfly) avoid the problem by not matching on
+// headers at all by default. Since Keploy does match on header keys, we
+// maintain this list covering the most common sources of non-determinism.
+//
+// Categories:
+//   - Cloud auth/signing:  AWS SigV4, GCP OAuth, Azure HMAC/Bearer
+//   - Tracing/correlation: W3C Trace Context, B3, Datadog, X-Request-Id
+//   - Webhook signatures:  Stripe, GitHub, Slack, Twilio, Shopify
+//   - SDK metadata:        per-call invocation IDs and attempt counters
+var DefaultFlakyHeaders = []string{
+	// ── AWS SigV4 & SDK ──────────────────────────────────────────────
+	"authorization",       // signature changes every request (all cloud providers)
+	"x-amz-date",         // signing timestamp
+	"x-amz-security-token", // STS/IRSA session token — may appear or disappear
+	"x-amz-content-sha256", // payload hash
+	"x-amz-credential",   // credential scope string
+	"amz-sdk-invocation-id", // unique per-call UUID from AWS SDK
+	"amz-sdk-request",    // attempt counter (attempt=1; max=3)
+
+	// ── GCP ──────────────────────────────────────────────────────────
+	"x-goog-api-client", // SDK metadata (version, runtime info)
+	"x-goog-request-params", // routing parameters, may change with resource
+
+	// ── Azure ────────────────────────────────────────────────────────
+	"x-ms-date",              // signing timestamp
+	"x-ms-client-request-id", // client-generated UUID per call
+	"x-ms-content-sha256",    // body hash for HMAC auth
+	"x-ms-return-client-request-id", // echo control flag
+
+	// ── W3C Trace Context / OpenTelemetry ────────────────────────────
+	"traceparent", // unique trace-id + span-id per request
+	"tracestate",  // vendor-specific trace context
+
+	// ── Zipkin B3 propagation ────────────────────────────────────────
+	"x-b3-traceid",
+	"x-b3-spanid",
+	"x-b3-parentspanid",
+	"x-b3-sampled",
+	"b3", // single-header compact format
+
+	// ── Datadog ──────────────────────────────────────────────────────
+	"x-datadog-trace-id",
+	"x-datadog-parent-id",
+	"x-datadog-sampling-priority",
+	"x-datadog-origin",
+
+	// ── Generic request/correlation IDs ──────────────────────────────
+	"x-request-id",     // Nginx, Envoy, HAProxy, AWS ALB, Heroku
+	"x-correlation-id", // cross-service correlation
+	"request-id",       // ASP.NET Core and others
+
+	// ── Webhook signatures (request-side, inbound webhooks) ──────────
+	"stripe-signature",
+	"x-hub-signature-256", // GitHub
+	"x-hub-signature",     // GitHub (legacy SHA-1)
+	"x-twilio-signature",
+	"x-shopify-hmac-sha256",
+	"x-slack-signature",
+	"x-slack-request-timestamp",
+	"webhook-signature",  // Standard Webhooks spec
+	"webhook-timestamp",  // Standard Webhooks spec
+	"webhook-id",         // Standard Webhooks spec
+
+	// ── Idempotency / CSRF ───────────────────────────────────────────
+	"idempotency-key",
+	"x-idempotency-key",
+	"x-csrf-token",
+	"x-xsrf-token",
+
+	// ── GCP trace (legacy) ───────────────────────────────────────────
+	"x-cloud-trace-context",
+}
+
 type req struct {
 	method string
 	url    *url.URL
