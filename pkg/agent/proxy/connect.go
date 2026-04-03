@@ -146,12 +146,6 @@ func handleConnectTunnel(
 	}, nil
 }
 
-// IsConnectPrefix checks if a 5-byte peek looks like CONNECT.
-// Exported for use by other packages (e.g., enterprise sockmap proxy).
-func IsConnectPrefix(peek []byte) bool {
-	return isConnectRequest(peek)
-}
-
 // stripUtilConn extracts the underlying net.Conn from a util.Conn wrapper.
 func stripUtilConn(conn net.Conn) net.Conn {
 	if uc, ok := conn.(*util.Conn); ok {
