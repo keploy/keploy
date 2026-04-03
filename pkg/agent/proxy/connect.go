@@ -110,19 +110,18 @@ func handleConnectTunnel(
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CONNECT response from proxy: %w", err)
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			// Forward the proxy's error response back to the client so it can
-			// handle auth challenges (407 with Proxy-Authenticate) or other
-			// proxy errors. Write status line + headers only; close body to
-			// avoid blocking on the proxy connection.
+			// Forward the proxy's error response (status + headers) back to
+			// the client so it can handle auth challenges (407 with
+			// Proxy-Authenticate header) or other proxy errors.
 			resp.Body.Close()
 			resp.Body = nil
 			resp.ContentLength = 0
 			_ = resp.Write(srcConn)
 			return nil, fmt.Errorf("corporate proxy rejected CONNECT with %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 		}
+		resp.Body.Close()
 
 		if _, err := srcConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 			return nil, fmt.Errorf("failed to forward CONNECT 200 to app: %w", err)
