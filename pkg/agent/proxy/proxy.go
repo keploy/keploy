@@ -638,7 +638,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Test mode:   respond with 200 directly (no external proxy needed).
 	var connectResult *connectTunnelResult
 	if isConnectRequest(testBuffer) {
-		p.logger.Info("Detected HTTP CONNECT request, handling tunnel",
+		p.logger.Debug("Detected HTTP CONNECT request, handling tunnel",
 			zap.Int("sourcePort", sourcePort),
 			zap.String("dstAddr", dstAddr),
 		)
@@ -650,16 +650,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if !isTestMode {
 			proxyConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial corporate proxy for CONNECT",
+				utils.LogError(p.logger, err, "failed to dial corporate proxy for CONNECT; verify the proxy address is correct, DNS/network is reachable, and HTTP_PROXY/HTTPS_PROXY settings are configured correctly",
 					zap.String("proxy_addr", dstAddr))
 				return err
 			}
-			// Note: we do NOT defer proxyConn.Close() here because we transfer
-			// ownership to dstConn below. dstConn is closed by the caller.
 		}
 
 		connectResult, err = handleConnectTunnel(p.logger, srcConn, proxyConn, isTestMode)
 		if err != nil {
+			// Close proxyConn on error to avoid leaking the TCP connection,
+			// since it won't be assigned to dstConn for deferred cleanup.
+			if proxyConn != nil {
+				proxyConn.Close()
+			}
 			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel")
 			return err
 		}
@@ -691,10 +694,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
-		// Re-wrap srcConn with the new reader so peeked bytes aren't lost.
+		// Keep the buffered reader and underlying connection aligned to avoid
+		// subtle buffering issues after peeking inner tunnel data.
+		baseConn := stripUtilConn(srcConn)
 		srcConn = &util.Conn{
-			Conn:   stripUtilConn(srcConn),
-			Reader: io.MultiReader(innerReader, stripUtilConn(srcConn)),
+			Conn:   baseConn,
+			Reader: innerReader,
 			Logger: p.logger,
 		}
 
@@ -705,7 +710,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstConn = proxyConn
 		}
 
-		p.logger.Info("CONNECT tunnel established, proceeding with inner connection",
+		p.logger.Debug("CONNECT tunnel established, proceeding with inner connection",
 			zap.String("target", connectResult.TargetAddr),
 			zap.Bool("innerTLS", pTls.IsTLSHandshake(testBuffer)),
 		)

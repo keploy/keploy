@@ -70,7 +70,7 @@ func handleConnectTunnel(
 		targetAddr = net.JoinHostPort(host, port)
 	}
 
-	logger.Info("CONNECT tunnel detected",
+	logger.Debug("CONNECT tunnel detected",
 		zap.String("target", targetAddr),
 		zap.Bool("testMode", isTestMode),
 	)
@@ -107,7 +107,12 @@ func handleConnectTunnel(
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("corporate proxy rejected CONNECT: %d %s", resp.StatusCode, resp.Status)
+			// Forward the proxy's error response back to the client so it can
+			// handle auth challenges (407) or other errors properly.
+			var errResp bytes.Buffer
+			fmt.Fprintf(&errResp, "HTTP/1.1 %d %s\r\n\r\n", resp.StatusCode, resp.Status)
+			_, _ = srcConn.Write(errResp.Bytes())
+			return nil, fmt.Errorf("corporate proxy rejected CONNECT with %d %s", resp.StatusCode, resp.Status)
 		}
 
 		if _, err := srcConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {

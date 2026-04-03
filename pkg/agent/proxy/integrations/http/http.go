@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -57,7 +56,7 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
 		bytes.HasPrefix(buf[:], []byte("HEAD ")) ||
 		bytes.HasPrefix(buf[:], []byte("CONNECT "))
-	h.Logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
+	h.Logger.Debug("determined whether the protocol is HTTP", zap.Bool("isHTTP", isHTTP))
 	return isHTTP
 }
 
