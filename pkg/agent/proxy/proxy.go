@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -676,9 +677,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstAddr = connectResult.TargetAddr
 		destInfo.Port = 443 // CONNECT targets are almost always TLS on 443
 		if connectResult.TargetPort != "" {
-			portNum := uint32(443)
-			if _, err := fmt.Sscanf(connectResult.TargetPort, "%d", &portNum); err == nil {
-				destInfo.Port = portNum
+			if portNum, err := strconv.ParseUint(connectResult.TargetPort, 10, 16); err == nil && portNum >= 1 && portNum <= 65535 {
+				destInfo.Port = uint32(portNum)
 			}
 		}
 
@@ -696,11 +696,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
-		// Keep the buffered reader and underlying connection aligned to avoid
-		// subtle buffering issues after peeking inner tunnel data.
-		baseConn := stripUtilConn(srcConn)
+		// Replace srcConn with a single-layer wrapper: the raw TCP connection
+		// for Conn (metadata, Close) and the handleConnectTunnel bufio.Reader
+		// for Read (preserves any read-ahead bytes like the TLS ClientHello).
+		// stripUtilConn unwraps the previous util.Conn to avoid deep nesting.
 		srcConn = &util.Conn{
-			Conn:   baseConn,
+			Conn:   stripUtilConn(srcConn),
 			Reader: innerReader,
 			Logger: p.logger,
 		}
