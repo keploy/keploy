@@ -20,6 +20,12 @@ type connectTunnelResult struct {
 	TargetHost string // e.g. "api.example.com"
 	TargetPort string // e.g. "443"
 	TargetAddr string // "host:port"
+	// BufferedReader is the bufio.Reader used to parse the CONNECT request.
+	// It may contain read-ahead bytes (e.g., the TLS ClientHello that the
+	// client sent immediately after the CONNECT headers). Callers MUST use
+	// this reader for subsequent reads from srcConn instead of creating a
+	// new reader, to avoid losing these buffered bytes.
+	BufferedReader *bufio.Reader
 }
 
 // isConnectRequest checks whether peeked bytes look like an HTTP CONNECT request.
@@ -133,9 +139,10 @@ func handleConnectTunnel(
 	}
 
 	return &connectTunnelResult{
-		TargetHost: host,
-		TargetPort: port,
-		TargetAddr: targetAddr,
+		TargetHost:     host,
+		TargetPort:     port,
+		TargetAddr:     targetAddr,
+		BufferedReader: reader,
 	}, nil
 }
 

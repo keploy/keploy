@@ -663,7 +663,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if proxyConn != nil {
 				proxyConn.Close()
 			}
-			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel")
+			utils.LogError(p.logger, err, "failed to handle CONNECT tunnel; check HTTP_PROXY/HTTPS_PROXY settings, proxy authentication (407), DNS/network reachability to the proxy, and egress firewall rules")
 			return err
 		}
 
@@ -682,8 +682,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		}
 
-		// Re-peek the next bytes from srcConn to detect TLS on the inner tunnel.
-		innerReader := bufio.NewReader(srcConn)
+		// Re-peek the next bytes to detect TLS on the inner tunnel.
+		// Use the BufferedReader from handleConnectTunnel to preserve any
+		// bytes it read ahead (e.g., TLS ClientHello pipelined by the client).
+		innerReader := connectResult.BufferedReader
 		testBuffer, err = innerReader.Peek(5)
 		if err != nil {
 			if err == io.EOF {
