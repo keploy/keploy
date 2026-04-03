@@ -621,8 +621,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				zap.String("Destination IP Address", dstAddr),
 			)
 			mysqlSession := &integrations.RecordSession{
-				Ingress:      util.NewSafeConn(srcConn, p.logger),
-				Egress:       util.NewSafeConn(dstConn, p.logger),
+				Ingress:      util.NewSafeConn(srcConn, mysqlLogger),
+				Egress:       util.NewSafeConn(dstConn, mysqlLogger),
 				Mocks:        rule.MC,
 				ErrGroup:     parserErrGrp,
 				MemLimiter:   p.memLimiter,
