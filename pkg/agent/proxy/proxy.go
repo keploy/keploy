@@ -696,10 +696,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
-		// Replace srcConn with a single-layer wrapper: the raw TCP connection
-		// for Conn (metadata, Close) and the handleConnectTunnel bufio.Reader
-		// for Read (preserves any read-ahead bytes like the TLS ClientHello).
-		// stripUtilConn unwraps the previous util.Conn to avoid deep nesting.
+		// Wrap the raw TCP connection with innerReader for subsequent reads.
+		// innerReader is the bufio.Reader from handleConnectTunnel that may
+		// hold pipelined bytes (TLS ClientHello) in its internal buffer.
 		srcConn = &util.Conn{
 			Conn:   stripUtilConn(srcConn),
 			Reader: innerReader,
@@ -860,9 +859,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			logger.Debug("NOT offering H2 (HTTP/1.x detected)", zap.Strings("nextProtos", nextProtos))
 		}
 
+		serverName := dstURL
+		// If SNI was not captured (e.g., client omitted it after CONNECT),
+		// fall back to the CONNECT target hostname for the TLS handshake.
+		if serverName == "" && connectResult != nil {
+			serverName = connectResult.TargetHost
+		}
+
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         dstURL,
+			ServerName:         serverName,
 			NextProtos:         nextProtos,
 		}
 
