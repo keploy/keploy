@@ -57,8 +57,8 @@ func (ml *MemoryLimiter) TryAcquire(n int64) bool {
 		// Roll back — we went over.
 		ml.used.Add(-n)
 		if !ml.exceeded.Swap(true) {
-			// First time exceeding: log once at Warn level.
-			ml.logger.Warn("proxy memory limit reached, parsers will drop recording; increase record.maxBufferMemoryMB or set to 0 to disable",
+			// First time exceeding: log once.
+			ml.logger.Info("proxy memory limit reached, parsers will drop recording; increase record.maxBufferMemoryMB or set to 0 to disable",
 				zap.Int64("limit_bytes", ml.limit),
 				zap.Int64("current_bytes", newUsed-n))
 		}

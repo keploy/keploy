@@ -152,6 +152,15 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			// errChannel <- ctx.Err()
 			return
 		default:
+			// Check memory limit BEFORE reading. TryAcquire in the
+			// previous iteration sets the exceeded flag; checking here
+			// avoids reading a buffer that can't be tracked without
+			// dropping data from the TCP stream.
+			if ml != nil && ml.IsExceeded() {
+				errChannel <- ErrMemoryLimitExceeded
+				return
+			}
+
 			if conn == nil {
 				logger.Debug("the conn is nil")
 			}
@@ -162,7 +171,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
-					logger.Warn("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
+					logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
 
 				}
 				errChannel <- err
@@ -172,13 +181,12 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				return
 			}
 
-			// Track buffered bytes via TryAcquire. Once the cumulative
-			// bytes across all connections exceed the limit, TryAcquire
-			// sets the exceeded flag and returns false, triggering the
-			// sentinel error. Custom-read parsers check IsExceeded().
-			if ml != nil && !ml.TryAcquire(int64(len(buffer))) {
-				errChannel <- ErrMemoryLimitExceeded
-				return
+			// Track cumulative buffered bytes. Once total exceeds the
+			// limit, TryAcquire sets the exceeded flag so the check at
+			// the top of the next iteration triggers the sentinel.
+			// The buffer is always forwarded to avoid data loss.
+			if ml != nil {
+				ml.TryAcquire(int64(len(buffer)))
 			}
 
 			bufferChannel <- buffer
