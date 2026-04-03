@@ -138,7 +138,9 @@ func handleConnectTunnel(
 			resp.Body.Close()
 			resp.Body = nil
 			resp.ContentLength = 0
-			_ = resp.Write(srcConn)
+			if writeErr := resp.Write(srcConn); writeErr != nil {
+				logger.Debug("failed to forward proxy error response to client", zap.Error(writeErr))
+			}
 			return nil, fmt.Errorf("corporate proxy rejected CONNECT with %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 		}
 		resp.Body.Close()
