@@ -18,7 +18,13 @@ import (
 )
 
 // encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, ml ...*pUtil.MemoryLimiter) error {
+
+	// Extract optional MemoryLimiter.
+	var memLimiter *pUtil.MemoryLimiter
+	if len(ml) > 0 {
+		memLimiter = ml[0]
+	}
 
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
@@ -51,6 +57,19 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		defer pUtil.Recover(h.Logger, clientConn, destConn)
 		defer close(errCh)
 		for {
+			if memLimiter != nil && memLimiter.IsExceeded() {
+				h.Logger.Warn("memory limit exceeded, stopping HTTP recording and falling back to passthrough")
+				done := make(chan struct{}, 2)
+				cp := func(dst, src net.Conn) {
+					_, _ = io.Copy(dst, src)
+					done <- struct{}{}
+				}
+				go cp(destConn, clientConn)
+				go cp(clientConn, destConn)
+				<-done
+				return nil
+			}
+
 			//check if expect : 100-continue header is present
 			lines := strings.Split(string(finalReq), "\n")
 			var expectHeader string

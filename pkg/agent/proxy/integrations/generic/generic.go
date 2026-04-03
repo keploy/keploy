@@ -33,16 +33,16 @@ func (g *Generic) MatchType(_ context.Context, _ []byte) bool {
 	return false
 }
 
-func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := g.logger.With(zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.String("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.String("Client IP Address", src.RemoteAddr().String()))
+func (g *Generic) RecordOutgoing(ctx context.Context, session *integrations.RecordSession) error {
+	logger := session.Logger
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
+	reqBuf, err := util.ReadInitialBuf(ctx, logger, session.Ingress)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial generic message")
 		return err
 	}
 
-	err = encodeGeneric(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = encodeGeneric(ctx, logger, reqBuf, session.Ingress, session.Egress, session.Mocks, session.Opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the generic message into the yaml")
 		return err

@@ -3,6 +3,7 @@ package generic
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -54,13 +55,13 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	//close(errChan)
 
 	// read requests from client
-	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
+	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client, nil)
 	if err != nil {
 		return fmt.Errorf("error reading from client:%v", err)
 	}
 
 	// read responses from destination
-	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination)
+	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination, nil)
 	if err != nil {
 		return fmt.Errorf("error reading from destination:%v", err)
 	}
@@ -202,6 +203,11 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		case err := <-errChan:
 			if err == io.EOF {
 				return nil
+			}
+			if errors.Is(err, pUtil.ErrMemoryLimitExceeded) {
+				logger.Warn("memory limit exceeded, falling back to passthrough for this connection")
+				_, ptErr := pUtil.PassThrough(ctx, logger, clientConn, opts.DstCfg, nil)
+				return ptErr
 			}
 			return err
 		}
