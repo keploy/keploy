@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sort"
 	"strings"
@@ -114,7 +115,7 @@ func isNetworkClosedErr(err error) bool {
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	var memLimit int64
-	if opts.Record.MaxBufferMemoryMB > 0 {
+	if opts.Record.MaxBufferMemoryMB > 0 && opts.Record.MaxBufferMemoryMB <= uint64(math.MaxInt64/(1024*1024)) {
 		memLimit = int64(opts.Record.MaxBufferMemoryMB) * 1024 * 1024
 	}
 

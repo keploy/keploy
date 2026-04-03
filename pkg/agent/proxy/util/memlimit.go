@@ -80,7 +80,7 @@ func (ml *MemoryLimiter) Release(n int64) {
 	// (hysteresis to prevent thrashing).
 	if ml.exceeded.Load() && newUsed < ml.limit*9/10 {
 		ml.exceeded.Store(false)
-		ml.logger.Info("proxy memory usage below threshold, recording can resume",
+		ml.logger.Debug("proxy memory usage below threshold, recording can resume",
 			zap.Int64("current_bytes", newUsed),
 			zap.Int64("limit_bytes", ml.limit))
 	}
