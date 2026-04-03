@@ -139,6 +139,9 @@ func handleConnectTunnel(
 		}
 		resp.Body.Close()
 
+		// Send a clean 200 to the app. CONNECT tunnel 200 responses have no
+		// meaningful headers per RFC 7231 §4.3.6, so a synthetic response
+		// is correct and avoids Transfer-Encoding issues with resp.Write.
 		if _, err := srcConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 			return nil, fmt.Errorf("failed to forward CONNECT 200 to app: %w", err)
 		}

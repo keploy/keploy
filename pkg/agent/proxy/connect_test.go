@@ -11,8 +11,7 @@ import (
 )
 
 func testLogger() *zap.Logger {
-	l, _ := zap.NewDevelopment()
-	return l
+	return zap.NewNop()
 }
 
 func TestHandleConnectTunnel_TestMode(t *testing.T) {
