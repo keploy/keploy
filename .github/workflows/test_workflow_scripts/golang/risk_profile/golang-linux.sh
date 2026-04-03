@@ -92,12 +92,9 @@ wait_for_http() {
 check_report_for_risk_profiles() {
     echo "validating the Keploy test report against expected risk profiles and categories"
 
-    local replay_supports_schema_addition_autopass=false
-    case "${REPLAY_BIN:-}" in
-        */build/keploy)
-            replay_supports_schema_addition_autopass=true
-            ;;
-    esac
+    # Both the locally-built binary and the latest release now auto-pass
+    # SCHEMA_ADDED (low-risk) test cases, so this capability is always true.
+    local replay_supports_schema_addition_autopass=true
 
     # Define the expected risk for each API endpoint path
     declare -A expected_risks
