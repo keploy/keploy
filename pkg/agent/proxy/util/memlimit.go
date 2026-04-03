@@ -8,9 +8,11 @@ import (
 )
 
 // ErrMemoryLimitExceeded is a sentinel error returned by ReadBuffConn
-// when the MemoryLimiter rejects a TryAcquire call. Parsers should
-// catch this via errors.Is and fall back to passthrough mode (continue
-// forwarding traffic without decoding or recording).
+// when the MemoryLimiter's TryAcquire call fails (cumulative buffered
+// bytes exceed the configured limit). Parsers should catch this via
+// errors.Is and fall back to passthrough mode (continue forwarding
+// traffic without decoding or recording). Custom-read parsers can
+// also check IsExceeded() directly.
 var ErrMemoryLimitExceeded = errors.New("proxy memory limit exceeded, recording dropped")
 
 // MemoryLimiter tracks total buffered bytes across all proxy

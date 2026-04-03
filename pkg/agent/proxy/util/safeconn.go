@@ -88,14 +88,5 @@ func (s *SafeConn) Unwrap() net.Conn {
 	return s.conn
 }
 
-// SetReader replaces the reader used by Read. This is used by the
-// TLSUpgrader after upgrading the connection, so that subsequent reads
-// come from the new TLS connection.
-func (s *SafeConn) SetReader(r io.Reader) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.reader = r
-}
-
 // Compile-time check that SafeConn implements net.Conn.
 var _ net.Conn = (*SafeConn)(nil)
