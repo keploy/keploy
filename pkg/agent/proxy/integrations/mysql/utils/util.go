@@ -190,28 +190,47 @@ func IsOKPacket(data []byte) bool {
 }
 
 // IsOKReplacingEOF detects the OK packet that replaces EOF when
-// CLIENT_DEPRECATE_EOF is negotiated. Per MySQL protocol, this packet
-// uses the 0xFE header byte (same as legacy EOF) but has a payload
-// length >= 9 bytes (unlike legacy EOF which has < 9 bytes).
+// CLIENT_DEPRECATE_EOF is negotiated. This packet uses the 0xFE header
+// byte (same as legacy EOF) but carries OK-packet structure. We validate
+// the packet strictly: header 0xFE, payload length consistent with the
+// wire bytes, and the two length-encoded integers (affected_rows and
+// last_insert_id) both zero — which is always the case for a SELECT
+// result set terminator. This avoids false positives with text row
+// packets whose first column uses the 0xFE length-encoded integer form.
 // See: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_ok_packet.html
 func IsOKReplacingEOF(data []byte) bool {
-	if len(data) < 5 {
+	if len(data) < 11 {
 		return false
 	}
+
+	// Payload length is stored in the first 3 bytes (little-endian).
+	payloadLen := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
+	if payloadLen != uint32(len(data)-4) {
+		return false
+	}
+
 	// The payload starts at data[4]. Header byte must be 0xFE.
 	if data[4] != 0xFE {
 		return false
 	}
-	// Payload length is in the first 3 bytes (little-endian).
-	payloadLen := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
-	// Legacy EOF has payload < 9 bytes; OK-replacing-EOF has >= 9.
-	return payloadLen >= 9
+
+	// For a result-set terminator the OK packet carries zero affected rows
+	// and zero last-insert-id, both encoded as single-byte lenenc ints.
+	if data[5] != 0x00 || data[6] != 0x00 {
+		return false
+	}
+
+	// After header + two zero lenenc ints we need at least status_flags (2)
+	// + warnings (2), so minimum payload is 7 bytes.
+	return payloadLen >= 7
 }
 
 // IsResultSetTerminator checks if a packet terminates a result set row
 // stream. When deprecateEOF is false, only legacy EOF packets terminate.
-// When deprecateEOF is true, the 0xFE-based OK-replacing-EOF terminates.
-// Row data never starts with 0xFE so this check has no false positives.
+// When deprecateEOF is true, the 0xFE-based OK-replacing-EOF also
+// terminates. Because row packets can begin with 0xFE (length-encoded
+// integer 8-byte form), OK-replacing-EOF is identified by its packet
+// structure (header + zero affected_rows + zero last_insert_id).
 func IsResultSetTerminator(data []byte, deprecateEOF bool) bool {
 	if IsEOFPacket(data) {
 		return true
