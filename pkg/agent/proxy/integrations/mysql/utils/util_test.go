@@ -289,10 +289,10 @@ func TestIsResultSetTerminator(t *testing.T) {
 			expect:       true,
 		},
 		{
-			name:         "OK-replacing-EOF (7-byte payload matches legacy EOF check too)",
+			name:         "OK-replacing-EOF, deprecateEOF=false",
 			data:         buildPacket(1, []byte{0xFE, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}),
 			deprecateEOF: false,
-			expect:       true, // IsEOFPacket matches 7-byte payload with 0xFE header
+			expect:       false, // OK-replacing-EOF should only terminate when deprecateEOF is negotiated
 		},
 		{
 			name:         "OK-replacing-EOF with session info (>7 bytes), deprecateEOF=false",

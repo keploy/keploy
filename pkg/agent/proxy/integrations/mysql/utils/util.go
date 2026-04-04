@@ -172,13 +172,16 @@ func IsEOFPacket(data []byte) bool {
 		return false // Packet is too short to be valid
 	}
 
-	// Check if the first byte is 5 or 7
-	if data[0] != 5 && data[0] != 7 {
+	// First payload byte must be 0xFE (EOF marker).
+	if data[4] != 0xFE {
 		return false
 	}
 
-	// Check if the packet contains the EOF marker 0xFE
-	return len(data) > 0 && data[4] == 0xFE
+	// Validate the full 3-byte payload length (little-endian) to avoid
+	// false positives on larger packets whose LSB happens to be 5 or 7.
+	// Legacy EOF payload is 5 bytes (with CLIENT_PROTOCOL_41) or 1 byte.
+	payloadLen := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
+	return payloadLen == 5 || payloadLen == 1
 }
 
 func IsERRPacket(data []byte) bool {
