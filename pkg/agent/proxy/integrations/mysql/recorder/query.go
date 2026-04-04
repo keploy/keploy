@@ -247,7 +247,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
 
-		if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+		if !decodeCtx.DeprecateEOF() {
 			logger.Debug("EOF packet is not deprecated while handling prepared statement param defs")
 
 			// Read the EOF packet for parameter definition
@@ -308,7 +308,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		logger.Debug("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
 
-		if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+		if !decodeCtx.DeprecateEOF() {
 			logger.Debug("EOF packet is not deprecated while handling prepared statement column defs")
 
 			// Read the EOF packet for column definition
@@ -387,7 +387,7 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 		textResultSet.Columns = append(textResultSet.Columns, column)
 	}
 
-	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+	if !decodeCtx.DeprecateEOF() {
 		logger.Debug("EOF packet is not deprecated while handling textResultSet")
 
 		// Read the EOF packet for column definition
@@ -448,9 +448,7 @@ rowLoop:
 			// 	break rowLoop
 			// }
 
-			// Break if the data packet is an EOF packet (or OK packet when CLIENT_DEPRECATE_EOF is set).
-			// When CLIENT_DEPRECATE_EOF is negotiated, MySQL 8.0+ sends an OK packet instead of EOF
-			// to terminate the result set rows.
+			// Break if the data packet is an EOF packet.
 			if mysqlUtils.IsEOFPacket(data) {
 				logger.Debug("Found EOF packet after row data in text resultset")
 				textResultSet.FinalResponse = &mysql.GenericResponse{
@@ -459,21 +457,36 @@ rowLoop:
 				}
 				break rowLoop
 			}
-			if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF != 0 && mysqlUtils.IsOKPacket(data) {
-				logger.Debug("Found OK packet (CLIENT_DEPRECATE_EOF) after row data in text resultset")
-				textResultSet.FinalResponse = &mysql.GenericResponse{
-					Data: data,
-					Type: mysql.StatusToString(mysql.OK),
-				}
-				break rowLoop
-			}
 
-			// It must be a row data packet
-			row, _, err := rowscols.DecodeTextRow(ctx, logger, data, textResultSet.Columns)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode row data packet: %w", err)
+			// When CLIENT_DEPRECATE_EOF is negotiated, the server sends an OK
+			// packet instead of EOF to terminate result set rows. However,
+			// IsOKPacket checks data[4]==0x00 which can collide with text row
+			// packets (e.g. an empty first column). To avoid false positives we
+			// attempt row decode first and only treat the packet as an OK
+			// terminator when row decode fails.
+			if decodeCtx.DeprecateEOF() {
+				row, _, err := rowscols.DecodeTextRow(ctx, logger, data, textResultSet.Columns)
+				if err != nil {
+					// Row decode failed — this is the OK terminator packet.
+					if mysqlUtils.IsOKPacket(data) {
+						logger.Debug("Found OK packet (CLIENT_DEPRECATE_EOF) after row data in text resultset")
+						textResultSet.FinalResponse = &mysql.GenericResponse{
+							Data: data,
+							Type: mysql.StatusToString(mysql.OK),
+						}
+						break rowLoop
+					}
+					return nil, fmt.Errorf("failed to decode row data packet: %w", err)
+				}
+				textResultSet.Rows = append(textResultSet.Rows, row)
+			} else {
+				// Standard path — no CLIENT_DEPRECATE_EOF, so all non-EOF packets are rows.
+				row, _, err := rowscols.DecodeTextRow(ctx, logger, data, textResultSet.Columns)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode row data packet: %w", err)
+				}
+				textResultSet.Rows = append(textResultSet.Rows, row)
 			}
-			textResultSet.Rows = append(textResultSet.Rows, row)
 		}
 	}
 
@@ -528,7 +541,7 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 
 	logger.Debug("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
 
-	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+	if !decodeCtx.DeprecateEOF() {
 		logger.Debug("EOF packet is not deprecated while handling BinaryProtocolResultSet")
 
 		// Read the EOF packet for column definition
@@ -591,9 +604,7 @@ rowLoop:
 			// 	break rowLoop
 			// }
 
-			// Break if the data packet is an EOF packet (or OK packet when CLIENT_DEPRECATE_EOF is set).
-			// When CLIENT_DEPRECATE_EOF is negotiated, MySQL 8.0+ sends an OK packet instead of EOF
-			// to terminate the result set rows.
+			// Break if the data packet is an EOF packet.
 			if mysqlUtils.IsEOFPacket(data) {
 				logger.Debug("Found EOF packet after row data in binary resultset")
 				binaryResultSet.FinalResponse = &mysql.GenericResponse{
@@ -602,21 +613,36 @@ rowLoop:
 				}
 				break rowLoop
 			}
-			if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF != 0 && mysqlUtils.IsOKPacket(data) {
-				logger.Debug("Found OK packet (CLIENT_DEPRECATE_EOF) after row data in binary resultset")
-				binaryResultSet.FinalResponse = &mysql.GenericResponse{
-					Data: data,
-					Type: mysql.StatusToString(mysql.OK),
-				}
-				break rowLoop
-			}
 
-			// It must be a row data packet
-			row, _, err := rowscols.DecodeBinaryRow(ctx, logger, data, binaryResultSet.Columns)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode row data packet: %w", err)
+			// When CLIENT_DEPRECATE_EOF is negotiated, the server sends an OK
+			// packet instead of EOF to terminate result set rows. However,
+			// IsOKPacket checks data[4]==0x00 which collides with binary row
+			// packets (every binary row payload also starts with 0x00). To
+			// avoid false positives we attempt row decode first and only treat
+			// the packet as an OK terminator when row decode fails.
+			if decodeCtx.DeprecateEOF() {
+				row, _, err := rowscols.DecodeBinaryRow(ctx, logger, data, binaryResultSet.Columns)
+				if err != nil {
+					// Row decode failed — this is the OK terminator packet.
+					if mysqlUtils.IsOKPacket(data) {
+						logger.Debug("Found OK packet (CLIENT_DEPRECATE_EOF) after row data in binary resultset")
+						binaryResultSet.FinalResponse = &mysql.GenericResponse{
+							Data: data,
+							Type: mysql.StatusToString(mysql.OK),
+						}
+						break rowLoop
+					}
+					return nil, fmt.Errorf("failed to decode row data packet: %w", err)
+				}
+				binaryResultSet.Rows = append(binaryResultSet.Rows, row)
+			} else {
+				// Standard path — no CLIENT_DEPRECATE_EOF, so all non-EOF packets are rows.
+				row, _, err := rowscols.DecodeBinaryRow(ctx, logger, data, binaryResultSet.Columns)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode row data packet: %w", err)
+				}
+				binaryResultSet.Rows = append(binaryResultSet.Rows, row)
 			}
-			binaryResultSet.Rows = append(binaryResultSet.Rows, row)
 		}
 	}
 
