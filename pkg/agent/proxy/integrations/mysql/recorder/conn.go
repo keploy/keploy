@@ -296,6 +296,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, err
 		}
 
+		// After TLS upgrade, the client sends a new HandshakeResponse41 with
+		// the final negotiated capabilities. Update ClientCaps so
+		// DeprecateEOF() reflects the post-TLS negotiation.
+		decodeCtx.ClientCaps = decodeCtx.ClientCapabilities
+
 		res.req = append(res.req, mysql.Request{
 			PacketBundle: *handshakeResponsePkt,
 		})
