@@ -450,8 +450,8 @@ rowLoop:
 
 			// Check for result set terminator. When CLIENT_DEPRECATE_EOF is
 			// negotiated the server replaces the final EOF with an OK packet
-			// that uses a 0xFE header byte (not 0x00), so there is no
-			// ambiguity with row data (row payloads never start with 0xFE).
+			// that uses a 0xFE header byte. IsOKReplacingEOF validates the
+			// full OK packet structure to avoid false positives with row data.
 			if mysqlUtils.IsResultSetTerminator(data, decodeCtx.DeprecateEOF()) {
 				respType := mysql.StatusToString(mysql.EOF)
 				if decodeCtx.DeprecateEOF() && mysqlUtils.IsOKReplacingEOF(data) {
