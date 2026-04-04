@@ -35,6 +35,9 @@ jobs:
           - name: risk-profile
             path: risk-profile
             script_dir: risk_profile
+          - name: sse-preflight
+            path: sse-preflight
+            script_dir: sse_preflight
         config:
           - job: record_latest_replay_build
             record_src: latest
