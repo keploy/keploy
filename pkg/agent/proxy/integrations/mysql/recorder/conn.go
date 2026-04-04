@@ -77,6 +77,11 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// Set the intial request operation
 	res.requestOperation = handshakePkt.Header.Type
 
+	// Store server capabilities for CLIENT_DEPRECATE_EOF handling during query phase
+	if greeting, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet); ok {
+		decodeCtx.ServerCaps = greeting.CapabilityFlags
+	}
+
 	// Get the initial Plugin Name
 	pluginName, err := wire.GetPluginName(handshakePkt.Message)
 	if err != nil {
