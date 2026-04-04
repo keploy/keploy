@@ -178,9 +178,14 @@ func IsEOFPacket(data []byte) bool {
 	}
 
 	// Validate the full 3-byte payload length (little-endian) to avoid
-	// false positives on larger packets whose LSB happens to be 5 or 7.
+	// false positives on larger packets whose LSB happens to be 5 or 1.
 	// Legacy EOF payload is 5 bytes (with CLIENT_PROTOCOL_41) or 1 byte.
 	payloadLen := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
+
+	// Also verify the buffer is long enough to contain the claimed payload.
+	if uint32(len(data)-4) < payloadLen {
+		return false
+	}
 	return payloadLen == 5 || payloadLen == 1
 }
 
